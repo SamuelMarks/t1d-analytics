@@ -28,3 +28,4 @@ disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
 addopts = "--cov=t1d_analytics --cov-report=term-missing --cov-report=html --cov-fail-under=100"
+pythonpath = ["src"]
