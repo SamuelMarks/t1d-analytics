@@ -12,7 +12,7 @@ npx prettier --check .
 cd ..
 
 echo "3. Running python tests and coverage..."
-pytest tests/ --cov-report=json
+PYTHONPATH=src pytest tests/ --cov=src/t1d_analytics --cov-report=json
 
 echo "4. Running frontend tests..."
 cd web
@@ -26,7 +26,7 @@ cd ..
 
 echo "6. Generating shields in README.md..."
 
-python - << 'PYEOF'
+python3 - << 'PYEOF'
 import json
 import re
 import subprocess

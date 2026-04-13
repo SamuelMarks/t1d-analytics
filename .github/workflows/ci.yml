@@ -38,7 +38,7 @@ jobs:
           python -c "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('tests/test_data/', 'ci_test.duckdb')"
 
           # Verify the database has the data
-          python -c "import duckdb; conn = duckdb.connect('ci_test.duckdb'); res = conn.execute('SELECT count(*) FROM t_tiny').fetchone()[0]; assert res == 2, f'Expected 2 rows, got {res}'"
+          python -c "import duckdb; conn = duckdb.connect('ci_test.duckdb'); res = conn.execute('SELECT count(*) FROM tiny').fetchone()[0]; assert res == 2, f'Expected 2 rows, got {res}'"
 
   web-tests:
     name: Web Frontend Build & Test

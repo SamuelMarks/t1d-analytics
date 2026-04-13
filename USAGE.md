@@ -85,7 +85,7 @@ This will launch a Vite development server. Check the terminal output for the lo
 - **Main Pane**: This is where you converse with the datasets.
 - **Model Selector** (Top Right):
   - `Gemma 4`: Type natural language (e.g., _"Show me the first 5 patients in the demographic table"_). The LLM will write the SQL and execute it.
-  - `Literal SQL`: Type raw DuckDB SQL directly (e.g., `SELECT * FROM t_demographics LIMIT 5;`).
+  - `Literal SQL`: Type raw DuckDB SQL directly (e.g., `SELECT * FROM demographics LIMIT 5;`).
 
 ### Viewing Results
 
