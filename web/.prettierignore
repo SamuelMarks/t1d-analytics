@@ -1,0 +1,6 @@
+dist/
+test-results/
+coverage/
+playwright-report/
+blob-report/
+node_modules/

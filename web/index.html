@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>t1d-analytics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <nav id="sidebar" class="sidebar" aria-label="Sidebar">
+        <div class="sidebar-header">
+          <button
+            id="new-chat-btn"
+            class="btn-primary"
+            aria-label="Start a new chat"
+          >
+            + New Chat
+          </button>
+          <button
+            id="close-sidebar-btn"
+            class="icon-btn mobile-only"
+            aria-label="Close sidebar"
+          >
+            ✕
+          </button>
+        </div>
+        <ul id="chat-list" class="chat-list" aria-label="Chat history">
+          <!-- Chat items will be injected here -->
+        </ul>
+      </nav>
+
+      <main id="main-pane" aria-label="Main chat area">
+        <header class="main-header">
+          <div class="header-left">
+            <button
+              id="open-sidebar-btn"
+              class="icon-btn mobile-only"
+              aria-label="Open sidebar"
+            >
+              ☰
+            </button>
+            <div class="model-selector-container">
+              <label for="model-select">Model:</label>
+              <select id="model-select" aria-label="Select AI Model">
+                <option value="gemma4">Gemma 4</option>
+                <option value="sql">Literal SQL</option>
+              </select>
+            </div>
+          </div>
+          <div class="header-right">
+            <button
+              id="theme-toggle-btn"
+              class="icon-btn"
+              aria-label="Toggle dark and light mode"
+              aria-pressed="true"
+            >
+              <!-- Default sun icon (for dark mode active) -->
+              ☀
+            </button>
+          </div>
+        </header>
+
+        <div
+          id="messages-container"
+          class="messages-container"
+          aria-live="polite"
+          aria-atomic="false"
+        >
+          <!-- Messages injected here -->
+          <div class="empty-state">Select or create a chat to begin.</div>
+        </div>
+
+        <footer class="main-footer">
+          <form id="chat-form" class="chat-form" aria-label="Chat input form">
+            <label for="chat-input" class="sr-only">Type a message...</label>
+            <input
+              type="text"
+              id="chat-input"
+              placeholder="Type a message..."
+              autocomplete="off"
+              disabled
+              aria-label="Chat input field"
+            />
+            <button
+              type="submit"
+              id="send-btn"
+              class="btn-primary"
+              disabled
+              aria-label="Send message"
+            >
+              Send
+            </button>
+          </form>
+        </footer>
+      </main>
+
+      <div id="overlay" class="overlay" aria-hidden="true"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

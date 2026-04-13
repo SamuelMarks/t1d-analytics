@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: alpine.backend.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the current directory to access the DuckDB database (t1d.duckdb) and downloaded data
+      - ./:/app/
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
