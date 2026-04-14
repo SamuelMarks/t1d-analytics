@@ -39,10 +39,10 @@ The project comes with a CLI entry point to manage datasets.
 
 Once the data is extracted into CSV or TXT formats, you need to load them into the high-performance DuckDB analytics database.
 
-Run the following Python snippet in your terminal to ingest all tabular files in the `data/` directory into a database named `t1d.duckdb`:
+Use the `load` CLI command to ingest all tabular files in your data directory into a database. For example, to load data from `/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb` into a `t1d.duckdb` file in the same directory:
 
 ```bash
-python -c "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('data/', 't1d.duckdb')"
+python -m t1d_analytics.cli load --data-dir /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb --db /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb
 ```
 
 This script automatically detects file encodings (UTF-8, UTF-16) and delimiters (comma, tab, pipe) and populates the local `.duckdb` file.
@@ -53,10 +53,11 @@ This script automatically detects file encodings (UTF-8, UTF-16) and delimiters 
 
 The web interface communicates with the database through a FastAPI application.
 
-Start the backend server using `uvicorn`:
+Start the backend server using `uvicorn`, and specify your database path using the `T1D_DB_PATH` environment variable:
 
 ```bash
 # Ensure you are in the root directory of the project
+T1D_DB_PATH=/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb \
 uvicorn src.t1d_analytics.api:app --reload --host 0.0.0.0 --port 8000
 ```
 

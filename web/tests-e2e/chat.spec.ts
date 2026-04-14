@@ -2,6 +2,12 @@ import { test, expect } from "@playwright/test";
 
 test.describe("Chat UI E2E", () => {
   test.beforeEach(async ({ page }) => {
+    // Add models endpoint mock for all tests
+    await page.route("http://localhost:8000/api/models", async (route) => {
+      await route.fulfill({
+        json: { models: [{ name: "gemma4" }] },
+      });
+    });
     // We will mock the API calls
     await page.route("http://localhost:8000/api/chat", async (route) => {
       const request = route.request();
@@ -145,4 +151,109 @@ test("Temporary chat is undeletable", async ({ page }) => {
   await expect(page.locator(".chat-item-title").first()).toHaveText(
     "Temporary chat",
   );
+});
+
+test("Query history is saved to local storage and restored on reload", async ({
+  page,
+}) => {
+  // Setup mock route to handle the chat response before navigation
+  await page.route("http://localhost:8000/api/chat", async (route) => {
+    await route.fulfill({
+      json: {
+        content: "Here is the cached result:",
+        sqlQuery: "SELECT * FROM history;",
+        sqlResult: [{ cached: true }],
+      },
+    });
+  });
+
+  await page.goto("/");
+
+  // Send a message
+  await page.fill("#chat-input", "Save this to history");
+  await page.click("#send-btn");
+
+  // Wait for the response to appear
+  await expect(page.locator(".message.assistant")).toContainText(
+    "Here is the cached result:",
+  );
+  await expect(page.locator(".sql-query")).toHaveText("SELECT * FROM history;");
+
+  // Reload the page to verify persistence
+  await page.reload();
+
+  // The chat should still be there, without sending another request
+  await expect(page.locator(".chat-item-title").first()).toHaveText(
+    /Chat #\d+/,
+  );
+  await expect(page.locator(".message.user")).toHaveText(
+    "Save this to history",
+  );
+  await expect(page.locator(".message.assistant")).toContainText(
+    "Here is the cached result:",
+  );
+  await expect(page.locator(".sql-query")).toHaveText("SELECT * FROM history;");
+});
+
+test("Visually indicates the model used for an assistant message", async ({
+  page,
+}) => {
+  // We will mock the API calls
+  await page.route("http://localhost:8000/api/chat", async (route) => {
+    const request = route.request();
+    const postData = JSON.parse(request.postData() || "{}");
+
+    if (postData.model === "sql") {
+      await route.fulfill({
+        json: { content: "Query executed.", sqlResult: [] },
+      });
+    } else {
+      await route.fulfill({
+        json: {
+          content: "Here is the result:",
+          sqlQuery: "SELECT * FROM test;",
+          sqlResult: [{ id: 1, name: "Test" }],
+        },
+      });
+    }
+  });
+
+  await page.route("http://localhost:8000/api/models", async (route) => {
+    await route.fulfill({ json: { models: [{ name: "gemma4" }] } });
+  });
+
+  await page.goto("/");
+
+  // Need to ensure the select element has its options
+  await page.waitForFunction(() => {
+    const select = document.querySelector("#model-select");
+    return select && select.children.length > 1; // Wait for models to load
+  });
+
+  // Set the model to SQL to trigger the badge
+  await page.selectOption("#model-select", "sql");
+
+  // Send a message
+  await page.fill("#chat-input", "SELECT * FROM test");
+  await page.click("#send-btn");
+
+  // Wait for the response and check the badge
+  const badge = page.locator(".message.assistant .model-badge").first();
+  await expect(badge).toBeVisible();
+  await expect(badge).toHaveText("Raw SQL");
+
+  // Now switch to gemma4 and test it.
+  await expect(page.locator("#model-select")).toBeEnabled();
+
+  // Select option value=gemma4
+  await page.locator("#model-select").selectOption("gemma4");
+
+  // Send a second message
+  await page.fill("#chat-input", "Show me the patients");
+  await page.click("#send-btn");
+
+  // Verify the second badge says Model: gemma4
+  const secondBadge = page.locator(".message.assistant .model-badge").nth(1);
+  await expect(secondBadge).toBeVisible();
+  await expect(secondBadge).toHaveText("Model: gemma4");
 });

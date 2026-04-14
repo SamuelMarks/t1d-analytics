@@ -1,11 +1,16 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ChatState } from "../src/state";
 
 describe("ChatState", () => {
   let state: ChatState;
 
   beforeEach(() => {
+    localStorage.clear();
     state = new ChatState();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
   });
 
   it("initializes empty state", () => {
@@ -141,5 +146,46 @@ describe("ChatState", () => {
     state.addMessageToActiveChat({ role: "user", content: "hello" });
     expect(chat.isTemporary).toBe(false);
     expect(chat.title).toBe("Chat #1");
+  });
+
+  it("handles localStorage setItem throwing an error", () => {
+    const setItem = localStorage.setItem;
+    localStorage.setItem = () => {
+      throw new Error("Quota exceeded");
+    };
+    state.createChat();
+    localStorage.setItem = setItem;
+  });
+
+  it("handles localStorage getItem throwing an error", () => {
+    const getItem = localStorage.getItem;
+    localStorage.getItem = () => {
+      throw new Error("Access denied");
+    };
+    new ChatState();
+    localStorage.getItem = getItem;
+  });
+
+  it("handles undefined localStorage gracefully", () => {
+    const originalLocalStorage = global.localStorage;
+    Object.defineProperty(global, "localStorage", {
+      value: undefined,
+      configurable: true,
+    });
+
+    const newState = new ChatState();
+    newState.createChat();
+
+    Object.defineProperty(global, "localStorage", {
+      value: originalLocalStorage,
+      configurable: true,
+    });
+  });
+  it("handles loading partial state from localStorage", () => {
+    localStorage.setItem("t1d_analytics_chats", JSON.stringify({}));
+    const partialState = new ChatState();
+    expect(partialState.chats).toEqual([]);
+    expect(partialState.activeChatId).toBeNull();
+    expect(partialState.chatCounter).toBe(1);
   });
 });

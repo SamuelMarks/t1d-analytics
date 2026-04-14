@@ -71,7 +71,8 @@ def test_extract_subcommand(mock_extract: MagicMock) -> None:
 def test_load_subcommand(mock_load: MagicMock) -> None:
     """Test successful CLI execution for load."""
     with patch(
-        "sys.argv", ["t1d-analytics", "load", "--data-dir", "./test_data", "--db", "test.db"]
+        "sys.argv",
+        ["t1d-analytics", "load", "--data-dir", "./test_data", "--db", "test.db"],
     ):
         main()
 

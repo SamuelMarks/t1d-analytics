@@ -1,4 +1,5 @@
 peek_s*
+*.patch
 # ========================
 # Operating System
 # ========================
@@ -132,3 +133,23 @@ t1d_datasets/
 # Jupyter Notebook
 .ipynb_checkpoints
 data/
+
+# ========================
+# Ad-hoc & Analysis Scripts
+# ========================
+check_*.py
+clinical_concepts*.py
+cluster_*.py
+harmonizer*.py
+test_load*.py
+update.js
+
+# ========================
+# Generated Data & Outputs
+# ========================
+all_columns.txt
+common_columns.txt
+likely_matches*.json
+src/t1d_analytics/likely_matches.json
+test_subset/
+*.duckdb

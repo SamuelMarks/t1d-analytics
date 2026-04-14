@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "jsdom",
+    setupFiles: ["./tests/setup.ts"],
     exclude: [
       "node_modules",
       "dist",
@@ -20,12 +21,7 @@ export default defineConfig({
         branches: 100,
         statements: 100,
       },
-      exclude: [
-        "src/main.ts",
-        "vitest.config.ts",
-        "playwright.config.ts",
-        "tests/**",
-      ], // Exclude entry point and config from coverage
+      exclude: ["vitest.config.ts", "playwright.config.ts", "tests/**"], // Exclude config and tests from coverage
     },
   },
 });

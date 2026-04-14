@@ -20,7 +20,7 @@ t1d-analytics = "t1d_analytics.cli:main"
 [tool.ruff]
 line-length = 88
 lint.select = ["E", "F", "I", "D"]
-lint.ignore = ["D100", "D104", "D107", "D203", "D212", "E501"]
+lint.ignore = ["D203", "D212", "E501"]
 
 [tool.mypy]
 strict = true

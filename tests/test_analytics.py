@@ -334,6 +334,7 @@ def test_get_database_schema_fetch_error() -> None:
     select_mock.fetchone.side_effect = Exception("Mock fetch error")
 
     def mock_execute(query):
+        """Mock execute function."""
         if query.startswith("SHOW TABLES"):
             return show_tables_mock
         elif query.startswith("DESCRIBE"):

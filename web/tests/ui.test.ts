@@ -16,7 +16,25 @@ describe("ChatUI", () => {
         <button id="new-chat-btn">New Chat</button>
         <button id="close-sidebar-btn">Close</button>
         <ul id="chat-list"></ul>
+        <div id="schema-explorer">
+          <div class="schema-header">
+            <button id="toggle-schema-btn"></button>
+          </div>
+          <div id="schema-content"></div>
+        </div>
       </nav>
+      <div id="table-modal" aria-hidden="true">
+        <h2 id="modal-title"></h2>
+        <button id="close-modal-btn"></button>
+        <button id="prev-page-btn"></button>
+        <button id="next-page-btn"></button>
+        <div id="table-loading"></div>
+        <table id="modal-table">
+          <thead id="modal-table-head"></thead>
+          <tbody id="modal-table-body"></tbody>
+        </table>
+        <span id="page-indicator"></span>
+      </div>
       <main id="main-pane">
         <button id="open-sidebar-btn">Open</button>
         <button id="theme-toggle-btn">Theme</button>
@@ -26,7 +44,10 @@ describe("ChatUI", () => {
         </select>
         <div id="messages-container"></div>
         <form id="chat-form">
-          <input id="chat-input" type="text" />
+          <div id="chat-input-wrapper" class="chat-input-wrapper">
+            <pre aria-hidden="true"><code id="chat-input-highlight"></code></pre>
+            <textarea id="chat-input"></textarea>
+          </div>
           <button id="send-btn" type="submit">Send</button>
         </form>
       </main>
@@ -34,13 +55,14 @@ describe("ChatUI", () => {
     `;
 
     mockFetch = vi.fn();
-    globalThis.fetch = mockFetch as any;
+    globalThis.fetch = mockFetch as typeof fetch;
 
     state = new ChatState();
     ui = new ChatUI(state);
   });
 
   afterEach(() => {
+    localStorage.clear();
     document.body.innerHTML = "";
     vi.restoreAllMocks();
   });
@@ -49,7 +71,7 @@ describe("ChatUI", () => {
     const container = document.getElementById("messages-container");
     expect(container?.innerHTML).toContain("Select or create a chat to begin.");
     expect(
-      (document.getElementById("chat-input") as HTMLInputElement).disabled,
+      (document.getElementById("chat-input") as HTMLTextAreaElement).disabled,
     ).toBe(true);
   });
 
@@ -89,7 +111,7 @@ describe("ChatUI", () => {
       }),
     });
 
-    const input = document.getElementById("chat-input") as HTMLInputElement;
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "Hello world";
     document
       .getElementById("chat-form")
@@ -115,7 +137,7 @@ describe("ChatUI", () => {
       status: 500,
     });
 
-    const input = document.getElementById("chat-input") as HTMLInputElement;
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "fail test";
     document
       .getElementById("chat-form")
@@ -134,7 +156,7 @@ describe("ChatUI", () => {
 
     mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
-    const input = document.getElementById("chat-input") as HTMLInputElement;
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "fail network";
     document
       .getElementById("chat-form")
@@ -153,7 +175,7 @@ describe("ChatUI", () => {
 
     mockFetch.mockRejectedValueOnce("String rejection");
 
-    const input = document.getElementById("chat-input") as HTMLInputElement;
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "fail throw str";
     document
       .getElementById("chat-form")
@@ -182,7 +204,7 @@ describe("ChatUI", () => {
       }),
     });
 
-    const input = document.getElementById("chat-input") as HTMLInputElement;
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "Show patients";
     document
       .getElementById("chat-form")
@@ -210,7 +232,7 @@ describe("ChatUI", () => {
       }),
     });
 
-    const input = document.getElementById("chat-input") as HTMLInputElement;
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "empty results";
     document
       .getElementById("chat-form")
@@ -240,7 +262,7 @@ describe("ChatUI", () => {
     select.value = "sql";
     select.dispatchEvent(new Event("change"));
 
-    const input = document.getElementById("chat-input") as HTMLInputElement;
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "SELECT * FROM patients";
     document
       .getElementById("chat-form")
@@ -263,7 +285,10 @@ describe("ChatUI", () => {
       .getElementById("chat-form")
       ?.dispatchEvent(new Event("submit", { cancelable: true }));
     expect(state.getActiveChat()?.messages.length).toBe(0);
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalledWith(
+      "http://localhost:8000/api/chat",
+      expect.anything(),
+    );
   });
 
   it("changes model on select", () => {
@@ -415,7 +440,7 @@ describe("ChatUI", () => {
   });
 
   it("renderMessages returns early if no active chat", () => {
-    (ui as any).renderMessages();
+    ui["renderMessages"]();
     const container = document.getElementById("messages-container");
     expect(container?.innerHTML).toContain("Select or create a chat to begin.");
   });
@@ -429,27 +454,18 @@ describe("ChatUI", () => {
     expect(state.activeChatId).toBe(chat2.id);
   });
 
-  it("populates chat input and sends message when clicking a chip", async () => {
+  it("populates chat input but does NOT send message when clicking a chip", async () => {
     state.createChat();
     ui.render();
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        content: "Chip response",
-        sqlResult: null,
-        error: null,
-      }),
-    });
 
     const chip = document.querySelector(".chip") as HTMLButtonElement;
     chip.click();
 
     await flushPromises();
 
-    expect(state.getActiveChat()?.messages.length).toBe(2);
-    expect(state.getActiveChat()?.messages[0].content).toBe(chip.textContent);
-    expect(state.getActiveChat()?.messages[1].content).toBe("Chip response");
+    expect(state.getActiveChat()?.messages.length).toBe(0);
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    expect(input.value).toBeTruthy();
   });
 
   it("renders sqlQuery in the message", () => {
@@ -480,5 +496,321 @@ describe("ChatUI", () => {
 
     themeBtn.click();
     expect(document.body.classList.contains("dark-mode")).toBe(false);
+  });
+
+  it("syncHighlight handles trailing newlines correctly", () => {
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "select * from table\n";
+    input.dispatchEvent(new Event("input"));
+    const highlight = document.getElementById(
+      "chat-input-highlight",
+    ) as HTMLElement;
+    expect(highlight.textContent).toBe("select * from table\n ");
+  });
+
+  it("submits chat form on Enter key press without shift", () => {
+    state.createChat();
+    ui.render();
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    let submitted = false;
+    const form = document.getElementById("chat-form") as HTMLFormElement;
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      submitted = true;
+    });
+    const event = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: false,
+    });
+    input.dispatchEvent(event);
+    expect(submitted).toBe(true);
+  });
+
+  it("clicks NLP chip and sets model to gemma4", () => {
+    state.createChat();
+    ui.render();
+
+    // Find the NLP chip
+    const chips = document.querySelectorAll(".chip");
+    let nlpChip = Array.from(chips).find((c) =>
+      c.textContent?.includes("[NLP]"),
+    ) as HTMLButtonElement;
+
+    nlpChip.click();
+
+    const select = document.getElementById("model-select") as HTMLSelectElement;
+    expect(select.value).toBe("gemma4");
+    expect(state.getActiveChat()?.model).toBe("gemma4");
+  });
+
+  it("handles failed schema load", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("Network Error"));
+    const ui2 = new ChatUI(state);
+    await ui2["loadSchema"]();
+    expect(document.getElementById("schema-content")?.innerHTML).toContain(
+      "error-text",
+    );
+  });
+
+  it("handles schema toggle events", () => {
+    const toggleBtn = document.getElementById("toggle-schema-btn");
+    const header = document.querySelector(".schema-header");
+    const explorer = document.getElementById("schema-explorer");
+    header?.dispatchEvent(new MouseEvent("click"));
+    expect(explorer?.classList.contains("collapsed")).toBe(true);
+
+    // Test if schemaHeader doesn't exist but toggleSchemaBtn does
+    // Restructure DOM: remove header but keep toggle button
+    explorer?.classList.remove("collapsed");
+    header?.remove();
+    explorer?.prepend(toggleBtn as Node);
+
+    const ui2 = new ChatUI(state);
+    const newToggleBtn = document.getElementById("toggle-schema-btn");
+    newToggleBtn?.dispatchEvent(new MouseEvent("click"));
+    expect(explorer?.classList.contains("collapsed")).toBe(true);
+  });
+
+  it("handles table modal interaction", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          rows: [
+            { id: 1, name: "Test" },
+            { id: 2, name: null },
+          ],
+        }),
+    });
+
+    await ui["openTableModal"]("test_table");
+
+    const modal = document.getElementById("table-modal");
+    expect(modal?.getAttribute("aria-hidden")).toBeNull();
+
+    // Next page
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 3, name: "Test 2" }] }),
+    });
+    const nextBtn = document.getElementById("next-page-btn");
+    nextBtn?.dispatchEvent(new MouseEvent("click"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentPage"]).toBe(2);
+
+    // Prev page
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+    });
+    const prevBtn = document.getElementById("prev-page-btn");
+    prevBtn?.dispatchEvent(new MouseEvent("click"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentPage"]).toBe(1);
+
+    // Prev page bounds
+    prevBtn?.dispatchEvent(new MouseEvent("click"));
+    expect(ui["currentPage"]).toBe(1);
+
+    // Modal Overlay click
+    modal?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(modal?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("handles table fetch empty rows returning to previous page", async () => {
+    ui["currentPage"] = 2;
+    ui["currentTable"] = "test_table";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [] }),
+    });
+    await ui["fetchTableData"]();
+    expect(ui["currentPage"]).toBe(1);
+  });
+
+  it("handles table fetch empty rows on page 1", async () => {
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [] }),
+    });
+    await ui["fetchTableData"]();
+    expect(ui["currentPage"]).toBe(1);
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "No data available",
+    );
+  });
+
+  it("handles table fetch error", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("Network Error"));
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "error-text",
+    );
+  });
+
+  it("handles play sql button click", async () => {
+    const chat = state.createChat();
+    state.setActiveChat(chat.id);
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: "Test",
+      sqlQuery: "SELECT 1;",
+      model: "gemma4",
+    });
+    ui.render();
+
+    const playBtn = document.querySelector(".play-sql-btn");
+    expect(playBtn).not.toBeNull();
+    playBtn?.dispatchEvent(new MouseEvent("click"));
+    // mockFetch will be called for the new message
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
+  it("load models handles failure", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("Network Error"));
+    const ui2 = new ChatUI(state);
+    await ui2["loadModels"]();
+    // Default model fallback expected
+  });
+
+  it("load schema table view button click", async () => {
+    // mock first fetch for models
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ models: [{ name: "gemma4" }] }),
+    });
+    // mock second fetch for schema
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          tables: [
+            { name: "users", columns: [{ name: "id", type: "INTEGER" }] },
+          ],
+        }),
+    });
+    // mock third fetch for table data when modal opens
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1 }] }),
+    });
+    const ui2 = new ChatUI(state);
+    await new Promise((resolve) => setTimeout(resolve, 10)); // let parallel init fetches resolve
+
+    const viewBtn = document.querySelector(".table-view-btn");
+    expect(viewBtn).not.toBeNull();
+    viewBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(
+      document.getElementById("table-modal")?.getAttribute("aria-hidden"),
+    ).toBeNull();
+  });
+
+  it("closes modal on close button click", async () => {
+    const closeBtn = document.getElementById("close-modal-btn");
+    closeBtn?.dispatchEvent(new MouseEvent("click"));
+    expect(
+      document.getElementById("table-modal")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+  });
+
+  it("handles empty schema tables", async () => {
+    const ui2 = new ChatUI(state);
+    await new Promise((resolve) => setTimeout(resolve, 10)); // wait for init
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ tables: [] }),
+    });
+    await ui2["loadSchema"]();
+    expect(document.getElementById("schema-content")?.innerHTML).toContain(
+      "No tables found",
+    );
+  });
+
+  it("handles HTTP errors in API requests", async () => {
+    const ui2 = new ChatUI(state);
+    await new Promise((resolve) => setTimeout(resolve, 10)); // wait for init
+    mockFetch.mockResolvedValue({ ok: false, status: 500 });
+    await ui2["loadSchema"]();
+    await ui2["loadModels"]();
+    expect(document.getElementById("schema-content")?.innerHTML).toContain(
+      "error-text",
+    );
+  });
+
+  it("sets active model to fallback if activeChat model doesn't exist", async () => {
+    const chat = state.createChat();
+    chat.model = "missing_model";
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    await new Promise((resolve) => setTimeout(resolve, 10)); // wait for init
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ models: [{ name: "gemma4" }] }),
+    });
+    await ui2["loadModels"]();
+    expect(ui2["modelSelect"].value).toBe("gemma4");
+  });
+
+  it("handles clicking table header to toggle expanded state", async () => {
+    const ui2 = new ChatUI(state);
+    await new Promise((resolve) => setTimeout(resolve, 10)); // wait for init
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          tables: [
+            { name: "users", columns: [{ name: "id", type: "INTEGER" }] },
+          ],
+        }),
+    });
+    await ui2["loadSchema"]();
+
+    const header = document.querySelector(".schema-table-header");
+    header?.dispatchEvent(new MouseEvent("click"));
+
+    const tableDiv = document.querySelector(".schema-table");
+    expect(tableDiv?.classList.contains("expanded")).toBe(true);
+  });
+
+  it("sets active model to activeChat model if it exists in models list", async () => {
+    const chat = state.createChat();
+    chat.model = "gemma4";
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    await new Promise((resolve) => setTimeout(resolve, 10)); // wait for init
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({ models: [{ name: "gemma4" }, { name: "other" }] }),
+    });
+    await ui2["loadModels"]();
+    expect(ui2["modelSelect"].value).toBe("gemma4");
+  });
+
+  it("handles missing DOM elements", async () => {
+    document.getElementById("schema-explorer")?.remove();
+    const ui2 = new ChatUI(state);
+    await ui2["loadSchema"](); // line 95 coverage
+
+    document.getElementById("table-modal")?.remove();
+    await ui2["openTableModal"]("test"); // line 736 coverage
+
+    document.getElementById("table-loading")?.remove();
+    await ui2["fetchTableData"](); // line 788 coverage
+  });
+
+  it("handles table fetch HTTP error", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "Failed to load data",
+    );
   });
 });

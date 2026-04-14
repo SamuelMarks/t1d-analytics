@@ -37,7 +37,9 @@ def test_execute_sql(mock_db: str) -> None:
 
 def test_execute_sql_no_result(mock_db: str) -> None:
     """Test SQL execution that returns no rows."""
-    res = execute_sql(mock_db, "CREATE TABLE dummy (id INTEGER)")
+    res = execute_sql(
+        mock_db, "SELECT * FROM duckdb_tables() WHERE table_name = 'nonexistent_dummy'"
+    )
     assert res == []
 
 
@@ -158,7 +160,8 @@ def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> Non
     assert response.status_code == 200
     data = response.json()
     assert "Generated SQL" in data["content"]
-    assert len(data["sqlResult"]) == 2
+    assert data["sqlResult"] is None
+    assert data["sqlQuery"] == "SELECT * FROM users"
 
 
 @patch("t1d_analytics.api.execute_sql")
@@ -203,3 +206,143 @@ def test_chat_endpoint_generic_exception(
     data = response.json()
     assert data["error"] == "System failure"
     assert "unexpected error" in data["content"]
+
+
+def test_list_models_success(monkeypatch):
+    """Test successful model listing from local Ollama."""
+    import json
+    import urllib.request
+
+    class MockResponse:
+        def read(self):
+            return json.dumps(
+                {
+                    "models": [
+                        {"name": "gemma4", "size": 12345},
+                        {"name": "llama3", "size": 67890},
+                    ]
+                }
+            ).encode()
+
+    class MockUrlopen:
+        def __init__(self, req, timeout=None):
+            self.req = req
+
+        def __enter__(self):
+            return MockResponse()
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr(urllib.request, "urlopen", MockUrlopen)
+
+    response = client.get("/api/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert "models" in data
+    assert len(data["models"]) == 2
+    assert data["models"][0]["name"] == "gemma4"
+    assert data["models"][1]["name"] == "llama3"
+
+
+def test_list_models_url_error(monkeypatch):
+    """Test fallback when Ollama is unreachable via URLError."""
+    import urllib.error
+    import urllib.request
+
+    def mock_urlopen(*args, **kwargs):
+        raise urllib.error.URLError("Connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    response = client.get("/api/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert "models" in data
+    assert len(data["models"]) == 1
+    assert data["models"][0]["name"] == "gemma4"
+
+
+def test_list_models_general_error(monkeypatch):
+    """Test fallback when an unexpected exception occurs."""
+    import urllib.request
+
+    def mock_urlopen(*args, **kwargs):
+        raise Exception("Unexpected boom")
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    response = client.get("/api/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert "models" in data
+    assert len(data["models"]) == 1
+    assert data["models"][0]["name"] == "gemma4"
+
+
+@patch("t1d_analytics.api.duckdb.connect")
+def test_get_schema_success(mock_connect: MagicMock) -> None:
+    """Test schema endpoint returns structured schema."""
+    mock_conn = MagicMock()
+    # Mock SHOW TABLES
+    mock_conn.execute.return_value.fetchall.side_effect = [
+        [("users",)],
+        [("id", "INTEGER"), ("name", "VARCHAR")],
+    ]
+    mock_connect.return_value = mock_conn
+
+    response = client.get("/api/schema")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["tables"]) == 1
+    assert data["tables"][0]["name"] == "users"
+    assert data["tables"][0]["columns"][0]["name"] == "id"
+    assert data["tables"][0]["columns"][0]["type"] == "INTEGER"
+
+
+@patch("t1d_analytics.api.duckdb.connect")
+def test_get_schema_error(mock_connect: MagicMock) -> None:
+    """Test schema endpoint handles errors gracefully."""
+    mock_connect.side_effect = Exception("DB connection failed")
+
+    response = client.get("/api/schema")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["tables"]) == 0
+
+
+def test_get_table_data(mock_db, monkeypatch):
+    """Test fetching valid table data with pagination."""
+    monkeypatch.setenv("T1D_DB_PATH", mock_db)
+    response = client.get("/api/table/users")
+    assert response.status_code == 200
+    data = response.json()
+    assert "rows" in data
+    assert len(data["rows"]) == 2
+    assert data["rows"][0]["id"] == 1
+    assert data["rows"][0]["name"] == "Alice"
+
+
+def test_get_table_data_invalid_table(mock_db, monkeypatch):
+    """Test fetching data from a table that doesn't exist."""
+    monkeypatch.setenv("T1D_DB_PATH", mock_db)
+    response = client.get("/api/table/non_existent_table")
+    assert response.status_code == 404
+
+
+def test_get_table_data_sql_injection(mock_db, monkeypatch):
+    """Test protection against basic SQL injection in table name."""
+    monkeypatch.setenv("T1D_DB_PATH", mock_db)
+    response = client.get("/api/table/invalid table name;")
+    assert response.status_code == 400
+
+
+def test_get_table_data_exception(mock_db, monkeypatch):
+    """Test server error handling when DB operations fail."""
+    monkeypatch.setenv("T1D_DB_PATH", mock_db)
+    from unittest.mock import patch
+
+    with patch("duckdb.connect", side_effect=Exception("DB Failure")):
+        response = client.get("/api/table/users")
+        assert response.status_code == 500
+        assert "DB Failure" in response.json()["detail"]

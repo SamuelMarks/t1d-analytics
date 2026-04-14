@@ -34,6 +34,31 @@
         <ul id="chat-list" class="chat-list" aria-label="Chat history">
           <!-- Chat items will be injected here -->
         </ul>
+        <div id="schema-explorer" class="schema-explorer">
+          <div class="schema-header">
+            <h3>Schema Explorer</h3>
+            <button
+              id="toggle-schema-btn"
+              class="icon-btn"
+              aria-label="Toggle Schema Explorer"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <polyline points="18 15 12 9 6 15"></polyline>
+              </svg>
+            </button>
+          </div>
+          <div id="schema-content" class="schema-content">
+            <!-- Schema will be injected here -->
+            <div class="schema-loading">Loading schema...</div>
+          </div>
+        </div>
       </nav>
 
       <main id="main-pane" aria-label="Main chat area">
@@ -80,14 +105,20 @@
         <footer class="main-footer">
           <form id="chat-form" class="chat-form" aria-label="Chat input form">
             <label for="chat-input" class="sr-only">Type a message...</label>
-            <input
-              type="text"
-              id="chat-input"
-              placeholder="Type a message..."
-              autocomplete="off"
-              disabled
-              aria-label="Chat input field"
-            />
+            <div id="chat-input-wrapper" class="chat-input-wrapper disabled">
+              <pre
+                aria-hidden="true"
+              ><code id="chat-input-highlight" class="language-sql"></code></pre>
+              <textarea
+                id="chat-input"
+                placeholder="Type a message..."
+                autocomplete="off"
+                disabled
+                aria-label="Chat input field"
+                rows="1"
+                spellcheck="false"
+              ></textarea>
+            </div>
             <button
               type="submit"
               id="send-btn"
@@ -102,6 +133,38 @@
       </main>
 
       <div id="overlay" class="overlay" aria-hidden="true"></div>
+    </div>
+    <div id="table-modal" class="modal" aria-hidden="true">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 id="modal-title">Table Data</h2>
+          <button
+            id="close-modal-btn"
+            class="icon-btn"
+            aria-label="Close modal"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="modal-body" id="modal-body">
+          <div id="table-loading" style="display: none">Loading...</div>
+          <div class="table-container">
+            <table id="modal-table">
+              <thead id="modal-table-head"></thead>
+              <tbody id="modal-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="prev-page-btn" class="btn-secondary" disabled>
+            Previous
+          </button>
+          <span id="page-indicator">Page 1</span>
+          <button id="next-page-btn" class="btn-secondary" disabled>
+            Next
+          </button>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

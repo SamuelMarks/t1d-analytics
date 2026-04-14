@@ -10,11 +10,16 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@types/highlight.js": "^9.12.4",
+    "@types/node": "^25.6.0",
     "@vitest/coverage-v8": "^1.4.0",
     "jsdom": "^24.0.0",
     "prettier": "^3.8.2",
     "typescript": "^5.4.3",
     "vite": "^5.2.7",
     "vitest": "^1.4.0"
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1"
   }
 }

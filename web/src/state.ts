@@ -12,9 +12,13 @@ export interface Message {
   /** The textual content of the message. */
   content: string;
   /** Optional tabular data returned from a SQL query execution. */
-  sqlResult?: Record<string, any>[];
+  sqlResult?: Record<string, string | number | boolean | null>[];
   /** Optional SQL query string generated or executed. */
   sqlQuery?: string;
+  /** Optional flag indicating this message represents an error. */
+  isError?: boolean;
+  /** Optional model identifier used to process this message. */
+  model?: string;
 }
 
 /**
@@ -44,8 +48,48 @@ export class ChatState {
   /** Counter used for auto-generating chat titles. */
   public chatCounter: number = 1;
 
+  constructor() {
+    this.loadFromLocalStorage();
+  }
+
+  /**
+   * Saves the current state to localStorage.
+   */
+  private saveToLocalStorage(): void {
+    try {
+      if (typeof localStorage === "undefined") return;
+      const data = {
+        chats: this.chats,
+        activeChatId: this.activeChatId,
+        chatCounter: this.chatCounter,
+      };
+      localStorage.setItem("t1d_analytics_chats", JSON.stringify(data));
+    } catch (e) {
+      console.warn("Could not save to localStorage", e);
+    }
+  }
+
+  /**
+   * Loads state from localStorage.
+   */
+  private loadFromLocalStorage(): void {
+    try {
+      if (typeof localStorage === "undefined") return;
+      const data = localStorage.getItem("t1d_analytics_chats");
+      if (data) {
+        const parsed = JSON.parse(data);
+        this.chats = parsed.chats || [];
+        this.activeChatId = parsed.activeChatId || null;
+        this.chatCounter = parsed.chatCounter || 1;
+      }
+    } catch (e) {
+      console.warn("Could not load from localStorage", e);
+    }
+  }
+
   /**
    * Creates a new chat and sets it as active.
+
    * @param {string} [title] Optional title for the chat.
    * @param {boolean} [isTemporary=false] Whether the chat should be treated as temporary.
    * @returns {Chat} The newly created chat.
@@ -60,6 +104,7 @@ export class ChatState {
     };
     this.chats.push(chat);
     this.activeChatId = chat.id;
+    this.saveToLocalStorage();
     return chat;
   }
 
@@ -78,6 +123,7 @@ export class ChatState {
   setActiveChat(id: string): void {
     if (this.chats.some((c) => c.id === id)) {
       this.activeChatId = id;
+      this.saveToLocalStorage();
     }
   }
 
@@ -99,6 +145,7 @@ export class ChatState {
     if (this.chats.length === 0) {
       this.createChat("Temporary chat", true);
     }
+    this.saveToLocalStorage();
   }
 
   /**
@@ -110,6 +157,7 @@ export class ChatState {
     const chat = this.chats.find((c) => c.id === id);
     if (chat && newTitle.trim()) {
       chat.title = newTitle.trim();
+      this.saveToLocalStorage();
     }
   }
 
@@ -133,6 +181,7 @@ export class ChatState {
     };
     this.chats.push(duplicate);
     this.activeChatId = duplicate.id;
+    this.saveToLocalStorage();
     return duplicate;
   }
 
@@ -148,6 +197,7 @@ export class ChatState {
         chat.isTemporary = false;
         chat.title = `Chat #${this.chatCounter++}`;
       }
+      this.saveToLocalStorage();
     }
   }
 
@@ -159,6 +209,7 @@ export class ChatState {
     const chat = this.getActiveChat();
     if (chat) {
       chat.model = model;
+      this.saveToLocalStorage();
     }
   }
 }

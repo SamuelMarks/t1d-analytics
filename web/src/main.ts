@@ -10,8 +10,10 @@ import { ChatUI } from "./ui";
 // Initialize the state and UI
 const appState = new ChatState();
 
-// Create an initial chat for convenience
-appState.createChat();
+// Create an initial chat if there are no existing chats
+if (appState.chats.length === 0) {
+  appState.createChat();
+}
 
 // Initialize UI
 new ChatUI(appState);
