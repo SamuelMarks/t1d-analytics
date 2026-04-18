@@ -6,11 +6,13 @@
 import { marked } from "marked";
 import hljs from "highlight.js/lib/core";
 import sql from "highlight.js/lib/languages/sql";
+import markdown from "highlight.js/lib/languages/markdown";
 import "highlight.js/styles/github-dark.css";
 import { ChatState } from "./state";
 import i18next, { setLanguage } from "./i18n";
 
 hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("markdown", markdown);
 
 /**
  * Parses a backend error string or detail object into a translated string.
@@ -397,17 +399,13 @@ export class ChatUI {
     if (this.chatInputHighlight) {
       this.chatInputHighlight.textContent = value;
 
-      if (
-        this.modelSelect.value === "sql" ||
-        value.trim().toUpperCase().startsWith("SELECT")
-      ) {
+      if (this.modelSelect.value === "sql") {
         this.chatInputHighlight.className = "language-sql";
-        delete this.chatInputHighlight.dataset.highlighted;
-        hljs.highlightElement(this.chatInputHighlight);
       } else {
-        this.chatInputHighlight.className = "";
-        this.chatInputHighlight.textContent = value;
+        this.chatInputHighlight.className = "language-markdown";
       }
+      delete this.chatInputHighlight.dataset.highlighted;
+      hljs.highlightElement(this.chatInputHighlight);
     }
 
     // Auto-resize both textarea and wrapper
@@ -834,9 +832,7 @@ export class ChatUI {
 
       const isSqlMessage =
         msg.role === "user" &&
-        (msg.model === "sql" ||
-          (!msg.model && activeChat.model === "sql") ||
-          msg.content.trim().toUpperCase().startsWith("SELECT"));
+        (msg.model === "sql" || (!msg.model && activeChat.model === "sql"));
 
       if (isSqlMessage) {
         contentDiv.className = "sql-user-query-wrapper";
@@ -858,15 +854,11 @@ export class ChatUI {
         preBlock.appendChild(codeBlock);
         contentDiv.appendChild(preBlock);
       } else {
-        if (msg.role === "assistant") {
-          contentDiv.innerHTML = marked.parse(msg.content) as string;
-          const codeBlocks = contentDiv.querySelectorAll("pre code");
-          codeBlocks.forEach((block) => {
-            hljs.highlightElement(block as HTMLElement);
-          });
-        } else {
-          contentDiv.textContent = msg.content;
-        }
+        contentDiv.innerHTML = marked.parse(msg.content) as string;
+        const codeBlocks = contentDiv.querySelectorAll("pre code");
+        codeBlocks.forEach((block) => {
+          hljs.highlightElement(block as HTMLElement);
+        });
       }
 
       if (msg.isError) {
