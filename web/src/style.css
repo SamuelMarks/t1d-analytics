@@ -462,6 +462,7 @@ select {
   opacity: 0.5;
 }
 
+.chat-input-wrapper pre,
 .chat-input-wrapper textarea {
   margin: 0;
   padding: 0.75rem 1rem;
@@ -476,11 +477,30 @@ select {
   width: 100%;
 }
 
+.chat-input-wrapper pre {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  color: var(--text-light);
+  overflow: hidden;
+  background-color: transparent !important;
+  height: 100%;
+}
+
+.chat-input-wrapper code {
+  font-family: inherit;
+  padding: 0 !important;
+  background: transparent !important;
+}
+
 #chat-input {
   position: relative;
   resize: none;
   background-color: transparent;
   color: var(--text-light);
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text-light);
   outline: none;
   overflow: hidden;
   min-height: 44px;
@@ -488,6 +508,7 @@ select {
 
 #chat-input::placeholder {
   color: var(--text-muted);
+  -webkit-text-fill-color: var(--text-muted);
 }
 
 #chat-input:disabled {

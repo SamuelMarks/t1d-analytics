@@ -61,6 +61,7 @@ export class ChatUI {
   private messagesContainer: HTMLElement;
   private chatForm: HTMLFormElement;
   private chatInputWrapper: HTMLElement;
+  private chatInputHighlight: HTMLElement;
   private chatInput: HTMLTextAreaElement;
   private sendBtn: HTMLButtonElement;
   private modelSelect: HTMLSelectElement;
@@ -88,6 +89,9 @@ export class ChatUI {
     this.chatForm = document.getElementById("chat-form") as HTMLFormElement;
     this.chatInputWrapper = document.getElementById(
       "chat-input-wrapper",
+    ) as HTMLElement;
+    this.chatInputHighlight = document.getElementById(
+      "chat-input-highlight",
     ) as HTMLElement;
     this.chatInput = document.getElementById(
       "chat-input",
@@ -383,6 +387,29 @@ export class ChatUI {
    * Resizes the textarea height automatically.
    */
   private syncHighlight(): void {
+    let value = this.chatInput.value;
+
+    // Ensure trailing newlines don't collapse
+    if (value.endsWith("\n")) {
+      value += " ";
+    }
+
+    if (this.chatInputHighlight) {
+      this.chatInputHighlight.textContent = value;
+
+      if (
+        this.modelSelect.value === "sql" ||
+        value.trim().toUpperCase().startsWith("SELECT")
+      ) {
+        this.chatInputHighlight.className = "language-sql";
+        delete this.chatInputHighlight.dataset.highlighted;
+        hljs.highlightElement(this.chatInputHighlight);
+      } else {
+        this.chatInputHighlight.className = "";
+        this.chatInputHighlight.textContent = value;
+      }
+    }
+
     // Auto-resize both textarea and wrapper
     this.chatInput.style.height = "auto";
     const scrollHeight = this.chatInput.scrollHeight;

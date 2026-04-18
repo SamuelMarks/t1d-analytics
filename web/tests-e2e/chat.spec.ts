@@ -179,7 +179,7 @@ test.describe("Chat UI E2E", () => {
     await expect(emptyState).toHaveAttribute("aria-live", "polite");
   });
 
-  test("Accessibility: Chat input does not use transparent text hack", async ({
+  test("Accessibility: Chat input uses accessible transparent text hack", async ({
     page,
   }) => {
     const chatInput = page.locator("#chat-input");
@@ -193,8 +193,8 @@ test.describe("Chat UI E2E", () => {
     expect(color).not.toBe("rgba(0, 0, 0, 0)");
     expect(color).not.toBe("transparent");
 
-    // Verify the highlight block is gone
-    await expect(page.locator("#chat-input-highlight")).toHaveCount(0);
+    // Verify the highlight block is present
+    await expect(page.locator("#chat-input-highlight")).toHaveCount(1);
   });
 });
 
