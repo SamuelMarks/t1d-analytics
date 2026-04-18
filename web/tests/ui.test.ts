@@ -30,6 +30,7 @@ describe("ChatUI", () => {
         <button id="next-page-btn"></button>
         <div id="table-loading"></div>
         <table id="modal-table">
+          <caption class="sr-only" id="modal-table-caption">Table Data</caption>
           <thead id="modal-table-head"></thead>
           <tbody id="modal-table-body"></tbody>
         </table>
@@ -42,16 +43,22 @@ describe("ChatUI", () => {
           <option value="gemma4">Gemma</option>
           <option value="sql">SQL</option>
         </select>
+        <select id="lang-select">
+          <option value="en">English</option>
+          <option value="ja">Japanese</option>
+        </select>
         <div id="messages-container"></div>
         <form id="chat-form">
           <div id="chat-input-wrapper" class="chat-input-wrapper">
             <pre aria-hidden="true"><code id="chat-input-highlight"></code></pre>
-            <textarea id="chat-input"></textarea>
+            <textarea id="chat-input" aria-describedby="chat-input-help"></textarea>
           </div>
+          <div id="chat-input-help" class="sr-only">Press Enter to send, Shift+Enter for a new line</div>
           <button id="send-btn" type="submit">Send</button>
         </form>
       </main>
       <div id="overlay"></div>
+      <div id="a11y-announcer"></div>
     `;
 
     mockFetch = vi.fn();
@@ -73,21 +80,31 @@ describe("ChatUI", () => {
     expect(
       (document.getElementById("chat-input") as HTMLTextAreaElement).disabled,
     ).toBe(true);
+    expect(
+      document.getElementById("chat-input")?.getAttribute("aria-describedby"),
+    ).toBe("chat-input-help");
   });
 
   it("creates new chat and renders it", () => {
+    const input = document.getElementById("chat-input") as HTMLElement;
+    vi.spyOn(input, "focus");
+
     document.getElementById("new-chat-btn")?.click();
     expect(state.chats.length).toBe(1);
 
     const list = document.getElementById("chat-list");
     expect(list?.children.length).toBe(1);
     expect(list?.innerHTML).toContain("Chat #1");
+    expect(input.focus).toHaveBeenCalled();
   });
 
   it("switches active chat on click", () => {
     state.createChat();
     state.createChat();
     ui.render();
+
+    const input = document.getElementById("chat-input") as HTMLElement;
+    vi.spyOn(input, "focus");
 
     const items = document.querySelectorAll(".chat-item-title");
     (items[0] as HTMLElement).click();
@@ -96,6 +113,53 @@ describe("ChatUI", () => {
     expect(document.querySelector(".chat-item.active")?.textContent).toContain(
       "Chat #1",
     );
+    expect(input.focus).toHaveBeenCalled();
+  });
+
+  it("switches active chat on Enter and Space keys", () => {
+    state.createChat();
+    const chat2 = state.createChat();
+    ui.render();
+
+    const items = document.querySelectorAll(".chat-item-title");
+
+    // Simulate Enter key on chat 2
+    (items[1] as HTMLElement).dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(state.activeChatId).toBe(chat2.id);
+
+    // Reset active chat to chat 1
+    state.setActiveChat(state.chats[0].id);
+    ui.render();
+
+    // Simulate Space key on chat 2
+    const newItems = document.querySelectorAll(".chat-item-title");
+    (newItems[1] as HTMLElement).dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: " ",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(state.activeChatId).toBe(chat2.id);
+
+    // Verify an unrelated key does not trigger selection
+    state.setActiveChat(state.chats[0].id);
+    ui.render();
+    const finalItems = document.querySelectorAll(".chat-item-title");
+    (finalItems[1] as HTMLElement).dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(state.activeChatId).toBe(state.chats[0].id);
   });
 
   it("handles sending a message successfully", async () => {
@@ -125,6 +189,9 @@ describe("ChatUI", () => {
     expect(state.getActiveChat()?.messages.length).toBe(2);
     expect(state.getActiveChat()?.messages[1].content).toContain(
       "Generated SQL for: Hello world",
+    );
+    expect(document.getElementById("a11y-announcer")?.textContent).toContain(
+      "received",
     );
   });
 
@@ -217,6 +284,12 @@ describe("ChatUI", () => {
     expect(tables[0].innerHTML).toContain("Alice");
     expect(tables[0].innerHTML).toContain("bg_level");
     expect(tables[0].innerHTML).toContain("NULL");
+
+    // Check accessibility attributes
+    const ths = tables[0].querySelectorAll("th");
+    expect(ths[0].getAttribute("scope")).toBe("col");
+    const caption = tables[0].querySelector("caption");
+    expect(caption?.classList.contains("sr-only")).toBe(true);
   });
 
   it("renders empty SQL results message", async () => {
@@ -324,10 +397,125 @@ describe("ChatUI", () => {
 
     let menu = document.querySelector(".dropdown-menu") as HTMLElement;
     expect(menu.classList.contains("show")).toBe(true);
+    expect(dropdownBtn.getAttribute("aria-expanded")).toBe("true");
 
     // Click outside
     document.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(menu.classList.contains("show")).toBe(false);
+    expect(dropdownBtn.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("navigates dropdown menu with keyboard", () => {
+    state.createChat();
+    ui.render();
+
+    const dropdownBtn = document.querySelector(".dropdown-btn") as HTMLElement;
+    const menu = document.querySelector(".dropdown-menu") as HTMLElement;
+    const items = document.querySelectorAll(
+      ".dropdown-item",
+    ) as NodeListOf<HTMLElement>;
+
+    // Open with Enter
+    dropdownBtn.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(menu.classList.contains("show")).toBe(true);
+    // Should focus first item
+    expect(document.activeElement).toBe(items[0]);
+
+    // ArrowDown moves to next item
+    menu.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(items[1]);
+
+    // ArrowDown again moves to last item
+    menu.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(items[2]);
+
+    // ArrowDown loops to first item
+    menu.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(items[0]);
+
+    // ArrowUp loops to last item
+    menu.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(items[2]);
+
+    // ArrowUp moves to middle item
+    menu.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(items[1]);
+
+    // Escape closes and focuses button
+    menu.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(menu.classList.contains("show")).toBe(false);
+    expect(document.activeElement).toBe(dropdownBtn);
+
+    // Open with ArrowDown
+    dropdownBtn.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(menu.classList.contains("show")).toBe(true);
+
+    // Unhandled key inside menu
+    menu.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "a",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(menu.classList.contains("show")).toBe(true);
+
+    // Unhandled key on button
+    dropdownBtn.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "a",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
   });
 
   it("does not close dropdowns when clicking inside a dropdown container", () => {
@@ -404,6 +592,9 @@ describe("ChatUI", () => {
     state.createChat();
     ui.render();
 
+    const input = document.getElementById("chat-input") as HTMLElement;
+    vi.spyOn(input, "focus");
+
     const btns = document.querySelectorAll(".dropdown-item");
     const deleteBtn = btns[2] as HTMLElement;
     deleteBtn.click();
@@ -411,6 +602,7 @@ describe("ChatUI", () => {
     expect(confirmMock).toHaveBeenCalled();
     expect(state.chats.length).toBe(1); // Temporary Chat!
     expect(state.chats[0].title).toBe("Temporary chat");
+    expect(input.focus).toHaveBeenCalled();
   });
 
   it("cancels delete chat if confirm is false", () => {
@@ -449,9 +641,30 @@ describe("ChatUI", () => {
     state.createChat();
     const chat2 = state.createChat();
     ui.render();
+
+    const input = document.getElementById("chat-input") as HTMLElement;
+    vi.spyOn(input, "focus");
+
     window.location.hash = `#${chat2.id}`;
     window.dispatchEvent(new Event("hashchange"));
+
     expect(state.activeChatId).toBe(chat2.id);
+    expect(input.focus).toHaveBeenCalled();
+  });
+
+  it("updates document.title on render based on active chat", () => {
+    state.createChat(); // Chat #1
+    ui.render();
+    expect(document.title).toBe("Chat #1 - t1d-analytics");
+
+    state.createChat(); // Chat #2
+    ui.render();
+    expect(document.title).toBe("Chat #2 - t1d-analytics");
+
+    // No active chat
+    state.activeChatId = null;
+    ui.render();
+    expect(document.title).toBe("t1d-analytics");
   });
 
   it("populates chat input but does NOT send message when clicking a chip", async () => {
@@ -482,30 +695,20 @@ describe("ChatUI", () => {
     expect(sqlQueryBlock.textContent).toBe("SELECT * FROM test;");
   });
 
-  it("toggles dark mode on theme button click", () => {
+  it("toggles light mode on theme button click", () => {
     state.createChat();
     ui.render();
 
     const themeBtn = document.getElementById(
       "theme-toggle-btn",
     ) as HTMLButtonElement;
-    expect(document.body.classList.contains("dark-mode")).toBe(false);
+    expect(document.body.classList.contains("light-mode")).toBe(false);
 
     themeBtn.click();
-    expect(document.body.classList.contains("dark-mode")).toBe(true);
+    expect(document.body.classList.contains("light-mode")).toBe(true);
 
     themeBtn.click();
-    expect(document.body.classList.contains("dark-mode")).toBe(false);
-  });
-
-  it("syncHighlight handles trailing newlines correctly", () => {
-    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
-    input.value = "select * from table\n";
-    input.dispatchEvent(new Event("input"));
-    const highlight = document.getElementById(
-      "chat-input-highlight",
-    ) as HTMLElement;
-    expect(highlight.textContent).toBe("select * from table\n ");
+    expect(document.body.classList.contains("light-mode")).toBe(false);
   });
 
   it("submits chat form on Enter key press without shift", () => {
@@ -556,8 +759,14 @@ describe("ChatUI", () => {
     const toggleBtn = document.getElementById("toggle-schema-btn");
     const header = document.querySelector(".schema-header");
     const explorer = document.getElementById("schema-explorer");
+
+    // Collapse
     header?.dispatchEvent(new MouseEvent("click"));
     expect(explorer?.classList.contains("collapsed")).toBe(true);
+
+    // Expand
+    header?.dispatchEvent(new MouseEvent("click"));
+    expect(explorer?.classList.contains("collapsed")).toBe(false);
 
     // Test if schemaHeader doesn't exist but toggleSchemaBtn does
     // Restructure DOM: remove header but keep toggle button
@@ -569,6 +778,10 @@ describe("ChatUI", () => {
     const newToggleBtn = document.getElementById("toggle-schema-btn");
     newToggleBtn?.dispatchEvent(new MouseEvent("click"));
     expect(explorer?.classList.contains("collapsed")).toBe(true);
+
+    // Expand again
+    newToggleBtn?.dispatchEvent(new MouseEvent("click"));
+    expect(explorer?.classList.contains("collapsed")).toBe(false);
   });
 
   it("handles table modal interaction", async () => {
@@ -611,6 +824,12 @@ describe("ChatUI", () => {
     // Prev page bounds
     prevBtn?.dispatchEvent(new MouseEvent("click"));
     expect(ui["currentPage"]).toBe(1);
+
+    // Check accessibility attributes in modal table
+    const ths = document
+      .getElementById("modal-table-head")
+      ?.querySelectorAll("th");
+    expect(ths?.[0].getAttribute("scope")).toBe("col");
 
     // Modal Overlay click
     modal?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -769,11 +988,31 @@ describe("ChatUI", () => {
     });
     await ui2["loadSchema"]();
 
-    const header = document.querySelector(".schema-table-header");
-    header?.dispatchEvent(new MouseEvent("click"));
-
+    const toggleBtn = document.querySelector(".schema-table-header-toggle");
     const tableDiv = document.querySelector(".schema-table");
+
+    // click to expand
+    toggleBtn?.dispatchEvent(new MouseEvent("click"));
     expect(tableDiv?.classList.contains("expanded")).toBe(true);
+    expect(toggleBtn?.getAttribute("aria-expanded")).toBe("true");
+
+    // click to collapse
+    toggleBtn?.dispatchEvent(new MouseEvent("click"));
+    expect(tableDiv?.classList.contains("expanded")).toBe(false);
+    expect(toggleBtn?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("renders SQL user message when msg.model is missing but activeChat.model is sql", () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "hello" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const wrapper = document.querySelector(".sql-user-query-wrapper");
+    expect(wrapper).not.toBeNull();
   });
 
   it("sets active model to activeChat model if it exists in models list", async () => {
@@ -790,6 +1029,37 @@ describe("ChatUI", () => {
     });
     await ui2["loadModels"]();
     expect(ui2["modelSelect"].value).toBe("gemma4");
+  });
+
+  it("handles modal focus trap", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1 }] }),
+    });
+
+    const modal = document.getElementById("table-modal") as HTMLElement;
+    const closeBtn = document.getElementById("close-modal-btn") as HTMLElement;
+
+    await ui["openTableModal"]("test_table");
+
+    // We fetch 1 row, so next and prev buttons are disabled.
+    // The only focusable element is closeBtn.
+    // Tab on closeBtn should loop back to closeBtn.
+    closeBtn.focus();
+    modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    expect(document.activeElement).toBe(closeBtn);
+
+    modal.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
+    );
+    expect(document.activeElement).toBe(closeBtn);
+
+    // Unrelated keys do nothing
+    modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(document.activeElement).toBe(closeBtn);
+
+    // Clean up
+    closeBtn.click();
   });
 
   it("handles missing DOM elements", async () => {
@@ -812,5 +1082,293 @@ describe("ChatUI", () => {
     expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
       "Failed to load data",
     );
+  });
+
+  it("handles fetch HTTP error with non-JSON response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new Error("Invalid JSON")),
+    });
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "HTTP 502",
+    );
+  });
+
+  it("handles fetch HTTP error with unmapped backend error", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: "Unmapped error string" }),
+    });
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "Unmapped error string",
+    );
+  });
+
+  it("handles fetch HTTP error with unmapped piped backend error", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: "unmapped|some data" }),
+    });
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "unmapped|some data",
+    );
+  });
+
+  it("handles fetch HTTP error with mapped backend error", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: "backend.invalidTable" }),
+    });
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "Invalid table name",
+    );
+  });
+
+  it("handles fetch HTTP error with mapped piped backend error", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: () =>
+        Promise.resolve({ detail: "backend.serverError|something broke" }),
+    });
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "Internal server error: something broke",
+    );
+  });
+
+  it("handles translated API content in chat", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          content: "backend.literalSql",
+          error: "",
+        }),
+    });
+
+    const chat = state.createChat();
+    state.setActiveChat(chat.id);
+    ui.render();
+
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "test translated content";
+    const form = document.getElementById("chat-form") as HTMLFormElement;
+    form.dispatchEvent(new Event("submit"));
+
+    await flushPromises();
+
+    const activeChat = state.getActiveChat();
+    const lastMsg = activeChat?.messages[activeChat.messages.length - 1];
+    expect(lastMsg?.content).toBe("Executed literal SQL:");
+  });
+
+  it("handles non-string API error gracefully", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 422,
+      json: () =>
+        Promise.resolve({
+          detail: [{ loc: ["body", "message"], msg: "field required" }],
+        }),
+    });
+
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "object Object",
+    );
+  });
+
+  it("handles empty API error gracefully", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          content: "untranslated.content",
+          error: "",
+        }),
+    });
+
+    const chat = state.createChat();
+    state.setActiveChat(chat.id);
+    ui.render();
+
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "test empty error";
+    const form = document.getElementById("chat-form") as HTMLFormElement;
+    form.dispatchEvent(new Event("submit"));
+
+    await flushPromises();
+
+    const activeChat = state.getActiveChat();
+    const lastMsg = activeChat?.messages[activeChat.messages.length - 1];
+    expect(lastMsg?.content).toBe("untranslated.content");
+    expect(lastMsg?.isError).toBe(false);
+  });
+
+  it("handles language switch via langSelect", async () => {
+    const chat = state.createChat();
+    state.setActiveChat(chat.id);
+    ui.render();
+
+    const langSelect = document.getElementById(
+      "lang-select",
+    ) as HTMLSelectElement;
+    expect(langSelect).not.toBeNull();
+
+    const renderSpy = vi.spyOn(ui, "render");
+
+    langSelect.value = "ja";
+    langSelect.dispatchEvent(new Event("change"));
+
+    // Allow async setLanguage to settle
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(renderSpy).toHaveBeenCalled();
+    expect(document.documentElement.lang).toBe("ja");
+  });
+
+  it("syncHighlight is called on chatInput input event", () => {
+    const ui = new ChatUI(state);
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "test\nlines";
+    input.dispatchEvent(new Event("input"));
+    // Height should be updated automatically
+    expect(input.style.height).not.toBe("");
+  });
+
+  it("handles copy-sql-btn click successfully", async () => {
+    const chat = {
+      id: "chat-1",
+      title: "Chat 1",
+      model: "gemma4",
+      messages: [
+        {
+          role: "assistant" as const,
+          content: "response",
+          sqlQuery: "SELECT 1;",
+        },
+      ],
+    };
+    state.chats = [chat];
+    state.activeChatId = "chat-1";
+
+    vi.useFakeTimers();
+
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    const ui = new ChatUI(state);
+
+    const copyBtn = document.querySelector(
+      ".copy-sql-btn",
+    ) as HTMLButtonElement;
+    expect(copyBtn).not.toBeNull();
+
+    await copyBtn.click();
+    await vi.waitFor(() => {
+      expect(writeTextMock).toHaveBeenCalledWith("SELECT 1;");
+      expect(copyBtn.innerHTML).toContain("polyline points=");
+    });
+
+    // Test setTimeout reset
+    vi.runAllTimers();
+    expect(copyBtn.innerHTML).not.toContain("polyline points=");
+
+    vi.useRealTimers();
+  });
+
+  it("handles copy-sql-btn click error gracefully", async () => {
+    const chat = {
+      id: "chat-2",
+      title: "Chat 2",
+      model: "gemma4",
+      messages: [
+        {
+          role: "assistant" as const,
+          content: "response",
+          sqlQuery: "SELECT 1;",
+        },
+      ],
+    };
+    state.chats = [chat];
+    state.activeChatId = "chat-2";
+
+    const writeTextMock = vi.fn().mockRejectedValue(new Error("Copy failed"));
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const ui = new ChatUI(state);
+
+    const copyBtn = document.querySelector(
+      ".copy-sql-btn",
+    ) as HTMLButtonElement;
+    expect(copyBtn).not.toBeNull();
+
+    await copyBtn.click();
+    await vi.waitFor(() => {
+      expect(writeTextMock).toHaveBeenCalledWith("SELECT 1;");
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to copy text: ",
+        expect.any(Error),
+      );
+    });
+
+    consoleSpy.mockRestore();
+  });
+
+  it("highlights code blocks in assistant messages", () => {
+    const chat = {
+      id: "chat-3",
+      title: "Chat 3",
+      model: "gemma4",
+      messages: [
+        {
+          role: "assistant" as const,
+          content: "Here is code: \n```sql\nSELECT * FROM test;\n```",
+        },
+      ],
+    };
+    state.chats = [chat as any];
+    state.activeChatId = "chat-3";
+
+    const ui = new ChatUI(state);
+
+    // marked parses it to a <pre><code> block
+    const msgBlock = document.querySelector(".message.assistant");
+    expect(msgBlock).not.toBeNull();
+    const codeBlock = msgBlock?.querySelector("pre code");
+    expect(codeBlock).not.toBeNull();
+    // highlightElement should add hljs class
+    expect(codeBlock?.classList.contains("hljs")).toBe(true);
   });
 });

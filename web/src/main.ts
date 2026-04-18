@@ -6,6 +6,10 @@
 
 import { ChatState } from "./state";
 import { ChatUI } from "./ui";
+import { translateDocument } from "./i18n";
+
+// Initialize translations
+translateDocument();
 
 // Initialize the state and UI
 const appState = new ChatState();

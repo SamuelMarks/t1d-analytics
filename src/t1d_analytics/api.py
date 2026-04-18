@@ -91,7 +91,7 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
         return output
     except Exception as e:
         logger.error(f"SQL execution error: {e}")
-        raise ValueError(f"SQL execution error: {e}")
+        raise ValueError(f"backend.sqlExecution|{e}")
 
 
 def generate_sql_from_nl(
@@ -120,7 +120,7 @@ def generate_sql_from_nl(
         from any_llm import AnyLLM
     except ImportError:
         logger.error("any-llm-sdk[ollama] is not installed.")
-        raise RuntimeError("any-llm-sdk[ollama] is not installed.")
+        raise RuntimeError("backend.missingSdk|any-llm-sdk[ollama]")
 
     try:
         conn = duckdb.connect(db_path, read_only=True)
@@ -129,7 +129,7 @@ def generate_sql_from_nl(
         logger.debug(f"Retrieved schema: {schema[:200]}... (truncated)")
     except Exception as e:
         logger.error(f"Failed to read schema: {e}")
-        raise ValueError(f"Failed to read schema: {e}")
+        raise ValueError(f"backend.readSchemaFailed|{e}")
 
     prompt = f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
 
@@ -163,8 +163,8 @@ Context & Rules for T1D Analytics:
    - If a requested concept (like "demographics") is not a table, find the relevant columns within the existing tables (e.g., `visits` or `patients`).
 
 Write a SQL query that answers the user's request.
-You may provide an explanation of your thought process as SQL comments (`--`) before the query.
-Return ONLY the raw SQL query, with no markdown formatting and no code blocks.
+You may provide an explanation of your thought process before or after the query.
+Ensure the SQL query is enclosed in a markdown code block (e.g. ```sql ... ```).
 The query should be a valid DuckDB SQL SELECT statement.
 
 User request: {nl_query}"""
@@ -176,25 +176,26 @@ User request: {nl_query}"""
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
         )
-        sql_query = response.choices[0].message.content.strip()
-        logger.info(f"LLM generated SQL query:\n{sql_query}")
+        full_response = response.choices[0].message.content.strip()
+        logger.info(f"LLM response:\n{full_response}")
 
-        if sql_query.startswith("```"):
-            lines = sql_query.split("\n")
-            if len(lines) > 2:
-                sql_query = "\n".join(lines[1:-1])
-            else:
-                sql_query = sql_query.replace("```", "")
+        import re
+        match = re.search(r"```(?:sql|duckdb)?\n?(.*?)\n?```", full_response, re.DOTALL | re.IGNORECASE)
+        if match:
+            sql_query = match.group(1).strip()
+        else:
+            # Fallback if no code block
+            sql_query = full_response
+            if sql_query.lower().startswith("sql\n"):
+                sql_query = sql_query[4:]
+            elif sql_query.lower().startswith("duckdb\n"):
+                sql_query = sql_query[7:]
+            sql_query = sql_query.replace("```", "").strip()
 
-        if sql_query.lower().startswith("sql\n"):
-            sql_query = sql_query[4:]
-        elif sql_query.lower().startswith("duckdb\n"):
-            sql_query = sql_query[7:]
-
-        return sql_query.strip()
+        return full_response, sql_query
     except Exception as e:
         logger.error(f"LLM translation error: {e}")
-        raise RuntimeError(f"LLM translation error: {e}")
+        raise RuntimeError(f"backend.llmTranslationError|{e}")
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -214,7 +215,7 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
     """
     if not request.message.strip():
         logger.warning("Received empty message.")
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+        raise HTTPException(status_code=400, detail="backend.emptyMessage")
 
     try:
         logger.info(
@@ -223,28 +224,27 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
         db_path = request.db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
         if request.model == "sql":
             sql_query = request.message
-            content_prefix = "Executed literal SQL:"
+            content_prefix = "backend.literalSql"
             results = execute_sql(db_path, sql_query)
             return ChatResponse(
                 content=content_prefix, sqlResult=results, sqlQuery=sql_query
             )
         else:
-            sql_query = generate_sql_from_nl(
+            full_response, sql_query = generate_sql_from_nl(
                 db_path, request.message, model_name=request.model
             )
-            content_prefix = "Generated SQL (click 'Run SQL' to execute):"
-            return ChatResponse(content=content_prefix, sqlQuery=sql_query)
+            return ChatResponse(content=full_response, sqlQuery=sql_query)
     except ValueError as ve:
         logger.error(f"Database error during chat request: {ve}")
         return ChatResponse(
-            content="Error executing database operation.", error=str(ve)
+            content="backend.errorDbExecution", error=str(ve)
         )
     except RuntimeError as re:
         logger.error(f"NLP error during chat request: {re}")
-        return ChatResponse(content="Error during NLP translation.", error=str(re))
+        return ChatResponse(content="backend.errorNlpTranslation", error=str(re))
     except Exception as e:
         logger.exception("Unexpected error during chat request.")
-        return ChatResponse(content="An unexpected error occurred.", error=str(e))
+        return ChatResponse(content="backend.errorUnexpected", error=str(e))
 
 
 class TableDataResponse(BaseModel):
@@ -261,7 +261,7 @@ def get_table_data(
     db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     # Validate table name to prevent SQL injection
     if not table_name.isidentifier():
-        raise HTTPException(status_code=400, detail="Invalid table name")
+        raise HTTPException(status_code=400, detail="backend.invalidTable")
 
     try:
         conn = duckdb.connect(db_path, read_only=True)
@@ -269,7 +269,7 @@ def get_table_data(
         tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
         if table_name not in tables:
             conn.close()
-            raise HTTPException(status_code=404, detail="Table not found")
+            raise HTTPException(status_code=404, detail="backend.tableNotFound")
 
         # Limit to reasonable maximum
         limit = min(limit, 1000)
@@ -285,7 +285,7 @@ def get_table_data(
         raise
     except Exception as e:
         logger.error(f"Error fetching table data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"backend.serverError|{e}")
 
 
 class ColumnInfo(BaseModel):

@@ -2,6 +2,7 @@
  * @file state.ts
  * Manages the application state for the chat UI.
  */
+import i18next from "./i18n";
 
 /**
  * Represents a single chat message.
@@ -97,7 +98,8 @@ export class ChatState {
   createChat(title?: string, isTemporary: boolean = false): Chat {
     const chat: Chat = {
       id: `chat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      title: title || `Chat #${this.chatCounter++}`,
+      title:
+        title || i18next.t("app.chatNumber", { count: this.chatCounter++ }),
       messages: [],
       model: "gemma4",
       isTemporary,
@@ -143,7 +145,7 @@ export class ChatState {
     }
 
     if (this.chats.length === 0) {
-      this.createChat("Temporary chat", true);
+      this.createChat(i18next.t("app.temporaryChat"), true);
     }
     this.saveToLocalStorage();
   }
@@ -174,7 +176,7 @@ export class ChatState {
 
     const duplicate: Chat = {
       id: `chat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      title: `${original.title} (Copy)`,
+      title: i18next.t("app.copyOf", { title: original.title }),
       messages: JSON.parse(JSON.stringify(original.messages)), // Deep copy
       model: original.model,
       isTemporary: false,
@@ -195,7 +197,7 @@ export class ChatState {
       chat.messages.push(message);
       if (chat.isTemporary) {
         chat.isTemporary = false;
-        chat.title = `Chat #${this.chatCounter++}`;
+        chat.title = i18next.t("app.chatNumber", { count: this.chatCounter++ });
       }
       this.saveToLocalStorage();
     }

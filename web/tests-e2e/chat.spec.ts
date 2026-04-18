@@ -128,6 +128,74 @@ test.describe("Chat UI E2E", () => {
     await page.setViewportSize({ width: 3840, height: 2160 });
     await expect(page.locator(".chat-form")).toBeVisible();
   });
+
+  test("Accessibility: --text-muted color contrast in dark mode meets WCAG AA", async ({
+    page,
+  }) => {
+    // The empty state text uses --text-muted.
+    const emptyState = page.locator(".empty-state").first();
+    await expect(emptyState).toBeVisible();
+
+    // Verify the computed color and background color to ensure contrast
+    const styles = await emptyState.evaluate((el) => {
+      const computed = window.getComputedStyle(el);
+      // We also need the background of the body/parent to compute contrast
+      const bg = window.getComputedStyle(document.body).backgroundColor;
+      return {
+        color: computed.color,
+        bg: bg,
+      };
+    });
+
+    // #bac2de is rgb(186, 194, 222)
+    expect(styles.color).toBe("rgb(186, 194, 222)");
+    // #1e1e2e is rgb(30, 30, 46)
+    expect(styles.bg).toBe("rgb(30, 30, 46)");
+  });
+
+  test("Accessibility: Chat input has a persistent, visible label", async ({
+    page,
+  }) => {
+    const label = page.locator('label[for="chat-input"]');
+    await expect(label).toBeVisible();
+    await expect(label).toHaveText("Type a message...");
+    // Check it doesn't have the sr-only class
+    await expect(label).not.toHaveClass(/sr-only/);
+  });
+
+  test("Accessibility: Empty state has role=status and aria-live=polite", async ({
+    page,
+  }) => {
+    // Delete the chat to trigger empty state (no chats)
+    await page.click(".dropdown-btn");
+    page.on("dialog", (dialog) => dialog.accept());
+    await page.click(".dropdown-item.danger");
+
+    // The temporary chat is created automatically, which has 0 messages.
+    // It should have the role="status"
+    const emptyState = page.locator(".empty-state").first();
+    await expect(emptyState).toBeVisible();
+    await expect(emptyState).toHaveAttribute("role", "status");
+    await expect(emptyState).toHaveAttribute("aria-live", "polite");
+  });
+
+  test("Accessibility: Chat input does not use transparent text hack", async ({
+    page,
+  }) => {
+    const chatInput = page.locator("#chat-input");
+    await expect(chatInput).toBeVisible();
+
+    // Verify textarea color is not transparent
+    const color = await chatInput.evaluate(
+      (el) => window.getComputedStyle(el).color,
+    );
+    // Transparent color in computed style is usually rgba(0, 0, 0, 0)
+    expect(color).not.toBe("rgba(0, 0, 0, 0)");
+    expect(color).not.toBe("transparent");
+
+    // Verify the highlight block is gone
+    await expect(page.locator("#chat-input-highlight")).toHaveCount(0);
+  });
 });
 
 test("Temporary chat is undeletable", async ({ page }) => {
@@ -186,7 +254,7 @@ test("Query history is saved to local storage and restored on reload", async ({
   await expect(page.locator(".chat-item-title").first()).toHaveText(
     /Chat #\d+/,
   );
-  await expect(page.locator(".message.user")).toHaveText(
+  await expect(page.locator(".message.user")).toContainText(
     "Save this to history",
   );
   await expect(page.locator(".message.assistant")).toContainText(

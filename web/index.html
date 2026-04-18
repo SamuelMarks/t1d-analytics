@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>t1d-analytics</title>
+    <title data-i18n="app.title">t1d-analytics</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -14,12 +14,19 @@
   </head>
   <body>
     <div id="app">
-      <nav id="sidebar" class="sidebar" aria-label="Sidebar">
+      <nav
+        id="sidebar"
+        class="sidebar"
+        aria-label="Sidebar"
+        data-i18n-aria-label="aria.sidebar"
+      >
         <div class="sidebar-header">
           <button
             id="new-chat-btn"
             class="btn-primary"
             aria-label="Start a new chat"
+            data-i18n-aria-label="aria.startNewChat"
+            data-i18n="app.newChat"
           >
             + New Chat
           </button>
@@ -27,20 +34,27 @@
             id="close-sidebar-btn"
             class="icon-btn mobile-only"
             aria-label="Close sidebar"
+            data-i18n-aria-label="aria.closeSidebar"
           >
             ✕
           </button>
         </div>
-        <ul id="chat-list" class="chat-list" aria-label="Chat history">
+        <ul
+          id="chat-list"
+          class="chat-list"
+          aria-label="Chat history"
+          data-i18n-aria-label="aria.chatHistory"
+        >
           <!-- Chat items will be injected here -->
         </ul>
         <div id="schema-explorer" class="schema-explorer">
           <div class="schema-header">
-            <h3>Schema Explorer</h3>
+            <h3 data-i18n="app.schemaExplorer">Schema Explorer</h3>
             <button
               id="toggle-schema-btn"
               class="icon-btn"
               aria-label="Toggle Schema Explorer"
+              data-i18n-aria-label="aria.toggleSchema"
             >
               <svg
                 width="16"
@@ -49,6 +63,7 @@
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
+                aria-hidden="true"
               >
                 <polyline points="18 15 12 9 6 15"></polyline>
               </svg>
@@ -56,34 +71,67 @@
           </div>
           <div id="schema-content" class="schema-content">
             <!-- Schema will be injected here -->
-            <div class="schema-loading">Loading schema...</div>
+            <div
+              class="schema-loading"
+              role="status"
+              aria-live="polite"
+              data-i18n="app.loadingSchema"
+            >
+              Loading schema...
+            </div>
           </div>
         </div>
       </nav>
 
-      <main id="main-pane" aria-label="Main chat area">
+      <main
+        id="main-pane"
+        aria-label="Main chat area"
+        data-i18n-aria-label="aria.mainChatArea"
+      >
         <header class="main-header">
           <div class="header-left">
             <button
               id="open-sidebar-btn"
               class="icon-btn mobile-only"
               aria-label="Open sidebar"
+              data-i18n-aria-label="aria.openSidebar"
             >
               ☰
             </button>
             <div class="model-selector-container">
-              <label for="model-select">Model:</label>
-              <select id="model-select" aria-label="Select AI Model">
-                <option value="gemma4">Gemma 4</option>
-                <option value="sql">Literal SQL</option>
+              <label
+                id="model-select-label"
+                for="model-select"
+                data-i18n="app.model"
+                >Model:</label
+              >
+              <select id="model-select" aria-labelledby="model-select-label">
+                <option value="gemma4" data-i18n="app.gemma4">Gemma 4</option>
+                <option value="sql" data-i18n="app.literalSql">
+                  Literal SQL
+                </option>
               </select>
             </div>
           </div>
           <div class="header-right">
+            <label id="lang-select-label" for="lang-select" class="sr-only"
+              >Language</label
+            >
+            <select
+              id="lang-select"
+              aria-labelledby="lang-select-label"
+              class="lang-select"
+            >
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+              <option value="ar">العربية</option>
+              <option value="he">עברית</option>
+            </select>
             <button
               id="theme-toggle-btn"
               class="icon-btn"
               aria-label="Toggle dark and light mode"
+              data-i18n-aria-label="aria.toggleTheme"
               aria-pressed="true"
             >
               <!-- Default sun icon (for dark mode active) -->
@@ -92,32 +140,51 @@
           </div>
         </header>
 
-        <div
-          id="messages-container"
-          class="messages-container"
-          aria-live="polite"
-          aria-atomic="false"
-        >
+        <div id="messages-container" class="messages-container">
           <!-- Messages injected here -->
-          <div class="empty-state">Select or create a chat to begin.</div>
+          <div
+            class="empty-state"
+            role="status"
+            aria-live="polite"
+            data-i18n="app.emptyState"
+          >
+            Select or create a chat to begin.
+          </div>
         </div>
 
         <footer class="main-footer">
-          <form id="chat-form" class="chat-form" aria-label="Chat input form">
-            <label for="chat-input" class="sr-only">Type a message...</label>
+          <form
+            id="chat-form"
+            class="chat-form"
+            aria-label="Chat input form"
+            data-i18n-aria-label="aria.chatInputForm"
+          >
+            <label
+              for="chat-input"
+              class="chat-input-label"
+              data-i18n="app.typeMessage"
+              >Type a message...</label
+            >
             <div id="chat-input-wrapper" class="chat-input-wrapper disabled">
-              <pre
-                aria-hidden="true"
-              ><code id="chat-input-highlight" class="language-sql"></code></pre>
               <textarea
                 id="chat-input"
                 placeholder="Type a message..."
+                data-i18n-placeholder="app.typeMessage"
                 autocomplete="off"
                 disabled
                 aria-label="Chat input field"
+                data-i18n-aria-label="aria.chatInputField"
+                aria-describedby="chat-input-help"
                 rows="1"
                 spellcheck="false"
               ></textarea>
+            </div>
+            <div
+              id="chat-input-help"
+              class="sr-only"
+              data-i18n="aria.chatInputHelp"
+            >
+              Press Enter to send, Shift+Enter for a new line
             </div>
             <button
               type="submit"
@@ -125,6 +192,8 @@
               class="btn-primary"
               disabled
               aria-label="Send message"
+              data-i18n-aria-label="aria.sendMessage"
+              data-i18n="app.send"
             >
               Send
             </button>
@@ -134,33 +203,75 @@
 
       <div id="overlay" class="overlay" aria-hidden="true"></div>
     </div>
-    <div id="table-modal" class="modal" aria-hidden="true">
+
+    <!-- Screen Reader Announcer -->
+    <div
+      id="a11y-announcer"
+      class="sr-only"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+
+    <div
+      id="table-modal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modal-title"
+      aria-hidden="true"
+    >
       <div class="modal-content">
         <div class="modal-header">
-          <h2 id="modal-title">Table Data</h2>
+          <h2 id="modal-title" data-i18n="app.tableData">Table Data</h2>
           <button
             id="close-modal-btn"
             class="icon-btn"
             aria-label="Close modal"
+            data-i18n-aria-label="aria.closeModal"
           >
             ✕
           </button>
         </div>
         <div class="modal-body" id="modal-body">
-          <div id="table-loading" style="display: none">Loading...</div>
+          <div
+            id="table-loading"
+            style="display: none"
+            role="status"
+            aria-live="polite"
+            data-i18n="app.loading"
+          >
+            Loading...
+          </div>
           <div class="table-container">
             <table id="modal-table">
+              <caption
+                class="sr-only"
+                id="modal-table-caption"
+                data-i18n="app.tableData"
+              >
+                Table Data
+              </caption>
               <thead id="modal-table-head"></thead>
               <tbody id="modal-table-body"></tbody>
             </table>
           </div>
         </div>
         <div class="modal-footer">
-          <button id="prev-page-btn" class="btn-secondary" disabled>
+          <button
+            id="prev-page-btn"
+            class="btn-secondary"
+            disabled
+            data-i18n="app.previous"
+          >
             Previous
           </button>
-          <span id="page-indicator">Page 1</span>
-          <button id="next-page-btn" class="btn-secondary" disabled>
+          <span id="page-indicator" data-i18n="app.page">Page 1</span>
+          <button
+            id="next-page-btn"
+            class="btn-secondary"
+            disabled
+            data-i18n="app.next"
+          >
             Next
           </button>
         </div>

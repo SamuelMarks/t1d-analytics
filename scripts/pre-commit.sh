@@ -12,7 +12,7 @@ npx prettier --check .
 cd ..
 
 echo "3. Running python tests and coverage..."
-PYTHONPATH=src pytest tests/ --cov=src/t1d_analytics --cov-report=json
+PYTHONPATH=src python3 -m pytest tests/ --cov-report=json
 
 echo "4. Running frontend tests..."
 cd web

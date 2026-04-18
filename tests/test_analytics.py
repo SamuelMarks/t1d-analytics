@@ -349,3 +349,19 @@ def test_get_database_schema_fetch_error() -> None:
 
     assert "Table: test_tab" in schema
     assert "(could not fetch)" in schema
+
+
+def test_load_data_to_duckdb_duplicate_mapped_columns(tmp_path: Path) -> None:
+    """Test loading data with columns that map to the same standard name."""
+    # Pt_NumHospDKA and NumHospDKA both map to numhospdka in likely_matches.json
+    (tmp_path / "data_dupes.csv").write_text(
+        "Pt_NumHospDKA,NumHospDKA,NumHospDKA\n1,2,3"
+    )
+    db_path = str(tmp_path / "test.duckdb")
+    load_data_to_duckdb(str(tmp_path), db_path)
+
+    conn = duckdb.connect(db_path)
+    cols = [r[0] for r in conn.execute("DESCRIBE data_dupes").fetchall()]
+    assert "numhospdka" in cols
+    assert "NumHospDKA_2" in cols
+    conn.close()

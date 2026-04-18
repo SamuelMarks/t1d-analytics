@@ -50,6 +50,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+coverage.json
 *.cover
 *.py,cover
 .hypothesis/
@@ -143,6 +144,8 @@ cluster_*.py
 harmonizer*.py
 test_load*.py
 update.js
+fix_*.py
+temp.ts
 
 # ========================
 # Generated Data & Outputs

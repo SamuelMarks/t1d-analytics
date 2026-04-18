@@ -1,4 +1,6 @@
 // setup.ts
+import "../src/i18n";
+
 const localStorageMock = (function () {
   let store: Record<string, string> = {};
   return {
