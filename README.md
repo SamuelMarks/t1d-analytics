@@ -88,6 +88,10 @@ cd web
 npm run coverage
 ```
 
+## 🚀 Deployment
+
+For automated provisioning and deployment instructions using LibScript, please see the [**DEPLOY.md**](./DEPLOY.md) file.
+
 ## 📖 Next Steps
 
 For detailed instructions on how to use the CLI, spin up the backend API, and interact with the web application, please see the [**USAGE.md**](./USAGE.md) file.

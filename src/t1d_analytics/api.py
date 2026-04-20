@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Union
 import duckdb
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from t1d_analytics.analytics import get_database_schema
@@ -247,6 +248,38 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
         return ChatResponse(content="backend.errorUnexpected", error=str(e))
 
 
+class ExecuteSqlRequest(BaseModel):
+    """Request model for the execute SQL endpoint."""
+    
+    query: str
+    db_path: Optional[str] = None
+
+
+class ExecuteSqlResponse(BaseModel):
+    """Response model for the execute SQL endpoint."""
+
+    sqlResult: Optional[List[Dict[str, SqlValue]]] = None
+    error: Optional[str] = None
+
+
+@app.post("/api/execute-sql", response_model=ExecuteSqlResponse)
+def execute_sql_endpoint(request: ExecuteSqlRequest) -> ExecuteSqlResponse:
+    """Execute an arbitrary SQL query against the database."""
+    if not request.query.strip():
+        return ExecuteSqlResponse(error="backend.emptyMessage")
+
+    try:
+        db_path = request.db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
+        results = execute_sql(db_path, request.query)
+        return ExecuteSqlResponse(sqlResult=results)
+    except ValueError as ve:
+        logger.error(f"Database error during sql execution request: {ve}")
+        return ExecuteSqlResponse(error=str(ve))
+    except Exception as e:
+        logger.exception("Unexpected error during sql execution request.")
+        return ExecuteSqlResponse(error=str(e))
+
+
 class TableDataResponse(BaseModel):
     """Response model for table data."""
 
@@ -356,3 +389,12 @@ def list_models() -> ModelsResponse:
     except Exception as e:
         logger.error(f"Error fetching models: {e}")
         return ModelsResponse(models=[ModelInfo(name="gemma4")])  # Fallback
+
+
+if os.environ.get("DEBUG"):  # pragma: no cover
+    dist_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "web", "dist")
+    if os.path.exists(dist_path):
+        logger.info(f"DEBUG mode enabled. Serving static frontend from {dist_path}")
+        app.mount("/", StaticFiles(directory=dist_path, html=True), name="static")
+    else:
+        logger.warning(f"DEBUG mode enabled but static dist folder not found at {dist_path}")

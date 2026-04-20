@@ -834,8 +834,192 @@ export class ChatUI {
         msg.role === "user" &&
         (msg.model === "sql" || (!msg.model && activeChat.model === "sql"));
 
+      const createCopyBtn = (textToCopy: string) => {
+        const btn = document.createElement("button");
+        btn.className = "copy-sql-btn icon-btn";
+        btn.setAttribute("aria-label", i18next.t("aria.copySql", "Copy SQL"));
+        btn.title = i18next.t("ui.copySql", "Copy SQL");
+        btn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+        `;
+        btn.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(textToCopy);
+            const originalSvg = btn.innerHTML;
+            btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+            setTimeout(() => {
+              btn.innerHTML = originalSvg;
+            }, 2000);
+          } catch (err) {
+            console.error("Failed to copy text: ", err);
+          }
+        });
+        return btn;
+      };
+
+      const createPlayBtn = (queryToPlay: string) => {
+        const btn = document.createElement("button");
+        btn.className = "play-sql-btn";
+        btn.setAttribute(
+          "aria-label",
+          i18next.t("aria.playQuery", "Execute Query"),
+        );
+        btn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          ${i18next.t("app.play", "Play")}
+        `;
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            const response = await fetchWithBackendError(
+              "http://localhost:8000/api/execute-sql",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ query: queryToPlay }),
+              },
+            );
+            const data = await response.json();
+
+            let contentStr = "";
+            let sqlRes = data.sqlResult;
+
+            if (data.error) {
+              const parsedError = parseApiError(data.error);
+              contentStr = i18next.t("ui.errorDetails", { error: parsedError });
+            } else if (!sqlRes || sqlRes.length === 0) {
+              contentStr = i18next.t("ui.noRows", "No rows returned");
+              sqlRes = []; // ensure it triggers table/empty rendering logic
+            } else if (
+              sqlRes.length === 1 &&
+              Object.keys(sqlRes[0]).length === 1
+            ) {
+              // Scalar result
+              const key = Object.keys(sqlRes[0])[0];
+              const val = sqlRes[0][key];
+              contentStr = val === null ? "NULL" : String(val);
+              sqlRes = undefined; // Do not render as table
+            } else {
+              // Full table
+              contentStr = i18next.t("app.tableData", "Table Data");
+            }
+
+            this.state.addMessageToActiveChat({
+              role: "assistant",
+              content: contentStr,
+              sqlResult: sqlRes,
+              sqlQuery: queryToPlay,
+              isError: !!data.error,
+              model: "sql",
+            });
+            this.renderMessages();
+            this.scrollToBottom();
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            this.state.addMessageToActiveChat({
+              role: "assistant",
+              content: i18next.t("ui.errorComm", { error: errorMsg }),
+              isError: true,
+              sqlQuery: queryToPlay,
+              model: "sql",
+            });
+            this.renderMessages();
+            this.scrollToBottom();
+          } finally {
+            btn.disabled = false;
+          }
+        });
+        return btn;
+      };
+
+      const createRefreshBtn = (queryToPlay: string, messageToUpdate: any) => {
+        const btn = document.createElement("button");
+        btn.className = "copy-sql-btn icon-btn";
+        btn.setAttribute(
+          "aria-label",
+          i18next.t("aria.refreshQuery", "Refresh Query"),
+        );
+        btn.title = i18next.t("ui.refreshQuery", "Refresh Query");
+        btn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <polyline points="1 20 1 14 7 14"></polyline>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+        `;
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          try {
+            const response = await fetchWithBackendError(
+              "http://localhost:8000/api/execute-sql",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ query: queryToPlay }),
+              },
+            );
+            const data = await response.json();
+
+            let contentStr = "";
+            let sqlRes = data.sqlResult;
+
+            if (data.error) {
+              const parsedError = parseApiError(data.error);
+              contentStr = i18next.t("ui.errorDetails", { error: parsedError });
+            } else if (!sqlRes || sqlRes.length === 0) {
+              contentStr = i18next.t("ui.noRows", "No rows returned");
+              sqlRes = []; // ensure it triggers table/empty rendering logic
+            } else if (
+              sqlRes.length === 1 &&
+              Object.keys(sqlRes[0]).length === 1
+            ) {
+              // Scalar result
+              const key = Object.keys(sqlRes[0])[0];
+              const val = sqlRes[0][key];
+              contentStr = val === null ? "NULL" : String(val);
+              sqlRes = undefined; // Do not render as table
+            } else {
+              // Full table
+              contentStr = i18next.t("app.tableData", "Table Data");
+            }
+
+            messageToUpdate.content = contentStr;
+            messageToUpdate.sqlResult = sqlRes;
+            messageToUpdate.isError = !!data.error;
+
+            this.state.saveToLocalStorage();
+            this.renderMessages();
+            this.scrollToBottom();
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            messageToUpdate.content = i18next.t("ui.errorComm", {
+              error: errorMsg,
+            });
+            messageToUpdate.sqlResult = undefined;
+            messageToUpdate.isError = true;
+            this.state.saveToLocalStorage();
+            this.renderMessages();
+            this.scrollToBottom();
+          } finally {
+            btn.disabled = false;
+          }
+        });
+        return btn;
+      };
+
       if (isSqlMessage) {
         contentDiv.className = "sql-user-query-wrapper";
+
+        const headerDiv = document.createElement("div");
+        headerDiv.className = "sql-query-header";
+        headerDiv.appendChild(createCopyBtn(msg.content));
+        headerDiv.appendChild(createPlayBtn(msg.content));
+
         const preBlock = document.createElement("pre");
         preBlock.style.margin = "0";
         preBlock.style.background = "transparent";
@@ -852,12 +1036,33 @@ export class ChatUI {
 
         hljs.highlightElement(codeBlock);
         preBlock.appendChild(codeBlock);
+
+        contentDiv.appendChild(headerDiv);
         contentDiv.appendChild(preBlock);
       } else {
         contentDiv.innerHTML = marked.parse(msg.content) as string;
         const codeBlocks = contentDiv.querySelectorAll("pre code");
         codeBlocks.forEach((block) => {
           hljs.highlightElement(block as HTMLElement);
+
+          // Add copy and play button for SQL markdown blocks
+          if (block.className.includes("language-sql")) {
+            const preElement = block.parentElement;
+            if (preElement) {
+              const wrapper = document.createElement("div");
+              wrapper.className = "sql-query-container";
+
+              const headerDiv = document.createElement("div");
+              headerDiv.className = "sql-query-header";
+              const queryStr = block.textContent!;
+              headerDiv.appendChild(createCopyBtn(queryStr));
+              headerDiv.appendChild(createPlayBtn(queryStr));
+
+              preElement.parentNode?.insertBefore(wrapper, preElement);
+              wrapper.appendChild(headerDiv);
+              wrapper.appendChild(preElement);
+            }
+          }
         });
       }
 
@@ -885,46 +1090,12 @@ export class ChatUI {
         const headerDiv = document.createElement("div");
         headerDiv.className = "sql-query-header";
 
-        // Add copy button for all SQL queries
-        const copyBtn = document.createElement("button");
-        copyBtn.className = "copy-sql-btn icon-btn";
-        copyBtn.setAttribute("aria-label", "Copy SQL");
-        copyBtn.title = "Copy SQL";
-        copyBtn.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-        `;
-        copyBtn.addEventListener("click", async () => {
-          try {
-            await navigator.clipboard.writeText(msg.sqlQuery!);
-            const originalSvg = copyBtn.innerHTML;
-            copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
-            setTimeout(() => {
-              copyBtn.innerHTML = originalSvg;
-            }, 2000);
-          } catch (err) {
-            console.error("Failed to copy text: ", err);
-          }
-        });
-        headerDiv.appendChild(copyBtn);
+        headerDiv.appendChild(createCopyBtn(msg.sqlQuery));
 
-        // Only show Play button if this is an NLP generated query (not literal SQL)
-        if (msg.model !== "sql" && msg.role === "assistant" && !msg.sqlResult) {
-          const playBtn = document.createElement("button");
-          playBtn.className = "play-sql-btn";
-          playBtn.setAttribute("aria-label", i18next.t("aria.playQuery"));
-          playBtn.innerHTML = `
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <polygon points="5 3 19 12 5 21 5 3"></polygon>
-            </svg>
-            ${i18next.t("aria.playQuery")}
-          `;
-          playBtn.addEventListener("click", () => {
-            this.handleSendMessage(msg.sqlQuery, "sql");
-          });
-          headerDiv.appendChild(playBtn);
+        if (msg.role === "assistant" && msg.model === "sql") {
+          headerDiv.appendChild(createRefreshBtn(msg.sqlQuery, msg));
+        } else {
+          headerDiv.appendChild(createPlayBtn(msg.sqlQuery));
         }
 
         queryContainer.appendChild(headerDiv);

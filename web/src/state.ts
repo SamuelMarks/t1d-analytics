@@ -56,7 +56,7 @@ export class ChatState {
   /**
    * Saves the current state to localStorage.
    */
-  private saveToLocalStorage(): void {
+  public saveToLocalStorage(): void {
     try {
       if (typeof localStorage === "undefined") return;
       const data = {

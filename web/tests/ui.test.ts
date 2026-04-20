@@ -1371,4 +1371,475 @@ describe("ChatUI", () => {
     // highlightElement should add hljs class
     expect(codeBlock?.classList.contains("hljs")).toBe(true);
   });
+
+  it("renders copy and play buttons for sql user query", () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT 1" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const wrapper = document.querySelector(".sql-user-query-wrapper");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.querySelector(".copy-sql-btn")).not.toBeNull();
+    expect(wrapper?.querySelector(".play-sql-btn")).not.toBeNull();
+  });
+
+  it("renders refresh button for sql result replies", () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const container = document.querySelector(".sql-query-container");
+    expect(container).not.toBeNull();
+
+    // Refresh button has the aria-label "Refresh Query" and class icon-btn
+    const refreshBtn = container?.querySelector(
+      "button[aria-label='Refresh Query']",
+    );
+    expect(refreshBtn).not.toBeNull();
+
+    // Ensure play button is NOT present here
+    const playBtn = container?.querySelector(
+      "button[aria-label='Execute Query']",
+    );
+    expect(playBtn).toBeNull();
+  });
+
+  it("handles play-sql-btn click successfully", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT 1" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const playBtn = document.querySelector(
+      ".play-sql-btn",
+    ) as HTMLButtonElement;
+    expect(playBtn).not.toBeNull();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [{ val: 1 }] }),
+    });
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages.length).toBe(2);
+  });
+
+  it("handles play-sql-btn click with error from backend", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT 1" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const playBtn = document.querySelector(
+      ".play-sql-btn",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ error: "backend.syntaxError" }),
+    });
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[1].isError).toBe(true);
+  });
+
+  it("handles play-sql-btn click with no rows", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT 1" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const playBtn = document.querySelector(
+      ".play-sql-btn",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [] }),
+    });
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[1].content.length).toBeGreaterThan(0); // We just care it populated
+  });
+
+  it("handles play-sql-btn click with multiple rows", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT 1" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const playBtn = document.querySelector(
+      ".play-sql-btn",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [{ a: 1, b: 2 }] }),
+    });
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[1].content.length).toBeGreaterThan(0);
+  });
+
+  it("handles play-sql-btn click error gracefully", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT 1" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const playBtn = document.querySelector(
+      ".play-sql-btn",
+    ) as HTMLButtonElement;
+    mockFetch.mockRejectedValueOnce(new Error("Network Error"));
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages.length).toBe(2);
+    expect(activeChat?.messages[1].isError).toBe(true);
+  });
+
+  it("handles refresh button click successfully", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+    expect(refreshBtn).not.toBeNull();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [{ id: 1, val: 2 }] }),
+    });
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages.length).toBe(1);
+    expect(activeChat?.messages[0].sqlResult?.[0].val).toBe(2);
+  });
+
+  it("handles refresh button click with error from backend", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ error: "backend.syntaxError" }),
+    });
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[0].isError).toBe(true);
+  });
+
+  it("handles refresh button click with no rows", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [] }),
+    });
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[0].content.length).toBeGreaterThan(0);
+  });
+
+  it("handles refresh button click with multiple rows", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [{ a: 1, b: 2 }] }),
+    });
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[0].content.length).toBeGreaterThan(0);
+  });
+
+  it("handles refresh button click error gracefully", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+    mockFetch.mockRejectedValueOnce(new Error("Network Error"));
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[0].isError).toBe(true);
+  });
+
+  it("handles syncHighlight with trailing newline", () => {
+    ui["chatInput"].value = "test\n";
+    ui["syncHighlight"]();
+    expect(ui["chatInputHighlight"].textContent).toBe("test\n ");
+  });
+
+  it("handles refresh button click with scalar value", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [{ val: 123 }] }),
+    });
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[0].content).toBe("123");
+  });
+
+  it("handles refresh button click with null scalar value", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT NULL",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [{ val: null }] }),
+    });
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[0].content).toBe("NULL");
+  });
+
+  it("handles play button click with null scalar value", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT NULL" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const playBtn = document.querySelector(
+      ".play-sql-btn",
+    ) as HTMLButtonElement;
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ sqlResult: [{ val: null }] }),
+    });
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[1].content).toBe("NULL");
+  });
+
+  it("handles play-sql-btn click error string gracefully", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({ role: "user", content: "SELECT 1" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const playBtn = document.querySelector(
+      ".play-sql-btn",
+    ) as HTMLButtonElement;
+    mockFetch.mockRejectedValueOnce("Network Error String");
+
+    playBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[1].content).toContain("Network Error String");
+  });
+
+  it("handles refresh button click error string gracefully", async () => {
+    const chat = state.createChat();
+    chat.model = "sql";
+    chat.messages.push({
+      role: "assistant",
+      content: "Table Data",
+      sqlResult: [{ id: 1 }],
+      sqlQuery: "SELECT 1",
+      model: "sql",
+    });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const refreshBtn = document.querySelector(
+      "button[aria-label='Refresh Query']",
+    ) as HTMLButtonElement;
+    mockFetch.mockRejectedValueOnce("Network Error String");
+
+    refreshBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[0].content).toContain("Network Error String");
+  });
+
+  it("handles empty textContent in markdown SQL code block", () => {
+    const chat = state.createChat();
+    chat.model = "gemma4";
+    // Using empty string in markdown block so block.textContent is falsy
+    chat.messages.push({ role: "assistant", content: "```sql\n```" });
+    state.setActiveChat(chat.id);
+
+    const ui2 = new ChatUI(state);
+    ui2["renderMessages"]();
+
+    const container = document.querySelector(".sql-query-container");
+    expect(container).not.toBeNull();
+  });
 });

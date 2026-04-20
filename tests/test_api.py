@@ -345,3 +345,51 @@ def test_get_table_data_exception(mock_db, monkeypatch):
         response = client.get("/api/table/users")
         assert response.status_code == 500
         assert "DB Failure" in response.json()["detail"]
+
+def test_execute_sql_endpoint_success(mock_db: str) -> None:
+    """Test execute_sql_endpoint returns successfully."""
+    response = client.post(
+        "/api/execute-sql",
+        json={"query": "SELECT * FROM users", "db_path": mock_db},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "sqlResult" in data
+    assert len(data["sqlResult"]) == 2
+    assert data["sqlResult"][0]["name"] == "Alice"
+
+def test_execute_sql_endpoint_empty(mock_db: str) -> None:
+    """Test execute_sql_endpoint empty query."""
+    response = client.post(
+        "/api/execute-sql",
+        json={"query": "   ", "db_path": mock_db},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["error"] == "backend.emptyMessage"
+
+@patch("t1d_analytics.api.execute_sql")
+def test_execute_sql_endpoint_value_error(mock_execute: MagicMock, mock_db: str) -> None:
+    """Test execute_sql_endpoint catching ValueError."""
+    mock_execute.side_effect = ValueError("backend.sqlExecution|syntax error")
+    response = client.post(
+        "/api/execute-sql",
+        json={"query": "BAD SQL", "db_path": mock_db},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["error"] == "backend.sqlExecution|syntax error"
+
+@patch("t1d_analytics.api.execute_sql")
+def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -> None:
+    """Test execute_sql_endpoint catching general Exception."""
+    mock_execute.side_effect = Exception("System crash")
+    response = client.post(
+        "/api/execute-sql",
+        json={"query": "SELECT * FROM users", "db_path": mock_db},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["error"] == "System crash"
+
+

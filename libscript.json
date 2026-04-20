@@ -1,0 +1,14 @@
+{
+  "secrets": "./secrets",
+  "dependencies": {
+    "required": {
+      "toolchains": [
+        { "name": "python", "version": "3.12" },
+        { "name": "nodejs", "version": "latest" }
+      ],
+      "databases": [{ "name": "postgres" }, { "name": "redis" }],
+      "servers": [{ "name": "nginx", "ports": [80, 443] }],
+      "capabilities": ["python-runtime"]
+    }
+  }
+}
