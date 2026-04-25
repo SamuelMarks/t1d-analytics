@@ -78,3 +78,10 @@ def test_process_datasets(tmp_path: Path, requests_mock: Mock) -> None:
     assert (tmp_path / "Proto_1" / "d1.zip").exists()
     assert (tmp_path / "Proto_1" / "doc.pdf").exists()
     assert (tmp_path / "Proto_2").exists()
+
+def test_download_file_doi_exists(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    """Test skipping existing DOI link."""
+    link_file = tmp_path / "dataset_link.txt"
+    link_file.write_text("https://doi.org/10.123/456")
+    download_file("https://doi.org/10.123/456", tmp_path)
+    assert "DOI link already exists" in capsys.readouterr().out

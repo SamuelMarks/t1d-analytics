@@ -129,7 +129,15 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
                     select_exprs.append(f'"{orig_col}"')
 
             select_sql = ",\n                ".join(select_exprs)
-            query = f"CREATE OR REPLACE TABLE {table_name} AS SELECT \n                {select_sql} \n            FROM temp_view"
+            
+            # Check if table already exists to make script idempotent
+            tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+            if table_name in tables:
+                print(f"Table {table_name} already exists, skipping...")
+                conn.execute("DROP VIEW temp_view")
+                continue
+
+            query = f"CREATE TABLE {table_name} AS SELECT \n                {select_sql} \n            FROM temp_view"
             conn.execute(query)
             conn.execute("DROP VIEW temp_view")
 

@@ -39,8 +39,11 @@ def download_file(url: str, dest_dir: Path) -> None:
     """
     if url.startswith("https://doi.org/"):
         link_file = dest_dir / "dataset_link.txt"
-        link_file.write_text(url)
-        print(f"Saved DOI link: {url}")
+        if not link_file.exists():
+            link_file.write_text(url)
+            print(f"Saved DOI link: {url}")
+        else:
+            print(f"DOI link already exists, skipping: {url}")
         return
 
     filename = unquote(url.split("/")[-1])

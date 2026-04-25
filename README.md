@@ -112,3 +112,23 @@ at your option.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
+
+
+## ⚙️ Deployment
+
+This project uses [LibScript](https://github.com/SamuelMarks/libscript) for complete, native PaaS deployment without Docker.
+
+```bash
+export LIBSCRIPT_PATH="$HOME/repos/libscript/libscript.sh"
+
+# 1. Install toolchains (Python 3.12, NodeJS 20, Nginx)
+$LIBSCRIPT_PATH install-deps
+
+# 2. Run ETL hooks, build frontend, setup daemons, and configure Nginx
+$LIBSCRIPT_PATH start
+
+# Note: You can skip hooks if data is already loaded
+$LIBSCRIPT_PATH start --no-hooks
+```
+
+See [DEPLOY.md](DEPLOY.md) for full cloud orchestration details.

@@ -1,14 +1,64 @@
 {
-  "secrets": "./secrets",
-  "dependencies": {
-    "required": {
-      "toolchains": [
-        { "name": "python", "version": "3.12" },
-        { "name": "nodejs", "version": "latest" }
-      ],
-      "databases": [{ "name": "postgres" }, { "name": "redis" }],
-      "servers": [{ "name": "nginx", "ports": [80, 443] }],
-      "capabilities": ["python-runtime"]
+  "name": "t1d-analytics",
+  "domain": "t1d-analytics.stanford.edu",
+  "secrets_dir": "./secrets",
+  "infrastructure": {
+    "node": {
+      "size": "Standard_D4s_v3",
+      "disk_gb": 128
+    },
+    "dns": {
+      "resource_group": "stanford-dns-rg"
     }
+  },
+  "state": {
+    "bucket": "s3://stanford-t1d-analytics-state",
+    "paths": ["t1d.duckdb"]
+  },
+  "dependencies": {
+    "toolchains": [
+      { "name": "python", "version": "3.12" },
+      { "name": "nodejs", "version": "20" }
+    ],
+    "servers": [
+      { "name": "nginx", "ports": [80, 443] }
+    ]
+  },
+  "hooks": {
+    "build": [
+      {
+        "name": "build-frontend",
+        "command": "cd web && npm ci && npm run build"
+      }
+    ],
+    "pre_start": [
+      {
+        "name": "python-deps",
+        "command": "pip install -r requirements.txt"
+      },
+      {
+        "name": "etl-pipeline",
+        "command": "python -m t1d_analytics.cli download && python -m t1d_analytics.cli extract && python -m t1d_analytics.cli load --db t1d.duckdb",
+        "condition": "unless_exists t1d.duckdb"
+      }
+    ]
+  },
+  "services": [
+    {
+      "name": "fastapi-backend",
+      "command": "uvicorn src.t1d_analytics.api:app --host 127.0.0.1 --port 8000",
+      "env": {
+        "T1D_DB_PATH": "t1d.duckdb",
+        "PYTHONPATH": "src"
+      },
+      "env_files": ["./secrets/backend.env"]
+    }
+  ],
+  "ingress": {
+    "tls": "letsencrypt",
+    "routes": [
+      { "path": "/api/", "proxy_pass": "http://127.0.0.1:8000/" },
+      { "path": "/", "root": "./web/dist", "try_files": "$uri $uri/ /index.html" }
+    ]
   }
 }

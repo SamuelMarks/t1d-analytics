@@ -1,5 +1,37 @@
+# ========================
+# Ad-hoc & Analysis Scripts (Wildcards)
+# ========================
+# Ignore all custom, temporary, or ad-hoc processing scripts
+fix_*.py
+fix_*.sh
+patch_*.py
+patch_*.sh
+test_*.py
+test_*.sh
+!tests/test_*.py
+update_*.py
+update_*.sh
+check_*.py
+check_*.sh
+analyze_*.py
+analyze_*.sh
+harmonize*.py
+harmonize*.sh
+cluster_*.py
+cluster_*.sh
+clinical_concepts*.py
+temp.*
 peek_s*
 *.patch
+*.diff
+*.tmp
+*.bak
+*.old
+*.rej
+*.out
+tmp/
+.tmp/
+
 # ========================
 # Operating System
 # ========================
@@ -10,6 +42,7 @@ Icon
 ._*
 .Spotlight-V100
 .Trashes
+Thumbs.db
 
 # ========================
 # Python
@@ -18,8 +51,6 @@ Icon
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
 # Distribution / packaging
@@ -56,6 +87,7 @@ coverage.json
 .hypothesis/
 .pytest_cache/
 cover/
+tmp_test_cov/
 
 # Linters & formatters
 .mypy_cache/
@@ -64,6 +96,8 @@ cover/
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -72,6 +106,7 @@ env.bak/
 venv.bak/
 .venv-*/
 *venv*
+.venv*/
 
 # ========================
 # Node.js / Web frontend
@@ -116,6 +151,7 @@ t1d_datasets/
 *.parquet
 *.h5
 *.hdf5
+*.duckdb
 
 # ========================
 # IDEs and Editors
@@ -130,22 +166,11 @@ t1d_datasets/
 # JetBrains / IntelliJ
 .idea/
 *.iml
+*.swp
 
 # Jupyter Notebook
 .ipynb_checkpoints
 data/
-
-# ========================
-# Ad-hoc & Analysis Scripts
-# ========================
-check_*.py
-clinical_concepts*.py
-cluster_*.py
-harmonizer*.py
-test_load*.py
-update.js
-fix_*.py
-temp.ts
 
 # ========================
 # Generated Data & Outputs
@@ -155,4 +180,15 @@ common_columns.txt
 likely_matches*.json
 src/t1d_analytics/likely_matches.json
 test_subset/
-*.duckdb
+secrets/
+
+# Ad-hoc Python scripts in root
+gen_bats.py
+make_generic.py
+make_generic2.py
+update.js
+
+# Test ad-hoc files
+test_scp/
+web/tests/*.txt
+web/tests/*.orig

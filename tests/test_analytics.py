@@ -365,3 +365,23 @@ def test_load_data_to_duckdb_duplicate_mapped_columns(tmp_path: Path) -> None:
     assert "numhospdka" in cols
     assert "NumHospDKA_2" in cols
     conn.close()
+
+def test_load_data_to_duckdb_existing_table(tmp_path: Path) -> None:
+    """Test loading data when the table already exists."""
+    (tmp_path / "data_exist.csv").write_text("id,val\n1,10\n2,20")
+    db_path = str(tmp_path / "test.duckdb")
+    
+    # Create the table beforehand
+    conn = duckdb.connect(db_path)
+    conn.execute("CREATE TABLE data_exist (dummy INT)")
+    conn.close()
+
+    # Load data
+    load_data_to_duckdb(str(tmp_path), db_path)
+
+    # Verify table structure wasn't overwritten
+    conn = duckdb.connect(db_path)
+    cols = [r[0] for r in conn.execute("DESCRIBE data_exist").fetchall()]
+    assert "dummy" in cols
+    assert "id" not in cols
+    conn.close()
