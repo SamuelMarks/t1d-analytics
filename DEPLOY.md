@@ -1,150 +1,159 @@
 # Deployment Guide
 
-This project is orchestrated using [LibScript](https://github.com/SamuelMarks/libscript), a zero-dependency, cross-platform provisioning framework. It uses a `libscript.json` file to declare infrastructure and software dependencies, which are then resolved and installed natively.
+This guide covers how to deploy the application to Azure using LibScript. You can either use the automated orchestration command or manually provision the infrastructure step-by-step (useful if you want to share a single node between multiple applications).
 
-## Prerequisites
+## 1. Automated Orchestration (Standalone Node)
 
-Ensure you have a local copy of LibScript available.
-For example, if it is located at `~/repos/libscript`:
-
-```bash
-export LIBSCRIPT_PATH="$HOME/repos/libscript/libscript.sh"
-```
-
-## 1. Configure the Environment
-
-This project defines its system dependencies (e.g., Python, NodeJS, Nginx) as well as its PaaS configuration (hooks, daemon services, ingress routes) in the `libscript.json` file at the root of the repository. Review this file to ensure the requested component versions align with your target environment.
-
-If you need to customize ports, paths, or install methods, export the relevant LibScript variables before proceeding:
+The `provision` command automatically handles creating the VNet, NSG, VM, syncing the code, resolving dependencies, and daemonizing the application.
 
 ```bash
-# Example overrides:
-export NGINX_LISTEN_PORT=8080
-export LIBSCRIPT_LOG_LEVEL=1
+# Provision the stack on Azure (creates vm-t1d-analytics)
+~/repos/libscript/libscript.sh provision azure vm-t1d-analytics rg-analytics-prod eastus ./ t1d-analytics
+
+# Map the domain to the newly provisioned node
+~/repos/libscript/libscript.sh cloud azure dns map-node vm-t1d-analytics rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
 ```
 
-## 2. Install Dependencies
+### Automated Deprovisioning
 
-Run the `install-deps` command to automatically parse the JSON manifest, download, configure, and install the required stack components natively on your machine:
+To completely tear down the application and its infrastructure (including DNS A-records, OS Disks, and Network Interfaces):
 
 ```bash
-$LIBSCRIPT_PATH install-deps
+~/repos/libscript/libscript.sh deprovision azure vm-t1d-analytics rg-analytics-prod eastus ./ t1d-analytics
 ```
 
-_Note: LibScript may prompt for `sudo` privileges if it needs to install system-level packages (like `apt` or `brew` packages) or configure daemon services._
+---
 
-## 3. Start the Stack
+## 2. Manual Orchestration (Shared Node)
 
-Once dependencies are installed, you can orchestrate the entire application. The `start` command automatically executes the ETL data pipelines (unless already run), compiles the frontend, daemonizes the FastAPI server natively via `systemd` or `launchd`, and configures the Nginx reverse proxy.
+If you want to host multiple applications on the same VM, you can manually provision the infrastructure and then deploy the codebases to the shared node.
+
+### Step 0: Create the Network
+Create a virtual network for the node.
+```bash
+~/repos/libscript/libscript.sh cloud azure network create shared-vnet rg-analytics-prod --location eastus
+```
+
+### Step 1: Create the Firewall (NSG)
+Create a network security group to open necessary ports (e.g., SSH, HTTP, HTTPS).
+```bash
+~/repos/libscript/libscript.sh cloud azure firewall create shared-nsg rg-analytics-prod "22 80 443" --location eastus
+```
+
+### Step 2: Provision the Instance
+Create the Ubuntu instance attached to your network and firewall.
+```bash
+~/repos/libscript/libscript.sh cloud azure node create shared-node Ubuntu2204 rg-analytics-prod --size Standard_B2s --vnet-name shared-vnet --nsg shared-nsg
+```
+
+### Step 3: Deploy the Code
+Sync your current working directory to the instance (respecting .gitignore).
+```bash
+~/repos/libscript/libscript.sh cloud azure node deploy shared-node rg-analytics-prod ./ t1d-analytics
+```
+
+### Step 4: Map DNS and Start Stack
+Map your domain and trigger the remote installation and daemonization.
+```bash
+# Map DNS
+~/repos/libscript/libscript.sh cloud azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+
+# Install dependencies and start the stack on the remote node
+~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh install-deps"
+~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh start"
+```
+
+### Manual Teardown
+
+If you deployed manually, you can delete the resources manually:
 
 ```bash
-$LIBSCRIPT_PATH start
+# Unmap DNS
+~/repos/libscript/libscript.sh cloud azure dns unmap-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+
+# Delete Node, NSG, and VNet
+~/repos/libscript/libscript.sh cloud azure node delete shared-node rg-analytics-prod
+~/repos/libscript/libscript.sh cloud azure firewall delete shared-nsg rg-analytics-prod
+~/repos/libscript/libscript.sh cloud azure network delete shared-vnet rg-analytics-prod
 ```
 
-### Skipping ETL Hooks
+## Deployment Architecture
 
-If you have already downloaded and compiled the datasets or want to iterate quickly without executing the `build` and `pre_start` hooks, you can pass the `--no-hooks` flag:
+```mermaid
+graph TD
+    Developer[Developer Machine] -->|Sync Code & Config| Instance[Shared Ubuntu Instance]
+    
+    subgraph Azure Infrastructure
+        VNet[Shared VNet] --> Instance
+        NSG[Shared NSG] --> Instance
+        
+        Instance --> Ingress[Nginx Ingress]
+        
+        Ingress -->|Route| PulseQuery[pulse-query.healthplatform.io]
+        Ingress -->|Route| T1DAnalytics[t1d-analytics.healthplatform.io]
+    end
+    
+    DNS[Azure DNS] -->|A Record| Instance
+```
+
+
+## HTTPS / TLS Provisioning
+
+LibScript natively configures HTTPS for your mapped domains. This is governed by the `libscript.json` configuration file present in your repository.
+
+```json
+{
+  "ingress": {
+    "tls": "letsencrypt"
+  }
+}
+```
+
+When you invoke the `start` command on the remote node, the framework detects the `domain` and `tls` blocks and automatically uses `certbot` to provision and bind a Let's Encrypt certificate to the generated Nginx reverse proxy. No manual intervention or certificate renewal scripts are required.
+
+## Multi-Environment / Multi-Tenant Deployments
+
+You can easily deploy multiple instances of the same stack (e.g., an `alpha` version and a `prod` version) to the *same* shared node under different domains.
+
+### 1. Distinct Deployment Directories
+When syncing your code, ensure you use distinct destination paths on the remote node to prevent overwriting your existing environments.
 
 ```bash
-$LIBSCRIPT_PATH start --no-hooks
+# Deploy Alpha version
+~/repos/libscript/libscript.sh cloud azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-alpha
+
+# Deploy Production version
+~/repos/libscript/libscript.sh cloud azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-prod
 ```
 
-## 4. Managing the Deployment
-
-LibScript acts as a process and service manager for the components it installs. You can use it to monitor the health and logs of your deployment:
-
-**Check component status and health:**
+### 2. Environment-Specific DNS Mapping
+Map your distinct environments to different subdomains.
 
 ```bash
-$LIBSCRIPT_PATH status
-$LIBSCRIPT_PATH health
+# Map Alpha DNS
+~/repos/libscript/libscript.sh cloud azure dns map-node shared-node rg-analytics-prod alpha.t1d-analytics.healthplatform.io healthplatform-zone
+
+# Map Production DNS
+~/repos/libscript/libscript.sh cloud azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
 ```
 
-**Tail real-time logs for all services:**
+### 3. Updating the Remote Stack Configurations
+Once deployed, modify the `libscript.json` inside the specific remote directory to reflect its intended domain before starting the stack. 
+
+For the alpha environment on the shared node, you would edit `~/t1d-analytics-alpha/libscript.json`:
+```json
+{
+  "domain": "alpha.t1d-analytics.healthplatform.io"
+}
+```
+
+*(Note: If you have conflicting static ports in your `libscript.json`, be sure to alter the `ports` block or use dynamic `$PORT` environment variables so both the alpha and prod services can run concurrently on the same shared host).*
+
+### 4. Daemonize
+Navigate into the respective directories on the remote node and start the services.
 
 ```bash
-$LIBSCRIPT_PATH logs -f
+~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics-alpha && sudo ~/libscript/libscript.sh start"
+~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics-prod && sudo ~/libscript/libscript.sh start"
 ```
 
-**Stop the stack:**
-
-```bash
-$LIBSCRIPT_PATH stop
-```
-
-## 5. Remote Cloud Deployment (Azure, AWS, GCP)
-
-You can deploy the entire `t1d-analytics` stack to major cloud providers (Azure, AWS, Google Cloud) using LibScript's native multi-cloud orchestration primitives. The workflow below uses Azure (`./libscript.sh azure`) as an example, but the exact same core primitives (`network`, `firewall`, `node`) map identically to AWS (`./libscript.sh aws`) and GCP (`./libscript.sh gcp`). This provisions the infrastructure, pushes the codebase, installs dependencies, and gracefully tears everything down when finished.
-
-### Prerequisites
-Ensure you are authenticated with the Azure CLI (`az login`) and have sufficient permissions to create network, compute, and DNS resources.
-
-### Provision Infrastructure (Azure Example)
-
-From your local LibScript repository root, run:
-
-```bash
-# Define our target environment
-export RG="t1d-analytics-rg"
-export NODE="t1d-web-node"
-export LOCATION="eastus"
-
-# Create the Resource Group
-az group create --name "$RG" --location "$LOCATION"
-
-# 1. Create the Network
-./libscript.sh azure network create t1d-vnet "$RG" --location "$LOCATION"
-
-# 2. Create the Firewall (Opening SSH, HTTP, and HTTPS)
-./libscript.sh azure firewall create t1d-nsg "$RG" "22 80 443" --location "$LOCATION"
-
-# 3. Create the Node (Passing Azure-native flags for a data-science workload)
-./libscript.sh azure node create "$NODE" "Ubuntu2204" "$RG" \
-    --size Standard_D4s_v3 \
-    --os-disk-size-gb 128 \
-    --vnet-name t1d-vnet \
-    --nsg t1d-nsg
-```
-
-### Deploy Stack
-
-Now that the infrastructure is up, push the orchestration framework and the application code, then execute the deployment natively.
-
-```bash
-# 1. Sync the LibScript core to the node (~/libscript)
-./libscript.sh azure node sync "$NODE" "$RG"
-
-# 2. Copy your local t1d-analytics repository to the remote node
-./libscript.sh azure node exec "$NODE" "$RG" "mkdir -p ~/t1d-analytics"
-./libscript.sh azure node deploy "$NODE" "$RG" "../new_research/stanford/t1d-analytics/" "~/t1d-analytics/"
-
-# 3. Map DNS for Let's Encrypt TLS Validation
-./libscript.sh azure dns map-node "$NODE" "$RG" "t1d-analytics.stanford.edu" "stanford.edu" "stanford-dns-rg"
-
-# 4. Resolve and install all dependencies (Python, Node, Nginx)
-./libscript.sh azure node exec "$NODE" "$RG" "cd ~/t1d-analytics && sudo ~/libscript/libscript.sh install-deps"
-
-# 4. Start the application stack (Daemonizes FastAPI, Configures Nginx, runs ETL)
-./libscript.sh azure node exec "$NODE" "$RG" "cd ~/t1d-analytics && sudo ~/libscript/libscript.sh start"
-```
-
-### Deprovision and Teardown
-
-When your research session is complete, gracefully shut down the application stack and delete the infrastructure layers in reverse order:
-
-```bash
-# 1. Gracefully stop the t1d-analytics stack and its daemonized services
-./libscript.sh azure node exec "$NODE" "$RG" "cd ~/t1d-analytics && sudo ~/libscript/libscript.sh stop"
-
-# 2. Delete the Node (and its associated OS disk)
-./libscript.sh azure node delete "$NODE" "$RG"
-
-# 3. Delete the Firewall (NSG)
-./libscript.sh azure firewall delete t1d-nsg "$RG"
-
-# 4. Delete the Network (VNET)
-./libscript.sh azure network delete t1d-vnet "$RG"
-
-# 5. (Optional) Purge the entire Resource Group
-az group delete --name "$RG" --yes --no-wait
-```
