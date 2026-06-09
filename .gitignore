@@ -177,8 +177,6 @@ data/
 # ========================
 all_columns.txt
 common_columns.txt
-likely_matches*.json
-src/t1d_analytics/likely_matches.json
 test_subset/
 secrets/
 
