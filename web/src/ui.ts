@@ -30,6 +30,9 @@ function parseApiError(errorStr: any): string {
 
 /**
  * Helper to fetch and automatically throw parsed backend errors.
+ * @param {string} url The URL to fetch.
+ * @param {RequestInit} [options] Fetch options.
+ * @returns {Promise<Response>} The fetch response.
  */
 async function fetchWithBackendError(
   url: string,

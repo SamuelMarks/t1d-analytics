@@ -387,9 +387,27 @@ def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -
     response = client.post(
         "/api/execute-sql",
         json={"query": "SELECT * FROM users", "db_path": mock_db},
+
     )
     assert response.status_code == 200
     data = response.json()
     assert data["error"] == "System crash"
 
-
+def test_generate_sql_fallback_no_prefix(mocker):
+    """Test SQL fallback when prefix is missing."""
+    from t1d_analytics.api import generate_sql_from_nl
+    
+    mock_llm_instance = mocker.MagicMock()
+    mock_choice = mocker.MagicMock()
+    mock_choice.message.content = "SELECT * FROM test;"
+    mock_llm_instance.completion.return_value.choices = [mock_choice]
+    
+    mock_llm_class = mocker.MagicMock()
+    mock_llm_class.create.return_value = mock_llm_instance
+    
+    mocker.patch.dict("sys.modules", {"any_llm": mocker.MagicMock(AnyLLM=mock_llm_class)})
+    
+    mocker.patch("t1d_analytics.api.duckdb.connect")
+    mocker.patch("t1d_analytics.api.get_database_schema", return_value="dummy_schema")
+    full, sql = generate_sql_from_nl("dummy_db", "test query")
+    assert sql == "SELECT * FROM test;"

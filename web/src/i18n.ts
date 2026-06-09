@@ -440,6 +440,11 @@ export function translateDocument(): void {
   });
 }
 
+/**
+ * Sets the application language, updates the document direction (LTR/RTL), and translates the UI.
+ * @param {string} lang The language code to set (e.g., 'en', 'ja', 'ar', 'he').
+ * @returns {Promise<void>}
+ */
 export async function setLanguage(lang: string): Promise<void> {
   await i18next.changeLanguage(lang);
   document.documentElement.lang = lang;

@@ -86,3 +86,16 @@ def test_query_subcommand(mock_query: MagicMock) -> None:
         main()
 
     mock_query.assert_called_once_with("test.db")
+
+def test_cli_main_invalid_command(mocker):
+    """Test CLI invalid command."""
+    from t1d_analytics.cli import main
+    
+    # Passing an invalid command. argparse might catch it if it's restricted by subparsers,
+    # but we can mock args to bypass argparse validation and reach the branch.
+    mock_args = mocker.MagicMock()
+    mock_args.command = "invalid_cmd"
+    mocker.patch("argparse.ArgumentParser.parse_args", return_value=mock_args)
+    
+    # It should fall through the if-elif chain and exit cleanly (or raise no exception)
+    main()

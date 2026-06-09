@@ -86,7 +86,13 @@ def main() -> None:
 
 
 def handle_download(args: argparse.Namespace) -> None:
-    """Handle the download subcommand."""
+    """
+    Handle the download subcommand.
+
+    Args:
+        args: Arguments.
+
+    """
     print(f"Fetching HTML from {args.url}...")
     html = fetch_html(args.url)
 
@@ -104,21 +110,39 @@ def handle_download(args: argparse.Namespace) -> None:
 
 
 def handle_extract(args: argparse.Namespace) -> None:
-    """Handle the extract subcommand."""
+    """
+    Handle the extract subcommand.
+
+    Args:
+        args: Command-line arguments.
+
+    """
     from t1d_analytics.analytics import extract_zips
 
     extract_zips(args.data_dir)
 
 
 def handle_load(args: argparse.Namespace) -> None:
-    """Handle the load subcommand."""
+    """
+    Handle the load subcommand.
+
+    Args:
+        args: Arguments.
+
+    """
     from t1d_analytics.analytics import load_data_to_duckdb
 
     load_data_to_duckdb(args.data_dir, args.db)
 
 
 def handle_query(args: argparse.Namespace) -> None:
-    """Handle the query subcommand."""
+    """
+    Handle the query subcommand.
+
+    Args:
+        args: Arguments.
+
+    """
     from t1d_analytics.analytics import run_query_repl
 
     run_query_repl(args.db)

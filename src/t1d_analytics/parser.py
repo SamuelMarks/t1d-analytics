@@ -18,9 +18,6 @@ def fetch_html(url: str) -> str:
     Returns:
         The HTML content as a string.
 
-    Raises:
-        requests.RequestException: If the HTTP request fails.
-
     """
     response = requests.get(url, timeout=30)
     response.raise_for_status()

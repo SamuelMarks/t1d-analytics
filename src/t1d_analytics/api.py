@@ -264,7 +264,16 @@ class ExecuteSqlResponse(BaseModel):
 
 @app.post("/api/execute-sql", response_model=ExecuteSqlResponse)
 def execute_sql_endpoint(request: ExecuteSqlRequest) -> ExecuteSqlResponse:
-    """Execute an arbitrary SQL query against the database."""
+    """
+    Execute an arbitrary SQL query against the database.
+
+    Args:
+        request: The request containing the query and optional db_path.
+
+    Returns:
+        The execution response containing results or error.
+
+    """
     if not request.query.strip():
         return ExecuteSqlResponse(error="backend.emptyMessage")
 
@@ -290,7 +299,21 @@ class TableDataResponse(BaseModel):
 def get_table_data(
     table_name: str, limit: int = 25, offset: int = 0
 ) -> TableDataResponse:
-    """Return paginated rows from a specific table."""
+    """
+    Return paginated rows from a specific table.
+
+    Args:
+        table_name: The table name.
+        limit: The limit.
+        offset: The offset.
+
+    Returns:
+        The data.
+
+    Raises:
+        HTTPException: on error.
+
+    """
     db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     # Validate table name to prevent SQL injection
     if not table_name.isidentifier():
@@ -343,7 +366,13 @@ class SchemaResponse(BaseModel):
 
 @app.get("/api/schema", response_model=SchemaResponse)
 def get_schema() -> SchemaResponse:
-    """Return structured schema for the frontend Schema Explorer."""
+    """
+    Return structured schema for the frontend Schema Explorer.
+
+    Returns:
+        The structured schema response.
+
+    """
     db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     try:
         conn = duckdb.connect(db_path, read_only=True)

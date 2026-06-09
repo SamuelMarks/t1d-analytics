@@ -33,9 +33,6 @@ def download_file(url: str, dest_dir: Path) -> None:
         url: The URL to download.
         dest_dir: The directory to save the file.
 
-    Raises:
-        requests.RequestException: If the HTTP request fails.
-
     """
     if url.startswith("https://doi.org/"):
         link_file = dest_dir / "dataset_link.txt"

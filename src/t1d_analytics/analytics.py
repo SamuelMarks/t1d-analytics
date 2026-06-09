@@ -8,7 +8,13 @@ import duckdb
 
 
 def extract_zips(data_dir_str: str) -> None:
-    """Extract any zip files found in the data directory."""
+    """
+    Extract any zip files found in the data directory.
+
+    Args:
+        data_dir_str: directory.
+
+    """
     data_dir = Path(data_dir_str)
     if not data_dir.exists():
         print(f"Data directory {data_dir} does not exist.")
@@ -35,7 +41,14 @@ def extract_zips(data_dir_str: str) -> None:
 
 
 def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
-    """Load all CSV and TXT files from the data directory into DuckDB tables."""
+    """
+    Load all CSV and TXT files from the data directory into DuckDB tables.
+
+    Args:
+        data_dir_str: directory.
+        db_path: db path.
+
+    """
     data_dir = Path(data_dir_str)
     if not data_dir.exists():
         print(f"Data directory {data_dir} does not exist.")
@@ -151,7 +164,16 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
 
 
 def get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
-    """Extract the database schema as a text description, including sample data."""
+    """
+    Extract the database schema as a text description, including sample data.
+
+    Args:
+        conn: The DuckDB connection.
+
+    Returns:
+        The database schema string.
+
+    """
     tables = conn.execute("SHOW TABLES").fetchall()
     schema_parts = []
     for (table_name,) in tables:
@@ -171,7 +193,14 @@ def get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
 
 
 def handle_natural_language(conn: duckdb.DuckDBPyConnection, query: str) -> None:
-    """Translate natural language to SQL using a local LLM via any-llm and execute it."""
+    """
+    Translate natural language to SQL using a local LLM via any-llm and execute it.
+
+    Args:
+        conn: DB connection.
+        query: The query.
+
+    """
     try:
         from any_llm import AnyLLM
     except ImportError:
@@ -253,7 +282,13 @@ User request: {query}
 
 
 def run_query_repl(db_path: str) -> None:
-    """Run the interactive query interface."""
+    """
+    Run the interactive query interface.
+
+    Args:
+        db_path: Path to DB.
+
+    """
     if not Path(db_path).exists():
         print(f"Database {db_path} does not exist.")
         print("Please run the 'load' command first to populate the database.")
