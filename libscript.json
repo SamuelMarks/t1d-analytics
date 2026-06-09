@@ -2,10 +2,31 @@
   "domain": "t1d-analytics.healthplatform.io",
   "infrastructure": {
     "node": {
-      "size": "Standard_B2s"
+      "size": "Standard_D2s_v7"
+    },
+    "network": {
+      "ports": ["22", "80", "443"]
     }
   },
   "ingress": {
-    "tls": "letsencrypt"
+    "tls": "letsencrypt",
+    "port": 3000
+  },
+  "hooks": {
+    "install": [
+      "sudo apt-get update && sudo apt-get install -y python3-pip python3-venv && python3 -m pip install uv --break-system-packages && python3 -m uv sync",
+      "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs && cd web && npm install"
+    ],
+    "build": [
+      "cd web && npm run build"
+    ]
+  },
+  "services": {
+    "web": {
+      "command": "cd web && npm run preview -- --port 3000 --host",
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
   }
 }

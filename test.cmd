@@ -4,8 +4,8 @@ setlocal
 if "%LIBSCRIPT_ROOT_DIR%"=="" set "LIBSCRIPT_ROOT_DIR=%USERPROFILE%\repos\libscript"
 set "LIBSCRIPT_CLI=%LIBSCRIPT_ROOT_DIR%\libscript.cmd"
 if "%NODE_NAME%"=="" set "NODE_NAME=test-t1d-analytics-node"
-if "%RG_NAME%"=="" set "RG_NAME=rg-analytics-test2"
-if "%LOCATION%"=="" set "LOCATION=westus3"
+if "%RG_NAME%"=="" set "RG_NAME=rg-analytics-test11"
+if "%LOCATION%"=="" set "LOCATION=eastus"
 set "REPO_DIR=%~dp0"
 if "%REMOTE_DEST%"=="" set "REMOTE_DEST=t1d-analytics-test"
 
