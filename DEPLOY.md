@@ -11,7 +11,7 @@ The `provision` command automatically handles creating the VNet, NSG, VM, syncin
 ~/repos/libscript/libscript.sh provision azure vm-t1d-analytics rg-analytics-prod eastus ./ t1d-analytics
 
 # Map the domain to the newly provisioned node
-~/repos/libscript/libscript.sh cloud azure dns map-node vm-t1d-analytics rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+~/repos/libscript/libscript.sh azure dns map-node vm-t1d-analytics rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
 ```
 
 ### Automated Deprovisioning
@@ -31,36 +31,36 @@ If you want to host multiple applications on the same VM, you can manually provi
 ### Step 0: Create the Network
 Create a virtual network for the node.
 ```bash
-~/repos/libscript/libscript.sh cloud azure network create shared-vnet rg-analytics-prod --location eastus
+~/repos/libscript/libscript.sh azure network create shared-vnet rg-analytics-prod --location eastus
 ```
 
 ### Step 1: Create the Firewall (NSG)
 Create a network security group to open necessary ports (e.g., SSH, HTTP, HTTPS).
 ```bash
-~/repos/libscript/libscript.sh cloud azure firewall create shared-nsg rg-analytics-prod "22 80 443" --location eastus
+~/repos/libscript/libscript.sh azure firewall create shared-nsg rg-analytics-prod "22 80 443" --location eastus
 ```
 
 ### Step 2: Provision the Instance
 Create the Ubuntu instance attached to your network and firewall.
 ```bash
-~/repos/libscript/libscript.sh cloud azure node create shared-node Ubuntu2204 rg-analytics-prod --size Standard_B2s --vnet-name shared-vnet --nsg shared-nsg
+~/repos/libscript/libscript.sh azure node create shared-node Ubuntu2204 rg-analytics-prod --size Standard_B2s --vnet-name shared-vnet --nsg shared-nsg
 ```
 
 ### Step 3: Deploy the Code
 Sync your current working directory to the instance (respecting .gitignore).
 ```bash
-~/repos/libscript/libscript.sh cloud azure node deploy shared-node rg-analytics-prod ./ t1d-analytics
+~/repos/libscript/libscript.sh azure node deploy shared-node rg-analytics-prod ./ t1d-analytics
 ```
 
 ### Step 4: Map DNS and Start Stack
 Map your domain and trigger the remote installation and daemonization.
 ```bash
 # Map DNS
-~/repos/libscript/libscript.sh cloud azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+~/repos/libscript/libscript.sh azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
 
 # Install dependencies and start the stack on the remote node
-~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh install-deps"
-~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh start"
+~/repos/libscript/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh install-deps"
+~/repos/libscript/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh start"
 ```
 
 ### Manual Teardown
@@ -69,12 +69,12 @@ If you deployed manually, you can delete the resources manually:
 
 ```bash
 # Unmap DNS
-~/repos/libscript/libscript.sh cloud azure dns unmap-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+~/repos/libscript/libscript.sh azure dns unmap-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
 
 # Delete Node, NSG, and VNet
-~/repos/libscript/libscript.sh cloud azure node delete shared-node rg-analytics-prod
-~/repos/libscript/libscript.sh cloud azure firewall delete shared-nsg rg-analytics-prod
-~/repos/libscript/libscript.sh cloud azure network delete shared-vnet rg-analytics-prod
+~/repos/libscript/libscript.sh azure node delete shared-node rg-analytics-prod
+~/repos/libscript/libscript.sh azure firewall delete shared-nsg rg-analytics-prod
+~/repos/libscript/libscript.sh azure network delete shared-vnet rg-analytics-prod
 ```
 
 ## Deployment Architecture
@@ -120,10 +120,10 @@ When syncing your code, ensure you use distinct destination paths on the remote 
 
 ```bash
 # Deploy Alpha version
-~/repos/libscript/libscript.sh cloud azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-alpha
+~/repos/libscript/libscript.sh azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-alpha
 
 # Deploy Production version
-~/repos/libscript/libscript.sh cloud azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-prod
+~/repos/libscript/libscript.sh azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-prod
 ```
 
 ### 2. Environment-Specific DNS Mapping
@@ -131,10 +131,10 @@ Map your distinct environments to different subdomains.
 
 ```bash
 # Map Alpha DNS
-~/repos/libscript/libscript.sh cloud azure dns map-node shared-node rg-analytics-prod alpha.t1d-analytics.healthplatform.io healthplatform-zone
+~/repos/libscript/libscript.sh azure dns map-node shared-node rg-analytics-prod alpha.t1d-analytics.healthplatform.io healthplatform-zone
 
 # Map Production DNS
-~/repos/libscript/libscript.sh cloud azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+~/repos/libscript/libscript.sh azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
 ```
 
 ### 3. Updating the Remote Stack Configurations
@@ -153,7 +153,7 @@ For the alpha environment on the shared node, you would edit `~/t1d-analytics-al
 Navigate into the respective directories on the remote node and start the services.
 
 ```bash
-~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics-alpha && sudo ~/libscript/libscript.sh start"
-~/repos/libscript/libscript.sh cloud azure node exec shared-node rg-analytics-prod "cd t1d-analytics-prod && sudo ~/libscript/libscript.sh start"
+~/repos/libscript/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics-alpha && sudo ~/libscript/libscript.sh start"
+~/repos/libscript/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics-prod && sudo ~/libscript/libscript.sh start"
 ```
 
