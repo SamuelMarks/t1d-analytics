@@ -82,6 +82,7 @@ export const enTranslations = {
     chatOptions: "Chat options",
     codeBlock: "Code block",
     chatInputHelp: "Press Enter to send, Shift+Enter for a new line",
+    languageSelector: "Select application language",
   },
   backend: {
     sqlExecution: "SQL execution error: {{error}}",
@@ -178,6 +179,7 @@ export const jaTranslations = {
     chatOptions: "チャットオプション",
     codeBlock: "コードブロック",
     chatInputHelp: "Enterで送信、Shift+Enterで改行",
+    languageSelector: "アプリケーション言語を選択",
   },
   backend: {
     sqlExecution: "SQL実行エラー: {{error}}",
@@ -274,6 +276,7 @@ export const arTranslations = {
     chatOptions: "خيارات الدردشة",
     codeBlock: "كتلة التعليمات البرمجية",
     chatInputHelp: "اضغط على Enter للإرسال، Shift+Enter لسطر جديد",
+    languageSelector: "تحديد لغة التطبيق",
   },
   backend: {
     sqlExecution: "خطأ في تنفيذ SQL: {{error}}",
@@ -370,6 +373,7 @@ export const heTranslations = {
     chatOptions: "אפשרויות צ'אט",
     codeBlock: "בלוק קוד",
     chatInputHelp: "לחץ Enter לשליחה, Shift+Enter לשורה חדשה",
+    languageSelector: "בחר שפת יישום",
   },
   backend: {
     sqlExecution: "שגיאת ביצוע SQL: {{error}}",
@@ -388,8 +392,23 @@ export const heTranslations = {
   },
 };
 
-i18next.init({
-  lng: "en",
+export function getInitialLang(): string {
+  const savedLang =
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem("app-lang")
+      : null;
+  const browserLang =
+    typeof navigator !== "undefined" ? navigator.language.split("-")[0] : "en";
+  return (
+    savedLang ||
+    (["en", "ja", "ar", "he"].includes(browserLang) ? browserLang : "en")
+  );
+}
+
+const initialLang = getInitialLang();
+
+await i18next.init({
+  lng: initialLang,
   fallbackLng: "en",
   resources: {
     en: {
@@ -406,6 +425,12 @@ i18next.init({
     },
   },
 });
+
+document.documentElement.lang = initialLang;
+export function setDocumentDir(lang: string) {
+  document.documentElement.dir = ["ar", "he"].includes(lang) ? "rtl" : "ltr";
+}
+setDocumentDir(initialLang);
 
 /**
  * Translates HTML elements in the document that have data-i18n attributes.
@@ -446,6 +471,7 @@ export function translateDocument(): void {
  * @returns {Promise<void>}
  */
 export async function setLanguage(lang: string): Promise<void> {
+  localStorage.setItem("app-lang", lang);
   await i18next.changeLanguage(lang);
   document.documentElement.lang = lang;
   document.documentElement.dir = ["ar", "he"].includes(lang) ? "rtl" : "ltr";

@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import i18next, { translateDocument, setLanguage } from "../src/i18n";
+import i18next, {
+  translateDocument,
+  setLanguage,
+  getInitialLang,
+  setDocumentDir,
+} from "../src/i18n";
 
 describe("i18n.ts", () => {
   beforeEach(() => {
@@ -48,6 +53,7 @@ describe("i18n.ts", () => {
     document.body.innerHTML = `<div id="test-text" data-i18n="app.newChat"></div>`;
 
     await setLanguage("ja");
+    expect(localStorage.getItem("app-lang")).toBe("ja");
     expect(i18next.language).toBe("ja");
     expect(document.documentElement.lang).toBe("ja");
     expect(document.documentElement.dir).toBe("ltr");
@@ -70,5 +76,69 @@ describe("i18n.ts", () => {
     expect(document.getElementById("test-text")?.textContent).toBe(
       "+ צ'אט חדש",
     );
+  });
+
+  it("determines initial language correctly", () => {
+    localStorage.clear();
+    // jsdom navigator language is en-US usually
+    expect(getInitialLang()).toBe("en");
+
+    localStorage.setItem("app-lang", "ja");
+    expect(getInitialLang()).toBe("ja");
+  });
+
+  it("determines initial language correctly when falling back to navigator", () => {
+    localStorage.clear();
+
+    // We need to mock navigator to trigger the language check.
+    // jsdom allows us to set language via Object.defineProperty
+    const originalNavigator = window.navigator;
+    Object.defineProperty(window, "navigator", {
+      value: { language: "ar-AE" },
+      configurable: true,
+    });
+
+    expect(getInitialLang()).toBe("ar");
+
+    Object.defineProperty(window, "navigator", {
+      value: { language: "fr-FR" },
+      configurable: true,
+    });
+
+    expect(getInitialLang()).toBe("en");
+
+    // restore
+    Object.defineProperty(window, "navigator", {
+      value: originalNavigator,
+      configurable: true,
+    });
+  });
+
+  it("determines initial language correctly when falling back to navigator, no navigator available", () => {
+    localStorage.clear();
+
+    // We need to mock navigator to undefined
+    const originalNavigator = window.navigator;
+    Object.defineProperty(window, "navigator", {
+      value: undefined,
+      configurable: true,
+    });
+
+    expect(getInitialLang()).toBe("en");
+
+    // restore
+    Object.defineProperty(window, "navigator", {
+      value: originalNavigator,
+      configurable: true,
+    });
+  });
+
+  it("sets document dir based on initial language correctly", () => {
+    setDocumentDir("ar");
+    expect(document.documentElement.dir).toBe("rtl");
+    setDocumentDir("he");
+    expect(document.documentElement.dir).toBe("rtl");
+    setDocumentDir("en");
+    expect(document.documentElement.dir).toBe("ltr");
   });
 });

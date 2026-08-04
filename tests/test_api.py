@@ -45,7 +45,7 @@ def test_execute_sql_no_result(mock_db: str) -> None:
 
 def test_execute_sql_error(mock_db: str) -> None:
     """Test SQL execution with invalid query."""
-    with pytest.raises(ValueError, match=r"backend\.sqlExecution\|.*"):
+    with pytest.raises(ValueError, match=r"{\"error_code\": \"backend.sqlExecution.*"):
         execute_sql(mock_db, "SELECT * FROM non_existent")
 
 @patch("any_llm.AnyLLM.create")
@@ -132,7 +132,7 @@ def test_chat_endpoint_empty_message() -> None:
     """Test API rejects empty messages."""
     response = client.post("/api/chat", json={"message": "   "})
     assert response.status_code == 400
-    assert response.json()["detail"] == "backend.emptyMessage"
+    assert response.json()["detail"]["error_code"] == "backend.emptyMessage"
 
 
 def test_chat_endpoint_sql_success(mock_db: str) -> None:
@@ -163,31 +163,29 @@ def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> Non
     assert data["sqlQuery"] == "SELECT * FROM users"
 
 
-@patch("t1d_analytics.api.execute_sql")
-def test_chat_endpoint_value_error(mock_execute: MagicMock, mock_db: str) -> None:
+def test_chat_endpoint_value_error(mock_db: str) -> None:
     """Test API handles ValueError (SQL syntax error)."""
-    mock_execute.side_effect = ValueError("Syntax error")
     response = client.post(
         "/api/chat",
         json={"message": "SELECT invalid", "model": "sql", "db_path": mock_db},
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["error"] == "Syntax error"
+    assert data["error"]["error_code"] == "backend.sqlExecution"
     assert data["content"] == "backend.errorDbExecution"
 
 
-@patch("t1d_analytics.api.generate_sql_from_nl")
-def test_chat_endpoint_runtime_error(mock_generate: MagicMock, mock_db: str) -> None:
+@patch("any_llm.AnyLLM.create")
+def test_chat_endpoint_runtime_error(mock_create: MagicMock, mock_db: str) -> None:
     """Test API handles RuntimeError (LLM failure)."""
-    mock_generate.side_effect = RuntimeError("LLM offline")
+    mock_create.side_effect = Exception("LLM offline")
     response = client.post(
         "/api/chat",
         json={"message": "give me users", "model": "gemma4", "db_path": mock_db},
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["error"] == "LLM offline"
+    assert data["error"]["error_code"] == "backend.llmTranslationError"
     assert data["content"] == "backend.errorNlpTranslation"
 
 
@@ -203,7 +201,8 @@ def test_chat_endpoint_generic_exception(
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["error"] == "System failure"
+    assert data["error"]["error_code"] == "backend.errorUnexpected"
+    assert data["error"]["params"]["error"] == "System failure"
     assert data["content"] == "backend.errorUnexpected"
 
 
@@ -344,7 +343,8 @@ def test_get_table_data_exception(mock_db, monkeypatch):
     with patch("duckdb.connect", side_effect=Exception("DB Failure")):
         response = client.get("/api/table/users")
         assert response.status_code == 500
-        assert "DB Failure" in response.json()["detail"]
+        assert response.json()["detail"]["error_code"] == "backend.serverError"
+        assert "DB Failure" in response.json()["detail"]["params"]["error"]
 
 def test_execute_sql_endpoint_success(mock_db: str) -> None:
     """Test execute_sql_endpoint returns successfully."""
@@ -366,19 +366,17 @@ def test_execute_sql_endpoint_empty(mock_db: str) -> None:
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["error"] == "backend.emptyMessage"
+    assert data["error"]["error_code"] == "backend.emptyMessage"
 
-@patch("t1d_analytics.api.execute_sql")
-def test_execute_sql_endpoint_value_error(mock_execute: MagicMock, mock_db: str) -> None:
+def test_execute_sql_endpoint_value_error(mock_db: str) -> None:
     """Test execute_sql_endpoint catching ValueError."""
-    mock_execute.side_effect = ValueError("backend.sqlExecution|syntax error")
     response = client.post(
         "/api/execute-sql",
         json={"query": "BAD SQL", "db_path": mock_db},
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["error"] == "backend.sqlExecution|syntax error"
+    assert data["error"]["error_code"] == "backend.sqlExecution"
 
 @patch("t1d_analytics.api.execute_sql")
 def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -> None:
@@ -391,7 +389,8 @@ def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["error"] == "System crash"
+    assert data["error"]["error_code"] == "backend.errorUnexpected"
+    assert data["error"]["params"]["error"] == "System crash"
 
 def test_generate_sql_fallback_no_prefix(mocker):
     """Test SQL fallback when prefix is missing."""

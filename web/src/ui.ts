@@ -17,15 +17,17 @@ hljs.registerLanguage("markdown", markdown);
 /**
  * Parses a backend error string or detail object into a translated string.
  */
-function parseApiError(errorStr: any): string {
-  if (typeof errorStr !== "string") return String(errorStr);
-  if (errorStr.includes("|")) {
-    const [key, ...rest] = errorStr.split("|");
-    return i18next.exists(key)
-      ? i18next.t(key, { error: rest.join("|") })
-      : errorStr;
+function parseApiError(errorObj: any): string {
+  if (typeof errorObj === "string") {
+    return i18next.exists(errorObj) ? i18next.t(errorObj) : errorObj;
   }
-  return i18next.exists(errorStr) ? i18next.t(errorStr) : errorStr;
+  if (errorObj && typeof errorObj === "object" && "error_code" in errorObj) {
+    const key = errorObj.error_code;
+    return i18next.exists(key)
+      ? i18next.t(key, errorObj.params)
+      : `${key}: ${JSON.stringify(errorObj.params)}`;
+  }
+  return String(errorObj);
 }
 
 /**
@@ -150,9 +152,7 @@ export class ChatUI {
     if (!schemaContent) return;
 
     try {
-      const response = await fetchWithBackendError(
-        "http://localhost:8000/api/schema",
-      );
+      const response = await fetchWithBackendError("/api/schema");
       const data = await response.json();
 
       schemaContent.innerHTML = ""; // Clear loading message
@@ -230,7 +230,9 @@ export class ChatUI {
       );
     } catch (error) {
       console.error("Failed to load schema:", error);
-      schemaContent.innerHTML = `<div class="schema-loading error-text" role="alert" aria-live="assertive" data-i18n="ui.failedSchema">${i18next.t("ui.failedSchema")}</div>`;
+      const errMsg = i18next.t("ui.failedSchema");
+      this.announce(errMsg, true);
+      schemaContent.innerHTML = `<div class="schema-loading error-text" role="alert" aria-live="assertive" data-i18n="ui.failedSchema">${errMsg}</div>`;
     }
   }
 
@@ -239,9 +241,7 @@ export class ChatUI {
    */
   private async loadModels(): Promise<void> {
     try {
-      const response = await fetchWithBackendError(
-        "http://localhost:8000/api/models",
-      );
+      const response = await fetchWithBackendError("/api/models");
       const data = await response.json();
 
       // Preserve the "Literal SQL" option
@@ -273,6 +273,20 @@ export class ChatUI {
       // Fallback is handled by the default HTML structure if we didn't wipe it,
       // but if we got here before wiping, it's fine.
     }
+  }
+
+  /**
+   * Updates the aria-label and icon of the theme toggle button based on current mode and language.
+   */
+  private updateThemeButtonLabel(): void {
+    const isLight = document.body.classList.contains("light-mode");
+    this.themeToggleBtn.setAttribute(
+      "aria-label",
+      isLight
+        ? i18next.t("aria.switchToDarkMode")
+        : i18next.t("aria.switchToLightMode"),
+    );
+    this.themeToggleBtn.innerHTML = isLight ? "☾" : "☀";
   }
 
   /**
@@ -313,10 +327,14 @@ export class ChatUI {
       this.langSelect.value = i18next.language;
       this.langSelect.addEventListener("change", async () => {
         await setLanguage(this.langSelect.value);
+        this.updateThemeButtonLabel();
         // Re-render UI components that generate dynamic text
         this.render();
       });
     }
+
+    // Set initial label
+    this.updateThemeButtonLabel();
 
     this.themeToggleBtn.addEventListener("click", () => {
       const isLight = document.body.classList.toggle("light-mode");
@@ -324,13 +342,7 @@ export class ChatUI {
         "aria-pressed",
         isLight ? "false" : "true",
       );
-      this.themeToggleBtn.setAttribute(
-        "aria-label",
-        isLight
-          ? i18next.t("aria.switchToDarkMode")
-          : i18next.t("aria.switchToLightMode"),
-      );
-      this.themeToggleBtn.innerHTML = isLight ? "☾" : "☀";
+      this.updateThemeButtonLabel();
     });
 
     // Mobile sidebar toggles
@@ -418,8 +430,23 @@ export class ChatUI {
   }
 
   /**
+   * Announces a message to screen readers using the aria-live region.
+   */
+  private announce(message: string, isAssertive: boolean = false): void {
+    const announcer = document.getElementById("a11y-announcer");
+    if (announcer) {
+      announcer.textContent = "";
+      announcer.setAttribute("aria-live", isAssertive ? "assertive" : "polite");
+      setTimeout(() => {
+        if (announcer) announcer.textContent = message;
+      }, 50);
+    }
+  }
+
+  /**
    * Handles sending a user message.
    */
+
   private async handleSendMessage(
     text?: string,
     modelOverride?: string,
@@ -460,14 +487,11 @@ export class ChatUI {
     const model = modelOverride ?? this.modelSelect.value;
 
     try {
-      const response = await fetchWithBackendError(
-        "http://localhost:8000/api/chat",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: content, model }),
-        },
-      );
+      const response = await fetchWithBackendError("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: content, model }),
+      });
 
       const data = await response.json();
 
@@ -477,6 +501,7 @@ export class ChatUI {
       if (data.error) {
         const parsedError = parseApiError(data.error);
         assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
+        this.announce(assistantMsg, true);
       }
 
       this.state.addMessageToActiveChat({
@@ -489,9 +514,11 @@ export class ChatUI {
       });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
+      const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
+      this.announce(announcedErr, true);
       this.state.addMessageToActiveChat({
         role: "assistant",
-        content: i18next.t("ui.errorComm", { error: errorMsg }),
+        content: announcedErr,
         isError: true,
         model: model,
       });
@@ -502,13 +529,7 @@ export class ChatUI {
       this.modelSelect.disabled = false;
       this.chatInput.focus();
 
-      const announcer = document.getElementById("a11y-announcer");
-      if (announcer) {
-        announcer.textContent = i18next.t(
-          "aria.messageReceived",
-          "Message received",
-        );
-      }
+      this.announce(i18next.t("aria.messageReceived", "Message received"));
     }
 
     this.renderSidebar();
@@ -879,14 +900,11 @@ export class ChatUI {
         btn.addEventListener("click", async () => {
           btn.disabled = true;
           try {
-            const response = await fetchWithBackendError(
-              "http://localhost:8000/api/execute-sql",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ query: queryToPlay }),
-              },
-            );
+            const response = await fetchWithBackendError("/api/execute-sql", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ query: queryToPlay }),
+            });
             const data = await response.json();
 
             let contentStr = "";
@@ -895,8 +913,10 @@ export class ChatUI {
             if (data.error) {
               const parsedError = parseApiError(data.error);
               contentStr = i18next.t("ui.errorDetails", { error: parsedError });
+              this.announce(contentStr, true);
             } else if (!sqlRes || sqlRes.length === 0) {
               contentStr = i18next.t("ui.noRows", "No rows returned");
+              this.announce(contentStr, false);
               sqlRes = []; // ensure it triggers table/empty rendering logic
             } else if (
               sqlRes.length === 1 &&
@@ -924,9 +944,11 @@ export class ChatUI {
             this.scrollToBottom();
           } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
+            const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
+            this.announce(announcedErr, true);
             this.state.addMessageToActiveChat({
               role: "assistant",
-              content: i18next.t("ui.errorComm", { error: errorMsg }),
+              content: announcedErr,
               isError: true,
               sqlQuery: queryToPlay,
               model: "sql",
@@ -958,14 +980,11 @@ export class ChatUI {
         btn.addEventListener("click", async () => {
           btn.disabled = true;
           try {
-            const response = await fetchWithBackendError(
-              "http://localhost:8000/api/execute-sql",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ query: queryToPlay }),
-              },
-            );
+            const response = await fetchWithBackendError("/api/execute-sql", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ query: queryToPlay }),
+            });
             const data = await response.json();
 
             let contentStr = "";
@@ -974,8 +993,10 @@ export class ChatUI {
             if (data.error) {
               const parsedError = parseApiError(data.error);
               contentStr = i18next.t("ui.errorDetails", { error: parsedError });
+              this.announce(contentStr, true);
             } else if (!sqlRes || sqlRes.length === 0) {
               contentStr = i18next.t("ui.noRows", "No rows returned");
+              this.announce(contentStr, false);
               sqlRes = []; // ensure it triggers table/empty rendering logic
             } else if (
               sqlRes.length === 1 &&
@@ -1226,8 +1247,11 @@ export class ChatUI {
       modal.removeEventListener("keydown", trapFocus);
 
       // Restore focus to where it was before opening the modal
-      if (previousFocus) {
+      if (previousFocus && document.body.contains(previousFocus)) {
         previousFocus.focus();
+      } else {
+        const chatInput = document.getElementById("chat-input");
+        if (chatInput) chatInput.focus();
       }
     };
 
@@ -1290,7 +1314,7 @@ export class ChatUI {
       const limit = this.ROWS_PER_PAGE;
       const offset = (this.currentPage - 1) * limit;
       const response = await fetchWithBackendError(
-        `http://localhost:8000/api/table/${this.currentTable}?limit=${limit}&offset=${offset}`,
+        `/api/table/${this.currentTable}?limit=${limit}&offset=${offset}`,
       );
       const data = await response.json();
 
@@ -1333,15 +1357,20 @@ export class ChatUI {
 
         prevBtn.disabled = this.currentPage === 1;
         nextBtn.disabled = data.rows.length < limit;
+        this.announce(i18next.t("app.tableData") + " loaded", false);
       } else {
-        tbody.innerHTML = `<tr><td>${i18next.t("ui.noDataAvailable")}</td></tr>`;
+        const msg = i18next.t("ui.noDataAvailable");
+        this.announce(msg, false);
+        tbody.innerHTML = `<tr><td>${msg}</td></tr>`;
         prevBtn.disabled = true;
         nextBtn.disabled = true;
       }
     } catch (error) {
       console.error("Failed to fetch table data:", error);
       loading.style.display = "none";
-      tbody.innerHTML = `<tr><td class="error-text" role="alert" aria-live="assertive">${i18next.t("ui.failedData", { error })}</td></tr>`;
+      const errMsg = i18next.t("ui.failedData", { error });
+      this.announce(errMsg, true);
+      tbody.innerHTML = `<tr><td class="error-text" role="alert" aria-live="assertive">${errMsg}</td></tr>`;
     }
   }
 }

@@ -5,7 +5,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import duckdb
 from fastapi import FastAPI, HTTPException
@@ -34,6 +34,12 @@ app.add_middleware(
 )
 
 
+class ApiError(BaseModel):
+    """Structured API error format."""
+
+    error_code: str
+    params: Dict[str, Any] = {}
+
 class ChatRequest(BaseModel):
     """Request model for the chat endpoint."""
 
@@ -48,7 +54,7 @@ class ChatResponse(BaseModel):
     content: str
     sqlResult: Optional[List[Dict[str, SqlValue]]] = None
     sqlQuery: Optional[str] = None
-    error: Optional[str] = None
+    error: Optional[ApiError] = None
 
 
 class ModelInfo(BaseModel):
@@ -92,7 +98,7 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
         return output
     except Exception as e:
         logger.error(f"SQL execution error: {e}")
-        raise ValueError(f"backend.sqlExecution|{e}")
+        raise ValueError(json.dumps({"error_code": "backend.sqlExecution", "params": {"error": str(e)}}))
 
 
 def generate_sql_from_nl(
@@ -121,7 +127,7 @@ def generate_sql_from_nl(
         from any_llm import AnyLLM
     except ImportError:
         logger.error("any-llm-sdk[ollama] is not installed.")
-        raise RuntimeError("backend.missingSdk|any-llm-sdk[ollama]")
+        raise RuntimeError(json.dumps({"error_code": "backend.missingSdk", "params": {"error": "any-llm-sdk[ollama]"}}))
 
     try:
         conn = duckdb.connect(db_path, read_only=True)
@@ -130,7 +136,7 @@ def generate_sql_from_nl(
         logger.debug(f"Retrieved schema: {schema[:200]}... (truncated)")
     except Exception as e:
         logger.error(f"Failed to read schema: {e}")
-        raise ValueError(f"backend.readSchemaFailed|{e}")
+        raise ValueError(json.dumps({"error_code": "backend.readSchemaFailed", "params": {"error": str(e)}}))
 
     prompt = f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
 
@@ -196,7 +202,7 @@ User request: {nl_query}"""
         return full_response, sql_query
     except Exception as e:
         logger.error(f"LLM translation error: {e}")
-        raise RuntimeError(f"backend.llmTranslationError|{e}")
+        raise RuntimeError(json.dumps({"error_code": "backend.llmTranslationError", "params": {"error": str(e)}}))
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -216,7 +222,7 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
     """
     if not request.message.strip():
         logger.warning("Received empty message.")
-        raise HTTPException(status_code=400, detail="backend.emptyMessage")
+        raise HTTPException(status_code=400, detail={"error_code": "backend.emptyMessage", "params": {}})
 
     try:
         logger.info(
@@ -238,14 +244,14 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
     except ValueError as ve:
         logger.error(f"Database error during chat request: {ve}")
         return ChatResponse(
-            content="backend.errorDbExecution", error=str(ve)
+            content="backend.errorDbExecution", error=parse_error(ve)
         )
     except RuntimeError as re:
         logger.error(f"NLP error during chat request: {re}")
-        return ChatResponse(content="backend.errorNlpTranslation", error=str(re))
+        return ChatResponse(content="backend.errorNlpTranslation", error=parse_error(re))
     except Exception as e:
         logger.exception("Unexpected error during chat request.")
-        return ChatResponse(content="backend.errorUnexpected", error=str(e))
+        return ChatResponse(content="backend.errorUnexpected", error=parse_error(e))
 
 
 class ExecuteSqlRequest(BaseModel):
@@ -259,8 +265,25 @@ class ExecuteSqlResponse(BaseModel):
     """Response model for the execute SQL endpoint."""
 
     sqlResult: Optional[List[Dict[str, SqlValue]]] = None
-    error: Optional[str] = None
+    error: Optional[ApiError] = None
 
+
+def parse_error(e: Exception) -> ApiError:
+    """
+    Parse an exception into a structured ApiError.
+
+    Args:
+        e (Exception): The exception to parse.
+
+    Returns:
+        ApiError: The resulting ApiError object.
+
+    """
+    try:
+        data = json.loads(str(e))
+        return ApiError(**data)
+    except Exception:
+        return ApiError(error_code="backend.errorUnexpected", params={"error": str(e)})
 
 @app.post("/api/execute-sql", response_model=ExecuteSqlResponse)
 def execute_sql_endpoint(request: ExecuteSqlRequest) -> ExecuteSqlResponse:
@@ -275,7 +298,7 @@ def execute_sql_endpoint(request: ExecuteSqlRequest) -> ExecuteSqlResponse:
 
     """
     if not request.query.strip():
-        return ExecuteSqlResponse(error="backend.emptyMessage")
+        return ExecuteSqlResponse(error=ApiError(error_code="backend.emptyMessage", params={}))
 
     try:
         db_path = request.db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
@@ -283,10 +306,10 @@ def execute_sql_endpoint(request: ExecuteSqlRequest) -> ExecuteSqlResponse:
         return ExecuteSqlResponse(sqlResult=results)
     except ValueError as ve:
         logger.error(f"Database error during sql execution request: {ve}")
-        return ExecuteSqlResponse(error=str(ve))
+        return ExecuteSqlResponse(error=parse_error(ve))
     except Exception as e:
         logger.exception("Unexpected error during sql execution request.")
-        return ExecuteSqlResponse(error=str(e))
+        return ExecuteSqlResponse(error=parse_error(e))
 
 
 class TableDataResponse(BaseModel):
@@ -317,7 +340,7 @@ def get_table_data(
     db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     # Validate table name to prevent SQL injection
     if not table_name.isidentifier():
-        raise HTTPException(status_code=400, detail="backend.invalidTable")
+        raise HTTPException(status_code=400, detail={"error_code": "backend.invalidTable", "params": {}})
 
     try:
         conn = duckdb.connect(db_path, read_only=True)
@@ -325,7 +348,7 @@ def get_table_data(
         tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
         if table_name not in tables:
             conn.close()
-            raise HTTPException(status_code=404, detail="backend.tableNotFound")
+            raise HTTPException(status_code=404, detail={"error_code": "backend.tableNotFound", "params": {}})
 
         # Limit to reasonable maximum
         limit = min(limit, 1000)
@@ -341,7 +364,7 @@ def get_table_data(
         raise
     except Exception as e:
         logger.error(f"Error fetching table data: {e}")
-        raise HTTPException(status_code=500, detail=f"backend.serverError|{e}")
+        raise HTTPException(status_code=500, detail={"error_code": "backend.serverError", "params": {"error": str(e)}})
 
 
 class ColumnInfo(BaseModel):

@@ -3,13 +3,13 @@ import { test, expect } from "@playwright/test";
 test.describe("Chat UI E2E", () => {
   test.beforeEach(async ({ page }) => {
     // Add models endpoint mock for all tests
-    await page.route("http://localhost:8000/api/models", async (route) => {
+    await page.route("**/api/models", async (route) => {
       await route.fulfill({
         json: { models: [{ name: "gemma4" }] },
       });
     });
     // We will mock the API calls
-    await page.route("http://localhost:8000/api/chat", async (route) => {
+    await page.route("**/api/chat", async (route) => {
       const request = route.request();
       const postData = JSON.parse(request.postData() || "{}");
 
@@ -225,7 +225,7 @@ test("Query history is saved to local storage and restored on reload", async ({
   page,
 }) => {
   // Setup mock route to handle the chat response before navigation
-  await page.route("http://localhost:8000/api/chat", async (route) => {
+  await page.route("**/api/chat", async (route) => {
     await route.fulfill({
       json: {
         content: "Here is the cached result:",
@@ -267,7 +267,7 @@ test("Visually indicates the model used for an assistant message", async ({
   page,
 }) => {
   // We will mock the API calls
-  await page.route("http://localhost:8000/api/chat", async (route) => {
+  await page.route("**/api/chat", async (route) => {
     const request = route.request();
     const postData = JSON.parse(request.postData() || "{}");
 
@@ -286,7 +286,7 @@ test("Visually indicates the model used for an assistant message", async ({
     }
   });
 
-  await page.route("http://localhost:8000/api/models", async (route) => {
+  await page.route("**/api/models", async (route) => {
     await route.fulfill({ json: { models: [{ name: "gemma4" }] } });
   });
 
@@ -324,4 +324,56 @@ test("Visually indicates the model used for an assistant message", async ({
   const secondBadge = page.locator(".message.assistant .model-badge").nth(1);
   await expect(secondBadge).toBeVisible();
   await expect(secondBadge).toHaveText("Model: gemma4");
+});
+
+test("Chat input resizes dynamically with multi-line text and resets on send", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const chatInput = page.locator("#chat-input");
+
+  // Wait for it to be visible
+  await expect(chatInput).toBeVisible();
+
+  // Get initial height
+  const initialBox = await chatInput.boundingBox();
+  expect(initialBox).not.toBeNull();
+  const initialHeight = initialBox!.height;
+
+  // Type multiple lines
+  await chatInput.fill("Line 1\nLine 2\nLine 3\nLine 4\nLine 5");
+
+  // Need to dispatch input event or wait for reactivity, but playwright .fill() does this.
+  // Wait a small amount for the DOM to update
+  await page.waitForTimeout(100);
+
+  // Get new height
+  const expandedBox = await chatInput.boundingBox();
+  expect(expandedBox).not.toBeNull();
+  const expandedHeight = expandedBox!.height;
+
+  // Assert it grew
+  expect(expandedHeight).toBeGreaterThan(initialHeight);
+
+  // Now clear it and see if it shrinks
+  await chatInput.fill("");
+  await page.waitForTimeout(100);
+
+  const clearedBox = await chatInput.boundingBox();
+  expect(clearedBox).not.toBeNull();
+  expect(clearedBox!.height).toBeCloseTo(initialHeight, 1);
+
+  // Type again, and test that sending resets it
+  await chatInput.fill("Line 1\nLine 2");
+  await page.waitForTimeout(100);
+  const reExpandedBox = await chatInput.boundingBox();
+  expect(reExpandedBox!.height).toBeGreaterThan(initialHeight);
+
+  await page.click("#send-btn");
+  await page.waitForTimeout(100);
+
+  const sentBox = await chatInput.boundingBox();
+  expect(sentBox).not.toBeNull();
+  expect(sentBox!.height).toBeCloseTo(initialHeight, 1);
 });

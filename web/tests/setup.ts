@@ -1,6 +1,4 @@
 // setup.ts
-import "../src/i18n";
-
 const localStorageMock = (function () {
   let store: Record<string, string> = {};
   return {
@@ -22,3 +20,5 @@ const localStorageMock = (function () {
 Object.defineProperty(window, "localStorage", {
   value: localStorageMock,
 });
+
+import "../src/i18n";

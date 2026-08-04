@@ -114,7 +114,11 @@
             </div>
           </div>
           <div class="header-right">
-            <label id="lang-select-label" for="lang-select" class="sr-only"
+            <label
+              id="lang-select-label"
+              for="lang-select"
+              class="sr-only"
+              data-i18n="aria.languageSelector"
               >Language</label
             >
             <select
@@ -131,7 +135,6 @@
               id="theme-toggle-btn"
               class="icon-btn"
               aria-label="Toggle dark and light mode"
-              data-i18n-aria-label="aria.toggleTheme"
               aria-pressed="true"
             >
               <!-- Default sun icon (for dark mode active) -->
@@ -246,14 +249,7 @@
             Loading...
           </div>
           <div class="table-container">
-            <table id="modal-table">
-              <caption
-                class="sr-only"
-                id="modal-table-caption"
-                data-i18n="app.tableData"
-              >
-                Table Data
-              </caption>
+            <table id="modal-table" aria-labelledby="modal-title">
               <thead id="modal-table-head"></thead>
               <tbody id="modal-table-body"></tbody>
             </table>

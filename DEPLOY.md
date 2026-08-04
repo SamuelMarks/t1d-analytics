@@ -1,164 +1,95 @@
-# Deployment Guide
+# Stanford HealthPlatform - Deployment Guide
 
-Before running these commands, export the LibScript path:
-```bash
-export LIBSCRIPT_ROOT_DIR="~/repos/libscript"
+This repository contains the configuration and source code for the Stanford HealthPlatform research tools. This document provides step-by-step instructions on how to use libscript to deploy, backup, and restore this specific stack across major cloud providers.
+
+## Pre-requisites
+
+Ensure libscript is installed and you are authenticated to your chosen cloud provider.
+
+- **AWS**: aws configure
+- **Azure**: az login
+- **GCP**: gcloud auth login
+
+## 1. Initial Deployment
+
+To provision the infrastructure and deploy the stack:
+
+**AWS:**
+
+```sh
+./libscript.sh cloud aws node-group create healthplatform-node 1 ami-ubuntu-lts healthplatform-vpc --tags Key=Project,Value=StanfordResearch
 ```
 
-This guide covers how to deploy the application to Azure using LibScript. You can either use the automated orchestration command or manually provision the infrastructure step-by-step (useful if you want to share a single node between multiple applications).
+**Azure:**
 
-## 1. Automated Orchestration (Standalone Node)
-
-The `provision` command automatically handles creating the VNet, NSG, VM, syncing the code, resolving dependencies, and daemonizing the application.
-
-```bash
-# Provision the stack on Azure (creates vm-t1d-analytics)
-$LIBSCRIPT_ROOT_DIR/libscript.sh provision azure vm-t1d-analytics rg-analytics-prod eastus ./ t1d-analytics
-
-# Map the domain to the newly provisioned node
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure dns map-node vm-t1d-analytics rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+```sh
+./libscript.sh cloud azure node create healthplatform-node Ubuntu2204 healthplatform-rg --vnet-name healthplatform-vnet --tags Project=StanfordResearch
 ```
 
-### Automated Deprovisioning
+**GCP:**
 
-To completely tear down the application and its infrastructure (including DNS A-records, OS Disks, and Network Interfaces):
-
-```bash
-$LIBSCRIPT_ROOT_DIR/libscript.sh deprovision azure vm-t1d-analytics rg-analytics-prod eastus ./ t1d-analytics
+```sh
+./libscript.sh cloud gcp node create healthplatform-node ubuntu-2204-lts healthplatform-project --network healthplatform-vpc --labels project=stanfordresearch
 ```
 
----
+## 2. Provisioning the Backup Target
 
-## 2. Manual Orchestration (Shared Node)
+Before performing backups, ensure you have an object storage bucket available:
 
-If you want to host multiple applications on the same VM, you can manually provision the infrastructure and then deploy the codebases to the shared node.
+**AWS S3:**
 
-### Step 0: Create the Network
-Create a virtual network for the node.
-```bash
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure network create shared-vnet rg-analytics-prod --location eastus
+```sh
+./libscript.sh cloud aws storage create stanford-healthplatform-backups
 ```
 
-### Step 1: Create the Firewall (NSG)
-Create a network security group to open necessary ports (e.g., SSH, HTTP, HTTPS).
-```bash
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure firewall create shared-nsg rg-analytics-prod "22 80 443" --location eastus
+**Azure Blob Storage:**
+
+```sh
+./libscript.sh cloud azure storage create stanfordhealthbackups
 ```
 
-### Step 2: Provision the Instance
-Create the Debian instance attached to your network and firewall.
-```bash
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node create shared-node Debian:debian-12:12-gen2:latest rg-analytics-prod --size Standard_B2s --vnet-name shared-vnet --nsg shared-nsg
+**GCP Cloud Storage:**
+
+```sh
+./libscript.sh cloud gcp storage create stanford-healthplatform-backups
 ```
 
-### Step 3: Deploy the Code
-Sync your current working directory to the instance (respecting .gitignore).
-```bash
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node deploy shared-node rg-analytics-prod ./ t1d-analytics
+## 3. Backing Up Application State
+
+We need to selectively backup the shared Postgres database directories and Let's Encrypt certificates before tearing down the instance.
+
+Using the explicit path retention feature:
+
+```sh
+./libscript.sh cloud backup healthplatform-node --target azure --paths "/var/lib/postgresql/data /etc/letsencrypt" --keep-last 5
 ```
 
-### Step 4: Map DNS and Start Stack
-Map your domain and trigger the remote installation and daemonization.
-```bash
-# Map DNS
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
+## 4. Deprovisioning (With Data & IP Retention)
 
-# Install dependencies and start the stack on the remote node
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh install-deps"
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics && sudo ~/libscript/libscript.sh start"
+When the active research phase is paused, we can tear down the compute instances to save costs while retaining the Static IPs (so DNS mapping remains intact) and the underlying data disks (for rapid resumption).
+
+**AWS:**
+
+```sh
+./libscript.sh cloud deprovision aws healthplatform-node healthplatform-vpc us-east-1 --retain-ip --retain-data
 ```
 
-### Manual Teardown
+**Azure:**
 
-If you deployed manually, you can delete the resources manually:
-
-```bash
-# Unmap DNS
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure dns unmap-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
-
-# Delete Node, NSG, and VNet
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node delete shared-node rg-analytics-prod
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure firewall delete shared-nsg rg-analytics-prod
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure network delete shared-vnet rg-analytics-prod
+```sh
+./libscript.sh cloud deprovision azure healthplatform-node healthplatform-rg eastus --retain-ip --retain-data
 ```
 
-## Deployment Architecture
+**GCP:**
 
-```mermaid
-graph TD
-    Developer[Developer Machine] -->|Sync Code & Config| Instance[Shared Debian Instance]
-    
-    subgraph Azure Infrastructure
-        VNet[Shared VNet] --> Instance
-        NSG[Shared NSG] --> Instance
-        
-        Instance --> Ingress[Nginx Ingress]
-        
-        Ingress -->|Route| PulseQuery[pulse-query.healthplatform.io]
-        Ingress -->|Route| T1DAnalytics[t1d-analytics.healthplatform.io]
-    end
-    
-    DNS[Azure DNS] -->|A Record| Instance
+```sh
+./libscript.sh cloud deprovision gcp healthplatform-node healthplatform-project us-central1-a --retain-ip --retain-data
 ```
 
+## 5. Restoration & Reprovisioning
 
-## HTTPS / TLS Provisioning
+To bring the environment back online, we use the restore command. This will map the retained IP back to the new instance, re-attach the persisted data disks, and pull the designated backup archive to restore the Postgres and LetsEncrypt state.
 
-LibScript natively configures HTTPS for your mapped domains. This is governed by the `libscript.json` configuration file present in your repository.
-
-```json
-{
-  "ingress": {
-    "tls": "letsencrypt"
-  }
-}
+```sh
+./libscript.sh cloud restore healthplatform-node --from-backup latest
 ```
-
-When you invoke the `start` command on the remote node, the framework detects the `domain` and `tls` blocks and automatically uses `certbot` to provision and bind a Let's Encrypt certificate to the generated Nginx reverse proxy. No manual intervention or certificate renewal scripts are required.
-
-## Multi-Environment / Multi-Tenant Deployments
-
-You can easily deploy multiple instances of the same stack (e.g., an `alpha` version and a `prod` version) to the *same* shared node under different domains.
-
-### 1. Distinct Deployment Directories
-When syncing your code, ensure you use distinct destination paths on the remote node to prevent overwriting your existing environments.
-
-```bash
-# Deploy Alpha version
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-alpha
-
-# Deploy Production version
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node deploy shared-node rg-analytics-prod ./ t1d-analytics-prod
-```
-
-### 2. Environment-Specific DNS Mapping
-Map your distinct environments to different subdomains.
-
-```bash
-# Map Alpha DNS
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure dns map-node shared-node rg-analytics-prod alpha.t1d-analytics.healthplatform.io healthplatform-zone
-
-# Map Production DNS
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure dns map-node shared-node rg-analytics-prod t1d-analytics.healthplatform.io healthplatform-zone
-```
-
-### 3. Updating the Remote Stack Configurations
-Once deployed, modify the `libscript.json` inside the specific remote directory to reflect its intended domain before starting the stack. 
-
-For the alpha environment on the shared node, you would edit `~/t1d-analytics-alpha/libscript.json`:
-```json
-{
-  "domain": "alpha.t1d-analytics.healthplatform.io"
-}
-```
-
-*(Note: If you have conflicting static ports in your `libscript.json`, be sure to alter the `ports` block or use dynamic `$PORT` environment variables so both the alpha and prod services can run concurrently on the same shared host).*
-
-### 4. Daemonize
-Navigate into the respective directories on the remote node and start the services.
-
-```bash
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics-alpha && sudo ~/libscript/libscript.sh start"
-$LIBSCRIPT_ROOT_DIR/libscript.sh azure node exec shared-node rg-analytics-prod "cd t1d-analytics-prod && sudo ~/libscript/libscript.sh start"
-```
-
