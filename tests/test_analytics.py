@@ -2,13 +2,10 @@
 
 import sys
 import types
+import typing
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-if "any_llm" not in sys.modules:
-    sys.modules["any_llm"] = types.ModuleType("any_llm")
-    sys.modules["any_llm"].AnyLLM = MagicMock()
 
 import duckdb
 import pytest
@@ -20,6 +17,10 @@ from t1d_analytics.analytics import (
     load_data_to_duckdb,
     run_query_repl,
 )
+
+if "any_llm" not in sys.modules:
+    sys.modules["any_llm"] = types.ModuleType("any_llm")
+    setattr(sys.modules["any_llm"], "AnyLLM", MagicMock())
 
 
 def test_extract_zips(tmp_path: Path) -> None:
@@ -68,7 +69,9 @@ def test_load_data_to_duckdb(tmp_path: Path) -> None:
     tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
     assert "data1" in tables
     assert "t_123_data" in tables
-    assert conn.execute("SELECT sum(val) FROM data1").fetchone()[0] == 30
+    res = conn.execute("SELECT sum(val) FROM data1").fetchone()
+    assert res is not None
+    assert res[0] == 30
     conn.close()
 
 
@@ -87,7 +90,9 @@ def test_load_data_to_duckdb_tab_delimited(tmp_path: Path) -> None:
     db_path = str(tmp_path / "test.duckdb")
     load_data_to_duckdb(str(tmp_path), db_path)
     conn = duckdb.connect(db_path)
-    assert conn.execute("SELECT sum(val) FROM data_tab").fetchone()[0] == 30
+    res = conn.execute("SELECT sum(val) FROM data_tab").fetchone()
+    assert res is not None
+    assert res[0] == 30
     conn.close()
 
 
@@ -101,7 +106,9 @@ def test_load_data_to_duckdb_utf16_pipe(tmp_path: Path) -> None:
     db_path = str(tmp_path / "test.duckdb")
     load_data_to_duckdb(str(tmp_path), db_path)
     conn = duckdb.connect(db_path)
-    assert conn.execute("SELECT sum(val) FROM data_utf16").fetchone()[0] == 30
+    res = conn.execute("SELECT sum(val) FROM data_utf16").fetchone()
+    assert res is not None
+    assert res[0] == 30
     conn.close()
 
 
@@ -182,7 +189,7 @@ def test_handle_natural_language_no_module(capsys: pytest.CaptureFixture[str]) -
 
     # Temporarily remove any_llm from modules to test ImportError
     original_module = sys.modules.get("any_llm")
-    sys.modules["any_llm"] = None
+    sys.modules["any_llm"] = None  # type: ignore
 
     conn = duckdb.connect(":memory:")
     handle_natural_language(conn, "test")
@@ -333,7 +340,7 @@ def test_get_database_schema_fetch_error() -> None:
     select_mock = MagicMock()
     select_mock.fetchone.side_effect = Exception("Mock fetch error")
 
-    def mock_execute(query):
+    def mock_execute(query: str) -> typing.Any:
         """Mock execute function."""
         if query.startswith("SHOW TABLES"):
             return show_tables_mock
@@ -403,7 +410,7 @@ def test_extract_zips_already_extracted(tmp_path: Path) -> None:
     # It should skip extraction, so "test.txt" won't be inside extract_dir
     assert not (extract_dir / "test.txt").exists()
 
-def test_load_data_no_matches_file(tmp_path: Path, mocker) -> None:
+def test_load_data_no_matches_file(tmp_path: Path, mocker: typing.Any) -> None:
     """Test load_data_to_duckdb when matches file does not exist."""
     import duckdb
 
@@ -417,7 +424,7 @@ def test_load_data_no_matches_file(tmp_path: Path, mocker) -> None:
     conn = duckdb.connect(db_path)
     assert "data" in [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
 
-def test_handle_natural_language_no_result(mocker) -> None:
+def test_handle_natural_language_no_result(mocker: typing.Any) -> None:
     """Test handle_natural_language when query returns no result."""
     from t1d_analytics.analytics import handle_natural_language
     
@@ -432,7 +439,7 @@ def test_handle_natural_language_no_result(mocker) -> None:
     handle_natural_language(conn, "test")
     conn.sql.assert_called_once()
 
-def test_run_query_repl_no_result(mocker, tmp_path) -> None:
+def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
     """Test run_query_repl when sql returns no result."""
     from t1d_analytics.analytics import run_query_repl
     

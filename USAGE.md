@@ -49,7 +49,22 @@ This script automatically detects file encodings (UTF-8, UTF-16) and delimiters 
 
 ---
 
-## ⚡ Step 4: Start the FastAPI Backend
+## 🤖 Step 4: Generate Training Data (Optional)
+
+If you are preparing to fine-tune `gemma-4-sql` on the T1D schema, you can use the LLM to generate synthetic training pairs directly from the database schema you just populated.
+
+```bash
+t1d-analytics generate-training-data \
+    --db t1d_analytics.duckdb \
+    --num-pairs 1000 \
+    --model gemma4
+```
+
+This will output `pretrain_data`, `sft_data`, and `dpo_data` tables directly into the DuckDB instance, making it ready to be handed off to `gemma-4-sql etl`.
+
+---
+
+## ⚡ Step 5: Start the FastAPI Backend
 
 The web interface communicates with the database through a FastAPI application.
 
@@ -65,7 +80,7 @@ You should see output indicating that the server has started on `http://0.0.0.0:
 
 ---
 
-## 🌐 Step 5: Start the Web UI
+## 🌐 Step 6: Start the Web UI
 
 With the backend running, open a **new terminal window** to start the frontend application.
 
@@ -78,7 +93,7 @@ This will launch a Vite development server. Check the terminal output for the lo
 
 ---
 
-## 💬 Step 6: Using the Web Application
+## 💬 Step 7: Using the Web Application
 
 ### The Interface
 

@@ -10,6 +10,25 @@ Ensure libscript is installed and you are authenticated to your chosen cloud pro
 - **Azure**: az login
 - **GCP**: gcloud auth login
 
+## T1D Domain Pipeline
+
+For users specifically looking to deploy the T1D domain pipeline for Text-to-SQL training with Gemma-4-SQL, please refer to the [T1D Integration Guide](T1D_INTEGRATION_GUIDE.md) and the granular [Execution Checklist](TODO_PLAN1.md) for a comprehensive step-by-step tutorial. 
+
+### TPU Research Cloud (TFRC) Deployments
+If you are deploying the training pipeline using a TFRC grant, ensure you provide the correct spot scheduling flags prior to provisioning via libscript:
+```bash
+export TPU_SCHEDULING_TYPE="spot"
+export TPU_USE_QUEUED_RESOURCE="true"
+export TPU_ZONE="us-central2-b" # MUST explicitly match your grant
+export TPU_ACCELERATOR_TYPE="v4-8" # MUST explicitly match your grant
+```
+
+### Remote Data Caching Optimization
+To prevent massive downloads on ephemeral TPU compute, use `rsync` to push your pre-loaded DuckDB instances directly to the nodes before training:
+```bash
+rsync -avzP t1d_analytics.duckdb $USER@$TPU_IP:~/t1d-analytics/
+```
+
 ## 1. Initial Deployment
 
 To provision the infrastructure and deploy the stack:

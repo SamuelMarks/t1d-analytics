@@ -2,11 +2,8 @@
 
 import sys
 import types
+import typing
 from unittest.mock import MagicMock, patch
-
-if "any_llm" not in sys.modules:
-    sys.modules["any_llm"] = types.ModuleType("any_llm")
-    sys.modules["any_llm"].AnyLLM = MagicMock()
 
 import duckdb
 import pytest
@@ -14,11 +11,15 @@ from fastapi.testclient import TestClient
 
 from t1d_analytics.api import app, execute_sql, generate_sql_from_nl
 
+if "any_llm" not in sys.modules:
+    sys.modules["any_llm"] = types.ModuleType("any_llm")
+    setattr(sys.modules["any_llm"], "AnyLLM", MagicMock())
+
 client = TestClient(app)
 
 
 @pytest.fixture
-def mock_db(tmp_path) -> str:
+def mock_db(tmp_path: typing.Any) -> str:
     """Fixture to provide a test duckdb database path."""
     db_path = str(tmp_path / "test.duckdb")
     conn = duckdb.connect(db_path)
@@ -101,7 +102,7 @@ def test_generate_sql_from_nl_prefixes(mock_create: MagicMock, mock_db: str) -> 
 def test_generate_sql_from_nl_no_module(mock_db: str) -> None:
     """Test handling of missing any_llm module."""
     orig = sys.modules.get("any_llm")
-    sys.modules["any_llm"] = None  # Force ImportError
+    sys.modules["any_llm"] = None  # type: ignore  # Force ImportError
     try:
         with pytest.raises(RuntimeError, match=r"backend\.missingSdk.*"):
             generate_sql_from_nl(mock_db, "test")
@@ -206,13 +207,13 @@ def test_chat_endpoint_generic_exception(
     assert data["content"] == "backend.errorUnexpected"
 
 
-def test_list_models_success(monkeypatch):
+def test_list_models_success(monkeypatch: typing.Any) -> None:
     """Test successful model listing from local Ollama."""
     import json
     import urllib.request
 
     class MockResponse:
-        def read(self):
+        def read(self) -> bytes:
             return json.dumps(
                 {
                     "models": [
@@ -223,13 +224,13 @@ def test_list_models_success(monkeypatch):
             ).encode()
 
     class MockUrlopen:
-        def __init__(self, req, timeout=None):
+        def __init__(self, req: typing.Any, timeout: typing.Any = None) -> None:
             self.req = req
 
-        def __enter__(self):
+        def __enter__(self) -> typing.Any:
             return MockResponse()
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
+        def __exit__(self, exc_type: typing.Any, exc_val: typing.Any, exc_tb: typing.Any) -> None:
             pass
 
     monkeypatch.setattr(urllib.request, "urlopen", MockUrlopen)
@@ -243,12 +244,12 @@ def test_list_models_success(monkeypatch):
     assert data["models"][1]["name"] == "llama3"
 
 
-def test_list_models_url_error(monkeypatch):
+def test_list_models_url_error(monkeypatch: typing.Any) -> None:
     """Test fallback when Ollama is unreachable via URLError."""
     import urllib.error
     import urllib.request
 
-    def mock_urlopen(*args, **kwargs):
+    def mock_urlopen(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         raise urllib.error.URLError("Connection refused")
 
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
@@ -261,11 +262,11 @@ def test_list_models_url_error(monkeypatch):
     assert data["models"][0]["name"] == "gemma4"
 
 
-def test_list_models_general_error(monkeypatch):
+def test_list_models_general_error(monkeypatch: typing.Any) -> None:
     """Test fallback when an unexpected exception occurs."""
     import urllib.request
 
-    def mock_urlopen(*args, **kwargs):
+    def mock_urlopen(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         raise Exception("Unexpected boom")
 
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
@@ -309,7 +310,7 @@ def test_get_schema_error(mock_connect: MagicMock) -> None:
     assert len(data["tables"]) == 0
 
 
-def test_get_table_data(mock_db, monkeypatch):
+def test_get_table_data(mock_db: str, monkeypatch: typing.Any) -> None:
     """Test fetching valid table data with pagination."""
     monkeypatch.setenv("T1D_DB_PATH", mock_db)
     response = client.get("/api/table/users")
@@ -321,21 +322,21 @@ def test_get_table_data(mock_db, monkeypatch):
     assert data["rows"][0]["name"] == "Alice"
 
 
-def test_get_table_data_invalid_table(mock_db, monkeypatch):
+def test_get_table_data_invalid_table(mock_db: str, monkeypatch: typing.Any) -> None:
     """Test fetching data from a table that doesn't exist."""
     monkeypatch.setenv("T1D_DB_PATH", mock_db)
     response = client.get("/api/table/non_existent_table")
     assert response.status_code == 404
 
 
-def test_get_table_data_sql_injection(mock_db, monkeypatch):
+def test_get_table_data_sql_injection(mock_db: str, monkeypatch: typing.Any) -> None:
     """Test protection against basic SQL injection in table name."""
     monkeypatch.setenv("T1D_DB_PATH", mock_db)
     response = client.get("/api/table/invalid table name;")
     assert response.status_code == 400
 
 
-def test_get_table_data_exception(mock_db, monkeypatch):
+def test_get_table_data_exception(mock_db: str, monkeypatch: typing.Any) -> None:
     """Test server error handling when DB operations fail."""
     monkeypatch.setenv("T1D_DB_PATH", mock_db)
     from unittest.mock import patch
@@ -392,7 +393,7 @@ def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -
     assert data["error"]["error_code"] == "backend.errorUnexpected"
     assert data["error"]["params"]["error"] == "System crash"
 
-def test_generate_sql_fallback_no_prefix(mocker):
+def test_generate_sql_fallback_no_prefix(mocker: typing.Any) -> None:
     """Test SQL fallback when prefix is missing."""
     from t1d_analytics.api import generate_sql_from_nl
     

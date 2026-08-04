@@ -69,6 +69,30 @@ def main() -> None:
         help="Path to the DuckDB database file.",
     )
 
+    # Generate Training Data subcommand
+    generate_parser = subparsers.add_parser(
+        "generate-training-data",
+        help="Generate synthetic Text-to-SQL training pairs from the database schema.",
+    )
+    generate_parser.add_argument(
+        "--db",
+        type=str,
+        default="t1d_analytics.duckdb",
+        help="Path to the target DuckDB file.",
+    )
+    generate_parser.add_argument(
+        "--num-pairs",
+        type=int,
+        required=True,
+        help="The number of synthetic SFT/DPO pairs to generate per table.",
+    )
+    generate_parser.add_argument(
+        "--model",
+        type=str,
+        default="gemma4",
+        help="The local Ollama model to use for generation.",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -80,6 +104,8 @@ def main() -> None:
             handle_load(args)
         elif args.command == "query":
             handle_query(args)
+        elif args.command == "generate-training-data":
+            handle_generate_training_data(args)
     except Exception as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
@@ -146,6 +172,45 @@ def handle_query(args: argparse.Namespace) -> None:
     from t1d_analytics.analytics import run_query_repl
 
     run_query_repl(args.db)
+
+
+def handle_generate_training_data(args: argparse.Namespace) -> None:
+    """
+    Handle the generate-training-data subcommand.
+
+    This function initializes a connection to DuckDB, creates the TrainingDataGenerator,
+    and runs the generation pipeline for the specified number of pairs per table using
+    the provided local LLM model.
+
+    Args:
+        args: Command-line arguments containing db (DuckDB path), num_pairs (count),
+            and model (LLM name).
+
+    """
+    import duckdb
+
+    from t1d_analytics.training_data import TrainingDataGenerator
+
+    print(f"Connecting to DuckDB at {args.db}...")
+    conn = duckdb.connect(args.db)
+
+    print(f"Initializing TrainingDataGenerator with model '{args.model}'...")
+    generator = TrainingDataGenerator(conn, args.model)
+    
+    # Extract schema
+    schema = generator._extract_schema()
+    
+    # Generate pairs and write to db
+    total_tables = len(schema)
+    print(f"Found {total_tables} tables in the schema.")
+    
+    for table_name, table_schema in schema.items():
+        print(f"Generating {args.num_pairs} pairs for table: {table_name}...")
+        pairs = generator._generate_pairs(table_schema, args.num_pairs)
+        generator.write_to_db(pairs)
+    
+    conn.close()
+    print("Training data generation complete!")
 
 
 if __name__ == "__main__":  # pragma: no cover

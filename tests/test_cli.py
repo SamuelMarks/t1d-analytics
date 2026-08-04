@@ -87,7 +87,39 @@ def test_query_subcommand(mock_query: MagicMock) -> None:
 
     mock_query.assert_called_once_with("test.db")
 
-def test_cli_main_invalid_command(mocker):
+
+@patch("duckdb.connect")
+@patch("t1d_analytics.training_data.TrainingDataGenerator")
+def test_generate_training_data_subcommand(mock_generator_class: MagicMock, mock_connect: MagicMock) -> None:
+    """Test successful CLI execution for generate-training-data."""
+    mock_generator = MagicMock()
+    mock_generator_class.return_value = mock_generator
+    mock_generator._extract_schema.return_value = {"table1": "schema1"}
+    mock_generator._generate_pairs.return_value = [("prompt", "chosen", "rejected")]
+    
+    with patch(
+        "sys.argv",
+        [
+            "t1d-analytics",
+            "generate-training-data",
+            "--db",
+            "test.db",
+            "--num-pairs",
+            "5",
+            "--model",
+            "test_model",
+        ],
+    ):
+        main()
+
+    mock_connect.assert_called_once_with("test.db")
+    mock_generator_class.assert_called_once_with(mock_connect.return_value, "test_model")
+    mock_generator._extract_schema.assert_called_once()
+    mock_generator._generate_pairs.assert_called_once_with("schema1", 5)
+    mock_generator.write_to_db.assert_called_once_with([("prompt", "chosen", "rejected")])
+
+
+def test_cli_main_invalid_command(mocker: MagicMock) -> None:
     """Test CLI invalid command."""
     from t1d_analytics.cli import main
     

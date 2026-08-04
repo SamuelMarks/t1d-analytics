@@ -103,7 +103,7 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
 
 def generate_sql_from_nl(
     db_path: str, nl_query: str, model_name: str = "gemma4"
-) -> str:
+) -> tuple[str, str]:
     """
     Translate natural language to SQL using any-llm.
 
@@ -124,7 +124,7 @@ def generate_sql_from_nl(
         f"Translating natural language to SQL: '{nl_query}' using model '{model_name}'"
     )
     try:
-        from any_llm import AnyLLM
+        from any_llm import AnyLLM  # type: ignore
     except ImportError:
         logger.error("any-llm-sdk[ollama] is not installed.")
         raise RuntimeError(json.dumps({"error_code": "backend.missingSdk", "params": {"error": "any-llm-sdk[ollama]"}}))

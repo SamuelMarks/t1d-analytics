@@ -93,8 +93,8 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
 
         try:
             # 1. Detect Encoding (utf-16 vs utf-8)
-            with open(data_file, "rb") as f:
-                raw_bytes = f.read(2)
+            with open(data_file, "rb") as f_rb:
+                raw_bytes = f_rb.read(2)
             encoding = "utf-16" if raw_bytes == b"\xff\xfe" else "utf-8"
 
             # 2. Detect Separator
@@ -202,7 +202,7 @@ def handle_natural_language(conn: duckdb.DuckDBPyConnection, query: str) -> None
 
     """
     try:
-        from any_llm import AnyLLM
+        from any_llm import AnyLLM  # type: ignore
     except ImportError:
         print("Error: any-llm-sdk[ollama] is not installed. Please install it.")
         return
