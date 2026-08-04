@@ -133,6 +133,21 @@ describe("i18n.ts", () => {
     });
   });
 
+  it("determines initial language correctly when localStorage is undefined", () => {
+    const originalLocalStorage = window.localStorage;
+    Object.defineProperty(window, "localStorage", {
+      value: undefined,
+      configurable: true,
+    });
+
+    expect(getInitialLang()).toBe("en");
+
+    Object.defineProperty(window, "localStorage", {
+      value: originalLocalStorage,
+      configurable: true,
+    });
+  });
+
   it("sets document dir based on initial language correctly", () => {
     setDocumentDir("ar");
     expect(document.documentElement.dir).toBe("rtl");
