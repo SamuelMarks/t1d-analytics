@@ -17,15 +17,18 @@ hljs.registerLanguage("markdown", markdown);
 /**
  * Parses a backend error string or detail object into a translated string.
  */
-function parseApiError(errorObj: any): string {
+function parseApiError(errorObj: unknown): string {
   if (typeof errorObj === "string") {
-    return i18next.exists(errorObj) ? i18next.t(errorObj) : errorObj;
+    return i18next.exists(errorObj)
+      ? (i18next.t(errorObj) as string)
+      : errorObj;
   }
   if (errorObj && typeof errorObj === "object" && "error_code" in errorObj) {
-    const key = errorObj.error_code;
+    const key = (errorObj as { error_code: string }).error_code;
+    const params = (errorObj as { params?: Record<string, unknown> }).params;
     return i18next.exists(key)
-      ? i18next.t(key, errorObj.params)
-      : `${key}: ${JSON.stringify(errorObj.params)}`;
+      ? (i18next.t(key, params as any) as string)
+      : `${key}: ${JSON.stringify(params)}`;
   }
   return String(errorObj);
 }
