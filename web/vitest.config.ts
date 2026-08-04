@@ -1,6 +1,9 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  build: {
+    target: "esnext",
+  },
   test: {
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
