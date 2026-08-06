@@ -73,3 +73,17 @@ jobs:
       - name: Run Web E2E Tests (Playwright)
         working-directory: ./web
         run: npx playwright test --project=chromium
+
+      - name: Setup Backend for Full E2E
+        run: |
+          mkdir -p tests/test_data
+          echo "id,name,value" > tests/test_data/tiny.csv
+          echo "1,Test A,100" >> tests/test_data/tiny.csv
+          echo "2,Test B,200" >> tests/test_data/tiny.csv
+          t1d-analytics load -d tests/test_data --db ci_test.duckdb
+          
+      - name: Run Web E2E Full Stack Tests (Playwright)
+        working-directory: ./web
+        env:
+          T1D_DB_PATH: ../ci_test.duckdb
+        run: npx playwright test tests-e2e-full -c playwright.full.config.ts

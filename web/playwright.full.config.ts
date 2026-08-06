@@ -1,8 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  testDir: "./tests-e2e",
-  fullyParallel: true,
+  testDir: "./tests-e2e-full",
+  fullyParallel: false,
   retries: 0,
   workers: 1,
   reporter: "list",
@@ -29,8 +29,8 @@ export default defineConfig({
     },
     {
       command:
-        "cd .. && T1D_DB_PATH=ci_test.duckdb PYTHONPATH=src uvicorn t1d_analytics.api:app --port 8000",
-      url: "http://localhost:8000/api/schema",
+        "cd .. && T1D_DB_PATH=ci_test.duckdb uvicorn t1d_analytics.api:app --port 8000",
+      url: "http://localhost:8000/api/models",
       reuseExistingServer: true,
       timeout: 120000,
     },

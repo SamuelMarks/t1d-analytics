@@ -8,12 +8,14 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Union
 
 import duckdb
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from t1d_analytics.analytics import get_database_schema
+from t1d_analytics.i18n import get_translator
 
 SqlValue = Union[str, int, float, bool, None]
 
@@ -33,6 +35,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Handle unhandled exceptions globally and return localized error message."""
+    lang_header = request.headers.get("accept-language", "en")
+    lang = lang_header.split(",")[0].split("-")[0].split(";")[0]
+    _ = get_translator(lang)
+    
+    logger.exception(f"Unhandled exception: {exc}")
+    # Return structured error for frontend
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "error_code": "backend.serverError",
+                "params": {"error": _("Internal server error: {}", exc)}
+            }
+        },
+    )
 
 class ApiError(BaseModel):
     """Structured API error format."""

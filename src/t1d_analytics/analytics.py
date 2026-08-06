@@ -6,6 +6,8 @@ from pathlib import Path
 
 import duckdb
 
+from t1d_analytics.i18n import get_translator
+
 
 def extract_zips(data_dir_str: str) -> None:
     """
@@ -15,29 +17,30 @@ def extract_zips(data_dir_str: str) -> None:
         data_dir_str: directory.
 
     """
+    _ = get_translator()
     data_dir = Path(data_dir_str)
     if not data_dir.exists():
-        print(f"Data directory {data_dir} does not exist.")
+        print(_("Data directory {} does not exist.", data_dir))
         return
 
-    print("Checking for zip files to extract...")
+    print(_("Checking for zip files to extract..."))
     found_zips = False
     for path in data_dir.rglob("*.zip"):
         found_zips = True
         extract_dir = path.with_suffix("")
         if not extract_dir.exists():
-            print(f"Extracting {path.name}...")
+            print(_("Extracting {}...", path.name))
             extract_dir.mkdir(parents=True, exist_ok=True)
             try:
                 with zipfile.ZipFile(path, "r") as zip_ref:
                     zip_ref.extractall(extract_dir)
             except zipfile.BadZipFile:
-                print(f"Failed to extract {path.name} (Bad Zip File).")
+                print(_("Failed to extract {} (Bad Zip File).", path.name))
 
     if not found_zips:
-        print("No zip files found to extract.")
+        print(_("No zip files found to extract."))
     else:
-        print("Extraction complete.")
+        print(_("Extraction complete."))
 
 
 def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
@@ -49,15 +52,16 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
         db_path: db path.
 
     """
+    _ = get_translator()
     data_dir = Path(data_dir_str)
     if not data_dir.exists():
-        print(f"Data directory {data_dir} does not exist.")
+        print(_("Data directory {} does not exist.", data_dir))
         return
 
-    print(f"Connecting to DuckDB at {db_path}...")
+    print(_("Connecting to DuckDB at {}...", db_path))
     conn = duckdb.connect(db_path, read_only=False)
 
-    print("Scanning for CSV and TXT files...")
+    print(_("Scanning for CSV and TXT files..."))
     data_files = list(data_dir.rglob("*.csv")) + list(data_dir.rglob("*.txt"))
     # Filter out MacOS hidden files or unhelpful docs
     data_files = [
@@ -69,7 +73,7 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
     ]
 
     if not data_files:
-        print("No tabular files found.")
+        print(_("No tabular files found."))
         conn.close()
         return
 
@@ -108,7 +112,7 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
                 sep = "\\t"
 
             print(
-                f"Loading {data_file.name} (encoding={encoding}, sep='{sep}') into table {table_name}..."
+                _("Loading {} (encoding={}, sep='{}') into table {}...", data_file.name, encoding, sep, table_name)
             )
 
             # Create temp view to inspect columns
@@ -146,7 +150,7 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
             # Check if table already exists to make script idempotent
             tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
             if table_name in tables:
-                print(f"Table {table_name} already exists, skipping...")
+                print(_("Table {} already exists, skipping...", table_name))
                 conn.execute("DROP VIEW temp_view")
                 continue
 
@@ -156,10 +160,10 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
 
             loaded_tables.append(table_name)
         except Exception as e:
-            print(f"Failed to load {data_file.name}: {e}")
+            print(_("Failed to load {}: {}", data_file.name, e))
 
     if loaded_tables:
-        print(f"Successfully populated {len(loaded_tables)} tables in {db_path}.")
+        print(_("Successfully populated {} tables in {}.", len(loaded_tables), db_path))
     conn.close()
 
 
@@ -201,13 +205,14 @@ def handle_natural_language(conn: duckdb.DuckDBPyConnection, query: str) -> None
         query: The query.
 
     """
+    _ = get_translator()
     try:
         from any_llm import AnyLLM  # type: ignore
     except ImportError:
-        print("Error: any-llm-sdk[ollama] is not installed. Please install it.")
+        print(_("Error: any-llm-sdk[ollama] is not installed. Please install it."))
         return
 
-    print("Thinking...")
+    print(_("Thinking..."))
     schema = get_database_schema(conn)
 
     prompt = f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
@@ -270,15 +275,15 @@ User request: {query}
         elif sql_query.lower().startswith("duckdb\n"):
             sql_query = sql_query[7:]
 
-        print(f"Generated SQL: \n{sql_query}\n")
-        print("Executing...\n")
+        print(_("Generated SQL: \n{}\n", sql_query))
+        print(_("Executing...\n"))
 
         result = conn.sql(sql_query)
         if result:
             result.show()
 
     except Exception as e:
-        print(f"Failed to generate or execute query: {e}")
+        print(_("Failed to generate or execute query: {}", e))
 
 
 def run_query_repl(db_path: str) -> None:
@@ -289,20 +294,21 @@ def run_query_repl(db_path: str) -> None:
         db_path: Path to DB.
 
     """
+    _ = get_translator()
     if not Path(db_path).exists():
-        print(f"Database {db_path} does not exist.")
-        print("Please run the 'load' command first to populate the database.")
+        print(_("Database {} does not exist.", db_path))
+        print(_("Please run the 'load' command first to populate the database."))
         return
 
-    print(f"Connecting to DuckDB at {db_path}...")
+    print(_("Connecting to DuckDB at {}...", db_path))
     conn = duckdb.connect(db_path, read_only=True)
 
     print("\n" + "=" * 50)
-    print("Welcome to T1D Analytics Interface!")
-    print("You can enter:")
-    print("  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)")
-    print("  - Natural language queries (will be translated to SQL via LLM)")
-    print("  - 'exit' or 'quit' to close.")
+    print(_("Welcome to T1D Analytics Interface!"))
+    print(_("You can enter:"))
+    print(_("  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)"))
+    print(_("  - Natural language queries (will be translated to SQL via LLM)"))
+    print(_("  - 'exit' or 'quit' to close."))
     print("=" * 50 + "\n")
 
     sql_keywords = ("select", "with", "show", "describe", "pragma")
@@ -311,7 +317,7 @@ def run_query_repl(db_path: str) -> None:
         try:
             user_input = input("query> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nExiting.")
+            print("\n" + _("Exiting."))
             break
 
         if not user_input:
@@ -319,7 +325,7 @@ def run_query_repl(db_path: str) -> None:
 
         lower_input = user_input.lower()
         if lower_input in ("exit", "quit"):
-            print("Exiting.")
+            print(_("Exiting."))
             break
 
         if lower_input.startswith(sql_keywords):
@@ -329,7 +335,7 @@ def run_query_repl(db_path: str) -> None:
                 if result:
                     result.show()
             except Exception as e:
-                print(f"SQL Error: {e}")
+                print(_("SQL Error: {}", e))
         else:
             handle_natural_language(conn, user_input)
 

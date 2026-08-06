@@ -4,11 +4,15 @@ import argparse
 import sys
 
 from t1d_analytics.downloader import process_datasets
+from t1d_analytics.i18n import get_translator
 from t1d_analytics.parser import fetch_html, parse_datasets
 
 
 def main() -> None:
     """Execute the CLI application."""
+    # Initialize translator based on LANG env var
+    _ = get_translator()
+    
     parser = argparse.ArgumentParser(
         description="Downloader and analytics tool for T1D public datasets."
     )
@@ -107,7 +111,7 @@ def main() -> None:
         elif args.command == "generate-training-data":
             handle_generate_training_data(args)
     except Exception as e:
-        print(f"An error occurred: {e}", file=sys.stderr)
+        print(_("An error occurred: {}", e), file=sys.stderr)
         sys.exit(1)
 
 
@@ -119,20 +123,21 @@ def handle_download(args: argparse.Namespace) -> None:
         args: Arguments.
 
     """
-    print(f"Fetching HTML from {args.url}...")
+    _ = get_translator()
+    print(_("Fetching HTML from {}...", args.url))
     html = fetch_html(args.url)
 
-    print("Parsing datasets...")
+    print(_("Parsing datasets..."))
     datasets = parse_datasets(html)
-    print(f"Found {len(datasets)} protocols.")
+    print(_("Found {} protocols.", len(datasets)))
 
     if not datasets:
-        print("No datasets found. Exiting.")
+        print(_("No datasets found. Exiting."))
         return
 
-    print(f"Starting downloads to {args.output}...")
+    print(_("Starting downloads to {}...", args.output))
     process_datasets(datasets, args.output)
-    print("Done!")
+    print(_("Done!"))
 
 
 def handle_extract(args: argparse.Namespace) -> None:
@@ -191,10 +196,12 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
 
     from t1d_analytics.training_data import TrainingDataGenerator
 
-    print(f"Connecting to DuckDB at {args.db}...")
+    _ = get_translator()
+
+    print(_("Connecting to DuckDB at {}...", args.db))
     conn = duckdb.connect(args.db)
 
-    print(f"Initializing TrainingDataGenerator with model '{args.model}'...")
+    print(_("Initializing TrainingDataGenerator with model '{}'...", args.model))
     generator = TrainingDataGenerator(conn, args.model)
     
     # Extract schema
@@ -202,15 +209,15 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
     
     # Generate pairs and write to db
     total_tables = len(schema)
-    print(f"Found {total_tables} tables in the schema.")
+    print(_("Found {} tables in the schema.", total_tables))
     
     for table_name, table_schema in schema.items():
-        print(f"Generating {args.num_pairs} pairs for table: {table_name}...")
+        print(_("Generating {} pairs for table: {}...", args.num_pairs, table_name))
         pairs = generator._generate_pairs(table_schema, args.num_pairs)
         generator.write_to_db(pairs)
     
     conn.close()
-    print("Training data generation complete!")
+    print(_("Training data generation complete!"))
 
 
 if __name__ == "__main__":  # pragma: no cover

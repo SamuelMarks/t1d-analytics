@@ -1,78 +1,8 @@
 import { test, expect } from "./base-test";
 import AxeBuilder from "@axe-core/playwright";
 
-test.describe("App Workflows E2E", () => {
+test.describe("App Workflows Full E2E", () => {
   test.beforeEach(async ({ page }) => {
-    // Mock the models API
-    await page.route("**/api/models", async (route) => {
-      await route.fulfill({
-        json: { models: [{ name: "gemma4" }] },
-      });
-    });
-
-    // Mock the schema API
-    await page.route("**/api/schema", async (route) => {
-      await route.fulfill({
-        json: {
-          tables: [
-            {
-              name: "users",
-              columns: [
-                { name: "id", type: "integer" },
-                { name: "username", type: "varchar" },
-              ],
-            },
-          ],
-        },
-      });
-    });
-
-    // Mock chat API
-    await page.route("**/api/chat", async (route) => {
-      await route.fulfill({
-        json: {
-          content: "Here is the SQL query:",
-          sqlQuery: "SELECT * FROM users;",
-          sqlResult: [], // no results executed yet or maybe empty
-        },
-      });
-    });
-
-    // Mock execute-sql API
-    await page.route("**/api/execute-sql", async (route) => {
-      await route.fulfill({
-        json: {
-          sqlResult: [{ id: 1, username: "admin" }],
-        },
-      });
-    });
-
-    // Mock table data API for Schema Explorer
-    await page.route("**/api/table/*", async (route) => {
-      const url = new URL(route.request().url());
-      const offset = parseInt(url.searchParams.get("offset") || "0", 10);
-
-      let rows: any[] = [];
-      if (offset === 0) {
-        rows = Array.from({ length: 25 }, (_, i) => ({
-          id: i + 1,
-          username: `user${i + 1}`,
-        }));
-      } else {
-        rows = Array.from({ length: 5 }, (_, i) => ({
-          id: offset + i + 1,
-          username: `user${offset + i + 1}`,
-        }));
-      }
-
-      await route.fulfill({
-        json: {
-          rows,
-          total: 30,
-        },
-      });
-    });
-
     await page.goto("/");
   });
 
@@ -82,11 +12,11 @@ test.describe("App Workflows E2E", () => {
   test("Schema Explorer: view schema and open table data modal", async ({
     page,
   }) => {
-    // Verify the schema table is rendered
+    // Verify the schema table is rendered (from real duckdb)
     const schemaTable = page.locator(".schema-table").first();
-    await expect(schemaTable).toBeVisible();
+    await expect(schemaTable).toBeVisible({ timeout: 10000 });
     await expect(schemaTable.locator(".schema-table-header span")).toHaveText(
-      "users",
+      "tiny",
     );
 
     // Expand the table columns view
@@ -103,14 +33,7 @@ test.describe("App Workflows E2E", () => {
 
     // Verify modal content
     const modalTitle = page.locator("#modal-title");
-    await expect(modalTitle).toHaveText("Table: users");
-
-    // Verify pagination controls
-    const nextPageBtn = page.locator("#next-page-btn");
-    await expect(nextPageBtn).toBeEnabled();
-
-    await nextPageBtn.click();
-    await expect(page.locator("#page-indicator")).toHaveText("Page 2");
+    await expect(modalTitle).toHaveText("Table: tiny");
 
     // Close modal
     await page.locator("#close-modal-btn").click();
@@ -122,7 +45,8 @@ test.describe("App Workflows E2E", () => {
    */
   test("Chat Management: rename and duplicate chat", async ({ page }) => {
     // Send a message so we have a non-temporary chat
-    await page.fill("#chat-input", "Hello");
+    await page.selectOption("#model-select", "sql");
+    await page.fill("#chat-input", "SELECT * FROM tiny LIMIT 1");
     await page.click("#send-btn");
 
     // Wait for chat item to appear in the list
@@ -175,31 +99,33 @@ test.describe("App Workflows E2E", () => {
   test("SQL Execution: execute query manually from assistant message", async ({
     page,
   }) => {
-    await page.fill("#chat-input", "Show me users");
+    await page.selectOption("#model-select", "sql");
+    await page.fill("#chat-input", "SELECT * FROM tiny;");
     await page.click("#send-btn");
 
     // Wait for response containing SQL
     const assistantMessage = page.locator(".message.assistant").first();
     await expect(assistantMessage).toBeVisible();
     await expect(assistantMessage.locator(".sql-query")).toHaveText(
-      "SELECT * FROM users;",
+      "SELECT * FROM tiny;",
     );
 
-    // Click the play button
-    const playBtn = assistantMessage
-      .locator("button")
-      .filter({ hasText: "Play" });
-    await expect(playBtn).toBeVisible();
-    await playBtn.click();
-
-    // Verify the query result table appears in the NEW assistant message
-    const newAssistantMessage = page.locator(".message.assistant").nth(1);
-    await expect(newAssistantMessage).toBeVisible();
-
-    const sqlTable = newAssistantMessage.locator(".sql-table");
+    // Get table value
+    const sqlTable = assistantMessage.locator(".sql-table");
     await expect(sqlTable).toBeVisible();
     await expect(sqlTable.locator("td").first()).toHaveText("1");
-    await expect(sqlTable.locator("td").nth(1)).toHaveText("admin");
+
+    // The refresh button modifies the message in-place
+    const refreshBtn = assistantMessage.locator(
+      'button[data-i18n-title="ui.refreshQuery"]',
+    );
+    await expect(refreshBtn).toBeVisible();
+    await refreshBtn.click();
+
+    // Verify it refreshed by waiting for the table to still be there
+    await expect(sqlTable).toBeVisible();
+    await expect(sqlTable.locator("td").first()).toHaveText("1");
+    await expect(sqlTable.locator("td").nth(1)).toHaveText("Test A");
   });
 
   /**
@@ -271,7 +197,7 @@ test.describe("App Workflows E2E", () => {
   }) => {
     // Open the schema explorer and click the table view button
     const schemaTable = page.locator(".schema-table").first();
-    await expect(schemaTable).toBeVisible();
+    await expect(schemaTable).toBeVisible({ timeout: 10000 });
 
     const tableViewBtn = schemaTable.locator(".table-view-btn");
     await tableViewBtn.focus();
@@ -295,6 +221,10 @@ test.describe("App Workflows E2E", () => {
   });
 
   test("Accessibility: complete accessibility audit", async ({ page }) => {
+    // Wait for it to settle
+    await expect(page.locator(".schema-table").first()).toBeVisible({
+      timeout: 10000,
+    });
     const accessibilityScanResults = await new AxeBuilder({ page }).analyze();
     expect(accessibilityScanResults.violations).toEqual([]);
   });
@@ -303,6 +233,10 @@ test.describe("App Workflows E2E", () => {
     page,
   }) => {
     // Navigate via tab to schema toggle and use enter
+    await expect(page.locator(".schema-table").first()).toBeVisible({
+      timeout: 10000,
+    });
+
     await page.locator("#toggle-schema-btn").focus();
     await page.keyboard.press("Enter");
 
@@ -328,13 +262,11 @@ test.describe("App Workflows E2E", () => {
     await expect(modal).toBeVisible();
     await expect(page.locator("#close-modal-btn")).toBeFocused();
 
-    // Verify that focus cycles within modal (to first element) when tabbing past last
-    await page.locator("#close-modal-btn").focus();
-    await page.keyboard.press("Shift+Tab"); // Should trap focus and go to last element (or itself if only 1)
-    await page.waitForTimeout(100);
-
-    // We just ensure we can focus the close btn back and press Enter to close
-    await page.locator("#close-modal-btn").focus();
+    // Tab cycles focus within modal
+    await page.keyboard.press("Tab"); // Next focusable (maybe prev btn or something else)
+    await page.keyboard.down("Shift");
+    await page.keyboard.press("Tab");
+    await page.keyboard.up("Shift");
     await expect(page.locator("#close-modal-btn")).toBeFocused();
 
     // Press enter to close

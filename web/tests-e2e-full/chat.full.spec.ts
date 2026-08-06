@@ -1,79 +1,28 @@
 import { test, expect } from "./base-test";
 import AxeBuilder from "@axe-core/playwright";
 
-test.describe("Chat UI E2E", () => {
+test.describe("Chat UI Full E2E", () => {
   test.beforeEach(async ({ page }) => {
-    // Add models endpoint mock for all tests
-    await page.route("**/api/models", async (route) => {
-      await route.fulfill({
-        json: { models: [{ name: "gemma4" }] },
-      });
-    });
-    // We will mock the API calls
-    await page.route("**/api/chat", async (route) => {
-      const request = route.request();
-      const postData = JSON.parse(request.postData() || "{}");
-
-      if (postData.model === "sql") {
-        if (postData.message.includes("empty")) {
-          await route.fulfill({
-            json: { content: "Query executed.", sqlResult: [] },
-          });
-        } else {
-          await route.fulfill({
-            json: {
-              content: "Query executed.",
-              sqlResult: [{ count: 42 }],
-            },
-          });
-        }
-      } else {
-        await route.fulfill({
-          json: {
-            content: "Here is the result:",
-            sqlQuery: "SELECT * FROM test;",
-            sqlResult: [{ id: 1, name: "Test" }],
-          },
-        });
-      }
-    });
-
     await page.goto("/");
   });
 
   test("Ask a question in SQL and show results", async ({ page }) => {
     await page.selectOption("#model-select", "sql");
-    await page.fill("#chat-input", "SELECT count(*) as count FROM users");
+    await page.fill("#chat-input", "SELECT count(*) as count FROM tiny");
     await page.click("#send-btn");
 
-    await expect(page.locator(".message.assistant")).toContainText(
-      "Query executed.",
-    );
-    await expect(page.locator(".sql-table")).toBeVisible();
-    await expect(page.locator(".sql-table td").first()).toHaveText("42");
-  });
-
-  test("Ask a question in natural-language, see the SQL it generates", async ({
-    page,
-  }) => {
-    await page.selectOption("#model-select", "gemma4");
-    await page.fill("#chat-input", "Show me all tests");
-    await page.click("#send-btn");
-
-    await expect(page.locator(".message.assistant")).toContainText(
-      "Here is the result:",
-    );
-    await expect(page.locator(".sql-query")).toHaveText("SELECT * FROM test;");
-    await expect(page.locator(".sql-table td").first()).toHaveText("1");
-    await expect(page.locator(".sql-table td").nth(1)).toHaveText("Test");
+    await expect(page.locator(".sql-table")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".sql-table td").first()).toHaveText("2");
   });
 
   test('Show "No rows returned" message', async ({ page }) => {
     await page.selectOption("#model-select", "sql");
-    await page.fill("#chat-input", "empty");
+    await page.fill("#chat-input", "SELECT * FROM tiny WHERE id = 999;");
     await page.click("#send-btn");
 
-    await expect(page.locator(".sql-empty")).toHaveText("No rows returned");
+    await expect(page.locator(".sql-empty")).toHaveText("No rows returned", {
+      timeout: 10000,
+    });
   });
 
   test("Show chat ID in URL", async ({ page }) => {
@@ -200,9 +149,9 @@ test.describe("Chat UI E2E", () => {
   test("Accessibility: complete accessibility audit", async ({ page }) => {
     // Send a message and show a table first so more UI is present
     await page.selectOption("#model-select", "sql");
-    await page.fill("#chat-input", "SELECT * FROM test");
+    await page.fill("#chat-input", "SELECT * FROM tiny LIMIT 1");
     await page.click("#send-btn");
-    await expect(page.locator(".sql-table")).toBeVisible();
+    await expect(page.locator(".sql-table")).toBeVisible({ timeout: 10000 });
 
     const accessibilityScanResults = await new AxeBuilder({ page }).analyze();
     expect(accessibilityScanResults.violations).toEqual([]);
@@ -235,28 +184,19 @@ test("Temporary chat is undeletable", async ({ page }) => {
 test("Query history is saved to local storage and restored on reload", async ({
   page,
 }) => {
-  // Setup mock route to handle the chat response before navigation
-  await page.route("**/api/chat", async (route) => {
-    await route.fulfill({
-      json: {
-        content: "Here is the cached result:",
-        sqlQuery: "SELECT * FROM history;",
-        sqlResult: [{ cached: true }],
-      },
-    });
-  });
-
   await page.goto("/");
 
   // Send a message
-  await page.fill("#chat-input", "Save this to history");
+  await page.selectOption("#model-select", "sql");
+  await page.fill("#chat-input", "SELECT * FROM tiny LIMIT 1");
   await page.click("#send-btn");
 
   // Wait for the response to appear
-  await expect(page.locator(".message.assistant")).toContainText(
-    "Here is the cached result:",
+  await expect(page.locator(".sql-query")).toHaveText(
+    "SELECT * FROM tiny LIMIT 1",
+    { timeout: 10000 },
   );
-  await expect(page.locator(".sql-query")).toHaveText("SELECT * FROM history;");
+  await expect(page.locator(".sql-table")).toBeVisible();
 
   // Reload the page to verify persistence
   await page.reload();
@@ -266,41 +206,16 @@ test("Query history is saved to local storage and restored on reload", async ({
     /Chat #\d+/,
   );
   await expect(page.locator(".message.user")).toContainText(
-    "Save this to history",
+    "SELECT * FROM tiny LIMIT 1",
   );
-  await expect(page.locator(".message.assistant")).toContainText(
-    "Here is the cached result:",
+  await expect(page.locator(".sql-query")).toHaveText(
+    "SELECT * FROM tiny LIMIT 1",
   );
-  await expect(page.locator(".sql-query")).toHaveText("SELECT * FROM history;");
 });
 
 test("Visually indicates the model used for an assistant message", async ({
   page,
 }) => {
-  // We will mock the API calls
-  await page.route("**/api/chat", async (route) => {
-    const request = route.request();
-    const postData = JSON.parse(request.postData() || "{}");
-
-    if (postData.model === "sql") {
-      await route.fulfill({
-        json: { content: "Query executed.", sqlResult: [] },
-      });
-    } else {
-      await route.fulfill({
-        json: {
-          content: "Here is the result:",
-          sqlQuery: "SELECT * FROM test;",
-          sqlResult: [{ id: 1, name: "Test" }],
-        },
-      });
-    }
-  });
-
-  await page.route("**/api/models", async (route) => {
-    await route.fulfill({ json: { models: [{ name: "gemma4" }] } });
-  });
-
   await page.goto("/");
 
   // Need to ensure the select element has its options
@@ -313,28 +228,13 @@ test("Visually indicates the model used for an assistant message", async ({
   await page.selectOption("#model-select", "sql");
 
   // Send a message
-  await page.fill("#chat-input", "SELECT * FROM test");
+  await page.fill("#chat-input", "SELECT * FROM tiny LIMIT 1");
   await page.click("#send-btn");
 
   // Wait for the response and check the badge
   const badge = page.locator(".message.assistant .model-badge").first();
-  await expect(badge).toBeVisible();
+  await expect(badge).toBeVisible({ timeout: 10000 });
   await expect(badge).toHaveText("Raw SQL");
-
-  // Now switch to gemma4 and test it.
-  await expect(page.locator("#model-select")).toBeEnabled();
-
-  // Select option value=gemma4
-  await page.locator("#model-select").selectOption("gemma4");
-
-  // Send a second message
-  await page.fill("#chat-input", "Show me the patients");
-  await page.click("#send-btn");
-
-  // Verify the second badge says Model: gemma4
-  const secondBadge = page.locator(".message.assistant .model-badge").nth(1);
-  await expect(secondBadge).toBeVisible();
-  await expect(secondBadge).toHaveText("Model: gemma4");
 });
 
 test("Chat input resizes dynamically with multi-line text and resets on send", async ({

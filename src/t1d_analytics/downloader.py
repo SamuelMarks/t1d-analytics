@@ -6,6 +6,7 @@ from urllib.parse import unquote
 
 import requests
 
+from t1d_analytics.i18n import get_translator
 from t1d_analytics.models import DatasetInfo
 
 
@@ -34,13 +35,14 @@ def download_file(url: str, dest_dir: Path) -> None:
         dest_dir: The directory to save the file.
 
     """
+    _ = get_translator()
     if url.startswith("https://doi.org/"):
         link_file = dest_dir / "dataset_link.txt"
         if not link_file.exists():
             link_file.write_text(url)
-            print(f"Saved DOI link: {url}")
+            print(_("Saved DOI link: {}", url))
         else:
-            print(f"DOI link already exists, skipping: {url}")
+            print(_("DOI link already exists, skipping: {}", url))
         return
 
     filename = unquote(url.split("/")[-1])
@@ -49,10 +51,10 @@ def download_file(url: str, dest_dir: Path) -> None:
 
     dest_path = dest_dir / filename
     if dest_path.exists():
-        print(f"File already exists, skipping: {filename}")
+        print(_("File already exists, skipping: {}", filename))
         return
 
-    print(f"Downloading {filename}...")
+    print(_("Downloading {}...", filename))
     response = requests.get(url, stream=True, timeout=30)
     response.raise_for_status()
 
@@ -70,6 +72,7 @@ def process_datasets(datasets: list[DatasetInfo], output_dir: str) -> None:
         output_dir: Base directory to save downloads.
 
     """
+    _ = get_translator()
     base_path = Path(output_dir)
     base_path.mkdir(parents=True, exist_ok=True)
 
@@ -78,7 +81,7 @@ def process_datasets(datasets: list[DatasetInfo], output_dir: str) -> None:
         dest_dir = base_path / folder_name
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"Processing protocol: {dataset.protocol}")
+        print(_("Processing protocol: {}", dataset.protocol))
         if dataset.dataset_url:
             download_file(dataset.dataset_url, dest_dir)
         if dataset.document_url:

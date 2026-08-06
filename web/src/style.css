@@ -3,10 +3,10 @@
   --bg-sidebar: #181825;
   --text-light: #cdd6f4;
   --text-muted: #bac2de;
-  --accent: #89b4fa;
-  --accent-hover: #b4befe;
+  --accent: #1e4b85;
+  --accent-hover: #295b9c;
   --border: #313244;
-  --dropdown-bg: #45475a;
+  --dropdown-bg: #2d2f3d;
   --user-msg: #89b4fa;
   --bot-msg: #313244;
   --user-msg-text: #1e1e2e;
@@ -171,7 +171,7 @@ body {
   padding: 0.4rem 0.5rem;
   background: none;
   border: none;
-  color: var(--accent);
+  color: var(--text-light); /* Better contrast */
   font-weight: 500;
   cursor: pointer;
   flex: 1;
@@ -530,7 +530,7 @@ select {
 
 :root {
   /* Override button text color in dark mode to match original */
-  --btn-text: var(--bg-dark);
+  --btn-text: #ffffff;
 }
 body.light-mode {
   --btn-text: #ffffff;
@@ -757,7 +757,7 @@ body.light-mode {
 
 .play-sql-btn {
   background-color: var(--accent);
-  color: white;
+  color: var(--btn-text);
   border: none;
   border-radius: 4px;
   padding: 0.3rem 0.6rem;

@@ -10,6 +10,7 @@ import i18next from "i18next";
 export const enTranslations = {
   app: {
     title: "t1d-analytics",
+    play: "Play",
     chatNumber: "Chat #{{count}}",
     temporaryChat: "Temporary chat",
     copyOf: "{{title}} (Copy)",
@@ -55,6 +56,8 @@ export const enTranslations = {
       hba1cDemographics: "[SQL] HbA1c by Demographics",
       nlpFirst5: "[NLP] Show First 5 Patients",
     },
+    copyQuery: "Copy Query",
+    refreshQuery: "Refresh Query",
   },
   aria: {
     sidebar: "Sidebar",
@@ -75,6 +78,7 @@ export const enTranslations = {
     viewTableData: "View Table Data",
     playQuery: "Play Query",
     copyQuery: "Copy Query",
+    refreshQuery: "Refresh Query",
     editChatTitle: "Edit chat title",
     duplicateChat: "Duplicate chat",
     deleteChat: "Delete chat",

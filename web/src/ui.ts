@@ -283,12 +283,11 @@ export class ChatUI {
    */
   private updateThemeButtonLabel(): void {
     const isLight = document.body.classList.contains("light-mode");
-    this.themeToggleBtn.setAttribute(
-      "aria-label",
-      isLight
-        ? i18next.t("aria.switchToDarkMode")
-        : i18next.t("aria.switchToLightMode"),
-    );
+    const ariaKey = isLight
+      ? "aria.switchToDarkMode"
+      : "aria.switchToLightMode";
+    this.themeToggleBtn.setAttribute("data-i18n-aria-label", ariaKey);
+    this.themeToggleBtn.setAttribute("aria-label", i18next.t(ariaKey));
     this.themeToggleBtn.innerHTML = isLight ? "☾" : "☀";
   }
 
@@ -326,15 +325,13 @@ export class ChatUI {
       this.syncHighlight();
     });
 
-    if (this.langSelect) {
-      this.langSelect.value = i18next.language;
-      this.langSelect.addEventListener("change", async () => {
-        await setLanguage(this.langSelect.value);
-        this.updateThemeButtonLabel();
-        // Re-render UI components that generate dynamic text
-        this.render();
-      });
-    }
+    this.langSelect.value = i18next.language;
+    this.langSelect.addEventListener("change", async () => {
+      await setLanguage(this.langSelect.value);
+      this.updateThemeButtonLabel();
+      // Re-render UI components that generate dynamic text
+      this.render();
+    });
 
     // Set initial label
     this.updateThemeButtonLabel();
@@ -414,17 +411,15 @@ export class ChatUI {
       value += " ";
     }
 
-    if (this.chatInputHighlight) {
-      this.chatInputHighlight.textContent = value;
+    this.chatInputHighlight!.textContent = value;
 
-      if (this.modelSelect.value === "sql") {
-        this.chatInputHighlight.className = "language-sql";
-      } else {
-        this.chatInputHighlight.className = "language-markdown";
-      }
-      delete this.chatInputHighlight.dataset.highlighted;
-      hljs.highlightElement(this.chatInputHighlight);
+    if (this.modelSelect.value === "sql") {
+      this.chatInputHighlight!.className = "language-sql";
+    } else {
+      this.chatInputHighlight!.className = "language-markdown";
     }
+    delete this.chatInputHighlight!.dataset.highlighted;
+    hljs.highlightElement(this.chatInputHighlight!);
 
     // Auto-resize both textarea and wrapper
     this.chatInput.style.height = "auto";
@@ -437,13 +432,12 @@ export class ChatUI {
    */
   private announce(message: string, isAssertive: boolean = false): void {
     const announcer = document.getElementById("a11y-announcer");
-    if (announcer) {
-      announcer.textContent = "";
-      announcer.setAttribute("aria-live", isAssertive ? "assertive" : "polite");
-      setTimeout(() => {
-        if (announcer) announcer.textContent = message;
-      }, 50);
-    }
+    if (!announcer) return;
+    announcer.textContent = "";
+    announcer.setAttribute("aria-live", isAssertive ? "assertive" : "polite");
+    setTimeout(() => {
+      announcer.textContent = message;
+    }, 50);
   }
 
   /**
@@ -620,6 +614,7 @@ export class ChatUI {
       dropdownBtn.className = "dropdown-btn";
       dropdownBtn.innerHTML = "&#8942;"; // 3 vertical dots
       dropdownBtn.setAttribute("aria-label", i18next.t("aria.chatOptions"));
+      dropdownBtn.setAttribute("data-i18n-aria-label", "aria.chatOptions");
       dropdownBtn.setAttribute("aria-haspopup", "menu");
       dropdownBtn.setAttribute("aria-expanded", "false");
       dropdownBtn.setAttribute("aria-controls", `dropdown-menu-${chat.id}`);
@@ -864,8 +859,13 @@ export class ChatUI {
       const createCopyBtn = (textToCopy: string) => {
         const btn = document.createElement("button");
         btn.className = "copy-sql-btn icon-btn";
-        btn.setAttribute("aria-label", i18next.t("aria.copySql", "Copy SQL"));
-        btn.title = i18next.t("ui.copySql", "Copy SQL");
+        btn.setAttribute(
+          "aria-label",
+          i18next.t("aria.copyQuery", "Copy Query"),
+        );
+        btn.setAttribute("data-i18n-aria-label", "aria.copyQuery");
+        btn.title = i18next.t("ui.copyQuery", "Copy Query");
+        btn.setAttribute("data-i18n-title", "ui.copyQuery");
         btn.innerHTML = `
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -894,11 +894,12 @@ export class ChatUI {
           "aria-label",
           i18next.t("aria.playQuery", "Execute Query"),
         );
+        btn.setAttribute("data-i18n-aria-label", "aria.playQuery");
         btn.innerHTML = `
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polygon points="5 3 19 12 5 21 5 3"></polygon>
           </svg>
-          ${i18next.t("app.play", "Play")}
+          <span data-i18n="app.play">${i18next.t("app.play", "Play")}</span>
         `;
         btn.addEventListener("click", async () => {
           btn.disabled = true;
@@ -972,7 +973,9 @@ export class ChatUI {
           "aria-label",
           i18next.t("aria.refreshQuery", "Refresh Query"),
         );
+        btn.setAttribute("data-i18n-aria-label", "aria.refreshQuery");
         btn.title = i18next.t("ui.refreshQuery", "Refresh Query");
+        btn.setAttribute("data-i18n-title", "ui.refreshQuery");
         btn.innerHTML = `
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="23 4 23 10 17 10"></polyline>
@@ -1054,6 +1057,7 @@ export class ChatUI {
         preBlock.style.whiteSpace = "pre-wrap";
         preBlock.tabIndex = 0;
         preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
+        preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
 
         const codeBlock = document.createElement("code");
         codeBlock.className = "language-sql";
@@ -1074,21 +1078,19 @@ export class ChatUI {
 
           // Add copy and play button for SQL markdown blocks
           if (block.className.includes("language-sql")) {
-            const preElement = block.parentElement;
-            if (preElement) {
-              const wrapper = document.createElement("div");
-              wrapper.className = "sql-query-container";
+            const preElement = block.parentElement!;
+            const wrapper = document.createElement("div");
+            wrapper.className = "sql-query-container";
 
-              const headerDiv = document.createElement("div");
-              headerDiv.className = "sql-query-header";
-              const queryStr = block.textContent!;
-              headerDiv.appendChild(createCopyBtn(queryStr));
-              headerDiv.appendChild(createPlayBtn(queryStr));
+            const headerDiv = document.createElement("div");
+            headerDiv.className = "sql-query-header";
+            const queryStr = block.textContent!;
+            headerDiv.appendChild(createCopyBtn(queryStr));
+            headerDiv.appendChild(createPlayBtn(queryStr));
 
-              preElement.parentNode?.insertBefore(wrapper, preElement);
-              wrapper.appendChild(headerDiv);
-              wrapper.appendChild(preElement);
-            }
+            preElement.parentNode!.insertBefore(wrapper, preElement);
+            wrapper.appendChild(headerDiv);
+            wrapper.appendChild(preElement);
           }
         });
       }
@@ -1107,6 +1109,7 @@ export class ChatUI {
         const preBlock = document.createElement("pre");
         preBlock.tabIndex = 0;
         preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
+        preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
         const codeBlock = document.createElement("code");
         codeBlock.className = "language-sql sql-query";
         codeBlock.textContent = msg.sqlQuery;
@@ -1229,12 +1232,12 @@ export class ChatUI {
       if (e.shiftKey) {
         if (document.activeElement === firstElement) {
           e.preventDefault();
-          lastElement?.focus();
+          lastElement.focus();
         }
       } else {
         if (document.activeElement === lastElement) {
           e.preventDefault();
-          firstElement?.focus();
+          firstElement.focus();
         }
       }
     };
@@ -1253,8 +1256,7 @@ export class ChatUI {
       if (previousFocus && document.body.contains(previousFocus)) {
         previousFocus.focus();
       } else {
-        const chatInput = document.getElementById("chat-input");
-        if (chatInput) chatInput.focus();
+        document.getElementById("chat-input")!.focus();
       }
     };
 

@@ -411,3 +411,24 @@ def test_generate_sql_fallback_no_prefix(mocker: typing.Any) -> None:
     mocker.patch("t1d_analytics.api.get_database_schema", return_value="dummy_schema")
     full, sql = generate_sql_from_nl("dummy_db", "test query")
     assert sql == "SELECT * FROM test;"
+
+def test_global_exception_handler() -> None:
+    """Test that unhandled exceptions are caught by the global exception handler."""
+    from fastapi import APIRouter
+    from fastapi.testclient import TestClient
+
+    from t1d_analytics.api import app
+    
+    router = APIRouter()
+    @router.get("/error_endpoint_for_test")
+    def error_endpoint() -> None:
+        raise Exception("Trigger unhandled exception")
+    app.include_router(router)
+    
+    test_client = TestClient(app, raise_server_exceptions=False)
+    response = test_client.get("/error_endpoint_for_test", headers={"Accept-Language": "ja-JP,ja;q=0.9"})
+    assert response.status_code == 500
+    data = response.json()
+    assert "detail" in data
+    assert data["detail"]["error_code"] == "backend.serverError"
+    assert "Trigger unhandled exception" in data["detail"]["params"]["error"]

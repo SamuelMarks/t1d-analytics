@@ -27,5 +27,13 @@ strict = true
 disallow_untyped_defs = true
 
 [tool.pytest.ini_options]
-addopts = "--cov=t1d_analytics --cov-report=term-missing --cov-report=html --cov-fail-under=100"
+addopts = "--cov=t1d_analytics --cov-report=term-missing --cov-report=html --cov-report=lcov --cov-fail-under=100"
 pythonpath = ["src"]
+[tool.coverage.run]
+source = ["src/t1d_analytics"]
+sigterm = true
+concurrency = ["multiprocessing", "thread"]
+parallel = true
+
+[tool.coverage.report]
+show_missing = true

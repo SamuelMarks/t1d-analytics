@@ -1067,7 +1067,23 @@ describe("ChatUI", () => {
     modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(document.activeElement).toBe(closeBtn);
 
+    // Test tab on a middle element
+    const dummy1 = document.createElement("button");
+    const dummy2 = document.createElement("button");
+    modal.appendChild(dummy1);
+    modal.appendChild(dummy2);
+    dummy1.focus(); // Middle element (closeBtn, dummy1, dummy2)
+    modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    modal.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
+    );
+
+    // Trigger overlay click inside the modal (not on modal itself)
+    dummy1.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
     // Clean up
+    dummy1.remove();
+    dummy2.remove();
     closeBtn.click();
   });
 
@@ -1203,6 +1219,20 @@ describe("ChatUI", () => {
     await ui["fetchTableData"]();
     expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
       "Internal server error: something broke",
+    );
+  });
+
+  it("handles fetch HTTP error with valid JSON but no detail field", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: () => Promise.resolve({ otherField: "something" }),
+    });
+    ui["currentPage"] = 1;
+    ui["currentTable"] = "test_table";
+    await ui["fetchTableData"]();
+    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+      "HTTP 403",
     );
   });
 
@@ -1892,5 +1922,53 @@ describe("ChatUI", () => {
 
     const container = document.querySelector(".sql-query-container");
     expect(container).not.toBeNull();
+  });
+
+  it("renders non-SQL markdown blocks correctly", () => {
+    const chat = state.createChat();
+    chat.messages.push({
+      role: "assistant",
+      content: "```python\nprint('hello')\n```",
+      model: "gemma",
+    });
+    state.setActiveChat(chat.id);
+    ui["renderMessages"]();
+    const codeBlock = document.querySelector(".language-python");
+    expect(codeBlock).toBeTruthy();
+  });
+
+  it("sendMessage with text argument doesn't clear chat input", async () => {
+    ui["chatInput"].value = "some typed text";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ response: "hello", sql_query: "" }),
+    });
+    await ui["handleSendMessage"]("override text");
+    expect(ui["chatInput"].value).toBe("some typed text");
+  });
+
+  it("closes dropdown menus safely when previous element is missing", () => {
+    const menu = document.createElement("div");
+    menu.className = "dropdown-menu show";
+    document.body.appendChild(menu);
+    ui["closeAllDropdowns"]();
+    expect(menu.classList.contains("show")).toBe(false);
+    menu.remove();
+  });
+
+  it("does not submit chat form on Enter key with shift", () => {
+    const event = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      cancelable: true,
+    });
+    ui["chatInput"].dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("does not submit chat form on other key press", () => {
+    const event = new KeyboardEvent("keydown", { key: "A", cancelable: true });
+    ui["chatInput"].dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
   });
 });

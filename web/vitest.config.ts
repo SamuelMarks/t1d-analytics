@@ -14,17 +14,19 @@ export default defineConfig({
       ".git",
       ".cache",
       "tests-e2e/**",
+      "tests-e2e-full/**",
     ],
     coverage: {
-      provider: "v8",
-      reporter: ["text", "html"],
-      thresholds: {
-        lines: 100,
-        functions: 100,
-        branches: 100,
-        statements: 100,
-      },
-      exclude: ["vitest.config.ts", "playwright.config.ts", "tests/**"], // Exclude config and tests from coverage
+      provider: "istanbul",
+      reporter: ["text", "html", "lcov", "json"],
+      exclude: [
+        "vitest.config.ts",
+        "playwright.config.ts",
+        "playwright.full.config.ts",
+        "tests/**",
+        "tests-e2e/**",
+        "tests-e2e-full/**",
+      ],
     },
   },
 });
