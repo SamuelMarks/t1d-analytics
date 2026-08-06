@@ -656,6 +656,39 @@ describe("ChatUI", () => {
     expect(input.focus).toHaveBeenCalled();
   });
 
+  it("does not update active chat on hashchange if hash is empty", () => {
+    const chat1 = state.createChat();
+    ui.render();
+
+    const input = document.getElementById("chat-input") as HTMLElement;
+    const focusSpy = vi.spyOn(input, "focus");
+
+    window.location.hash = "";
+    focusSpy.mockClear();
+    window.dispatchEvent(new Event("hashchange"));
+
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(state.activeChatId).toBe(chat1.id);
+  });
+
+  it("does not update active chat on hashchange if hash equals activeChatId", () => {
+    const chat1 = state.createChat();
+    ui.render();
+
+    const input = document.getElementById("chat-input") as HTMLElement;
+    const focusSpy = vi.spyOn(input, "focus");
+
+    // Clear just in case
+    focusSpy.mockClear();
+
+    // Set hash to current chat
+    window.location.hash = `#${chat1.id}`;
+
+    // We expect focus to NOT be called since active chat didn't change
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(state.activeChatId).toBe(chat1.id);
+  });
+
   it("updates document.title on render based on active chat", () => {
     state.createChat(); // Chat #1
     ui.render();
