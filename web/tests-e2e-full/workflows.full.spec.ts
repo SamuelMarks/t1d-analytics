@@ -13,7 +13,11 @@ test.describe("App Workflows Full E2E", () => {
     page,
   }) => {
     // Verify the schema table is rendered (from real duckdb)
-    const schemaTable = page.locator(".schema-table").first();
+    // There may be multiple tables (e.g. patients, tiny), so we find the one containing "tiny"
+    const schemaTable = page
+      .locator(".schema-table")
+      .filter({ hasText: "tiny" })
+      .first();
     await expect(schemaTable).toBeVisible({ timeout: 10000 });
     await expect(schemaTable.locator(".schema-table-header span")).toHaveText(
       "tiny",
