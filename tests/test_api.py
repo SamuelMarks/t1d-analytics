@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
-
 from t1d_analytics.api import app, execute_sql, generate_sql_from_nl
 
 if "any_llm" not in sys.modules:
@@ -48,6 +47,7 @@ def test_execute_sql_error(mock_db: str) -> None:
     """Test SQL execution with invalid query."""
     with pytest.raises(ValueError, match=r"{\"error_code\": \"backend.sqlExecution.*"):
         execute_sql(mock_db, "SELECT * FROM non_existent")
+
 
 @patch("any_llm.AnyLLM.create")
 def test_generate_sql_from_nl_success(mock_create: MagicMock, mock_db: str) -> None:
@@ -230,7 +230,9 @@ def test_list_models_success(monkeypatch: typing.Any) -> None:
         def __enter__(self) -> typing.Any:
             return MockResponse()
 
-        def __exit__(self, exc_type: typing.Any, exc_val: typing.Any, exc_tb: typing.Any) -> None:
+        def __exit__(
+            self, exc_type: typing.Any, exc_val: typing.Any, exc_tb: typing.Any
+        ) -> None:
             pass
 
     monkeypatch.setattr(urllib.request, "urlopen", MockUrlopen)
@@ -347,6 +349,7 @@ def test_get_table_data_exception(mock_db: str, monkeypatch: typing.Any) -> None
         assert response.json()["detail"]["error_code"] == "backend.serverError"
         assert "DB Failure" in response.json()["detail"]["params"]["error"]
 
+
 def test_execute_sql_endpoint_success(mock_db: str) -> None:
     """Test execute_sql_endpoint returns successfully."""
     response = client.post(
@@ -359,6 +362,7 @@ def test_execute_sql_endpoint_success(mock_db: str) -> None:
     assert len(data["sqlResult"]) == 2
     assert data["sqlResult"][0]["name"] == "Alice"
 
+
 def test_execute_sql_endpoint_empty(mock_db: str) -> None:
     """Test execute_sql_endpoint empty query."""
     response = client.post(
@@ -368,6 +372,7 @@ def test_execute_sql_endpoint_empty(mock_db: str) -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["error"]["error_code"] == "backend.emptyMessage"
+
 
 def test_execute_sql_endpoint_value_error(mock_db: str) -> None:
     """Test execute_sql_endpoint catching ValueError."""
@@ -379,6 +384,7 @@ def test_execute_sql_endpoint_value_error(mock_db: str) -> None:
     data = response.json()
     assert data["error"]["error_code"] == "backend.sqlExecution"
 
+
 @patch("t1d_analytics.api.execute_sql")
 def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -> None:
     """Test execute_sql_endpoint catching general Exception."""
@@ -386,47 +392,53 @@ def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -
     response = client.post(
         "/api/execute-sql",
         json={"query": "SELECT * FROM users", "db_path": mock_db},
-
     )
     assert response.status_code == 200
     data = response.json()
     assert data["error"]["error_code"] == "backend.errorUnexpected"
     assert data["error"]["params"]["error"] == "System crash"
 
+
 def test_generate_sql_fallback_no_prefix(mocker: typing.Any) -> None:
     """Test SQL fallback when prefix is missing."""
     from t1d_analytics.api import generate_sql_from_nl
-    
+
     mock_llm_instance = mocker.MagicMock()
     mock_choice = mocker.MagicMock()
     mock_choice.message.content = "SELECT * FROM test;"
     mock_llm_instance.completion.return_value.choices = [mock_choice]
-    
+
     mock_llm_class = mocker.MagicMock()
     mock_llm_class.create.return_value = mock_llm_instance
-    
-    mocker.patch.dict("sys.modules", {"any_llm": mocker.MagicMock(AnyLLM=mock_llm_class)})
-    
+
+    mocker.patch.dict(
+        "sys.modules", {"any_llm": mocker.MagicMock(AnyLLM=mock_llm_class)}
+    )
+
     mocker.patch("t1d_analytics.api.duckdb.connect")
     mocker.patch("t1d_analytics.api.get_database_schema", return_value="dummy_schema")
     full, sql = generate_sql_from_nl("dummy_db", "test query")
     assert sql == "SELECT * FROM test;"
 
+
 def test_global_exception_handler() -> None:
     """Test that unhandled exceptions are caught by the global exception handler."""
     from fastapi import APIRouter
     from fastapi.testclient import TestClient
-
     from t1d_analytics.api import app
-    
+
     router = APIRouter()
+
     @router.get("/error_endpoint_for_test")
     def error_endpoint() -> None:
         raise Exception("Trigger unhandled exception")
+
     app.include_router(router)
-    
+
     test_client = TestClient(app, raise_server_exceptions=False)
-    response = test_client.get("/error_endpoint_for_test", headers={"Accept-Language": "ja-JP,ja;q=0.9"})
+    response = test_client.get(
+        "/error_endpoint_for_test", headers={"Accept-Language": "ja-JP,ja;q=0.9"}
+    )
     assert response.status_code == 500
     data = response.json()
     assert "detail" in data

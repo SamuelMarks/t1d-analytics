@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.5
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier
+        entry: npx --prefix web prettier --write .
+        language: system
+        types_or: [javascript, ts, css, html, json, markdown]
+        pass_filenames: true
+      - id: tests-and-shields
+        name: run build, tests, coverage, and update shields
+        entry: sh -c 'python3 scripts/run_tests.py 2>/dev/null || python scripts/run_tests.py'
+        language: system
+        pass_filenames: false

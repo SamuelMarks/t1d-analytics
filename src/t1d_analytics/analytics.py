@@ -14,6 +14,7 @@ def extract_zips(data_dir_str: str) -> None:
     Extract any zip files found in the data directory.
 
     Args:
+    ----
         data_dir_str: directory.
 
     """
@@ -48,6 +49,7 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
     Load all CSV and TXT files from the data directory into DuckDB tables.
 
     Args:
+    ----
         data_dir_str: directory.
         db_path: db path.
 
@@ -112,7 +114,13 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
                 sep = "\\t"
 
             print(
-                _("Loading {} (encoding={}, sep='{}') into table {}...", data_file.name, encoding, sep, table_name)
+                _(
+                    "Loading {} (encoding={}, sep='{}') into table {}...",
+                    data_file.name,
+                    encoding,
+                    sep,
+                    table_name,
+                )
             )
 
             # Create temp view to inspect columns
@@ -146,7 +154,7 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
                     select_exprs.append(f'"{orig_col}"')
 
             select_sql = ",\n                ".join(select_exprs)
-            
+
             # Check if table already exists to make script idempotent
             tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
             if table_name in tables:
@@ -172,9 +180,11 @@ def get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
     Extract the database schema as a text description, including sample data.
 
     Args:
+    ----
         conn: The DuckDB connection.
 
     Returns:
+    -------
         The database schema string.
 
     """
@@ -201,6 +211,7 @@ def handle_natural_language(conn: duckdb.DuckDBPyConnection, query: str) -> None
     Translate natural language to SQL using a local LLM via any-llm and execute it.
 
     Args:
+    ----
         conn: DB connection.
         query: The query.
 
@@ -291,6 +302,7 @@ def run_query_repl(db_path: str) -> None:
     Run the interactive query interface.
 
     Args:
+    ----
         db_path: Path to DB.
 
     """
@@ -306,7 +318,9 @@ def run_query_repl(db_path: str) -> None:
     print("\n" + "=" * 50)
     print(_("Welcome to T1D Analytics Interface!"))
     print(_("You can enter:"))
-    print(_("  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)"))
+    print(
+        _("  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)")
+    )
     print(_("  - Natural language queries (will be translated to SQL via LLM)"))
     print(_("  - 'exit' or 'quit' to close."))
     print("=" * 50 + "\n")

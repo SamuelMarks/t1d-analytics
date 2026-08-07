@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-
 from t1d_analytics.analytics import (
     extract_zips,
     get_database_schema,
@@ -373,11 +372,12 @@ def test_load_data_to_duckdb_duplicate_mapped_columns(tmp_path: Path) -> None:
     assert "NumHospDKA_2" in cols
     conn.close()
 
+
 def test_load_data_to_duckdb_existing_table(tmp_path: Path) -> None:
     """Test loading data when the table already exists."""
     (tmp_path / "data_exist.csv").write_text("id,val\n1,10\n2,20")
     db_path = str(tmp_path / "test.duckdb")
-    
+
     # Create the table beforehand
     conn = duckdb.connect(db_path)
     conn.execute("CREATE TABLE data_exist (dummy INT)")
@@ -393,65 +393,72 @@ def test_load_data_to_duckdb_existing_table(tmp_path: Path) -> None:
     assert "id" not in cols
     conn.close()
 
+
 def test_extract_zips_already_extracted(tmp_path: Path) -> None:
     """Test extract_zips when the directory already exists."""
     import zipfile
 
     from t1d_analytics.analytics import extract_zips
-    
+
     zip_path = tmp_path / "data.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("test.txt", "content")
-        
+
     extract_dir = tmp_path / "data"
     extract_dir.mkdir()
-    
+
     extract_zips(str(tmp_path))
     # It should skip extraction, so "test.txt" won't be inside extract_dir
     assert not (extract_dir / "test.txt").exists()
 
+
 def test_load_data_no_matches_file(tmp_path: Path, mocker: typing.Any) -> None:
     """Test load_data_to_duckdb when matches file does not exist."""
     import duckdb
-
     from t1d_analytics.analytics import load_data_to_duckdb
-    
-    mocker.patch("pathlib.Path.exists", autospec=True, side_effect=lambda self: False if "likely_matches" in str(self) else True)
-    
+
+    mocker.patch(
+        "pathlib.Path.exists",
+        autospec=True,
+        side_effect=lambda self: False if "likely_matches" in str(self) else True,
+    )
+
     (tmp_path / "data.csv").write_text("A,B\n1,2")
     db_path = str(tmp_path / "test.duckdb")
     load_data_to_duckdb(str(tmp_path), db_path)
     conn = duckdb.connect(db_path)
     assert "data" in [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
 
+
 def test_handle_natural_language_no_result(mocker: typing.Any) -> None:
     """Test handle_natural_language when query returns no result."""
     from t1d_analytics.analytics import handle_natural_language
-    
+
     # Mock any-llm
     mock_llm = mocker.MagicMock()
     mock_llm.return_value.generate.return_value = "```sql\nSELECT 1;\n```"
     mocker.patch.dict("sys.modules", {"any_llm": mocker.MagicMock(AnyLLM=mock_llm)})
-    
+
     conn = mocker.MagicMock()
     conn.sql.return_value = None  # No result
-    
+
     handle_natural_language(conn, "test")
     conn.sql.assert_called_once()
+
 
 def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
     """Test run_query_repl when sql returns no result."""
     from t1d_analytics.analytics import run_query_repl
-    
+
     db_path = tmp_path / "test.duckdb"
     db_path.touch()
-    
+
     inputs = ["SELECT 1", "exit"]
     mocker.patch("builtins.input", side_effect=inputs)
-    
+
     mock_conn = mocker.MagicMock()
     mock_conn.sql.return_value = None
     mocker.patch("duckdb.connect", return_value=mock_conn)
-    
+
     run_query_repl(str(db_path))
     mock_conn.sql.assert_called_once()

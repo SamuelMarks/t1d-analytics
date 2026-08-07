@@ -12,7 +12,7 @@ def main() -> None:
     """Execute the CLI application."""
     # Initialize translator based on LANG env var
     _ = get_translator()
-    
+
     parser = argparse.ArgumentParser(
         description="Downloader and analytics tool for T1D public datasets."
     )
@@ -120,6 +120,7 @@ def handle_download(args: argparse.Namespace) -> None:
     Handle the download subcommand.
 
     Args:
+    ----
         args: Arguments.
 
     """
@@ -145,6 +146,7 @@ def handle_extract(args: argparse.Namespace) -> None:
     Handle the extract subcommand.
 
     Args:
+    ----
         args: Command-line arguments.
 
     """
@@ -158,6 +160,7 @@ def handle_load(args: argparse.Namespace) -> None:
     Handle the load subcommand.
 
     Args:
+    ----
         args: Arguments.
 
     """
@@ -171,6 +174,7 @@ def handle_query(args: argparse.Namespace) -> None:
     Handle the query subcommand.
 
     Args:
+    ----
         args: Arguments.
 
     """
@@ -188,6 +192,7 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
     the provided local LLM model.
 
     Args:
+    ----
         args: Command-line arguments containing db (DuckDB path), num_pairs (count),
             and model (LLM name).
 
@@ -203,19 +208,19 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
 
     print(_("Initializing TrainingDataGenerator with model '{}'...", args.model))
     generator = TrainingDataGenerator(conn, args.model)
-    
+
     # Extract schema
     schema = generator._extract_schema()
-    
+
     # Generate pairs and write to db
     total_tables = len(schema)
     print(_("Found {} tables in the schema.", total_tables))
-    
+
     for table_name, table_schema in schema.items():
         print(_("Generating {} pairs for table: {}...", args.num_pairs, table_name))
         pairs = generator._generate_pairs(table_schema, args.num_pairs)
         generator.write_to_db(pairs)
-    
+
     conn.close()
     print(_("Training data generation complete!"))
 

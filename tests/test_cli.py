@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pytest import CaptureFixture
-
 from t1d_analytics.cli import main
 
 
@@ -90,13 +89,15 @@ def test_query_subcommand(mock_query: MagicMock) -> None:
 
 @patch("duckdb.connect")
 @patch("t1d_analytics.training_data.TrainingDataGenerator")
-def test_generate_training_data_subcommand(mock_generator_class: MagicMock, mock_connect: MagicMock) -> None:
+def test_generate_training_data_subcommand(
+    mock_generator_class: MagicMock, mock_connect: MagicMock
+) -> None:
     """Test successful CLI execution for generate-training-data."""
     mock_generator = MagicMock()
     mock_generator_class.return_value = mock_generator
     mock_generator._extract_schema.return_value = {"table1": "schema1"}
     mock_generator._generate_pairs.return_value = [("prompt", "chosen", "rejected")]
-    
+
     with patch(
         "sys.argv",
         [
@@ -113,21 +114,25 @@ def test_generate_training_data_subcommand(mock_generator_class: MagicMock, mock
         main()
 
     mock_connect.assert_called_once_with("test.db")
-    mock_generator_class.assert_called_once_with(mock_connect.return_value, "test_model")
+    mock_generator_class.assert_called_once_with(
+        mock_connect.return_value, "test_model"
+    )
     mock_generator._extract_schema.assert_called_once()
     mock_generator._generate_pairs.assert_called_once_with("schema1", 5)
-    mock_generator.write_to_db.assert_called_once_with([("prompt", "chosen", "rejected")])
+    mock_generator.write_to_db.assert_called_once_with(
+        [("prompt", "chosen", "rejected")]
+    )
 
 
 def test_cli_main_invalid_command(mocker: MagicMock) -> None:
     """Test CLI invalid command."""
     from t1d_analytics.cli import main
-    
+
     # Passing an invalid command. argparse might catch it if it's restricted by subparsers,
     # but we can mock args to bypass argparse validation and reach the branch.
     mock_args = mocker.MagicMock()
     mock_args.command = "invalid_cmd"
     mocker.patch("argparse.ArgumentParser.parse_args", return_value=mock_args)
-    
+
     # It should fall through the if-elif chain and exit cleanly (or raise no exception)
     main()

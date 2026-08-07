@@ -81,7 +81,7 @@ jobs:
           echo "1,Test A,100" >> tests/test_data/tiny.csv
           echo "2,Test B,200" >> tests/test_data/tiny.csv
           t1d-analytics load -d tests/test_data --db ci_test.duckdb
-          
+
       - name: Run Web E2E Full Stack Tests (Playwright)
         working-directory: ./web
         env:

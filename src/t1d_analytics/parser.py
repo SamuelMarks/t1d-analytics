@@ -13,9 +13,11 @@ def fetch_html(url: str) -> str:
     Fetch HTML content from a given URL.
 
     Args:
+    ----
         url: The URL to fetch.
 
     Returns:
+    -------
         The HTML content as a string.
 
     """
@@ -29,9 +31,11 @@ def extract_url(td: Tag) -> Optional[str]:
     Extract dataset/document URL from a table cell.
 
     Args:
+    ----
         td: A BeautifulSoup Tag representing a table cell.
 
     Returns:
+    -------
         The extracted URL if found, else None.
 
     """
@@ -49,9 +53,11 @@ def parse_datasets(html: str) -> List[DatasetInfo]:
     Parse HTML to extract dataset information.
 
     Args:
+    ----
         html: The HTML string to parse.
 
     Returns:
+    -------
         A list of DatasetInfo objects.
 
     """

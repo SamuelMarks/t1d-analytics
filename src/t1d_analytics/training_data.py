@@ -20,6 +20,7 @@ class TrainingDataGenerator:
         Initialize the TrainingDataGenerator.
 
         Args:
+        ----
             conn: An active DuckDB connection to read the schema and write data.
             model: The local Ollama model to use for generation (e.g., 'gemma4').
 
@@ -31,7 +32,8 @@ class TrainingDataGenerator:
         """
         Extract the database schema using SHOW TABLES and DESCRIBE.
 
-        Returns:
+        Returns
+        -------
             A dictionary mapping table names to their textual schema descriptions.
 
         """
@@ -53,10 +55,12 @@ class TrainingDataGenerator:
         Generate (prompt, chosen_sql, rejected_sql) pairs using the LLM.
 
         Args:
+        ----
             schema: The textual representation of the table's schema.
             count: The number of pairs to generate.
 
         Returns:
+        -------
             A list of tuples, each containing:
             - The natural language prompt
             - The correct (chosen) SQL query
@@ -77,12 +81,12 @@ class TrainingDataGenerator:
                 "model": self.model,
                 "prompt": prompt,
                 "stream": False,
-                "format": "json"
+                "format": "json",
             }
             req = urllib.request.Request(
                 "http://localhost:11434/api/generate",
                 data=json.dumps(data).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
             )
             try:
                 with urllib.request.urlopen(req) as response:
@@ -101,6 +105,7 @@ class TrainingDataGenerator:
         Write generated pairs to `pretrain_data`, `sft_data`, and `dpo_data` tables.
 
         Args:
+        ----
             pairs: A list of tuples containing (prompt, chosen_sql, rejected_sql).
 
         """
@@ -128,17 +133,16 @@ class TrainingDataGenerator:
             )
             """
         )
-        
+
         for prompt, chosen, rejected in pairs:
             # Pretrain data is just the raw text of the correct query and prompt
             pretrain_text = f"Question: {prompt}\\nSQL: {chosen}"
             self.conn.execute("INSERT INTO pretrain_data VALUES (?)", (pretrain_text,))
-            
+
             # SFT data pairs prompt with chosen
             self.conn.execute("INSERT INTO sft_data VALUES (?, ?)", (prompt, chosen))
-            
+
             # DPO data includes prompt, chosen, and rejected
             self.conn.execute(
-                "INSERT INTO dpo_data VALUES (?, ?, ?)",
-                (prompt, chosen, rejected)
+                "INSERT INTO dpo_data VALUES (?, ?, ?)", (prompt, chosen, rejected)
             )

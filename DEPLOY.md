@@ -12,26 +12,31 @@ Ensure libscript is installed and you are authenticated to your chosen cloud pro
 
 ## T1D Domain Pipeline
 
-For users specifically looking to deploy the T1D domain pipeline for Text-to-SQL training with Gemma-4-SQL, please refer to the [T1D Integration Guide](T1D_INTEGRATION_GUIDE.md) and the granular [Execution Checklist](TODO_PLAN1.md) for a comprehensive step-by-step tutorial. 
+For users specifically looking to deploy the T1D domain pipeline for Text-to-SQL training with Gemma-4-SQL, please refer to the [T1D Integration Guide](T1D_INTEGRATION_GUIDE.md) and the granular [Execution Checklist](TODO_PLAN1.md) for a comprehensive step-by-step tutorial.
 
 ### TPU Research Cloud (TFRC) Deployments
+
 If you are deploying the training pipeline using a TFRC grant, ensure you provide the correct spot or on-demand scheduling flags prior to provisioning via libscript.
 
 You have access to the following TFRC capacity. Ensure your `TPU_ZONE`, `TPU_ACCELERATOR_TYPE`, and `TPU_SCHEDULING_TYPE` exactly match one of these configurations:
 
 **Cloud TPU v4 (us-central2-b)**
+
 - Up to 32 chips On-Demand: `TPU_SCHEDULING_TYPE="on-demand"`, `TPU_ZONE="us-central2-b"`
 - Up to 32 chips Spot: `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="us-central2-b"`
 
 **Cloud TPU v5e (europe-west4-b & us-central1-a)**
+
 - Up to 64 chips Spot (Europe): `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="europe-west4-b"`
 - Up to 64 chips Spot (US Central): `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="us-central1-a"`
 
 **Cloud TPU v6e (europe-west4-a & us-east1-d)**
+
 - Up to 64 chips Spot (Europe): `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="europe-west4-a"`
 - Up to 64 chips Spot (US East): `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="us-east1-d"`
 
 Example configuration for a v4-8 spot instance:
+
 ```bash
 export TPU_SCHEDULING_TYPE="spot"
 export TPU_USE_QUEUED_RESOURCE="true"
@@ -40,10 +45,12 @@ export TPU_ACCELERATOR_TYPE="v4-8"
 ```
 
 ### Remote Data Caching Optimization (Jaeb Dataset)
+
 To prevent massive and repetitive downloads on ephemeral TPU compute, we recommend preparing the DuckDB database locally first, and then using `rsync` or `scp` to push the dataset and your pre-loaded DuckDB instances directly to the nodes before training.
 
 **1. Prepare Data Locally:**
 Use the `t1d-analytics` CLI pipeline to download, extract, load into DuckDB, and generate the synthetic SFT/DPO pairs:
+
 ```bash
 # 1. Download datasets
 t1d-analytics download -o ./data/jaeb_raw
@@ -59,6 +66,7 @@ t1d-analytics generate-training-data --db t1d_analytics.duckdb --num-pairs 100 -
 ```
 
 **2. Push Cache via Rsync or SCP:**
+
 ```bash
 # Using rsync (recommended for delta transfers and resume support)
 rsync -avzP ./data/jaeb_raw/ t1d_analytics.duckdb $USER@$TPU_IP:~/t1d-analytics/

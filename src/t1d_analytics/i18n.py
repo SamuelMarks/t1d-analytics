@@ -51,34 +51,38 @@ TRANSLATIONS = {
         "Initializing TrainingDataGenerator with model '{}'...": "モデル'{}'でTrainingDataGeneratorを初期化中...",
         "Found {} tables in the schema.": "スキーマ内に{}個のテーブルが見つかりました。",
         "Generating {} pairs for table: {}...": "テーブル: {}のペアを{}個生成中...",
-        "Training data generation complete!": "トレーニングデータの生成が完了しました！"
-    }
+        "Training data generation complete!": "トレーニングデータの生成が完了しました！",
+    },
 }
+
 
 def get_translator(lang: Optional[str] = None) -> Callable[..., str]:
     """
     Get a translator function for the given language.
-    
+
     Args:
+    ----
         lang: The language code (e.g., "en", "ja"). If None, uses the LANG env var.
-        
+
     Returns:
+    -------
         A translation function.
 
     """
     if lang is None:
         lang = os.environ.get("LANG", "en").split(".")[0].split("_")[0]
-        
+
     lang_dict = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
-    
+
     def translate(text: str, *args: Any, **kwargs: Any) -> str:
         """Translate the given text and format it with args and kwargs."""
         translated = lang_dict.get(text, text)
         if args or kwargs:
             return translated.format(*args, **kwargs)
         return translated
-        
+
     return translate
+
 
 # Default translator
 _ = get_translator()

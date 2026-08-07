@@ -5,7 +5,6 @@ from unittest.mock import Mock
 import pytest
 from bs4 import BeautifulSoup, Tag
 from requests import HTTPError
-
 from t1d_analytics.parser import extract_url, fetch_html, parse_datasets
 
 

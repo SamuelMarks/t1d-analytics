@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
-
 from t1d_analytics.cli import main
 
 
@@ -16,18 +15,22 @@ from t1d_analytics.cli import main
 def temp_workspace() -> Generator[Path, None, None]:
     """
     Create a temporary workspace directory for integration tests.
-    
-    Yields:
+
+    Yields
+    ------
         Path: The temporary directory path.
 
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
 
+
 def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
     """Test the complete CLI integration flow: download, load, and query."""
     # Setup mock for parser
-    requests_mock.get("http://fake.url", text="""
+    requests_mock.get(
+        "http://fake.url",
+        text="""
     <table id="ctl00_CphMain_GridViewPublicDataSets">
         <tr>
             <td>TestProtocol</td><td></td><td></td><td></td>
@@ -35,8 +38,9 @@ def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
             <td><a data-url="http://example.com/doc.txt">Doc</a></td>
         </tr>
     </table>
-    """)
-    
+    """,
+    )
+
     # Setup mock for downloader
     requests_mock.get("http://example.com/doc.txt", text="dummy doc content")
 
@@ -44,8 +48,15 @@ def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
     db_path = temp_workspace / "integration.duckdb"
 
     # Test Download
-    test_args_download = ["t1d-analytics", "download", "-u", "http://fake.url", "-o", str(data_dir)]
-    with patch.object(sys, 'argv', test_args_download):
+    test_args_download = [
+        "t1d-analytics",
+        "download",
+        "-u",
+        "http://fake.url",
+        "-o",
+        str(data_dir),
+    ]
+    with patch.object(sys, "argv", test_args_download):
         main()
 
     # Verify download created folders and files
@@ -59,8 +70,15 @@ def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
         f.write("id,value\n1,100\n2,200\n")
 
     # Test Load
-    test_args_load = ["t1d-analytics", "load", "-d", str(data_dir), "--db", str(db_path)]
-    with patch.object(sys, 'argv', test_args_load):
+    test_args_load = [
+        "t1d-analytics",
+        "load",
+        "-d",
+        str(data_dir),
+        "--db",
+        str(db_path),
+    ]
+    with patch.object(sys, "argv", test_args_load):
         main()
 
     # Verify DuckDB database
@@ -74,6 +92,8 @@ def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
 
     # Test Query (Mocking input)
     test_args_query = ["t1d-analytics", "query", "--db", str(db_path)]
-    with patch.object(sys, 'argv', test_args_query), \
-         patch('builtins.input', side_effect=["SELECT count(*) FROM test_data", "exit"]):
+    with (
+        patch.object(sys, "argv", test_args_query),
+        patch("builtins.input", side_effect=["SELECT count(*) FROM test_data", "exit"]),
+    ):
         main()

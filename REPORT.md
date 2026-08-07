@@ -5,6 +5,7 @@ This report outlines the comprehensive steps required to execute an end-to-end t
 ## 1. Environment & Prerequisites Setup
 
 ### 1.1 Infrastructure Provisioning
+
 To handle large-scale LLM training efficiently, we recommend utilizing Google Cloud TPU instances (e.g., v4-8 or multi-node clusters) via the `libscript` multicloud orchestration system.
 
 ```bash
@@ -15,11 +16,12 @@ cd ~/.libscript
 
 # Provision a TPU VM with persistent storage
 export TPU_NAME="gemma-t1d-node"
-export TPU_DATA_DISK_SIZE="500" 
+export TPU_DATA_DISK_SIZE="500"
 ./stacks/ml-training/tpu-vm-eval-node/setup.sh
 ```
 
 ### 1.2 Repository Installation
+
 On the training instance, install the required frameworks. Both `t1d-analytics` (for data generation) and `gemma-4-sql` (for training orchestration) are needed.
 
 ```bash
@@ -35,7 +37,9 @@ pip install -e /path/to/gemma-4-sql[all]
 The foundation of the training process is extracting domain-specific T1D data and procedurally generating synthetic training pairs using a local LLM.
 
 ### 2.1 Download and Load T1D Clinical Data
+
 First, retrieve the public T1D datasets and load them into a local DuckDB instance.
+
 ```bash
 # 1. Download datasets
 t1d-analytics download
@@ -48,6 +52,7 @@ t1d-analytics load --data-dir ./data --db t1d_analytics.duckdb
 ```
 
 ### 2.2 Procedural Generation of Training Pairs
+
 Leverage a local LLM (e.g., `ollama run gemma4`) to inspect the T1D DuckDB schema and generate high-quality `(Prompt, SQL)` pairs. This step generates the `pretrain_data`, `sft_data`, and `dpo_data` tables within the `t1d_analytics.duckdb` database.
 
 ```bash
@@ -88,6 +93,7 @@ gemma-4-sql etl posttrain \
 We utilize the MaxText backend for highly optimized XLA execution on TPU architectures.
 
 ### Phase 1: Continuous Pretraining (Domain Adaptation)
+
 Adapt the base Google `gemma-4` weights to exclusively understand T1D schemas and SQL syntax.
 
 ```bash
@@ -100,6 +106,7 @@ gemma-4-sql pretrain \
 ```
 
 ### Phase 2: Supervised Fine-Tuning (SFT)
+
 Perform instruction tuning so the model maps natural language questions (e.g., "What is the average Time In Range for Patient X?") to precise SQL. We use Parameter-Efficient Fine-Tuning (PEFT/LoRA) to reduce memory overhead.
 
 ```bash
@@ -115,6 +122,7 @@ gemma-4-sql sft \
 ```
 
 ### Phase 3: Direct Preference Optimization (DPO)
+
 Align the model's behavior by contrasting the chosen (correct) SQL queries against rejected (incorrect/hallucinated) SQL queries generated in Step 2.2.
 
 ```bash
@@ -130,6 +138,7 @@ gemma-4-sql dpo \
 ## 5. Evaluation and Deployment
 
 ### 5.1 Evaluate Execution Accuracy
+
 Unlike general NLP models, Text-to-SQL models must be evaluated on Execution Accuracy (EX). We use the `gemma-4-sql` LiveDatabaseEngine to run generated queries against the DuckDB instance.
 
 ```bash
@@ -142,6 +151,7 @@ gemma-4-sql evaluate \
 ```
 
 ### 5.2 Export Artifacts to Google Cloud Storage
+
 Once training and evaluation are complete, export the model weights (e.g., to `safetensors` or `orbax`) and upload them to persistent GCS storage before deprovisioning the ephemeral TPU compute.
 
 ```bash

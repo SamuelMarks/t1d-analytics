@@ -1,6 +1,6 @@
 # Deploying and Training T1D Analytics on Google Cloud TPUs
 
-This document provides a comprehensive guide to deploying, training, and serving the `t1d-analytics` Text-to-SQL Large Language Model on Google Cloud TPUs utilizing the `libscript` infrastructure automation ecosystem. 
+This document provides a comprehensive guide to deploying, training, and serving the `t1d-analytics` Text-to-SQL Large Language Model on Google Cloud TPUs utilizing the `libscript` infrastructure automation ecosystem.
 
 This guide details how to leverage `libscript` to orchestrate both single-node and multi-node (distributed) training architectures for the T1D domain pipeline.
 
@@ -55,14 +55,17 @@ As part of the TPU Research Cloud (TFRC) grant for this project, you have been a
 You MUST set your `TPU_ZONE`, `TPU_SCHEDULING_TYPE`, and `TPU_ACCELERATOR_TYPE` perfectly to match one of the following allocations:
 
 ### Cloud TPU v4 (us-central2-b)
+
 - **32 on-demand chips:** `TPU_SCHEDULING_TYPE="on-demand"`, `TPU_ZONE="us-central2-b"`, `TPU_ACCELERATOR_TYPE="v4-32"` (or smaller slices like `v4-8`, `v4-16`)
 - **32 spot chips:** `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="us-central2-b"`, `TPU_ACCELERATOR_TYPE="v4-32"` (or smaller slices)
 
 ### Cloud TPU v5e (europe-west4-b & us-central1-a)
+
 - **64 spot chips (Europe):** `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="europe-west4-b"`, `TPU_ACCELERATOR_TYPE="v5litepod-64"` (or smaller slices)
 - **64 spot chips (US Central):** `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="us-central1-a"`, `TPU_ACCELERATOR_TYPE="v5litepod-64"` (or smaller slices)
 
 ### Cloud TPU v6e (europe-west4-a & us-east1-d)
+
 - **64 spot chips (Europe):** `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="europe-west4-a"`, `TPU_ACCELERATOR_TYPE="v6e-64"` (or smaller slices)
 - **64 spot chips (US East):** `TPU_SCHEDULING_TYPE="spot"`, `TPU_ZONE="us-east1-d"`, `TPU_ACCELERATOR_TYPE="v6e-64"` (or smaller slices)
 
@@ -116,6 +119,7 @@ To prevent massive and repetitive downloads of the raw Jaeb datasets on ephemera
 
 **1. Prepare Data Locally:**
 Use the `t1d-analytics` CLI pipeline to download, extract, load into DuckDB, and generate the synthetic SFT/DPO pairs:
+
 ```bash
 # 1. Download datasets
 t1d-analytics download -o ./data/jaeb_raw
@@ -148,13 +152,14 @@ scp -r ./data/jaeb_raw/ t1d_analytics.duckdb $USER@$TPU_IP:~/ml_data/
 You can now dispatch native CLI commands using the stack's deployment script.
 
 **Example 1: Supervised Fine-Tuning (SFT) with LoRA via MaxText**
+
 ```bash
 ./libscript.sh gcp/tpu-vm ssh "$TPU_NAME" "
   export HF_TOKEN=\$HF_TOKEN
-  
+
   # 1. Apply PEFT/LoRA adapters
   gemma-4-sql peft --model \$MODEL_NAME --target-modules q_proj,v_proj --lora-r 16 --backend maxtext
-  
+
   # 2. Run the SFT loop using the mounted DuckDB file
   gemma-4-sql sft --model \$MODEL_NAME --dataset /mnt/ml_data/t1d_analytics.duckdb --backend maxtext
 "
@@ -196,6 +201,7 @@ xpk workload create \
 ## 4. Serving, Chat, & Agentic Inference
 
 ### Option A: Serving API using `libscript` Stacks
+
 Deploy a high-throughput vLLM API server natively:
 
 ```bash
@@ -206,6 +212,7 @@ export TPU_NAME="$SERVE_TPU_NAME"
 ```
 
 ### Option B: DuckDB UDF Integration
+
 Embed the model directly into a DuckDB instance running on your TPU to query T1D analytics:
 
 ```bash
@@ -224,7 +231,7 @@ TPU VMs are ephemeral. Once your training run completes, export and upload the a
 ./libscript.sh gcp/tpu-vm ssh "$TPU_NAME" "
   # Export the trained model to safetensors
   gemma-4-sql export --model /mnt/ml_data/t1d-finetuned --path ./exported/t1d-pt --backend pytorch
-  
+
   # Upload to GCS
   gcloud storage cp -r ./exported/t1d-pt \$BUCKET_NAME/
 "
@@ -237,6 +244,7 @@ TPU VMs are ephemeral. Once your training run completes, export and upload the a
 To avoid runaway costs, destroy all compute resources once the assets are safely stored.
 
 ### Teardown: Single TPU VMs
+
 ```bash
 # If mounted manually, safely unmount first
 ./libscript.sh gcp/tpu-vm ssh "$TPU_NAME" "~/.libscript/libscript.sh storage-layers/gcsfuse unmount /mnt/ml_data" || true
@@ -247,6 +255,7 @@ To avoid runaway costs, destroy all compute resources once the assets are safely
 ```
 
 ### Teardown: GKE TPU Clusters (XPK)
+
 ```bash
 ./libscript.sh gcp/gke-tpu-cluster delete "$XPK_CLUSTER_NAME"
 ```

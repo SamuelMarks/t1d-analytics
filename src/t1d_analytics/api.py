@@ -42,7 +42,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     lang_header = request.headers.get("accept-language", "en")
     lang = lang_header.split(",")[0].split("-")[0].split(";")[0]
     _ = get_translator(lang)
-    
+
     logger.exception(f"Unhandled exception: {exc}")
     # Return structured error for frontend
     return JSONResponse(
@@ -50,16 +50,18 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
         content={
             "detail": {
                 "error_code": "backend.serverError",
-                "params": {"error": _("Internal server error: {}", exc)}
+                "params": {"error": _("Internal server error: {}", exc)},
             }
         },
     )
+
 
 class ApiError(BaseModel):
     """Structured API error format."""
 
     error_code: str
     params: Dict[str, Any] = {}
+
 
 class ChatRequest(BaseModel):
     """Request model for the chat endpoint."""
@@ -96,13 +98,16 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
     Execute a SQL query and return results as a list of dictionaries.
 
     Args:
+    ----
         db_path: Path to the DuckDB database file.
         query: SQL query to execute.
 
     Returns:
+    -------
         List of dictionaries representing the rows returned.
 
     Raises:
+    ------
         ValueError: If there is an error executing the query.
 
     """
@@ -119,7 +124,11 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
         return output
     except Exception as e:
         logger.error(f"SQL execution error: {e}")
-        raise ValueError(json.dumps({"error_code": "backend.sqlExecution", "params": {"error": str(e)}}))
+        raise ValueError(
+            json.dumps(
+                {"error_code": "backend.sqlExecution", "params": {"error": str(e)}}
+            )
+        )
 
 
 def generate_sql_from_nl(
@@ -129,14 +138,17 @@ def generate_sql_from_nl(
     Translate natural language to SQL using any-llm.
 
     Args:
+    ----
         db_path: Path to the DuckDB database file.
         nl_query: Natural language question.
         model_name: The Ollama model to use.
 
     Returns:
+    -------
         The generated SQL query string.
 
     Raises:
+    ------
         RuntimeError: If any-llm-sdk is missing or LLM API fails.
         ValueError: If reading schema fails.
 
@@ -148,7 +160,14 @@ def generate_sql_from_nl(
         from any_llm import AnyLLM  # type: ignore
     except ImportError:
         logger.error("any-llm-sdk[ollama] is not installed.")
-        raise RuntimeError(json.dumps({"error_code": "backend.missingSdk", "params": {"error": "any-llm-sdk[ollama]"}}))
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "error_code": "backend.missingSdk",
+                    "params": {"error": "any-llm-sdk[ollama]"},
+                }
+            )
+        )
 
     try:
         conn = duckdb.connect(db_path, read_only=True)
@@ -157,7 +176,11 @@ def generate_sql_from_nl(
         logger.debug(f"Retrieved schema: {schema[:200]}... (truncated)")
     except Exception as e:
         logger.error(f"Failed to read schema: {e}")
-        raise ValueError(json.dumps({"error_code": "backend.readSchemaFailed", "params": {"error": str(e)}}))
+        raise ValueError(
+            json.dumps(
+                {"error_code": "backend.readSchemaFailed", "params": {"error": str(e)}}
+            )
+        )
 
     prompt = f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
 
@@ -208,7 +231,12 @@ User request: {nl_query}"""
         logger.info(f"LLM response:\n{full_response}")
 
         import re
-        match = re.search(r"```(?:sql|duckdb)?\n?(.*?)\n?```", full_response, re.DOTALL | re.IGNORECASE)
+
+        match = re.search(
+            r"```(?:sql|duckdb)?\n?(.*?)\n?```",
+            full_response,
+            re.DOTALL | re.IGNORECASE,
+        )
         if match:
             sql_query = match.group(1).strip()
         else:
@@ -223,7 +251,14 @@ User request: {nl_query}"""
         return full_response, sql_query
     except Exception as e:
         logger.error(f"LLM translation error: {e}")
-        raise RuntimeError(json.dumps({"error_code": "backend.llmTranslationError", "params": {"error": str(e)}}))
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "error_code": "backend.llmTranslationError",
+                    "params": {"error": str(e)},
+                }
+            )
+        )
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -232,18 +267,23 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
     Handle incoming chat messages and execute SQL or NLP queries.
 
     Args:
+    ----
         request: The incoming ChatRequest.
 
     Returns:
+    -------
         A ChatResponse indicating success or error.
 
     Raises:
+    ------
         HTTPException: If request parameters are invalid.
 
     """
     if not request.message.strip():
         logger.warning("Received empty message.")
-        raise HTTPException(status_code=400, detail={"error_code": "backend.emptyMessage", "params": {}})
+        raise HTTPException(
+            status_code=400, detail={"error_code": "backend.emptyMessage", "params": {}}
+        )
 
     try:
         logger.info(
@@ -264,12 +304,12 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
             return ChatResponse(content=full_response, sqlQuery=sql_query)
     except ValueError as ve:
         logger.error(f"Database error during chat request: {ve}")
-        return ChatResponse(
-            content="backend.errorDbExecution", error=parse_error(ve)
-        )
+        return ChatResponse(content="backend.errorDbExecution", error=parse_error(ve))
     except RuntimeError as re:
         logger.error(f"NLP error during chat request: {re}")
-        return ChatResponse(content="backend.errorNlpTranslation", error=parse_error(re))
+        return ChatResponse(
+            content="backend.errorNlpTranslation", error=parse_error(re)
+        )
     except Exception as e:
         logger.exception("Unexpected error during chat request.")
         return ChatResponse(content="backend.errorUnexpected", error=parse_error(e))
@@ -277,7 +317,7 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
 
 class ExecuteSqlRequest(BaseModel):
     """Request model for the execute SQL endpoint."""
-    
+
     query: str
     db_path: Optional[str] = None
 
@@ -294,9 +334,11 @@ def parse_error(e: Exception) -> ApiError:
     Parse an exception into a structured ApiError.
 
     Args:
+    ----
         e (Exception): The exception to parse.
 
     Returns:
+    -------
         ApiError: The resulting ApiError object.
 
     """
@@ -306,20 +348,25 @@ def parse_error(e: Exception) -> ApiError:
     except Exception:
         return ApiError(error_code="backend.errorUnexpected", params={"error": str(e)})
 
+
 @app.post("/api/execute-sql", response_model=ExecuteSqlResponse)
 def execute_sql_endpoint(request: ExecuteSqlRequest) -> ExecuteSqlResponse:
     """
     Execute an arbitrary SQL query against the database.
 
     Args:
+    ----
         request: The request containing the query and optional db_path.
 
     Returns:
+    -------
         The execution response containing results or error.
 
     """
     if not request.query.strip():
-        return ExecuteSqlResponse(error=ApiError(error_code="backend.emptyMessage", params={}))
+        return ExecuteSqlResponse(
+            error=ApiError(error_code="backend.emptyMessage", params={})
+        )
 
     try:
         db_path = request.db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
@@ -347,21 +394,26 @@ def get_table_data(
     Return paginated rows from a specific table.
 
     Args:
+    ----
         table_name: The table name.
         limit: The limit.
         offset: The offset.
 
     Returns:
+    -------
         The data.
 
     Raises:
+    ------
         HTTPException: on error.
 
     """
     db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     # Validate table name to prevent SQL injection
     if not table_name.isidentifier():
-        raise HTTPException(status_code=400, detail={"error_code": "backend.invalidTable", "params": {}})
+        raise HTTPException(
+            status_code=400, detail={"error_code": "backend.invalidTable", "params": {}}
+        )
 
     try:
         conn = duckdb.connect(db_path, read_only=True)
@@ -369,7 +421,10 @@ def get_table_data(
         tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
         if table_name not in tables:
             conn.close()
-            raise HTTPException(status_code=404, detail={"error_code": "backend.tableNotFound", "params": {}})
+            raise HTTPException(
+                status_code=404,
+                detail={"error_code": "backend.tableNotFound", "params": {}},
+            )
 
         # Limit to reasonable maximum
         limit = min(limit, 1000)
@@ -385,7 +440,10 @@ def get_table_data(
         raise
     except Exception as e:
         logger.error(f"Error fetching table data: {e}")
-        raise HTTPException(status_code=500, detail={"error_code": "backend.serverError", "params": {"error": str(e)}})
+        raise HTTPException(
+            status_code=500,
+            detail={"error_code": "backend.serverError", "params": {"error": str(e)}},
+        )
 
 
 class ColumnInfo(BaseModel):
@@ -413,7 +471,8 @@ def get_schema() -> SchemaResponse:
     """
     Return structured schema for the frontend Schema Explorer.
 
-    Returns:
+    Returns
+    -------
         The structured schema response.
 
     """
@@ -442,7 +501,8 @@ def list_models() -> ModelsResponse:
     """
     List available local Ollama models.
 
-    Returns:
+    Returns
+    -------
         A list of available models.
 
     """
@@ -465,9 +525,13 @@ def list_models() -> ModelsResponse:
 
 
 if os.environ.get("DEBUG"):  # pragma: no cover
-    dist_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "web", "dist")
+    dist_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "web", "dist"
+    )
     if os.path.exists(dist_path):
         logger.info(f"DEBUG mode enabled. Serving static frontend from {dist_path}")
         app.mount("/", StaticFiles(directory=dist_path, html=True), name="static")
     else:
-        logger.warning(f"DEBUG mode enabled but static dist folder not found at {dist_path}")
+        logger.warning(
+            f"DEBUG mode enabled but static dist folder not found at {dist_path}"
+        )

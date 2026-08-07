@@ -27,12 +27,5 @@ export default defineConfig({
       reuseExistingServer: true,
       timeout: 120000,
     },
-    {
-      command:
-        "cd .. && T1D_DB_PATH=ci_test.duckdb PYTHONPATH=src uvicorn t1d_analytics.api:app --port 8000",
-      url: "http://localhost:8000/api/schema",
-      reuseExistingServer: true,
-      timeout: 120000,
-    },
   ],
 });

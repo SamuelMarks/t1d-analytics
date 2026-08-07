@@ -6,7 +6,6 @@ from unittest.mock import Mock
 import pytest
 from pytest import CaptureFixture
 from requests import HTTPError
-
 from t1d_analytics.downloader import (
     download_file,
     process_datasets,
@@ -78,6 +77,7 @@ def test_process_datasets(tmp_path: Path, requests_mock: Mock) -> None:
     assert (tmp_path / "Proto_1" / "d1.zip").exists()
     assert (tmp_path / "Proto_1" / "doc.pdf").exists()
     assert (tmp_path / "Proto_2").exists()
+
 
 def test_download_file_doi_exists(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     """Test skipping existing DOI link."""

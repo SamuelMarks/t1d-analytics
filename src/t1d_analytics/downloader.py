@@ -15,9 +15,11 @@ def sanitize_filename(name: str) -> str:
     Sanitize a string to be used as a safe filename or directory name.
 
     Args:
+    ----
         name: The original string.
 
     Returns:
+    -------
         A sanitized string.
 
     """
@@ -31,6 +33,7 @@ def download_file(url: str, dest_dir: Path) -> None:
     Download a file from a URL or save a DOI link.
 
     Args:
+    ----
         url: The URL to download.
         dest_dir: The directory to save the file.
 
@@ -68,6 +71,7 @@ def process_datasets(datasets: list[DatasetInfo], output_dir: str) -> None:
     Process and download all given datasets.
 
     Args:
+    ----
         datasets: List of DatasetInfo objects.
         output_dir: Base directory to save downloads.
 
