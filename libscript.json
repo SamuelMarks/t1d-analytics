@@ -21,30 +21,24 @@
   },
   "hooks": {
     "install": [
-      "sudo mkdir -p /mnt/data",
-      "sudo mount /dev/nvme1n1 /mnt/data || sudo mount /dev/disk/azure/scsi1/lun0 /mnt/data || true",
-      "/home/azureuser/.local/bin/uv sync",
-      "(cd web && export PATH=/home/azureuser/.volta/bin:$PATH && npm install)",
-      "sudo apt-get update && sudo apt-get install -y certbot python3-certbot-nginx",
-      "printf 'server { listen 80; server_name t1d-analytics.healthplatform.io; proxy_read_timeout 3600; proxy_connect_timeout 3600; proxy_send_timeout 3600; location / { proxy_pass http://127.0.0.1:3000; } location /api/ { proxy_pass http://127.0.0.1:8001; } }' | sudo tee /etc/nginx/conf.d/t1d-analytics.healthplatform.io.conf",
-      "sudo systemctl restart nginx || true",
-      "sudo certbot --nginx -n --agree-tos -d t1d-analytics.healthplatform.io -m admin@healthplatform.io --redirect || true"
+      "mkdir -p /tmp/data",
+      "python3 -m pip install -r requirements.txt -r requirements-dev.txt",
+      "python3 -m pip install -e .",
+      "(cd web && npm install)"
     ],
-    "build": [
-      "(cd web && export PATH=/home/azureuser/.volta/bin:$PATH && npm run build)"
-    ],
-    "pre_start": ["sudo -u postgres createdb t1d_analytics || true"]
+    "build": ["(cd web && npm run build)"],
+    "pre_start": ["createdb t1d_analytics || true"]
   },
   "services": {
     "t1d-api": {
-      "command": "/home/azureuser/.local/bin/uv run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port 8001",
+      "command": "uvicorn t1d_analytics.api:app --host 0.0.0.0 --port 8001",
       "env": {
         "DATABASE_URL": "postgres://postgres:password@127.0.0.1:5432/t1d_analytics",
-        "T1D_DB_PATH": "/mnt/data/t1d_analytics.duckdb"
+        "T1D_DB_PATH": "/tmp/data/t1d_analytics.duckdb"
       }
     },
     "t1d-web": {
-      "command": "cd web && export PATH=/home/azureuser/.volta/bin:$PATH && npx vite preview --port 3000 --host",
+      "command": "cd web && npx vite preview --port 3000 --host",
       "env": {
         "NODE_ENV": "production",
         "DATABASE_URL": "postgres://postgres:password@127.0.0.1:5432/t1d_analytics"

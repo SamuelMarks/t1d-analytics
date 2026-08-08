@@ -62,13 +62,13 @@ goto :eof
 
 :install_base
 call :activate_venv
-python -m pip install --upgrade pip
+python3 -m pip install --upgrade pip
 npm install -g npm
 goto :eof
 
 :install_deps
 call :activate_venv
-python -m pip install -r requirements.txt -r requirements-dev.txt
+python3 -m pip install -r requirements.txt -r requirements-dev.txt
 cd web
 call npm install
 cd ..
@@ -84,7 +84,7 @@ cd web
 call npm run build
 cd ..
 call :activate_venv
-python -m pip install -e .
+python3 -m pip install -e .
 goto :eof
 
 :serve

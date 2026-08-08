@@ -84,7 +84,7 @@ class TrainingDataGenerator:
                 "format": "json",
             }
             req = urllib.request.Request(
-                "http://localhost:11434/api/generate",
+                "http://127.0.0.1:11434/api/generate",
                 data=json.dumps(data).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )

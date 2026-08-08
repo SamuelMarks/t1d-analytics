@@ -66,7 +66,7 @@ def main() -> None:
     with open("tests/test_data/tiny.csv", "w") as f:
         f.write("id,value\n1,100\n2,200\n")
 
-    system_python = shutil.which("python3") or shutil.which("python") or "python"
+    system_python = sys.executable
     run_cmd(
         [
             system_python,
@@ -84,18 +84,20 @@ def main() -> None:
 
     print("Starting backend server...")
     backend_proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "t1d_analytics.api:app", "--port", "8000"],
+        [system_python, "-m", "uvicorn", "t1d_analytics.api:app", "--port", "8000"],
         env=backend_env,
     )
 
     print("Starting frontend server...")
-    frontend_proc = subprocess.Popen([npm_cmd, "run", "dev"], cwd="web", env=env)
+    frontend_proc = subprocess.Popen(
+        [npm_cmd, "run", "dev", "--", "--host", "127.0.0.1"], cwd="web", env=env
+    )
 
     print("Waiting for backend DB to connect and API to be ready...")
     backend_ready = False
     for _ in range(30):
         try:
-            urllib.request.urlopen("http://localhost:8000/api/schema")
+            urllib.request.urlopen("http://127.0.0.1:8000/api/schema")
             backend_ready = True
             break
         except Exception:
@@ -111,7 +113,7 @@ def main() -> None:
     frontend_ready = False
     for _ in range(30):
         try:
-            urllib.request.urlopen("http://localhost:5173")
+            urllib.request.urlopen("http://127.0.0.1:5173")
             frontend_ready = True
             break
         except Exception:
@@ -151,7 +153,6 @@ def main() -> None:
     lcov_files = [
         "coverage.lcov",
         os.path.join("web", "coverage", "lcov.info"),
-        os.path.join("web", "coverage", "e2e", "lcov.info"),
     ]
 
     for lcov_file in lcov_files:

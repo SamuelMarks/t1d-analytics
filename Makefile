@@ -31,11 +31,11 @@ clean_docker:
 	docker-compose down -v
 
 install_base:
-	$(VENV_ACTIVATE) python -m pip install --upgrade pip
+	$(VENV_ACTIVATE) python3 -m pip install --upgrade pip
 	npm install -g npm
 
 install_deps:
-	$(VENV_ACTIVATE) python -m pip install -r requirements.txt -r requirements-dev.txt
+	$(VENV_ACTIVATE) python3 -m pip install -r requirements.txt -r requirements-dev.txt
 	cd web && npm install
 
 build_docs:
@@ -44,7 +44,7 @@ build_docs:
 
 build:
 	cd web && npm run build
-	$(VENV_ACTIVATE) python -m pip install -e .
+	$(VENV_ACTIVATE) python3 -m pip install -e .
 
 serve:
 	$(VENV_ACTIVATE) DEBUG=1 uvicorn src.t1d_analytics.api:app --reload --port 8000

@@ -13,6 +13,16 @@ repos:
         language: system
         types_or: [javascript, ts, css, html, json, markdown]
         pass_filenames: true
+      - id: tsc
+        name: typecheck frontend
+        entry: bash -c 'cd web && npx tsc --noEmit'
+        language: system
+        pass_filenames: false
+      - id: mypy
+        name: typecheck backend
+        entry: mypy --strict src/t1d_analytics
+        language: system
+        pass_filenames: false
       - id: tests-and-shields
         name: run build, tests, coverage, and update shields
         entry: sh -c 'python3 scripts/run_tests.py 2>/dev/null || python scripts/run_tests.py'

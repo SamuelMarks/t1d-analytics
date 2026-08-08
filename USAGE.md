@@ -30,7 +30,7 @@ The project comes with a CLI entry point to manage datasets.
    ```
 3. Extract the downloaded Zip files:
    ```bash
-   python -c "from t1d_analytics.analytics import extract_zips; extract_zips('data/')"
+   t1d-analytics extract -d data/
    ```
 
 ---
@@ -42,7 +42,7 @@ Once the data is extracted into CSV or TXT formats, you need to load them into t
 Use the `load` CLI command to ingest all tabular files in your data directory into a database. For example, to load data from `/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb` into a `t1d.duckdb` file in the same directory:
 
 ```bash
-python -m t1d_analytics.cli load --data-dir /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb --db /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb
+t1d-analytics load --data-dir /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb --db /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb
 ```
 
 This script automatically detects file encodings (UTF-8, UTF-16) and delimiters (comma, tab, pipe) and populates the local `.duckdb` file.
@@ -114,7 +114,7 @@ Whenever an executed query returns data, the UI will automatically parse the res
 If you prefer staying completely in the terminal, you can bypass the web interface and use the built-in Interactive REPL:
 
 ```bash
-python -c "from t1d_analytics.analytics import run_query_repl; run_query_repl('t1d.duckdb')"
+t1d-analytics query --db t1d.duckdb
 ```
 
 This opens a `query>` prompt.

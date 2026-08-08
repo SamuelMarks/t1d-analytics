@@ -7,12 +7,14 @@ import { marked } from "marked";
 import hljs from "highlight.js/lib/core";
 import sql from "highlight.js/lib/languages/sql";
 import markdown from "highlight.js/lib/languages/markdown";
+import python from "highlight.js/lib/languages/python";
 import "highlight.js/styles/github-dark.css";
 import { ChatState } from "./state";
 import i18next, { setLanguage } from "./i18n";
 
 hljs.registerLanguage("sql", sql);
 hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("python", python);
 
 /**
  * Parses a backend error string or detail object into a translated string.

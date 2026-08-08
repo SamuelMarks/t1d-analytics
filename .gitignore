@@ -1,3 +1,5 @@
+*.lcov
+.nyc_output
 # ========================
 # Ad-hoc & Analysis Scripts (Wildcards)
 # ========================

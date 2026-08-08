@@ -123,7 +123,7 @@ npm run coverage
 
 ```bash
 cd web
-npm run test:e2e
+npx playwright test
 ```
 
 ## ⚙️ Deployment
@@ -131,17 +131,15 @@ npm run test:e2e
 This project leverages [LibScript](https://github.com/SamuelMarks/libscript) for complete, native PaaS deployment without Docker.
 
 ```bash
-export LIBSCRIPT_PATH="$HOME/repos/libscript/libscript.sh"
-[ -d "$LIBSCRIPT_PATH" ] || git clone --depth=1 https://github.com/SamuelMarks/libscript "$LIBSCRIPT_PATH"
+export LIBSCRIPT_DIR="$HOME/repos/libscript"
+[ -d "$LIBSCRIPT_DIR" ] || git clone --depth=1 https://github.com/SamuelMarks/libscript "$LIBSCRIPT_DIR"
+export LIBSCRIPT_PATH="$LIBSCRIPT_DIR/libscript.sh"
 
-# 1. Install toolchains (Python 3.12, NodeJS 20, Nginx)
+# 1. Install toolchains (Python, NodeJS, Postgres) natively
 $LIBSCRIPT_PATH install-deps
 
-# 2. Run ETL hooks, build frontend, setup daemons, and configure Nginx
+# 2. Start the services natively (automatically daemonizes and runs build hooks)
 $LIBSCRIPT_PATH start
-
-# Note: You can skip hooks if data is already loaded
-$LIBSCRIPT_PATH start --no-hooks
 ```
 
 For full cloud orchestration details, see [DEPLOY.md](DEPLOY.md).
