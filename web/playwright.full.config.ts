@@ -22,6 +22,15 @@ export default defineConfig({
   ],
   webServer: [
     {
+      // Start the Python FastAPI backend server required for full E2E tests.
+      // Fallback to python3 if python is not available in the environment.
+      command:
+        "python -m uvicorn t1d_analytics.api:app --port 8000 || python3 -m uvicorn t1d_analytics.api:app --port 8000",
+      url: "http://127.0.0.1:8000/api/models",
+      reuseExistingServer: true,
+      timeout: 120000,
+    },
+    {
       command: "npm run dev",
       url: "http://localhost:5173",
       reuseExistingServer: true,
