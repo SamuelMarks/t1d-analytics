@@ -213,7 +213,10 @@ def test_list_models_success(monkeypatch: typing.Any) -> None:
     import urllib.request
 
     class MockResponse:
+        """Mock HTTP response object."""
+
         def read(self) -> bytes:
+            """Return mock JSON byte payload."""
             return json.dumps(
                 {
                     "models": [
@@ -224,15 +227,20 @@ def test_list_models_success(monkeypatch: typing.Any) -> None:
             ).encode()
 
     class MockUrlopen:
+        """Mock context manager for urllib urlopen."""
+
         def __init__(self, req: typing.Any, timeout: typing.Any = None) -> None:
+            """Initialize MockUrlopen."""
             self.req = req
 
         def __enter__(self) -> typing.Any:
+            """Enter the context manager."""
             return MockResponse()
 
         def __exit__(
             self, exc_type: typing.Any, exc_val: typing.Any, exc_tb: typing.Any
         ) -> None:
+            """Exit the context manager."""
             pass
 
     monkeypatch.setattr(urllib.request, "urlopen", MockUrlopen)
@@ -252,6 +260,7 @@ def test_list_models_url_error(monkeypatch: typing.Any) -> None:
     import urllib.request
 
     def mock_urlopen(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        """Simulate urlopen throwing URLError."""
         raise urllib.error.URLError("Connection refused")
 
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
@@ -269,6 +278,7 @@ def test_list_models_general_error(monkeypatch: typing.Any) -> None:
     import urllib.request
 
     def mock_urlopen(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        """Simulate urlopen throwing a generic exception."""
         raise Exception("Unexpected boom")
 
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
@@ -431,6 +441,7 @@ def test_global_exception_handler() -> None:
 
     @router.get("/error_endpoint_for_test")
     def error_endpoint() -> None:
+        """Endpoint designed to raise an unhandled exception."""
         raise Exception("Trigger unhandled exception")
 
     app.include_router(router)

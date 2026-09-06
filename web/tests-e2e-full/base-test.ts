@@ -1,9 +1,17 @@
-import { test as baseTest, expect } from "@playwright/test";
+/**
+ * @fileoverview Custom Playwright test fixture for full stack E2E testing
+ * providing NYC code coverage collection.
+ */
+
+import { test as baseTest, expect, type Page } from "@playwright/test";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
-export const test = baseTest.extend({
+/**
+ * Extended Playwright test runner for full E2E testing with automatic coverage instrumentation.
+ */
+export const test = baseTest.extend<{ page: Page }>({
   page: async ({ page }, use) => {
     await use(page);
     const coverage = await page.evaluate(() => (window as any).__coverage__);
@@ -22,4 +30,5 @@ export const test = baseTest.extend({
     }
   },
 });
+
 export { expect };
