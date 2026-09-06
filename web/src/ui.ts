@@ -83,6 +83,18 @@ export class ChatUI {
   private themeToggleBtn: HTMLButtonElement;
   private overlay: HTMLElement;
 
+  // Diagnostic and status elements
+  private systemStatusChip: HTMLButtonElement | null;
+  private statusChipText: HTMLElement | null;
+  private systemStatusBanner: HTMLElement | null;
+  private bannerTitle: HTMLElement | null;
+  private bannerDesc: HTMLElement | null;
+  private bannerIcon: HTMLElement | null;
+  private bannerRetryBtn: HTMLButtonElement | null;
+  private bannerInstructionsBtn: HTMLButtonElement | null;
+  private bannerInstructionsDrawer: HTMLElement | null;
+  private bannerDismissBtn: HTMLButtonElement | null;
+
   /**
    * Initializes the ChatUI.
    * @param {ChatState} state The global state object.
@@ -127,6 +139,28 @@ export class ChatUI {
     ) as HTMLButtonElement;
     this.overlay = document.getElementById("overlay") as HTMLElement;
 
+    // Diagnostic and status elements
+    this.systemStatusChip = document.getElementById(
+      "system-status-chip",
+    ) as HTMLButtonElement | null;
+    this.statusChipText = document.getElementById("status-chip-text");
+    this.systemStatusBanner = document.getElementById("system-status-banner");
+    this.bannerTitle = document.getElementById("banner-title");
+    this.bannerDesc = document.getElementById("banner-desc");
+    this.bannerIcon = document.getElementById("banner-icon");
+    this.bannerRetryBtn = document.getElementById(
+      "banner-retry-btn",
+    ) as HTMLButtonElement | null;
+    this.bannerInstructionsBtn = document.getElementById(
+      "banner-instructions-btn",
+    ) as HTMLButtonElement | null;
+    this.bannerInstructionsDrawer = document.getElementById(
+      "banner-instructions-drawer",
+    );
+    this.bannerDismissBtn = document.getElementById(
+      "banner-dismiss-btn",
+    ) as HTMLButtonElement | null;
+
     this.bindEvents();
     this.loadModels();
     this.loadSchema();
@@ -150,6 +184,209 @@ export class ChatUI {
   }
 
   /**
+   * Shows the system status alert banner with the specified severity and messaging.
+   * @param {"danger" | "warning" | "info"} severity The alert level.
+   * @param {string} title The title to display.
+   * @param {string} desc The description message.
+   * @param {string} icon The icon to render.
+   * @param {boolean} showRetry Whether to show the retry button.
+   */
+  public showBanner(
+    severity: "danger" | "warning" | "info",
+    title: string,
+    desc: string,
+    icon: string = "⚠️",
+    showRetry: boolean = true,
+  ): void {
+    if (!this.systemStatusBanner) return;
+    this.systemStatusBanner.className = `system-status-banner banner-${severity}`;
+    if (this.bannerIcon) this.bannerIcon.textContent = icon;
+    if (this.bannerTitle) this.bannerTitle.textContent = title;
+    if (this.bannerDesc) this.bannerDesc.textContent = desc;
+    if (this.bannerRetryBtn) {
+      this.bannerRetryBtn.style.display = showRetry ? "inline-block" : "none";
+    }
+    this.systemStatusBanner.classList.remove("hidden");
+  }
+
+  /**
+   * Hides the system status alert banner.
+   */
+  public hideBanner(): void {
+    if (this.systemStatusBanner) {
+      this.systemStatusBanner.classList.add("hidden");
+    }
+  }
+
+  /**
+   * Updates the status chip in the top header.
+   * @param {"healthy" | "degraded" | "error" | "offline"} level The status severity.
+   * @param {string} text The status text.
+   */
+  public updateStatusChip(
+    level: "healthy" | "degraded" | "error" | "offline",
+    text: string,
+  ): void {
+    if (!this.systemStatusChip) return;
+    this.systemStatusChip.className = `status-chip status-${level}`;
+    this.systemStatusChip.setAttribute("aria-label", `System status: ${text}`);
+    this.systemStatusChip.setAttribute("title", `System status: ${text}`);
+    if (this.statusChipText) {
+      this.statusChipText.textContent = text;
+    }
+  }
+
+  /**
+   * Checks system health and updates UI indicators accordingly.
+   * @param {boolean} [isManualRetry=false] Whether this is a manual user retry.
+   */
+  public async checkSystemStatus(
+    isManualRetry: boolean = false,
+  ): Promise<void> {
+    if (isManualRetry && this.bannerRetryBtn) {
+      this.bannerRetryBtn.textContent = i18next.t("status.reconnecting");
+    }
+
+    try {
+      const response = await fetchWithBackendError("/api/status");
+      const health = await response.json();
+
+      this.state.setSystemStatus({
+        backendOnline: true,
+        status: health.status,
+        dbConfigured: Boolean(health.database?.exists),
+        dbExists: Boolean(health.database?.exists),
+        dbConnected: Boolean(health.database?.connected),
+        dbStatusCode: health.database?.status_code || "unknown",
+        dbMessage: health.database?.message || null,
+        dbRemediation: health.database?.remediation || null,
+        tableCount: Number(health.database?.table_count) || 0,
+        hasInitialData: Boolean(health.database?.has_initial_data),
+        ollamaOnline: Boolean(health.ollama?.accessible),
+        ollamaMessage: health.ollama?.message || null,
+        ollamaRemediation: health.ollama?.remediation || null,
+      });
+
+      // Handle database statuses
+      if (health.database?.status_code === "missing_file") {
+        this.showBanner(
+          "warning",
+          i18next.t("status.dbMissingTitle"),
+          i18next.t("status.dbMissingDesc", {
+            path: health.database.configured_path,
+          }),
+          "📁",
+          true,
+        );
+        this.updateStatusChip("error", i18next.t("status.dbMissingTitle"));
+      } else if (health.database?.status_code === "empty_db") {
+        this.showBanner(
+          "warning",
+          i18next.t("status.dbEmptyTitle"),
+          i18next.t("status.dbEmptyDesc"),
+          "🗄️",
+          true,
+        );
+        this.updateStatusChip("degraded", i18next.t("status.dbEmptyTitle"));
+      } else if (health.database?.status_code === "missing_initial_data") {
+        this.showBanner(
+          "warning",
+          i18next.t("status.dbMissingDataTitle"),
+          i18next.t("status.dbMissingDataDesc"),
+          "📊",
+          true,
+        );
+        this.updateStatusChip(
+          "degraded",
+          i18next.t("status.dbMissingDataTitle"),
+        );
+      } else if (!health.ollama?.accessible) {
+        this.showBanner(
+          "info",
+          i18next.t("status.ollamaOfflineTitle"),
+          i18next.t("status.ollamaOfflineDesc"),
+          "ℹ️",
+          false,
+        );
+        this.updateStatusChip(
+          "degraded",
+          i18next.t("status.ollamaOfflineTitle"),
+        );
+        if (this.modelSelect && this.modelSelect.value !== "sql") {
+          this.modelSelect.value = "sql";
+        }
+      } else {
+        this.hideBanner();
+        this.updateStatusChip("healthy", i18next.t("status.systemHealthy"));
+      }
+
+      this.render();
+    } catch {
+      this.state.setSystemStatus({
+        backendOnline: false,
+        status: "offline",
+      });
+      this.showBanner(
+        "danger",
+        i18next.t("status.offlineTitle"),
+        i18next.t("status.offlineDesc"),
+        "⚠️",
+        true,
+      );
+      this.updateStatusChip("offline", i18next.t("status.systemOffline"));
+      this.render();
+    } finally {
+      if (this.bannerRetryBtn) {
+        this.bannerRetryBtn.textContent = i18next.t("status.retry");
+      }
+    }
+  }
+
+  /**
+   * Copies text to the user's clipboard and provides visual button feedback.
+   * @param {string} cmd The command string to copy.
+   * @param {HTMLButtonElement} btn The button providing visual feedback.
+   */
+  public async copyCommandToClipboard(
+    cmd: string,
+    btn: HTMLButtonElement,
+  ): Promise<void> {
+    if (!navigator?.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      btn.textContent = i18next.t("status.commandCopied");
+      setTimeout(() => {
+        btn.textContent = i18next.t("status.copyCommand");
+      }, 2000);
+    } catch {
+      // Ignore clipboard write errors
+    }
+  }
+
+  /**
+   * Binds interaction events to action buttons inside diagnostic cards.
+   * @param {HTMLElement} container The container holding diagnostic cards.
+   */
+  private bindSchemaDiagnosticButtons(container: HTMLElement): void {
+    container.querySelectorAll(".copy-cmd-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const target = e.currentTarget as HTMLButtonElement;
+        const cmd = target.dataset.cmd;
+        if (cmd) {
+          void this.copyCommandToClipboard(cmd, target);
+        }
+      });
+    });
+
+    container.querySelectorAll(".reload-schema-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this.loadSchema();
+        this.checkSystemStatus(true);
+      });
+    });
+  }
+
+  /**
    * Fetches the database schema and renders it in the sidebar.
    */
   private async loadSchema(): Promise<void> {
@@ -162,8 +399,99 @@ export class ChatUI {
 
       schemaContent.innerHTML = ""; // Clear loading message
 
+      if (data.database) {
+        const dbStatus = data.database;
+        const isHealthy = dbStatus.status_code === "healthy";
+        this.state.setSystemStatus({
+          backendOnline: true,
+          status: isHealthy ? "healthy" : "degraded",
+          dbConfigured: Boolean(dbStatus.exists),
+          dbExists: Boolean(dbStatus.exists),
+          dbConnected: Boolean(dbStatus.connected),
+          dbStatusCode: dbStatus.status_code || "unknown",
+          dbMessage: dbStatus.message || null,
+          dbRemediation: dbStatus.remediation || null,
+          tableCount: Number(dbStatus.table_count) || 0,
+          hasInitialData: Boolean(dbStatus.has_initial_data),
+        });
+
+        if (dbStatus.status_code === "missing_file") {
+          this.showBanner(
+            "warning",
+            i18next.t("status.dbMissingTitle"),
+            i18next.t("status.dbMissingDesc", {
+              path: dbStatus.configured_path,
+            }),
+            "📁",
+            true,
+          );
+          this.updateStatusChip("error", i18next.t("status.dbMissingTitle"));
+        } else if (dbStatus.status_code === "empty_db") {
+          this.showBanner(
+            "warning",
+            i18next.t("status.dbEmptyTitle"),
+            i18next.t("status.dbEmptyDesc"),
+            "🗄️",
+            true,
+          );
+          this.updateStatusChip("degraded", i18next.t("status.dbEmptyTitle"));
+        } else if (dbStatus.status_code === "missing_initial_data") {
+          this.showBanner(
+            "warning",
+            i18next.t("status.dbMissingDataTitle"),
+            i18next.t("status.dbMissingDataDesc"),
+            "📊",
+            true,
+          );
+          this.updateStatusChip(
+            "degraded",
+            i18next.t("status.dbMissingDataTitle"),
+          );
+        } else {
+          this.hideBanner();
+          this.updateStatusChip("healthy", i18next.t("status.systemHealthy"));
+        }
+      }
+
       if (!data.tables || data.tables.length === 0) {
-        schemaContent.innerHTML = `<div class="schema-loading" role="status" aria-live="polite" data-i18n="ui.noTables">${i18next.t("ui.noTables")}</div>`;
+        const dbStatus = data.database;
+        if (dbStatus && dbStatus.status_code === "missing_file") {
+          schemaContent.innerHTML = `
+            <div class="schema-diagnostic-card" role="alert">
+              <div class="schema-diagnostic-header">
+                <span>📁</span>
+                <span>${i18next.t("status.dbMissingTitle")}</span>
+              </div>
+              <p class="schema-diagnostic-desc">${i18next.t(
+                "status.dbMissingDesc",
+                { path: dbStatus.configured_path },
+              )}</p>
+              <div class="schema-command-box">
+                <code>t1d-analytics load --db ${dbStatus.configured_path}</code>
+                <button class="btn btn-xs btn-secondary copy-cmd-btn" data-cmd="t1d-analytics load --db ${dbStatus.configured_path}">${i18next.t("status.copyCommand")}</button>
+              </div>
+              <button class="btn btn-xs btn-primary reload-schema-btn">${i18next.t("status.reloadSchema")}</button>
+            </div>
+          `;
+        } else if (dbStatus && dbStatus.status_code === "empty_db") {
+          schemaContent.innerHTML = `
+            <div class="schema-diagnostic-card" role="alert">
+              <div class="schema-diagnostic-header">
+                <span>🗄️</span>
+                <span>${i18next.t("status.dbEmptyTitle")}</span>
+              </div>
+              <p class="schema-diagnostic-desc">${i18next.t("status.dbEmptyDesc")}</p>
+              <div class="schema-command-box">
+                <code>t1d-analytics load</code>
+                <button class="btn btn-xs btn-secondary copy-cmd-btn" data-cmd="t1d-analytics load">${i18next.t("status.copyCommand")}</button>
+              </div>
+              <button class="btn btn-xs btn-primary reload-schema-btn">${i18next.t("status.reloadSchema")}</button>
+            </div>
+          `;
+        } else {
+          schemaContent.innerHTML = `<div class="schema-loading" role="status" aria-live="polite" data-i18n="ui.noTables">${i18next.t("ui.noTables")}</div>`;
+        }
+        this.bindSchemaDiagnosticButtons(schemaContent);
         return;
       }
 
@@ -237,7 +565,29 @@ export class ChatUI {
       console.error("Failed to load schema:", error);
       const errMsg = i18next.t("ui.failedSchema");
       this.announce(errMsg, true);
-      schemaContent.innerHTML = `<div class="schema-loading error-text" role="alert" aria-live="assertive" data-i18n="ui.failedSchema">${errMsg}</div>`;
+      schemaContent.innerHTML = `
+        <div class="schema-diagnostic-card error-text" role="alert">
+          <div class="schema-diagnostic-header">
+            <span>⚠️</span>
+            <span>${i18next.t("status.offlineTitle")}</span>
+          </div>
+          <p class="schema-diagnostic-desc">${i18next.t("status.offlineDesc")}</p>
+          <button class="btn btn-xs btn-primary reload-schema-btn">${i18next.t("status.reloadSchema")}</button>
+        </div>
+      `;
+      this.bindSchemaDiagnosticButtons(schemaContent);
+      this.state.setSystemStatus({
+        backendOnline: false,
+        status: "offline",
+      });
+      this.showBanner(
+        "danger",
+        i18next.t("status.offlineTitle"),
+        i18next.t("status.offlineDesc"),
+        "⚠️",
+        true,
+      );
+      this.updateStatusChip("offline", i18next.t("status.systemOffline"));
     }
   }
 
@@ -332,6 +682,7 @@ export class ChatUI {
       await setLanguage(this.langSelect.value);
       this.updateThemeButtonLabel();
       // Re-render UI components that generate dynamic text
+      this.checkSystemStatus();
       this.render();
     });
 
@@ -346,6 +697,33 @@ export class ChatUI {
       );
       this.updateThemeButtonLabel();
     });
+
+    // Status banner & chip interactions
+    if (this.bannerRetryBtn) {
+      this.bannerRetryBtn.addEventListener("click", () => {
+        this.checkSystemStatus(true);
+        this.loadModels();
+        this.loadSchema();
+      });
+    }
+
+    if (this.bannerInstructionsBtn && this.bannerInstructionsDrawer) {
+      this.bannerInstructionsBtn.addEventListener("click", () => {
+        this.bannerInstructionsDrawer?.classList.toggle("hidden");
+      });
+    }
+
+    if (this.bannerDismissBtn) {
+      this.bannerDismissBtn.addEventListener("click", () => {
+        this.hideBanner();
+      });
+    }
+
+    if (this.systemStatusChip) {
+      this.systemStatusChip.addEventListener("click", () => {
+        this.checkSystemStatus(true);
+      });
+    }
 
     // Mobile sidebar toggles
     this.openSidebarBtn.addEventListener("click", () => {
@@ -739,9 +1117,18 @@ export class ChatUI {
       return;
     }
 
-    this.chatInput.disabled = false;
-    this.chatInputWrapper.classList.remove("disabled");
-    this.sendBtn.disabled = false;
+    if (!this.state.systemStatus.backendOnline) {
+      this.chatInput.disabled = true;
+      this.chatInputWrapper.classList.add("disabled");
+      this.chatInput.placeholder = i18next.t("status.inputOffline");
+      this.sendBtn.disabled = true;
+    } else {
+      this.chatInput.disabled = false;
+      this.chatInputWrapper.classList.remove("disabled");
+      this.chatInput.placeholder = i18next.t("app.typeMessage");
+      this.sendBtn.disabled = false;
+    }
+
     this.modelSelect.disabled = false;
     this.modelSelect.value = activeChat.model;
 
@@ -765,7 +1152,33 @@ export class ChatUI {
       emptyStateDiv.className = "empty-state";
       emptyStateDiv.setAttribute("role", "status");
       emptyStateDiv.setAttribute("aria-live", "polite");
-      emptyStateDiv.innerHTML = `<p style="margin-bottom: 1rem;">${i18next.t("ui.noMessagesYet")}</p>`;
+
+      if (
+        this.state.systemStatus.dbStatusCode === "empty_db" ||
+        this.state.systemStatus.dbStatusCode === "missing_initial_data" ||
+        this.state.systemStatus.dbStatusCode === "missing_file"
+      ) {
+        const dbNotice = document.createElement("div");
+        dbNotice.className = "schema-diagnostic-card";
+        dbNotice.style.marginBottom = "1rem";
+        dbNotice.innerHTML = `
+          <div class="schema-diagnostic-header">
+            <span>ℹ️</span>
+            <span>${i18next.t("status.emptyDbPrompt")}</span>
+          </div>
+          <div class="schema-command-box">
+            <code>t1d-analytics load</code>
+            <button class="btn btn-xs btn-secondary copy-cmd-btn" data-cmd="t1d-analytics load">${i18next.t("status.copyCommand")}</button>
+          </div>
+        `;
+        this.bindSchemaDiagnosticButtons(dbNotice);
+        emptyStateDiv.appendChild(dbNotice);
+      }
+
+      emptyStateDiv.insertAdjacentHTML(
+        "beforeend",
+        `<p style="margin-bottom: 1rem;">${i18next.t("ui.noMessagesYet")}</p>`,
+      );
 
       const chipsContainer = document.createElement("div");
       chipsContainer.className = "chips-container";

@@ -102,6 +102,49 @@ export const enTranslations = {
     invalidTable: "Invalid table name",
     tableNotFound: "Table not found",
     serverError: "Internal server error: {{error}}",
+    dbNotFound: "Database file not found: {{path}}",
+    dbEmpty: "Database contains 0 tables.",
+    dbUnreadable: "Database is unreadable or corrupted.",
+  },
+  status: {
+    offlineTitle: "Backend Server Unreachable",
+    offlineDesc:
+      "Cannot connect to the backend server at http://127.0.0.1:8000. Ensure the API server is running.",
+    dbMissingTitle: "Database File Missing",
+    dbMissingDesc:
+      "Database file not found at '{{path}}'. Run 't1d-analytics load' to initialize it.",
+    dbEmptyTitle: "Database Unpopulated",
+    dbEmptyDesc:
+      "Database contains 0 tables. Load clinical trial data using 't1d-analytics load'.",
+    dbMissingDataTitle: "Clinical Datasets Missing",
+    dbMissingDataDesc:
+      "Standard T1D clinical trial tables (patients, cgms, etc.) are missing.",
+    ollamaOfflineTitle: "Ollama LLM Offline",
+    ollamaOfflineDesc:
+      "Natural language translation is unavailable. Switched to Literal SQL mode.",
+    retry: "Retry Connection",
+    reconnecting: "Reconnecting...",
+    dismiss: "Dismiss alert",
+    systemHealthy: "All systems operational",
+    systemDegraded: "Degraded service",
+    systemError: "System error",
+    systemOffline: "Backend offline",
+    diagnostics: "Diagnostics",
+    setupGuide: "Setup Instructions",
+    copyCommand: "Copy Command",
+    commandCopied: "Copied!",
+    reloadSchema: "Reload Schema",
+    inputOffline: "Backend unreachable. Reconnecting...",
+    backendStatus: "Backend API",
+    databaseStatus: "DuckDB Database",
+    llmStatus: "Ollama LLM",
+    connected: "Connected",
+    disconnected: "Disconnected",
+    healthy: "Healthy",
+    warning: "Warning",
+    error: "Error",
+    emptyDbPrompt:
+      "Database has no tables loaded. Use 't1d-analytics load' to import clinical data.",
   },
 };
 
@@ -199,6 +242,49 @@ export const jaTranslations = {
     invalidTable: "無効なテーブル名",
     tableNotFound: "テーブルが見つかりません",
     serverError: "内部サーバーエラー: {{error}}",
+    dbNotFound: "データベースファイルが見つかりません: {{path}}",
+    dbEmpty: "データベースにテーブルがありません。",
+    dbUnreadable: "データベースを読み取れないか破損しています。",
+  },
+  status: {
+    offlineTitle: "バックエンドサーバーに接続できません",
+    offlineDesc:
+      "http://127.0.0.1:8000 のバックエンドサーバーに接続できません。APIサーバーが実行中であることを確認してください。",
+    dbMissingTitle: "データベースファイルが見つかりません",
+    dbMissingDesc:
+      "データベースファイル '{{path}}' が見つかりません。't1d-analytics load' を実行して初期化してください。",
+    dbEmptyTitle: "データベースが空です",
+    dbEmptyDesc:
+      "データベースにテーブルがありません。't1d-analytics load' で臨床試験データを読み込んでください。",
+    dbMissingDataTitle: "臨床データセットが不足しています",
+    dbMissingDataDesc:
+      "標準的なT1D臨床試験テーブル（patients、cgms等）が存在しません。",
+    ollamaOfflineTitle: "Ollama LLM オフライン",
+    ollamaOfflineDesc:
+      "自然言語の翻訳が利用できません。リテラルSQLモードに切り替えました。",
+    retry: "再接続を試みる",
+    reconnecting: "再接続中...",
+    dismiss: "アラートを閉じる",
+    systemHealthy: "すべてのシステムが正常に動作中",
+    systemDegraded: "一部の機能が制限されています",
+    systemError: "システムエラー",
+    systemOffline: "バックエンドオフライン",
+    diagnostics: "診断情報",
+    setupGuide: "セットアップ手順",
+    copyCommand: "コマンドをコピー",
+    commandCopied: "コピーしました！",
+    reloadSchema: "スキーマを再読み込み",
+    inputOffline: "バックエンドに接続できません。再接続中...",
+    backendStatus: "バックエンドAPI",
+    databaseStatus: "DuckDBデータベース",
+    llmStatus: "Ollama LLM",
+    connected: "接続済み",
+    disconnected: "未接続",
+    healthy: "正常",
+    warning: "警告",
+    error: "エラー",
+    emptyDbPrompt:
+      "データベースにテーブルが読み込まれていません。't1d-analytics load' を使用してデータをインポートしてください。",
   },
 };
 
@@ -296,6 +382,49 @@ export const arTranslations = {
     invalidTable: "اسم جدول غير صالح",
     tableNotFound: "الجدول غير موجود",
     serverError: "خطأ خادم داخلي: {{error}}",
+    dbNotFound: "لم يتم العثور على ملف قاعدة البيانات: {{path}}",
+    dbEmpty: "قاعدة البيانات لا تحتوي على جداول.",
+    dbUnreadable: "قاعدة البيانات غير قابلة للقراءة أو تالفة.",
+  },
+  status: {
+    offlineTitle: "تعذر الاتصال بخادم الواجهة الخلفية",
+    offlineDesc:
+      "لا يمكن الاتصال بخادم الواجهة الخلفية على http://127.0.0.1:8000. تأكد من تشغيل خادم API.",
+    dbMissingTitle: "ملف قاعدة البيانات مفقود",
+    dbMissingDesc:
+      "لم يتم العثور على ملف قاعدة البيانات في '{{path}}'. شغّل 't1d-analytics load' لتهيئته.",
+    dbEmptyTitle: "قاعدة البيانات غير مأهولة",
+    dbEmptyDesc:
+      "قاعدة البيانات لا تحتوي على جداول. حمّل بيانات التجارب السريرية باستخدام 't1d-analytics load'.",
+    dbMissingDataTitle: "مجموعات البيانات السريرية مفقودة",
+    dbMissingDataDesc:
+      "جداول التجارب السريرية القياسية للنوع الأول من السكري (patients, cgms, إلخ) مفقودة.",
+    ollamaOfflineTitle: "خدمة Ollama LLM غير متصلة",
+    ollamaOfflineDesc:
+      "ترجمة استعلامات اللغة الطبيعية غير متاحة. تم التبديل إلى وضع SQL الحرفي.",
+    retry: "إعادة المحاولة",
+    reconnecting: "جاري إعادة الاتصال...",
+    dismiss: "إغلاق التنبيه",
+    systemHealthy: "جميع الأنظمة تعمل بشكل طبيعي",
+    systemDegraded: "الخدمة متدهورة جزئياً",
+    systemError: "خطأ في النظام",
+    systemOffline: "الواجهة الخلفية غير متصلة",
+    diagnostics: "التشخيصات",
+    setupGuide: "إرشادات الإعداد",
+    copyCommand: "نسخ الأمر",
+    commandCopied: "تم النسخ!",
+    reloadSchema: "إعادة تحميل المخطط",
+    inputOffline: "تعذر الاتصال بالواجهة الخلفية. جاري إعادة الاتصال...",
+    backendStatus: "واجهة برمجة تطبيقات الواجهة الخلفية",
+    databaseStatus: "قاعدة بيانات DuckDB",
+    llmStatus: "Ollama LLM",
+    connected: "متصل",
+    disconnected: "غير متصل",
+    healthy: "سليم",
+    warning: "تحذير",
+    error: "خطأ",
+    emptyDbPrompt:
+      "لا توجد جداول محملة في قاعدة البيانات. استخدم 't1d-analytics load' لاستيراد البيانات.",
   },
 };
 
@@ -393,6 +522,49 @@ export const heTranslations = {
     invalidTable: "שם טבלה לא חוקי",
     tableNotFound: "טבלה לא נמצאה",
     serverError: "שגיאת שרת פנימית: {{error}}",
+    dbNotFound: "קובץ מסד הנתונים לא נמצא: {{path}}",
+    dbEmpty: "מסד הנתונים אינו מכיל טבלאות.",
+    dbUnreadable: "מסד הנתונים אינו קריא או פגום.",
+  },
+  status: {
+    offlineTitle: "שרת ה-Backend אינו נגיש",
+    offlineDesc:
+      "לא ניתן להתחבר לשרת ה-Backend ב-http://127.0.0.1:8000. ודא ששרת ה-API פעיל.",
+    dbMissingTitle: "קובץ מסד הנתונים חסר",
+    dbMissingDesc:
+      "קובץ מסד הנתונים לא נמצא ב-'{{path}}'. הפעל 't1d-analytics load' כדי לאתחל אותו.",
+    dbEmptyTitle: "מסד הנתונים אינו מאוכלס",
+    dbEmptyDesc:
+      "מסד הנתונים אינו מכיל טבלאות. טען נתוני ניסויים קליניים באמצעות 't1d-analytics load'.",
+    dbMissingDataTitle: "ערכות נתונים קליניות חסרות",
+    dbMissingDataDesc:
+      "טבלאות ניסויים קליניים סטנדרטיים של סוכרת מסוג 1 (patients, cgms וכו') חסרות.",
+    ollamaOfflineTitle: "שירות Ollama LLM לא מקוון",
+    ollamaOfflineDesc:
+      "תרגום שאילתות בשפה טבעית אינו זמין. בוצע מעבר למצב SQL מילולי.",
+    retry: "נסה שוב",
+    reconnecting: "מתחבר מחדש...",
+    dismiss: "סגור התראה",
+    systemHealthy: "כל המערכות פועלות כסדרן",
+    systemDegraded: "שירות מוגבל",
+    systemError: "שגיאת מערכת",
+    systemOffline: "Backend לא מקוון",
+    diagnostics: "אבחון מערכת",
+    setupGuide: "הוראות הגדרה",
+    copyCommand: "העתק פקודה",
+    commandCopied: "הועתק!",
+    reloadSchema: "טען מחדש סכמה",
+    inputOffline: "אין חיבור ל-Backend. מנסה להתחבר מחדש...",
+    backendStatus: "ממשק Backend API",
+    databaseStatus: "מסד נתונים DuckDB",
+    llmStatus: "Ollama LLM",
+    connected: "מחובר",
+    disconnected: "מנותק",
+    healthy: "תקין",
+    warning: "אזהרה",
+    error: "שגיאה",
+    emptyDbPrompt:
+      "אין טבלאות במסד הנתונים. השתמש ב-'t1d-analytics load' לייבוא נתונים.",
   },
 };
 

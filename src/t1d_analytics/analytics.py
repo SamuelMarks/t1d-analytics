@@ -6,6 +6,7 @@ from pathlib import Path
 
 import duckdb
 
+from t1d_analytics.diagnostics import DatabaseStatusCode, check_database_health
 from t1d_analytics.i18n import get_translator
 
 
@@ -311,6 +312,18 @@ def run_query_repl(db_path: str) -> None:
         print(_("Database {} does not exist.", db_path))
         print(_("Please run the 'load' command first to populate the database."))
         return
+
+    db_health = check_database_health(db_path)
+    if db_health.status_code == DatabaseStatusCode.EMPTY_DB:
+        print(_("Warning: Database {} contains 0 tables.", db_path))
+        print(_("Please run the 'load' command first to populate the database."))
+    elif db_health.status_code == DatabaseStatusCode.MISSING_INITIAL_DATA:
+        print(
+            _(
+                "Warning: Database {} lacks standard initial clinical trial datasets.",
+                db_path,
+            )
+        )
 
     print(_("Connecting to DuckDB at {}...", db_path))
     conn = duckdb.connect(db_path, read_only=True)

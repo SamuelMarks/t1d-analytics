@@ -1,10 +1,13 @@
 """Tests for the CLI module."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import duckdb
 import pytest
 from pytest import CaptureFixture
 from t1d_analytics.cli import main
+from t1d_analytics.diagnostics import OllamaStatus
 
 
 @patch("t1d_analytics.cli.fetch_html")
@@ -136,3 +139,38 @@ def test_cli_main_invalid_command(mocker: MagicMock) -> None:
 
     # It should fall through the if-elif chain and exit cleanly (or raise no exception)
     main()
+
+
+def test_doctor_subcommand(capsys: CaptureFixture[str]) -> None:
+    """Test doctor subcommand runs diagnostics and outputs report."""
+    with patch("sys.argv", ["t1d-analytics", "doctor", "--db", "missing.duckdb"]):
+        main()
+
+    out = capsys.readouterr().out
+    assert "T1D Analytics System Health Report" in out
+    assert "Database (missing.duckdb):" in out
+    assert "Action:" in out
+
+
+def test_doctor_subcommand_healthy(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    """Test doctor subcommand when healthy and models are present."""
+    db_path = str(tmp_path / "healthy.duckdb")
+    conn = duckdb.connect(db_path)
+    conn.execute("CREATE TABLE patients (id INT)")
+    conn.close()
+
+    with patch(
+        "t1d_analytics.diagnostics.check_ollama_health",
+        return_value=OllamaStatus(
+            accessible=True,
+            available_models=["gemma4"],
+            message="Online",
+            remediation=None,
+        ),
+    ):
+        with patch("sys.argv", ["t1d-analytics", "doctor", "--db", db_path]):
+            main()
+
+    out = capsys.readouterr().out
+    assert "Overall Status: HEALTHY" in out
+    assert "Models:    gemma4" in out

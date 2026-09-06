@@ -39,6 +39,38 @@ export interface Chat {
 }
 
 /**
+ * System health and diagnostic status tracking backend, database, and LLM.
+ */
+export interface SystemStatus {
+  /** Whether backend API is reachable. */
+  backendOnline: boolean;
+  /** Overall system health level. */
+  status: "healthy" | "degraded" | "error" | "offline";
+  /** Whether database path is configured. */
+  dbConfigured: boolean;
+  /** Whether database file exists on disk. */
+  dbExists: boolean;
+  /** Whether database connection is active. */
+  dbConnected: boolean;
+  /** Database diagnostic status code. */
+  dbStatusCode: string;
+  /** Human-readable database status message. */
+  dbMessage: string | null;
+  /** Remediation advice for database. */
+  dbRemediation: string | null;
+  /** Count of tables present in database. */
+  tableCount: number;
+  /** Whether clinical trial initial data is present. */
+  hasInitialData: boolean;
+  /** Whether Ollama service is reachable. */
+  ollamaOnline: boolean;
+  /** Human-readable Ollama status message. */
+  ollamaMessage: string | null;
+  /** Remediation advice for Ollama service. */
+  ollamaRemediation: string | null;
+}
+
+/**
  * State manager for the Chat Application.
  */
 export class ChatState {
@@ -48,6 +80,22 @@ export class ChatState {
   public activeChatId: string | null = null;
   /** Counter used for auto-generating chat titles. */
   public chatCounter: number = 1;
+  /** Diagnostic health status of backend and database. */
+  public systemStatus: SystemStatus = {
+    backendOnline: true,
+    status: "healthy",
+    dbConfigured: true,
+    dbExists: true,
+    dbConnected: true,
+    dbStatusCode: "healthy",
+    dbMessage: null,
+    dbRemediation: null,
+    tableCount: 0,
+    hasInitialData: true,
+    ollamaOnline: true,
+    ollamaMessage: null,
+    ollamaRemediation: null,
+  };
 
   constructor() {
     this.loadFromLocalStorage();
@@ -213,5 +261,13 @@ export class ChatState {
       chat.model = model;
       this.saveToLocalStorage();
     }
+  }
+
+  /**
+   * Updates the diagnostic health status of the system.
+   * @param {Partial<SystemStatus>} status The partial status updates.
+   */
+  setSystemStatus(status: Partial<SystemStatus>): void {
+    this.systemStatus = { ...this.systemStatus, ...status };
   }
 }

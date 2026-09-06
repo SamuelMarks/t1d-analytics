@@ -97,6 +97,17 @@ def main() -> None:
         help="The local Ollama model to use for generation.",
     )
 
+    # Doctor subcommand
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Inspect database configuration, initial data, and LLM readiness.",
+    )
+    doctor_parser.add_argument(
+        "--db",
+        default="t1d_analytics.duckdb",
+        help="Path to the DuckDB database file.",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -110,6 +121,8 @@ def main() -> None:
             handle_query(args)
         elif args.command == "generate-training-data":
             handle_generate_training_data(args)
+        elif args.command == "doctor":
+            handle_doctor(args)
     except Exception as e:
         print(_("An error occurred: {}", e), file=sys.stderr)
         sys.exit(1)
@@ -223,6 +236,46 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
 
     conn.close()
     print(_("Training data generation complete!"))
+
+
+def handle_doctor(args: argparse.Namespace) -> None:
+    """
+    Handle the doctor subcommand to inspect system health.
+
+    Args:
+    ----
+        args: Arguments containing db path.
+
+    """
+    from t1d_analytics.diagnostics import get_system_health
+
+    health = get_system_health(db_path=args.db)
+    db = health.database
+    ollama = health.ollama
+
+    print("=" * 60)
+    print("T1D Analytics System Health Report")
+    print("=" * 60)
+    print(f"Overall Status: {health.status.upper()}")
+    print("-" * 60)
+    print(f"Database ({db.configured_path}):")
+    print(f"  Connected: {db.connected}")
+    print(f"  Status:    {db.status_code.value}")
+    print(f"  Tables:    {db.table_count}")
+    print(f"  Message:   {db.message}")
+    if db.remediation:
+        print(f"  Action:    {db.remediation}")
+    print("-" * 60)
+    print("Ollama LLM Service:")
+    print(f"  Online:    {ollama.accessible}")
+    models_str = (
+        ", ".join(ollama.available_models) if ollama.available_models else "None"
+    )
+    print(f"  Models:    {models_str}")
+    print(f"  Message:   {ollama.message}")
+    if ollama.remediation:
+        print(f"  Action:    {ollama.remediation}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":  # pragma: no cover

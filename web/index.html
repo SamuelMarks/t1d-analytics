@@ -117,6 +117,20 @@
             </div>
           </div>
           <div class="header-right">
+            <button
+              id="system-status-chip"
+              class="status-chip status-healthy"
+              aria-label="System status: Healthy"
+              title="System status: Healthy"
+            >
+              <span class="status-dot"></span>
+              <span
+                id="status-chip-text"
+                class="status-text"
+                data-i18n="status.systemHealthy"
+                >All systems operational</span
+              >
+            </button>
             <label
               id="lang-select-label"
               for="lang-select"
@@ -145,6 +159,57 @@
             </button>
           </div>
         </header>
+
+        <div
+          id="system-status-banner"
+          class="system-status-banner hidden"
+          role="alert"
+          aria-live="assertive"
+        >
+          <div class="banner-content">
+            <span class="banner-icon" id="banner-icon" aria-hidden="true"
+              >⚠️</span
+            >
+            <div class="banner-body">
+              <strong id="banner-title" class="banner-title"></strong>
+              <p id="banner-desc" class="banner-desc"></p>
+              <div class="banner-actions">
+                <button
+                  id="banner-retry-btn"
+                  class="btn btn-sm btn-primary"
+                  data-i18n="status.retry"
+                >
+                  Retry Connection
+                </button>
+                <button
+                  id="banner-instructions-btn"
+                  class="btn btn-sm btn-secondary"
+                  data-i18n="status.setupGuide"
+                >
+                  Setup Instructions
+                </button>
+              </div>
+              <div id="banner-instructions-drawer" class="banner-drawer hidden">
+                <div class="instruction-step">
+                  <p><strong>Step 1:</strong> Download datasets</p>
+                  <code>t1d-analytics download</code>
+                </div>
+                <div class="instruction-step">
+                  <p><strong>Step 2:</strong> Parse and populate DuckDB</p>
+                  <code>t1d-analytics load -d ./data --db t1d.duckdb</code>
+                </div>
+              </div>
+            </div>
+            <button
+              id="banner-dismiss-btn"
+              class="icon-btn banner-dismiss"
+              aria-label="Dismiss alert"
+              data-i18n-aria-label="status.dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
 
         <div id="messages-container" class="messages-container">
           <!-- Messages injected here -->

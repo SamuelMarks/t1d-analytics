@@ -5,7 +5,8 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional, Union
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import duckdb
 from fastapi import FastAPI, HTTPException, Request
@@ -15,6 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from t1d_analytics.analytics import get_database_schema
+from t1d_analytics.diagnostics import (
+    check_database_health,
+    get_system_health,
+    log_startup_diagnostics,
+)
 from t1d_analytics.i18n import get_translator
 
 SqlValue = Union[str, int, float, bool, None]
@@ -25,7 +31,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="T1D Analytics API", description="API for querying T1D datasets.")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """
+    Lifespan context manager that logs system startup diagnostics.
+
+    Args:
+    ----
+        app: The FastAPI application instance.
+
+    Yields:
+    ------
+        None upon server startup.
+
+    """
+    log_startup_diagnostics()
+    yield
+
+
+app = FastAPI(
+    title="T1D Analytics API",
+    description="API for querying T1D datasets.",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -124,10 +153,17 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
         return output
     except Exception as e:
         logger.error(f"SQL execution error: {e}")
+        err_msg = str(e)
+        if (
+            "database does not exist" in err_msg.lower()
+            or "cannot open" in err_msg.lower()
+            or "no such file" in err_msg.lower()
+        ):
+            err_code = "backend.dbNotFound"
+        else:
+            err_code = "backend.sqlExecution"
         raise ValueError(
-            json.dumps(
-                {"error_code": "backend.sqlExecution", "params": {"error": str(e)}}
-            )
+            json.dumps({"error_code": err_code, "params": {"error": err_msg}})
         )
 
 
@@ -176,10 +212,17 @@ def generate_sql_from_nl(
         logger.debug(f"Retrieved schema: {schema[:200]}... (truncated)")
     except Exception as e:
         logger.error(f"Failed to read schema: {e}")
+        err_msg = str(e)
+        if (
+            "database does not exist" in err_msg.lower()
+            or "cannot open" in err_msg.lower()
+            or "no such file" in err_msg.lower()
+        ):
+            err_code = "backend.dbNotFound"
+        else:
+            err_code = "backend.readSchemaFailed"
         raise ValueError(
-            json.dumps(
-                {"error_code": "backend.readSchemaFailed", "params": {"error": str(e)}}
-            )
+            json.dumps({"error_code": err_code, "params": {"error": err_msg}})
         )
 
     prompt = f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
@@ -464,19 +507,48 @@ class SchemaResponse(BaseModel):
     """Response model for database schema."""
 
     tables: List[TableInfo]
+    database: Optional[Dict[str, Any]] = None
+
+
+@app.get("/api/status")
+@app.get("/api/health")
+def get_status(request: Request) -> Dict[str, Any]:
+    """
+    Return comprehensive system health, database status, and LLM availability.
+
+    Args:
+    ----
+        request: FastAPI request object.
+
+    Returns:
+    -------
+        Dictionary containing health status details.
+
+    """
+    lang_header = request.headers.get("accept-language", "en")
+    lang = lang_header.split(",")[0].split("-")[0].split(";")[0]
+    return get_system_health(lang=lang).to_dict()
 
 
 @app.get("/api/schema", response_model=SchemaResponse)
-def get_schema() -> SchemaResponse:
+def get_schema(request: Request) -> SchemaResponse:
     """
     Return structured schema for the frontend Schema Explorer.
 
-    Returns
+    Args:
+    ----
+        request: FastAPI request.
+
+    Returns:
     -------
-        The structured schema response.
+        The structured schema response including database diagnostics.
 
     """
     db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
+    lang_header = request.headers.get("accept-language", "en")
+    lang = lang_header.split(",")[0].split("-")[0].split(";")[0]
+    db_health = check_database_health(db_path, lang=lang)
+
     try:
         conn = duckdb.connect(db_path, read_only=True)
         # Fetch tables
@@ -490,10 +562,10 @@ def get_schema() -> SchemaResponse:
             schema_data.append(TableInfo(name=table, columns=col_info))
 
         conn.close()
-        return SchemaResponse(tables=schema_data)
+        return SchemaResponse(tables=schema_data, database=db_health.to_dict())
     except Exception as e:
         logger.error(f"Error fetching schema: {e}")
-        return SchemaResponse(tables=[])
+        return SchemaResponse(tables=[], database=db_health.to_dict())
 
 
 @app.get("/api/models", response_model=ModelsResponse)

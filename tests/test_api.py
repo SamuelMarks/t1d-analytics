@@ -444,3 +444,40 @@ def test_global_exception_handler() -> None:
     assert "detail" in data
     assert data["detail"]["error_code"] == "backend.serverError"
     assert "Trigger unhandled exception" in data["detail"]["params"]["error"]
+
+
+@pytest.mark.anyio
+async def test_lifespan() -> None:
+    """Test lifespan startup diagnostics execution."""
+    from t1d_analytics.api import lifespan
+
+    with patch("t1d_analytics.api.log_startup_diagnostics") as mock_diag:
+        async with lifespan(app):
+            pass
+        mock_diag.assert_called_once()
+
+
+def test_execute_sql_db_not_found() -> None:
+    """Test execute_sql when database file is missing."""
+    with pytest.raises(ValueError, match=r"backend\.dbNotFound.*"):
+        execute_sql("missing_file.duckdb", "SELECT 1")
+
+
+@patch("any_llm.AnyLLM.create")
+def test_generate_sql_from_nl_db_not_found(mock_create: MagicMock) -> None:
+    """Test generate_sql_from_nl when database file is missing."""
+    with pytest.raises(ValueError, match=r"backend\.dbNotFound.*"):
+        generate_sql_from_nl("missing_file.duckdb", "SELECT 1")
+
+
+def test_get_status_endpoint() -> None:
+    """Test /api/status and /api/health endpoints."""
+    response = client.get("/api/status", headers={"Accept-Language": "ja"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "status" in data
+    assert "database" in data
+    assert "ollama" in data
+
+    resp_health = client.get("/api/health")
+    assert resp_health.status_code == 200

@@ -282,6 +282,21 @@ def test_run_query_repl_invalid_db(capsys: pytest.CaptureFixture[str]) -> None:
     assert "does not exist" in capsys.readouterr().out
 
 
+@patch("builtins.input", side_effect=["quit"])
+def test_run_query_repl_missing_initial_data(
+    mock_input: MagicMock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test REPL warning when DB has tables but lacks T1D trial datasets."""
+    db_path = str(tmp_path / "custom.duckdb")
+    conn = duckdb.connect(db_path)
+    conn.execute("CREATE TABLE custom (id INT)")
+    conn.close()
+
+    run_query_repl(db_path)
+    out = capsys.readouterr().out
+    assert "lacks standard initial clinical trial datasets" in out
+
+
 @patch("t1d_analytics.analytics.get_database_schema", return_value="mock schema")
 @patch("any_llm.AnyLLM.create")
 def test_handle_natural_language_edge_cases(
