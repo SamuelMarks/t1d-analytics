@@ -87,7 +87,19 @@ def test_query_subcommand(mock_query: MagicMock) -> None:
     with patch("sys.argv", ["t1d-analytics", "query", "--db", "test.db"]):
         main()
 
-    mock_query.assert_called_once_with("test.db")
+    mock_query.assert_called_once_with("test.db", model="gemma4")
+
+
+@patch("t1d_analytics.analytics.run_query_repl")
+def test_query_subcommand_with_model(mock_query: MagicMock) -> None:
+    """Test query CLI execution with custom model flag."""
+    with patch(
+        "sys.argv",
+        ["t1d-analytics", "query", "--db", "test.db", "--model", "custom-gemma"],
+    ):
+        main()
+
+    mock_query.assert_called_once_with("test.db", model="custom-gemma")
 
 
 @patch("duckdb.connect")

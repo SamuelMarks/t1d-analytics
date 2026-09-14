@@ -72,6 +72,11 @@ def main() -> None:
         default="t1d_analytics.duckdb",
         help="Path to the DuckDB database file.",
     )
+    query_parser.add_argument(
+        "--model",
+        default="gemma4",
+        help="The local Ollama model to use for query translation.",
+    )
 
     # Generate Training Data subcommand
     generate_parser = subparsers.add_parser(
@@ -188,12 +193,12 @@ def handle_query(args: argparse.Namespace) -> None:
 
     Args:
     ----
-        args: Arguments.
+        args: Arguments containing db and model.
 
     """
     from t1d_analytics.analytics import run_query_repl
 
-    run_query_repl(args.db)
+    run_query_repl(args.db, model=args.model)
 
 
 def handle_generate_training_data(args: argparse.Namespace) -> None:

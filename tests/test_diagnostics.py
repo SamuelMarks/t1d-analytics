@@ -268,3 +268,58 @@ def test_log_startup_diagnostics_all_branches(tmp_path: Path) -> None:
         ) as mock_err:
             log_startup_diagnostics(db_path=missing_file)
             assert mock_err.called
+
+
+def test_log_startup_diagnostics_no_remediations() -> None:
+    """Test log_startup_diagnostics when remediation strings are None."""
+    from t1d_analytics.diagnostics import DatabaseStatus, OllamaStatus, SystemHealth
+
+    # Test warning branch with remediation=None
+    mock_health_warn = SystemHealth(
+        status="degraded",
+        backend_accessible=True,
+        version="0.1.0",
+        database=DatabaseStatus(
+            configured_path="test.duckdb",
+            exists=True,
+            connected=True,
+            status_code=DatabaseStatusCode.EMPTY_DB,
+            message="Empty",
+            remediation=None,
+        ),
+        ollama=OllamaStatus(
+            accessible=True,
+            available_models=["other"],
+            message="No gemma",
+            remediation=None,
+        ),
+    )
+    with patch(
+        "t1d_analytics.diagnostics.get_system_health", return_value=mock_health_warn
+    ):
+        log_startup_diagnostics()
+
+    # Test error branch with remediation=None
+    mock_health_err = SystemHealth(
+        status="error",
+        backend_accessible=True,
+        version="0.1.0",
+        database=DatabaseStatus(
+            configured_path="test.duckdb",
+            exists=False,
+            connected=False,
+            status_code=DatabaseStatusCode.MISSING_FILE,
+            message="Missing",
+            remediation=None,
+        ),
+        ollama=OllamaStatus(
+            accessible=False,
+            available_models=[],
+            message="Offline",
+            remediation=None,
+        ),
+    )
+    with patch(
+        "t1d_analytics.diagnostics.get_system_health", return_value=mock_health_err
+    ):
+        log_startup_diagnostics()

@@ -405,10 +405,6 @@ def log_startup_diagnostics(db_path: Optional[str] = None) -> None:
     # Ollama report
     if ollama.accessible and not ollama.remediation:
         logger.info(f"[OK] Ollama LLM Service: {ollama.message}")
-    elif ollama.accessible:
-        logger.warning(f"[WARNING] Ollama LLM Service: {ollama.message}")
-        if ollama.remediation:
-            logger.warning(f"  -> Action: {ollama.remediation}")
     else:
         logger.warning(f"[WARNING] Ollama LLM Service: {ollama.message}")
         if ollama.remediation:

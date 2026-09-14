@@ -20,7 +20,7 @@ repos:
         pass_filenames: false
       - id: mypy
         name: typecheck backend
-        entry: mypy --strict src/t1d_analytics
+        entry: mypy --strict src tests
         language: system
         pass_filenames: false
       - id: tests-and-shields

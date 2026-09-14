@@ -28,6 +28,8 @@ describe("ChatUI", () => {
         <button id="close-modal-btn"></button>
         <button id="prev-page-btn"></button>
         <button id="next-page-btn"></button>
+        <button id="modal-export-csv-btn" disabled></button>
+        <button id="modal-export-json-btn" disabled></button>
         <div id="table-loading"></div>
         <table id="modal-table">
           <caption class="sr-only" id="modal-table-caption">Table Data</caption>
@@ -896,7 +898,11 @@ describe("ChatUI", () => {
     ui["currentTable"] = "test_table";
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [] }),
+      json: () => Promise.resolve({ rows: [], total_pages: 1 }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1 }], total_pages: 1 }),
     });
     await ui["fetchTableData"]();
     expect(ui["currentPage"]).toBe(1);
@@ -1097,16 +1103,20 @@ describe("ChatUI", () => {
 
     await ui["openTableModal"]("test_table");
 
-    // We fetch 1 row, so next and prev buttons are disabled.
-    // The only focusable element is closeBtn.
-    // Tab on closeBtn should loop back to closeBtn.
+    // Focus on closeBtn (firstElement)
     closeBtn.focus();
-    modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
-    expect(document.activeElement).toBe(closeBtn);
 
+    // Shift+Tab on firstElement should loop to lastElement (modal-export-json-btn)
+    const jsonBtn = document.getElementById(
+      "modal-export-json-btn",
+    ) as HTMLElement;
     modal.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
     );
+    expect(document.activeElement).toBe(jsonBtn);
+
+    // Tab on lastElement should loop back to firstElement (closeBtn)
+    modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
     expect(document.activeElement).toBe(closeBtn);
 
     // Unrelated keys do nothing
@@ -1133,15 +1143,19 @@ describe("ChatUI", () => {
     closeBtn.click();
   });
 
-  it("restores focus to chat input when previous focus is removed from DOM", () => {
+  it("restores focus to chat input when previous focus is removed from DOM", async () => {
     const dummyBtn = document.createElement("button");
     dummyBtn.id = "dummy-btn";
     document.body.appendChild(dummyBtn);
     dummyBtn.focus();
 
     // Simulate setting previousFocus in openTableModal
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [] }),
+    });
     const ui2 = new ChatUI(state);
-    ui2["openTableModal"]("test_table");
+    await ui2["openTableModal"]("test_table");
 
     // Remove element
     document.body.removeChild(dummyBtn);
@@ -2474,5 +2488,139 @@ describe("ChatUI", () => {
     });
     await ui["loadSchema"]();
     expect(state.systemStatus.dbStatusCode).toBe("unknown");
+  });
+
+  it("exports rows to CSV and handles edge cases", () => {
+    const createObjectURL = vi.fn().mockReturnValue("blob:mock-csv");
+    const revokeObjectURL = vi.fn();
+    globalThis.URL.createObjectURL = createObjectURL;
+    globalThis.URL.revokeObjectURL = revokeObjectURL;
+
+    // Empty rows returns early
+    ui.exportRowsToCsv([], "test.csv");
+    expect(createObjectURL).not.toHaveBeenCalled();
+
+    // Valid rows with null, undefined, strings needing escaping
+    const sampleRows = [
+      { id: 1, name: 'Alice "Wonderland"', note: null, extra: undefined },
+      { id: 2, name: "Bob", note: "some note", extra: 42 },
+    ];
+    ui.exportRowsToCsv(sampleRows, "test.csv");
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-csv");
+  });
+
+  it("exports rows to JSON and handles edge cases", () => {
+    const createObjectURL = vi.fn().mockReturnValue("blob:mock-json");
+    const revokeObjectURL = vi.fn();
+    globalThis.URL.createObjectURL = createObjectURL;
+    globalThis.URL.revokeObjectURL = revokeObjectURL;
+
+    // Empty rows returns early
+    ui.exportRowsToJson([], "test.json");
+    expect(createObjectURL).not.toHaveBeenCalled();
+
+    // Valid rows
+    const sampleRows = [{ id: 1, name: "Alice" }];
+    ui.exportRowsToJson(sampleRows, "test.json");
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-json");
+  });
+
+  it("renders export buttons in chat message tables and triggers export", () => {
+    const exportCsvSpy = vi
+      .spyOn(ui, "exportRowsToCsv")
+      .mockImplementation(() => {});
+    const exportJsonSpy = vi
+      .spyOn(ui, "exportRowsToJson")
+      .mockImplementation(() => {});
+
+    state.createChat();
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: "Here are the query results:",
+      sqlQuery: "SELECT * FROM users",
+      sqlResult: [{ id: 1, name: "Alice" }],
+    });
+    ui["renderMessages"]();
+
+    const csvBtn = document.querySelector(
+      ".export-csv-btn",
+    ) as HTMLButtonElement | null;
+    const jsonBtn = document.querySelector(
+      ".export-json-btn",
+    ) as HTMLButtonElement | null;
+
+    expect(csvBtn).not.toBeNull();
+    expect(jsonBtn).not.toBeNull();
+
+    csvBtn?.click();
+    expect(exportCsvSpy).toHaveBeenCalled();
+
+    jsonBtn?.click();
+    expect(exportJsonSpy).toHaveBeenCalled();
+  });
+
+  it("triggers export from modal export buttons", async () => {
+    const exportCsvSpy = vi
+      .spyOn(ui, "exportRowsToCsv")
+      .mockImplementation(() => {});
+    const exportJsonSpy = vi
+      .spyOn(ui, "exportRowsToJson")
+      .mockImplementation(() => {});
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          rows: [{ id: 1, patient: "P100" }],
+          total_count: 1,
+          total_pages: 1,
+        }),
+    });
+
+    await ui["openTableModal"]("patients");
+
+    const modalCsvBtn = document.getElementById("modal-export-csv-btn");
+    const modalJsonBtn = document.getElementById("modal-export-json-btn");
+
+    expect(modalCsvBtn).not.toBeNull();
+    expect(modalJsonBtn).not.toBeNull();
+
+    modalCsvBtn?.click();
+    expect(exportCsvSpy).toHaveBeenCalled();
+
+    modalJsonBtn?.click();
+    expect(exportJsonSpy).toHaveBeenCalled();
+  });
+
+  it("handles openTableModal and fetchTableData when modal export buttons are missing from DOM", async () => {
+    document.getElementById("modal-export-csv-btn")?.remove();
+    document.getElementById("modal-export-json-btn")?.remove();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          rows: [{ id: 1 }],
+          total_count: 1,
+          total_pages: 1,
+        }),
+    });
+
+    await ui["openTableModal"]("test_table");
+  });
+
+  it("deduplicates SQL block when markdown content already contains SQL code block", () => {
+    state.createChat();
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: "Here is the query:\n```sql\nSELECT * FROM users;\n```",
+      sqlQuery: "SELECT * FROM users;",
+    });
+    ui["renderMessages"]();
+
+    const containers = document.querySelectorAll(".sql-query-container");
+    expect(containers.length).toBe(1);
   });
 });

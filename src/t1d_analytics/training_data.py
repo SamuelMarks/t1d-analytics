@@ -1,9 +1,15 @@
 """Module for generating synthetic Text-to-SQL training data using an LLM."""
 
 import json
+import logging
+import os
+import urllib.error
 import urllib.request
+from pathlib import Path
 
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 
 class TrainingDataGenerator:
@@ -41,7 +47,7 @@ class TrainingDataGenerator:
         tables = self.conn.execute("SHOW TABLES").fetchall()
         for row in tables:
             table_name = row[0]
-            columns = self.conn.execute(f"DESCRIBE {table_name}").fetchall()
+            columns = self.conn.execute(f'DESCRIBE "{table_name}"').fetchall()
             schema_desc = f"Table: {table_name}\nColumns:\n"
             for col in columns:
                 col_name = col[0]
@@ -50,7 +56,28 @@ class TrainingDataGenerator:
             schema[table_name] = schema_desc
         return schema
 
-    def _generate_pairs(self, schema: str, count: int) -> list[tuple[str, str, str]]:
+    def _is_valid_sql(self, sql_query: str) -> bool:
+        """
+        Validate whether a SQL statement parses and can execute against the schema.
+
+        Args:
+        ----
+            sql_query: The SQL statement to validate.
+
+        Returns:
+        -------
+            True if the statement is valid and executable, False otherwise.
+
+        """
+        try:
+            self.conn.execute(f"EXPLAIN {sql_query}")
+            return True
+        except Exception:
+            return False
+
+    def _generate_pairs(
+        self, schema: str, count: int, validate_sql: bool = True
+    ) -> list[tuple[str, str, str]]:
         """
         Generate (prompt, chosen_sql, rejected_sql) pairs using the LLM.
 
@@ -58,6 +85,7 @@ class TrainingDataGenerator:
         ----
             schema: The textual representation of the table's schema.
             count: The number of pairs to generate.
+            validate_sql: Whether to validate chosen SQL queries against DuckDB schema.
 
         Returns:
         -------
@@ -68,7 +96,16 @@ class TrainingDataGenerator:
 
         """
         pairs: list[tuple[str, str, str]] = []
-        for _ in range(count):
+        base_url = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+        if not base_url.startswith("http://") and not base_url.startswith("https://"):
+            base_url = f"http://{base_url}"
+        api_url = f"{base_url}/api/generate"
+
+        attempts = 0
+        max_attempts = count * 3
+
+        while len(pairs) < count and attempts < max_attempts:
+            attempts += 1
             prompt = (
                 f"Given the following database schema:\n{schema}\n"
                 "Generate a natural language question, a correct SQL query to answer it, "
@@ -84,20 +121,32 @@ class TrainingDataGenerator:
                 "format": "json",
             }
             req = urllib.request.Request(
-                "http://127.0.0.1:11434/api/generate",
+                api_url,
                 data=json.dumps(data).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
             try:
-                with urllib.request.urlopen(req) as response:
+                with urllib.request.urlopen(req, timeout=30.0) as response:
                     result = json.loads(response.read().decode("utf-8"))
                     generated_text = result.get("response", "[]")
                     parsed = json.loads(generated_text)
                     if isinstance(parsed, list) and len(parsed) == 3:
-                        pairs.append((str(parsed[0]), str(parsed[1]), str(parsed[2])))
-            except Exception:
-                # In case of API failure or bad JSON, skip or retry
-                pass
+                        q, chosen, rej = (
+                            str(parsed[0]),
+                            str(parsed[1]),
+                            str(parsed[2]),
+                        )
+                        if validate_sql and not self._is_valid_sql(chosen):
+                            logger.warning(
+                                f"Discarding pair with invalid chosen SQL: {chosen}"
+                            )
+                            continue
+                        pairs.append((q, chosen, rej))
+            except Exception as e:
+                logger.warning(
+                    f"Generation attempt {attempts} failed: {e}. Retrying..."
+                )
+
         return pairs
 
     def write_to_db(self, pairs: list[tuple[str, str, str]]) -> None:
@@ -135,8 +184,8 @@ class TrainingDataGenerator:
         )
 
         for prompt, chosen, rejected in pairs:
-            # Pretrain data is just the raw text of the correct query and prompt
-            pretrain_text = f"Question: {prompt}\\nSQL: {chosen}"
+            # Pretrain data contains question and SQL with actual newline
+            pretrain_text = f"Question: {prompt}\nSQL: {chosen}"
             self.conn.execute("INSERT INTO pretrain_data VALUES (?)", (pretrain_text,))
 
             # SFT data pairs prompt with chosen
@@ -146,3 +195,35 @@ class TrainingDataGenerator:
             self.conn.execute(
                 "INSERT INTO dpo_data VALUES (?, ?, ?)", (prompt, chosen, rejected)
             )
+
+    def export_to_jsonl(self, table_name: str, output_path: Path) -> None:
+        """
+        Export a training table to JSONL format.
+
+        Args:
+        ----
+            table_name: Name of the table to export (e.g. 'sft_data').
+            output_path: Path to write the JSONL file to.
+
+        """
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        escaped_path = str(output_path).replace("'", "''")
+        self.conn.execute(
+            f"""COPY "{table_name}" TO '{escaped_path}' (FORMAT JSON, ARRAY FALSE)"""
+        )
+
+    def export_to_parquet(self, table_name: str, output_path: Path) -> None:
+        """
+        Export a training table to Parquet format.
+
+        Args:
+        ----
+            table_name: Name of the table to export (e.g. 'dpo_data').
+            output_path: Path to write the Parquet file to.
+
+        """
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        escaped_path = str(output_path).replace("'", "''")
+        self.conn.execute(
+            f"""COPY "{table_name}" TO '{escaped_path}' (FORMAT PARQUET)"""
+        )

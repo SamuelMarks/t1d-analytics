@@ -1,6 +1,9 @@
 """Analytics module for querying downloaded T1D datasets."""
 
+import csv
 import json
+import os
+import re
 import zipfile
 from pathlib import Path
 
@@ -12,11 +15,11 @@ from t1d_analytics.i18n import get_translator
 
 def extract_zips(data_dir_str: str) -> None:
     """
-    Extract any zip files found in the data directory.
+    Extract any zip files found in the data directory safely without path traversal.
 
     Args:
     ----
-        data_dir_str: directory.
+        data_dir_str: Directory path containing zip files to extract.
 
     """
     _ = get_translator()
@@ -33,9 +36,21 @@ def extract_zips(data_dir_str: str) -> None:
         if not extract_dir.exists():
             print(_("Extracting {}...", path.name))
             extract_dir.mkdir(parents=True, exist_ok=True)
+            resolved_extract_dir = extract_dir.resolve()
             try:
                 with zipfile.ZipFile(path, "r") as zip_ref:
-                    zip_ref.extractall(extract_dir)
+                    for member in zip_ref.namelist():
+                        target_path = (resolved_extract_dir / member).resolve()
+                        if not str(target_path).startswith(str(resolved_extract_dir)):
+                            print(
+                                _(
+                                    "Skipping unsafe entry {} in {} (path traversal detected).",
+                                    member,
+                                    path.name,
+                                )
+                            )
+                            continue
+                        zip_ref.extract(member, extract_dir)
             except zipfile.BadZipFile:
                 print(_("Failed to extract {} (Bad Zip File).", path.name))
 
@@ -51,8 +66,8 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
 
     Args:
     ----
-        data_dir_str: directory.
-        db_path: db path.
+        data_dir_str: Directory containing extracted CSV/TXT datasets.
+        db_path: Path to the target DuckDB database file.
 
     """
     _ = get_translator()
@@ -93,40 +108,58 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
     loaded_tables = []
     for data_file in data_files:
         # Create a safe table name from the file name
-        table_name = data_file.stem.replace(" ", "_").replace("-", "_").lower()
+        safe_stem = re.sub(r"[^a-zA-Z0-9_]", "_", data_file.stem).lower()
+        table_name = safe_stem.strip("_") or "dataset"
         # Ensure it starts with a letter
         if not table_name[0].isalpha():
             table_name = "t_" + table_name
 
         try:
-            # 1. Detect Encoding (utf-16 vs utf-8)
+            # 1. Detect Encoding (utf-8-sig vs utf-16 vs utf-8)
             with open(data_file, "rb") as f_rb:
-                raw_bytes = f_rb.read(2)
-            encoding = "utf-16" if raw_bytes == b"\xff\xfe" else "utf-8"
+                raw_bytes = f_rb.read(4)
+            if raw_bytes[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                py_encoding = "utf-16"
+                duckdb_encoding = "utf-16"
+            elif raw_bytes[:3] == b"\xef\xbb\xbf":
+                py_encoding = "utf-8-sig"
+                duckdb_encoding = "utf-8"
+            else:
+                py_encoding = "utf-8"
+                duckdb_encoding = "utf-8"
 
-            # 2. Detect Separator
-            with open(data_file, "r", encoding=encoding, errors="ignore") as f:
-                first_line = f.readline()
-
+            # 2. Detect Separator using csv.Sniffer with fallback
             sep = ","
-            if "|" in first_line:
-                sep = "|"
-            elif "\t" in first_line:
-                sep = "\\t"
+            try:
+                with open(data_file, "r", encoding=py_encoding, errors="ignore") as f:
+                    sample = "".join([f.readline() for _ in range(5)])
+                if sample.strip():
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",\t|;")
+                    sep = dialect.delimiter
+            except Exception:
+                with open(data_file, "r", encoding=py_encoding, errors="ignore") as f:
+                    first_line = f.readline()
+                if "|" in first_line:
+                    sep = "|"
+                elif "\t" in first_line:
+                    sep = "\t"
+
+            duckdb_sep = "\\t" if sep == "\t" else sep
 
             print(
                 _(
                     "Loading {} (encoding={}, sep='{}') into table {}...",
                     data_file.name,
-                    encoding,
-                    sep,
+                    duckdb_encoding,
+                    duckdb_sep,
                     table_name,
                 )
             )
 
             # Create temp view to inspect columns
+            escaped_path = str(data_file).replace("'", "''")
             conn.execute(
-                f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{str(data_file)}', auto_detect=true, sep='{sep}', encoding='{encoding}')"
+                f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sep='{duckdb_sep}', encoding='{duckdb_encoding}')"
             )
             cols = conn.execute("DESCRIBE temp_view").fetchall()
 
@@ -149,10 +182,12 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
 
                 seen_std_names.add(std_name.lower())
 
+                escaped_orig = orig_col.replace('"', '""')
+                escaped_std = std_name.replace('"', '""')
                 if std_name != orig_col:
-                    select_exprs.append(f'"{orig_col}" AS "{std_name}"')
+                    select_exprs.append(f'"{escaped_orig}" AS "{escaped_std}"')
                 else:
-                    select_exprs.append(f'"{orig_col}"')
+                    select_exprs.append(f'"{escaped_orig}"')
 
             select_sql = ",\n                ".join(select_exprs)
 
@@ -163,7 +198,11 @@ def load_data_to_duckdb(data_dir_str: str, db_path: str) -> None:
                 conn.execute("DROP VIEW temp_view")
                 continue
 
-            query = f"CREATE TABLE {table_name} AS SELECT \n                {select_sql} \n            FROM temp_view"
+            query = (
+                f'CREATE TABLE "{table_name}" AS SELECT \n'
+                f"                {select_sql} \n"
+                f"            FROM temp_view"
+            )
             conn.execute(query)
             conn.execute("DROP VIEW temp_view")
 
@@ -192,11 +231,11 @@ def get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
     tables = conn.execute("SHOW TABLES").fetchall()
     schema_parts = []
     for (table_name,) in tables:
-        columns = conn.execute(f"DESCRIBE {table_name}").fetchall()
+        columns = conn.execute(f'DESCRIBE "{table_name}"').fetchall()
         col_desc = ", ".join([f"{c[0]} ({c[1]})" for c in columns])
 
         try:
-            sample = conn.execute(f"SELECT * FROM {table_name} LIMIT 1").fetchone()
+            sample = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 1').fetchone()
             sample_desc = (
                 f"Sample row: {sample}" if sample else "Sample row: (empty table)"
             )
@@ -207,14 +246,67 @@ def get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
     return "\n\n".join(schema_parts)
 
 
-def handle_natural_language(conn: duckdb.DuckDBPyConnection, query: str) -> None:
+def is_sql_query(query: str) -> bool:
+    """
+    Determine whether a user input string is a SQL query rather than natural language.
+
+    Args:
+    ----
+        query: The raw query string entered by the user.
+
+    Returns:
+    -------
+        True if the query appears to be a SQL statement, False if natural language.
+
+    """
+    # Strip SQL comments (-- ... and /* ... */) and whitespace
+    cleaned = re.sub(r"--[^\n]*\n?", " ", query)
+    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL).strip()
+    if not cleaned:
+        return False
+
+    first_word = cleaned.split()[0].lower()
+    sql_keywords = ("select", "with", "describe", "pragma", "explain")
+    if first_word in sql_keywords:
+        return True
+
+    if first_word == "show":
+        words = cleaned.lower().split()
+        nl_indicators = {
+            "me",
+            "the",
+            "a",
+            "an",
+            "us",
+            "our",
+            "all",
+            "how",
+            "what",
+            "where",
+            "which",
+            "any",
+            "patients",
+            "trials",
+            "datasets",
+        }
+        if len(words) > 1 and words[1] in nl_indicators:
+            return False
+        return True
+
+    return False
+
+
+def handle_natural_language(
+    conn: duckdb.DuckDBPyConnection, query: str, model: str = "gemma4"
+) -> None:
     """
     Translate natural language to SQL using a local LLM via any-llm and execute it.
 
     Args:
     ----
         conn: DB connection.
-        query: The query.
+        query: The natural language query.
+        model: Model name for translation.
 
     """
     _ = get_translator()
@@ -266,9 +358,13 @@ The query should be a valid DuckDB SQL SELECT statement.
 User request: {query}
 """
     try:
+        api_base = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+        if not api_base.startswith("http://") and not api_base.startswith("https://"):
+            api_base = f"http://{api_base}"
+
         llm = AnyLLM.create("ollama")
         response = llm.completion(
-            model="gemma4",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
         )
         sql_query = response.choices[0].message.content.strip()
@@ -298,13 +394,14 @@ User request: {query}
         print(_("Failed to generate or execute query: {}", e))
 
 
-def run_query_repl(db_path: str) -> None:
+def run_query_repl(db_path: str, model: str = "gemma4") -> None:
     """
     Run the interactive query interface.
 
     Args:
     ----
         db_path: Path to DB.
+        model: Local LLM model name for query translation.
 
     """
     _ = get_translator()
@@ -338,8 +435,6 @@ def run_query_repl(db_path: str) -> None:
     print(_("  - 'exit' or 'quit' to close."))
     print("=" * 50 + "\n")
 
-    sql_keywords = ("select", "with", "show", "describe", "pragma")
-
     while True:
         try:
             user_input = input("query> ").strip()
@@ -355,7 +450,7 @@ def run_query_repl(db_path: str) -> None:
             print(_("Exiting."))
             break
 
-        if lower_input.startswith(sql_keywords):
+        if is_sql_query(user_input):
             try:
                 result = conn.sql(user_input)
                 # Show results nicely
@@ -364,6 +459,6 @@ def run_query_repl(db_path: str) -> None:
             except Exception as e:
                 print(_("SQL Error: {}", e))
         else:
-            handle_natural_language(conn, user_input)
+            handle_natural_language(conn, user_input, model=model)
 
     conn.close()

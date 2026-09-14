@@ -579,6 +579,20 @@ body.light-mode {
   background-color: var(--bg-dark);
 }
 
+.sql-table-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  padding: 0.5rem;
+  background-color: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.sql-table-toolbar button {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.75rem;
+}
+
 .sql-table {
   width: 100%;
   border-collapse: collapse;

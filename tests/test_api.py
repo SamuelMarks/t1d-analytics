@@ -1,5 +1,7 @@
 """Tests for the FastAPI application."""
 
+import json
+import os
 import sys
 import types
 import typing
@@ -151,7 +153,7 @@ def test_chat_endpoint_sql_success(mock_db: str) -> None:
 
 @patch("t1d_analytics.api.generate_sql_from_nl")
 def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> None:
-    """Test API handles NLP queries successfully."""
+    """Test API handles NLP queries successfully and auto-executes the query."""
     mock_generate.return_value = ("Generated Markdown", "SELECT * FROM users")
     response = client.post(
         "/api/chat",
@@ -160,8 +162,45 @@ def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> Non
     assert response.status_code == 200
     data = response.json()
     assert data["content"] == "Generated Markdown"
-    assert data["sqlResult"] is None
+    assert data["sqlResult"] is not None
+    assert len(data["sqlResult"]) == 2
     assert data["sqlQuery"] == "SELECT * FROM users"
+
+
+@patch("t1d_analytics.api.generate_sql_from_nl")
+def test_chat_endpoint_nl_sql_execution_failure(
+    mock_generate: MagicMock, mock_db: str
+) -> None:
+    """Test API handles NLP queries where generated SQL execution fails."""
+    mock_generate.return_value = (
+        "Generated Markdown",
+        "SELECT * FROM nonexistent_table",
+    )
+    response = client.post(
+        "/api/chat",
+        json={"message": "give me users", "model": "gemma4", "db_path": mock_db},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["content"] == "Generated Markdown"
+    assert data["sqlResult"] is None
+    assert data["error"] is not None
+    assert data["error"]["error_code"] == "backend.sqlExecution"
+
+
+@patch("t1d_analytics.api.generate_sql_from_nl")
+def test_chat_endpoint_nl_no_sql_query(mock_generate: MagicMock, mock_db: str) -> None:
+    """Test API handles NLP response that contains no SQL query."""
+    mock_generate.return_value = ("Just an explanation, no query.", "")
+    response = client.post(
+        "/api/chat",
+        json={"message": "hello", "model": "gemma4", "db_path": mock_db},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["content"] == "Just an explanation, no query."
+    assert data["sqlResult"] is None
+    assert data["sqlQuery"] == ""
 
 
 def test_chat_endpoint_value_error(mock_db: str) -> None:
@@ -492,3 +531,47 @@ def test_get_status_endpoint() -> None:
 
     resp_health = client.get("/api/health")
     assert resp_health.status_code == 200
+
+
+def test_execute_sql_max_rows(mock_db: str) -> None:
+    """Test execute_sql respects max_rows constraint."""
+    res = execute_sql(mock_db, "SELECT * FROM users", max_rows=1)
+    assert len(res) == 1
+    assert res[0]["name"] == "Alice"
+
+
+def test_get_table_data_pagination_metadata(mock_db: str) -> None:
+    """Test get_table_data returns total_count, page, and total_pages."""
+    response = client.get(f"/api/table/users?limit=1&offset=0&db_path={mock_db}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_count"] == 2
+    assert data["page"] == 1
+    assert data["total_pages"] == 2
+    assert len(data["rows"]) == 1
+
+
+def test_get_schema_with_db_path(mock_db: str) -> None:
+    """Test get_schema respects db_path query parameter."""
+    response = client.get(f"/api/schema?db_path={mock_db}")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["tables"]) >= 1
+    table_names = [t["name"] for t in data["tables"]]
+    assert "users" in table_names
+
+
+@patch("urllib.request.urlopen")
+def test_list_models_with_ollama_host(mock_urlopen: MagicMock) -> None:
+    """Test list_models respects OLLAMA_HOST env variable."""
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps(
+        {"models": [{"name": "gemma4-custom", "size": 12345}]}
+    ).encode("utf-8")
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    with patch.dict(os.environ, {"OLLAMA_HOST": "remote-ollama:11434"}):
+        response = client.get("/api/models")
+        assert response.status_code == 200
+        data = response.json()
+        assert any(m["name"] == "gemma4-custom" for m in data["models"])

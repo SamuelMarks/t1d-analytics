@@ -107,6 +107,8 @@ This will launch a Vite development server. Check the terminal output for the lo
 
 Whenever an executed query returns data, the UI will automatically parse the resulting JSON object and render an interactive, horizontally-scrollable HTML table right inside the chat window. If the query returns empty, it will display a clean _"No results returned"_ message.
 
+You can also use the **CSV** and **JSON** export buttons located on any rendered query table or within the Schema Explorer's table inspection modal to download tabular datasets directly to your machine.
+
 ---
 
 ## 🛠️ Alternate: CLI Interactive REPL
@@ -114,7 +116,7 @@ Whenever an executed query returns data, the UI will automatically parse the res
 If you prefer staying completely in the terminal, you can bypass the web interface and use the built-in Interactive REPL:
 
 ```bash
-t1d-analytics query --db t1d.duckdb
+t1d-analytics query --db t1d.duckdb --model gemma4
 ```
 
 This opens a `query>` prompt.

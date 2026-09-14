@@ -1518,7 +1518,9 @@ export class ChatUI {
 
       msgDiv.appendChild(contentDiv);
 
-      if (msg.sqlQuery) {
+      const hasMarkdownSqlBlock =
+        contentDiv.querySelector(".sql-query-container") !== null;
+      if (msg.sqlQuery && !hasMarkdownSqlBlock) {
         const queryContainer = document.createElement("div");
         queryContainer.className = "sql-query-container";
         const preBlock = document.createElement("pre");
@@ -1551,6 +1553,34 @@ export class ChatUI {
         if (msg.sqlResult.length > 0) {
           const tableContainer = document.createElement("div");
           tableContainer.className = "sql-table-container";
+
+          const toolbar = document.createElement("div");
+          toolbar.className = "sql-table-toolbar";
+          const csvBtn = document.createElement("button");
+          csvBtn.className = "btn-secondary export-csv-btn";
+          csvBtn.textContent = "CSV";
+          csvBtn.setAttribute("aria-label", "Export CSV");
+          csvBtn.addEventListener("click", () =>
+            this.exportRowsToCsv(
+              msg.sqlResult as Array<Record<string, unknown>>,
+              "query_results.csv",
+            ),
+          );
+
+          const jsonBtn = document.createElement("button");
+          jsonBtn.className = "btn-secondary export-json-btn";
+          jsonBtn.textContent = "JSON";
+          jsonBtn.setAttribute("aria-label", "Export JSON");
+          jsonBtn.addEventListener("click", () =>
+            this.exportRowsToJson(
+              msg.sqlResult as Array<Record<string, unknown>>,
+              "query_results.json",
+            ),
+          );
+
+          toolbar.appendChild(csvBtn);
+          toolbar.appendChild(jsonBtn);
+          tableContainer.appendChild(toolbar);
 
           const table = document.createElement("table");
           table.className = "sql-table";
@@ -1607,6 +1637,7 @@ export class ChatUI {
   private currentTable: string = "";
   private currentPage: number = 1;
   private readonly ROWS_PER_PAGE = 25;
+  private currentModalRows: Array<Record<string, unknown>> = [];
 
   /**
    * Opens the table modal and loads the first page of data.
@@ -1631,6 +1662,29 @@ export class ChatUI {
 
     modalTitle.textContent = i18next.t("ui.tableName", { name: tableName });
     modal.removeAttribute("aria-hidden");
+
+    // Wire up modal export buttons if present
+    const modalExportCsvBtn = document.getElementById(
+      "modal-export-csv-btn",
+    ) as HTMLButtonElement | null;
+    const modalExportJsonBtn = document.getElementById(
+      "modal-export-json-btn",
+    ) as HTMLButtonElement | null;
+
+    if (modalExportCsvBtn) {
+      modalExportCsvBtn.onclick = () =>
+        this.exportRowsToCsv(
+          this.currentModalRows,
+          `${this.currentTable}_page${this.currentPage}.csv`,
+        );
+    }
+    if (modalExportJsonBtn) {
+      modalExportJsonBtn.onclick = () =>
+        this.exportRowsToJson(
+          this.currentModalRows,
+          `${this.currentTable}_page${this.currentPage}.json`,
+        );
+    }
 
     // Focus the first interactive element
     closeBtn.focus();
@@ -1725,30 +1779,39 @@ export class ChatUI {
       return;
 
     loading.style.display = "block";
-    thead.innerHTML = "";
-    tbody.innerHTML = "";
     prevBtn.disabled = true;
     nextBtn.disabled = true;
+    const modalExportCsvBtn = document.getElementById(
+      "modal-export-csv-btn",
+    ) as HTMLButtonElement | null;
+    const modalExportJsonBtn = document.getElementById(
+      "modal-export-json-btn",
+    ) as HTMLButtonElement | null;
+    if (modalExportCsvBtn) modalExportCsvBtn.disabled = true;
+    if (modalExportJsonBtn) modalExportJsonBtn.disabled = true;
 
     try {
       const limit = this.ROWS_PER_PAGE;
       const offset = (this.currentPage - 1) * limit;
       const response = await fetchWithBackendError(
-        `/api/table/${this.currentTable}?limit=${limit}&offset=${offset}`,
+        `/api/table/${encodeURIComponent(this.currentTable)}?limit=${limit}&offset=${offset}`,
       );
       const data = await response.json();
 
       loading.style.display = "none";
-      indicator.textContent = i18next.t("app.page", { page: this.currentPage });
+      const totalPagesStr = data.total_pages ? ` / ${data.total_pages}` : "";
+      indicator.textContent = `${i18next.t("app.page", { page: this.currentPage })}${totalPagesStr}`;
 
       if (data.rows.length === 0 && this.currentPage > 1) {
-        // No more rows
+        // No more rows: navigate back to previous page
         this.currentPage--;
-        indicator.textContent = i18next.t("app.page", {
-          page: this.currentPage,
-        });
+        await this.fetchTableData();
         return;
       }
+
+      this.currentModalRows = data.rows;
+      thead.innerHTML = "";
+      tbody.innerHTML = "";
 
       if (data.rows.length > 0) {
         // Render header
@@ -1776,7 +1839,12 @@ export class ChatUI {
         );
 
         prevBtn.disabled = this.currentPage === 1;
-        nextBtn.disabled = data.rows.length < limit;
+        const hasMore = data.total_pages
+          ? this.currentPage < data.total_pages
+          : data.rows.length >= limit;
+        nextBtn.disabled = !hasMore;
+        if (modalExportCsvBtn) modalExportCsvBtn.disabled = false;
+        if (modalExportJsonBtn) modalExportJsonBtn.disabled = false;
         this.announce(i18next.t("app.tableData") + " loaded", false);
       } else {
         const msg = i18next.t("ui.noDataAvailable");
@@ -1792,5 +1860,66 @@ export class ChatUI {
       this.announce(errMsg, true);
       tbody.innerHTML = `<tr><td class="error-text" role="alert" aria-live="assertive">${errMsg}</td></tr>`;
     }
+  }
+
+  /**
+   * Export row objects as a downloadable CSV file.
+   * @param {Array<Record<string, unknown>>} rows - The data rows to export.
+   * @param {string} filename - The filename for the downloaded file.
+   */
+  public exportRowsToCsv(
+    rows: Array<Record<string, unknown>>,
+    filename: string,
+  ): void {
+    if (!rows || rows.length === 0) return;
+    const columns = Object.keys(rows[0]);
+    const headerLine = columns
+      .map((col) => `"${col.replace(/"/g, '""')}"`)
+      .join(",");
+    const dataLines = rows.map((row) =>
+      columns
+        .map((col) => {
+          const val = row[col];
+          if (val === null || val === undefined) return '""';
+          return `"${String(val).replace(/"/g, '""')}"`;
+        })
+        .join(","),
+    );
+    const csvContent = [headerLine, ...dataLines].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", filename);
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Export row objects as a downloadable JSON file.
+   * @param {Array<Record<string, unknown>>} rows - The data rows to export.
+   * @param {string} filename - The filename for the downloaded file.
+   */
+  public exportRowsToJson(
+    rows: Array<Record<string, unknown>>,
+    filename: string,
+  ): void {
+    if (!rows || rows.length === 0) return;
+    const jsonContent = JSON.stringify(rows, null, 2);
+    const blob = new Blob([jsonContent], {
+      type: "application/json;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", filename);
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 }

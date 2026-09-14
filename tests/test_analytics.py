@@ -1,5 +1,6 @@
 """Tests for the analytics module."""
 
+import os
 import sys
 import types
 import typing
@@ -477,3 +478,159 @@ def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
 
     run_query_repl(str(db_path))
     mock_conn.sql.assert_called_once()
+
+
+def test_extract_zips_path_traversal_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test that zip slip path traversal entries are skipped safely."""
+    zip_path = tmp_path / "malicious.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("../../evil.txt", "evil content")
+        zf.writestr("safe.txt", "safe content")
+    extract_zips(str(tmp_path))
+    assert not (tmp_path.parent / "evil.txt").exists()
+    extract_dir = tmp_path / "malicious"
+    assert (extract_dir / "safe.txt").exists()
+    assert "path traversal detected" in capsys.readouterr().out
+
+
+def test_is_sql_query() -> None:
+    """Test is_sql_query classification logic."""
+    from t1d_analytics.analytics import is_sql_query
+
+    assert is_sql_query("SELECT * FROM users")
+    assert is_sql_query("WITH cte AS (SELECT 1) SELECT * FROM cte")
+    assert is_sql_query("DESCRIBE users")
+    assert is_sql_query("PRAGMA version")
+    assert is_sql_query("EXPLAIN SELECT 1")
+    assert is_sql_query("SHOW TABLES")
+    assert is_sql_query("SHOW columns")
+    assert is_sql_query("-- comment\nSELECT * FROM users")
+    assert is_sql_query("/* block comment */ SELECT * FROM users")
+    assert not is_sql_query("Show me the first 5 patients")
+    assert not is_sql_query("Show the average HbA1c")
+    assert not is_sql_query("Show all patients with low blood glucose")
+    assert not is_sql_query("What is the average age?")
+    assert not is_sql_query("")
+    assert not is_sql_query("   ")
+    assert not is_sql_query("-- only comments\n")
+
+
+def test_load_data_to_duckdb_bom_and_delimiters(tmp_path: Path) -> None:
+    """Test loading data files with UTF-8 BOM, tabs, and pipes."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db_path = str(tmp_path / "test.duckdb")
+
+    # UTF-8 BOM
+    bom_file = data_dir / "bom_data.csv"
+    with open(bom_file, "wb") as f:
+        f.write(b"\xef\xbb\xbfid,name\n1,Alpha\n")
+
+    # Tab delimited
+    tsv_file = data_dir / "tab_data.csv"
+    tsv_file.write_text("id\tval\n1\t100\n2\t200\n", encoding="utf-8")
+
+    # Pipe delimited with commas inside cells
+    pipe_file = data_dir / "pipe_data.csv"
+    pipe_file.write_text(
+        'id|description\n1|"apple, banana, cherry"\n', encoding="utf-8"
+    )
+
+    load_data_to_duckdb(str(data_dir), db_path)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    assert "bom_data" in tables
+    assert "tab_data" in tables
+    assert "pipe_data" in tables
+    pipe_rows = conn.execute("SELECT * FROM pipe_data").fetchall()
+    assert len(pipe_rows) == 1
+    assert "apple, banana, cherry" in pipe_rows[0][1]
+    conn.close()
+
+
+def test_run_query_repl_custom_model_routing(
+    mocker: typing.Any, tmp_path: Path
+) -> None:
+    """Test run_query_repl routes 'Show me...' to handle_natural_language with custom model."""
+    from t1d_analytics.analytics import run_query_repl
+
+    db_path = tmp_path / "test.duckdb"
+    conn = duckdb.connect(str(db_path))
+    conn.execute("CREATE TABLE patients (id INT)")
+    conn.close()
+
+    inputs = ["Show me the first 5 patients", "exit"]
+    mocker.patch("builtins.input", side_effect=inputs)
+    mock_hnl = mocker.patch("t1d_analytics.analytics.handle_natural_language")
+
+    run_query_repl(str(db_path), model="custom-gemma")
+    mock_hnl.assert_called_once()
+    assert mock_hnl.call_args[1]["model"] == "custom-gemma"
+
+
+def test_load_data_to_duckdb_fallback_delimiters(
+    tmp_path: Path, mocker: typing.Any
+) -> None:
+    """Test load_data_to_duckdb delimiter fallback logic when Sniffer raises an exception."""
+    data_dir = tmp_path / "data_fb"
+    data_dir.mkdir()
+    db_path = str(tmp_path / "test_fb.duckdb")
+
+    # Pipe fallback
+    pipe_file = data_dir / "pipe_fb.csv"
+    pipe_file.write_text("colA|colB\n1|2\n")
+
+    # Tab fallback
+    tab_file = data_dir / "tab_fb.csv"
+    tab_file.write_text("colA\tcolB\n1\t2\n")
+
+    # Mock csv.Sniffer to raise Exception
+    mock_sniffer = mocker.patch("csv.Sniffer")
+    mock_sniffer.return_value.sniff.side_effect = Exception("Sniff failed")
+
+    load_data_to_duckdb(str(data_dir), db_path)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    assert "pipe_fb" in tables
+    assert "tab_fb" in tables
+    conn.close()
+
+
+def test_load_data_to_duckdb_empty_file(tmp_path: Path) -> None:
+    """Test load_data_to_duckdb with an empty CSV file."""
+    data_dir = tmp_path / "data_empty"
+    data_dir.mkdir()
+    db_path = str(tmp_path / "test_empty.duckdb")
+
+    empty_file = data_dir / "empty.csv"
+    empty_file.write_text("")
+
+    load_data_to_duckdb(str(data_dir), db_path)
+
+
+@patch("t1d_analytics.analytics.get_database_schema", return_value="mock schema")
+@patch("any_llm.AnyLLM.create")
+def test_handle_natural_language_ollama_host_prefix(
+    mock_create: MagicMock,
+    mock_get_schema: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test handle_natural_language prefixes http:// to OLLAMA_HOST if missing."""
+    conn = duckdb.connect(":memory:")
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "SELECT 1;"
+    mock_llm.completion.return_value = mock_response
+    mock_create.return_value = mock_llm
+
+    with patch.dict(os.environ, {"OLLAMA_HOST": "custom-host:11434"}):
+        handle_natural_language(conn, "test query")
+
+    output = capsys.readouterr().out
+    assert "SELECT 1;" in output
+    conn.close()

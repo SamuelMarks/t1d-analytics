@@ -128,7 +128,7 @@ def test_write_to_db(mock_db: duckdb.DuckDBPyConnection) -> None:
     pretrain = mock_db.execute("SELECT * FROM pretrain_data").fetchall()
     assert len(pretrain) == 1
     assert "What is the average age?" in pretrain[0][0]
-    assert "SELECT AVG(age)" in pretrain[0][0]
+    assert "\nSQL: SELECT AVG(age)" in pretrain[0][0]
 
     # Verify sft_data
     sft = mock_db.execute("SELECT * FROM sft_data").fetchall()
@@ -142,3 +142,82 @@ def test_write_to_db(mock_db: duckdb.DuckDBPyConnection) -> None:
     assert dpo[0][0] == "What is the average age?"
     assert dpo[0][1] == "SELECT AVG(age) FROM demographics;"
     assert dpo[0][2] == "SELECT SUM(age) FROM demographics;"
+
+
+def test_is_valid_sql(mock_db: duckdb.DuckDBPyConnection) -> None:
+    """Test _is_valid_sql with valid and invalid queries."""
+    generator = TrainingDataGenerator(mock_db, "gemma4")
+    assert generator._is_valid_sql("SELECT * FROM demographics")
+    assert not generator._is_valid_sql("SELECT * FROM nonexistent_table")
+    assert not generator._is_valid_sql("MALFORMED SQL QUERY !!!")
+
+
+@patch("urllib.request.urlopen")
+def test_generate_pairs_sql_validation_discard(
+    mock_urlopen: MagicMock, mock_db: duckdb.DuckDBPyConnection
+) -> None:
+    """Test generating pairs discards invalid SQL when validate_sql is enabled."""
+    mock_response = MagicMock()
+    mock_json_response = json.dumps(
+        [
+            "What is the average age?",
+            "SELECT * FROM nonexistent_table;",
+            "SELECT * FROM demographics;",
+        ]
+    )
+    mock_response.read.return_value = json.dumps(
+        {"response": mock_json_response}
+    ).encode("utf-8")
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    generator = TrainingDataGenerator(mock_db, "gemma4")
+    pairs = generator._generate_pairs("dummy_schema", 1, validate_sql=True)
+    assert len(pairs) == 0
+
+
+def test_export_to_jsonl_and_parquet(
+    mock_db: duckdb.DuckDBPyConnection, tmp_path: pytest.TempPathFactory
+) -> None:
+    """Test exporting training tables to JSONL and Parquet."""
+    from pathlib import Path
+
+    out_dir = Path(str(tmp_path))
+    generator = TrainingDataGenerator(mock_db, "gemma4")
+    pairs = [
+        (
+            "What is the average age?",
+            "SELECT AVG(age) FROM demographics;",
+            "SELECT SUM(age) FROM demographics;",
+        )
+    ]
+    generator.write_to_db(pairs)
+
+    jsonl_path = out_dir / "sft.jsonl"
+    generator.export_to_jsonl("sft_data", jsonl_path)
+    assert jsonl_path.exists()
+    assert len(jsonl_path.read_text()) > 0
+
+    parquet_path = out_dir / "dpo.parquet"
+    generator.export_to_parquet("dpo_data", parquet_path)
+    assert parquet_path.exists()
+    assert parquet_path.stat().st_size > 0
+
+
+@patch("urllib.request.urlopen")
+def test_generate_pairs_ollama_host_without_http(
+    mock_urlopen: MagicMock, mock_db: duckdb.DuckDBPyConnection
+) -> None:
+    """Test _generate_pairs formats OLLAMA_HOST without http prefix."""
+    import os
+
+    mock_response = MagicMock()
+    mock_json = json.dumps(["Q?", "SELECT 1;", "SELECT 2;"])
+    mock_response.read.return_value = json.dumps({"response": mock_json}).encode(
+        "utf-8"
+    )
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    with patch.dict(os.environ, {"OLLAMA_HOST": "localhost:11434"}):
+        generator = TrainingDataGenerator(mock_db, "gemma4")
+        pairs = generator._generate_pairs("dummy", 1, validate_sql=False)
+        assert len(pairs) == 1

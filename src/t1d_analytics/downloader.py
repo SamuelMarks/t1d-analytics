@@ -1,8 +1,10 @@
 """Downloader module for saving files and links."""
 
+import hashlib
 import re
 from pathlib import Path
-from urllib.parse import unquote
+from typing import Optional
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -20,22 +22,25 @@ def sanitize_filename(name: str) -> str:
 
     Returns:
     -------
-        A sanitized string.
+        A sanitized string safe for file systems.
 
     """
-    name = re.sub(r"[^a-zA-Z0-9\-_ ]", "", name)
-    name = name.strip().replace(" ", "_")
-    return name
+    sanitized = re.sub(r"[^a-zA-Z0-9\-_ ]", "", name)
+    sanitized = sanitized.strip().replace(" ", "_")
+    return sanitized if sanitized else "dataset"
 
 
-def download_file(url: str, dest_dir: Path) -> None:
+def download_file(
+    url: str, dest_dir: Path, expected_sha256: Optional[str] = None
+) -> None:
     """
-    Download a file from a URL or save a DOI link.
+    Download a file from a URL or save a DOI link safely and atomically.
 
     Args:
     ----
         url: The URL to download.
         dest_dir: The directory to save the file.
+        expected_sha256: Optional expected SHA-256 hex digest for integrity verification.
 
     """
     _ = get_translator()
@@ -48,8 +53,9 @@ def download_file(url: str, dest_dir: Path) -> None:
             print(_("DOI link already exists, skipping: {}", url))
         return
 
-    filename = unquote(url.split("/")[-1])
-    if not filename:
+    parsed_path = urlparse(url).path
+    filename = unquote(parsed_path.split("/")[-1]) if parsed_path else ""
+    if not filename or filename == "/":
         filename = "downloaded_file"
 
     dest_path = dest_dir / filename
@@ -57,18 +63,38 @@ def download_file(url: str, dest_dir: Path) -> None:
         print(_("File already exists, skipping: {}", filename))
         return
 
+    tmp_path = dest_path.with_name(f"{filename}.tmp")
     print(_("Downloading {}...", filename))
-    response = requests.get(url, stream=True, timeout=30)
-    response.raise_for_status()
+    try:
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
 
-    with open(dest_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+        hasher = hashlib.sha256() if expected_sha256 else None
+        with open(tmp_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    if hasher:
+                        hasher.update(chunk)
+
+        if expected_sha256 and hasher:
+            digest = hasher.hexdigest()
+            if digest.lower() != expected_sha256.lower():
+                tmp_path.unlink(missing_ok=True)
+                raise ValueError(
+                    f"SHA-256 mismatch for {filename}: expected {expected_sha256}, got {digest}"
+                )
+
+        tmp_path.replace(dest_path)
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        print(_("Failed to download {}: {}", filename, e))
+        raise
 
 
 def process_datasets(datasets: list[DatasetInfo], output_dir: str) -> None:
     """
-    Process and download all given datasets.
+    Process and download all given datasets without halting on single file failures.
 
     Args:
     ----
@@ -87,6 +113,24 @@ def process_datasets(datasets: list[DatasetInfo], output_dir: str) -> None:
 
         print(_("Processing protocol: {}", dataset.protocol))
         if dataset.dataset_url:
-            download_file(dataset.dataset_url, dest_dir)
+            try:
+                download_file(dataset.dataset_url, dest_dir)
+            except Exception as e:
+                print(
+                    _(
+                        "Error downloading dataset for protocol {}: {}",
+                        dataset.protocol,
+                        e,
+                    )
+                )
         if dataset.document_url:
-            download_file(dataset.document_url, dest_dir)
+            try:
+                download_file(dataset.document_url, dest_dir)
+            except Exception as e:
+                print(
+                    _(
+                        "Error downloading document for protocol {}: {}",
+                        dataset.protocol,
+                        e,
+                    )
+                )

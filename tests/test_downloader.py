@@ -18,6 +18,8 @@ def test_sanitize_filename() -> None:
     """Test filename sanitization."""
     assert sanitize_filename("Test (Project) 1!") == "Test_Project_1"
     assert sanitize_filename("  spaces  ") == "spaces"
+    assert sanitize_filename("???!!!") == "dataset"
+    assert sanitize_filename("") == "dataset"
 
 
 def test_download_file_doi(tmp_path: Path) -> None:
@@ -85,3 +87,73 @@ def test_download_file_doi_exists(tmp_path: Path, capsys: CaptureFixture[str]) -
     link_file.write_text("https://doi.org/10.123/456")
     download_file("https://doi.org/10.123/456", tmp_path)
     assert "DOI link already exists" in capsys.readouterr().out
+
+
+def test_download_file_with_query_params(tmp_path: Path, requests_mock: Mock) -> None:
+    """Test downloading a file whose URL has query parameters."""
+    requests_mock.get("http://test/data.zip?auth=secret&version=2", content=b"content")
+    download_file("http://test/data.zip?auth=secret&version=2", tmp_path)
+    target = tmp_path / "data.zip"
+    assert target.exists()
+    assert target.read_bytes() == b"content"
+
+
+def test_download_file_sha256_verification(tmp_path: Path, requests_mock: Mock) -> None:
+    """Test downloading a file with matching and mismatching SHA-256."""
+    import hashlib
+
+    data = b"verified_content"
+    correct_hash = hashlib.sha256(data).hexdigest()
+    requests_mock.get("http://test/hashed.csv", content=data)
+
+    # Success case
+    download_file("http://test/hashed.csv", tmp_path, expected_sha256=correct_hash)
+    assert (tmp_path / "hashed.csv").exists()
+
+    # Mismatch case
+    tmp_path2 = tmp_path / "sub"
+    tmp_path2.mkdir()
+    requests_mock.get("http://test/bad_hash.csv", content=data)
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        download_file(
+            "http://test/bad_hash.csv",
+            tmp_path2,
+            expected_sha256="0000000000000000000000000000000000000000000000000000000000000000",
+        )
+    assert not (tmp_path2 / "bad_hash.csv").exists()
+
+
+def test_process_datasets_with_errors(
+    tmp_path: Path, requests_mock: Mock, capsys: CaptureFixture[str]
+) -> None:
+    """Test process_datasets continues when an individual file fails."""
+    requests_mock.get("http://test/broken_dataset.zip", status_code=500)
+    requests_mock.get("http://test/broken_doc.pdf", status_code=404)
+
+    datasets = [
+        DatasetInfo(
+            "FailedProtocol",
+            "http://test/broken_dataset.zip",
+            "http://test/broken_doc.pdf",
+        )
+    ]
+    process_datasets(datasets, str(tmp_path))
+    out = capsys.readouterr().out
+    assert "Error downloading dataset" in out
+    assert "Error downloading document" in out
+
+
+def test_download_file_empty_chunks(tmp_path: Path) -> None:
+    """Test downloading a file with empty chunks yielded by iter_content."""
+    from unittest.mock import MagicMock, patch
+
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.iter_content.return_value = [b"chunk1", b"", b"chunk2"]
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        download_file("http://test/chunks.csv", tmp_path)
+        target = tmp_path / "chunks.csv"
+        assert target.exists()
+        assert target.read_bytes() == b"chunk1chunk2"

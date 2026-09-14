@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import urllib.error
 import urllib.request
@@ -122,7 +123,9 @@ class ModelsResponse(BaseModel):
     models: List[ModelInfo]
 
 
-def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
+def execute_sql(
+    db_path: str, query: str, max_rows: int = 10000
+) -> List[Dict[str, SqlValue]]:
     """
     Execute a SQL query and return results as a list of dictionaries.
 
@@ -130,6 +133,7 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
     ----
         db_path: Path to the DuckDB database file.
         query: SQL query to execute.
+        max_rows: Maximum rows to return to prevent memory exhaustion.
 
     Returns:
     -------
@@ -146,7 +150,7 @@ def execute_sql(db_path: str, query: str) -> List[Dict[str, SqlValue]]:
         result = conn.execute(query)
 
         columns = [desc[0] for desc in result.description] if result.description else []
-        rows = result.fetchall()
+        rows = result.fetchmany(max_rows)
         output = [dict(zip(columns, row)) for row in rows]
         conn.close()
         logger.info(f"SQL query executed successfully. Returned {len(output)} rows.")
@@ -344,7 +348,20 @@ def chat_endpoint(request: ChatRequest) -> ChatResponse:
             full_response, sql_query = generate_sql_from_nl(
                 db_path, request.message, model_name=request.model
             )
-            return ChatResponse(content=full_response, sqlQuery=sql_query)
+            results = None
+            sql_error = None
+            if sql_query:
+                try:
+                    results = execute_sql(db_path, sql_query)
+                except Exception as e:
+                    sql_error = parse_error(e)
+
+            return ChatResponse(
+                content=full_response,
+                sqlQuery=sql_query,
+                sqlResult=results,
+                error=sql_error,
+            )
     except ValueError as ve:
         logger.error(f"Database error during chat request: {ve}")
         return ChatResponse(content="backend.errorDbExecution", error=parse_error(ve))
@@ -427,11 +444,17 @@ class TableDataResponse(BaseModel):
     """Response model for table data."""
 
     rows: List[Dict[str, SqlValue]]
+    total_count: int = 0
+    page: int = 1
+    total_pages: int = 1
 
 
 @app.get("/api/table/{table_name}", response_model=TableDataResponse)
 def get_table_data(
-    table_name: str, limit: int = 25, offset: int = 0
+    table_name: str,
+    limit: int = 25,
+    offset: int = 0,
+    db_path: Optional[str] = None,
 ) -> TableDataResponse:
     """
     Return paginated rows from a specific table.
@@ -441,17 +464,18 @@ def get_table_data(
         table_name: The table name.
         limit: The limit.
         offset: The offset.
+        db_path: Optional path to the DuckDB database.
 
     Returns:
     -------
-        The data.
+        The data with pagination metadata.
 
     Raises:
     ------
         HTTPException: on error.
 
     """
-    db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
+    target_db = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     # Validate table name to prevent SQL injection
     if not table_name.isidentifier():
         raise HTTPException(
@@ -459,7 +483,7 @@ def get_table_data(
         )
 
     try:
-        conn = duckdb.connect(db_path, read_only=True)
+        conn = duckdb.connect(target_db, read_only=True)
         # Check if table exists
         tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
         if table_name not in tables:
@@ -472,13 +496,20 @@ def get_table_data(
         # Limit to reasonable maximum
         limit = min(limit, 1000)
 
-        query = f"SELECT * FROM {table_name} LIMIT {limit} OFFSET {offset}"
+        count_result = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
+        total_count = count_result[0] if count_result else 0
+        total_pages = max(1, math.ceil(total_count / limit)) if limit > 0 else 1
+        page = (offset // limit) + 1 if limit > 0 else 1
+
+        query = f'SELECT * FROM "{table_name}" LIMIT {limit} OFFSET {offset}'
         result = conn.execute(query)
         columns = [desc[0] for desc in result.description] if result.description else []
         rows = result.fetchall()
         output = [dict(zip(columns, row)) for row in rows]
         conn.close()
-        return TableDataResponse(rows=output)
+        return TableDataResponse(
+            rows=output, total_count=total_count, page=page, total_pages=total_pages
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -531,33 +562,34 @@ def get_status(request: Request) -> Dict[str, Any]:
 
 
 @app.get("/api/schema", response_model=SchemaResponse)
-def get_schema(request: Request) -> SchemaResponse:
+def get_schema(request: Request, db_path: Optional[str] = None) -> SchemaResponse:
     """
     Return structured schema for the frontend Schema Explorer.
 
     Args:
     ----
         request: FastAPI request.
+        db_path: Optional target DuckDB database path.
 
     Returns:
     -------
         The structured schema response including database diagnostics.
 
     """
-    db_path = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
+    target_db = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     lang_header = request.headers.get("accept-language", "en")
     lang = lang_header.split(",")[0].split("-")[0].split(";")[0]
-    db_health = check_database_health(db_path, lang=lang)
+    db_health = check_database_health(target_db, lang=lang)
 
     try:
-        conn = duckdb.connect(db_path, read_only=True)
+        conn = duckdb.connect(target_db, read_only=True)
         # Fetch tables
         tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
 
         schema_data = []
         for table in tables:
-            # Fetch columns for each table
-            columns = conn.execute(f"DESCRIBE {table}").fetchall()
+            # Fetch columns for each table safely quoting table name
+            columns = conn.execute(f'DESCRIBE "{table}"').fetchall()
             col_info = [ColumnInfo(name=c[0], type=c[1]) for c in columns]
             schema_data.append(TableInfo(name=table, columns=col_info))
 
@@ -578,8 +610,12 @@ def list_models() -> ModelsResponse:
         A list of available models.
 
     """
+    base_url = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    if not base_url.startswith("http://") and not base_url.startswith("https://"):
+        base_url = f"http://{base_url}"
+
     try:
-        req = urllib.request.Request("http://127.0.0.1:11434/api/tags")
+        req = urllib.request.Request(f"{base_url}/api/tags")
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
 

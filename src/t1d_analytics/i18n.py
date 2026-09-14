@@ -22,6 +22,7 @@ TRANSLATIONS = {
         "Failed to extract {} (Bad Zip File).": "{}の解凍に失敗しました（不正なZipファイル）。",
         "No zip files found to extract.": "解凍するzipファイルが見つかりません。",
         "Extraction complete.": "解凍が完了しました。",
+        "Skipping unsafe entry {} in {} (path traversal detected).": "{}内の安全でないエントリ{}をスキップしています（パストラバーサルが検出されました）。",
         "Connecting to DuckDB at {}...": "{}のDuckDBに接続中...",
         "Scanning for CSV and TXT files...": "CSVおよびTXTファイルをスキャン中...",
         "No tabular files found.": "表形式のファイルが見つかりません。",
