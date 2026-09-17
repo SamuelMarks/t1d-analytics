@@ -25,6 +25,18 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
           pip install -e .
 
+      - name: Lint and Code Quality (Ruff)
+        run: ruff check .
+
+      - name: Static Type Checking (Mypy)
+        run: mypy src/ tests/
+
+      - name: Documentation Coverage (Interrogate)
+        run: interrogate -vv --fail-under=100 src/t1d_analytics
+
+      - name: Build Sphinx Documentation
+        run: python -m sphinx -b html docs_src docs
+
       - name: Run Pytest Coverage
         run: pytest tests/ --cov=src/t1d_analytics --cov-fail-under=100
 
@@ -40,6 +52,9 @@ jobs:
 
           # Verify the database has the data
           python -c "import duckdb; conn = duckdb.connect('ci_test.duckdb'); res = conn.execute('SELECT count(*) FROM tiny').fetchone()[0]; assert res == 2, f'Expected 2 rows, got {res}'"
+
+      - name: Validate Cloud Deployment Script Mock Mode
+        run: ./test.sh --mock-cloud
 
   web-tests:
     name: Web Frontend Build & Test
@@ -58,9 +73,17 @@ jobs:
         working-directory: ./web
         run: npm ci
 
+      - name: Static Type Checking (TypeScript)
+        working-directory: ./web
+        run: npm run typecheck
+
       - name: Build Web Application
         working-directory: ./web
         run: npm run build
+
+      - name: Generate TypeScript Documentation (TypeDoc)
+        working-directory: ./web
+        run: npm run docs
 
       - name: Run Web Unit Tests (Vitest)
         working-directory: ./web
@@ -99,3 +122,13 @@ jobs:
         env:
           T1D_DB_PATH: ../ci_test.duckdb
         run: npx playwright test tests-e2e-full -c playwright.full.config.ts
+
+      - name: Archive Playwright Test Reports & Traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7

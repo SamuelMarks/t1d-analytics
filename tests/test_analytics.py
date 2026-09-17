@@ -1,5 +1,6 @@
 """Tests for the analytics module."""
 
+import io
 import os
 import sys
 import types
@@ -198,6 +199,50 @@ def test_handle_natural_language_no_module(capsys: pytest.CaptureFixture[str]) -
 
     if original_module:
         sys.modules["any_llm"] = original_module
+
+
+def test_handle_natural_language_provider_readiness_error(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test natural language when requested provider is missing API credentials."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    conn = duckdb.connect(":memory:")
+    handle_natural_language(conn, "test query", model="openai/gpt-4o")
+    output = capsys.readouterr().out
+    assert "Failed to generate or execute query:" in output
+    assert "OPENAI_API_KEY" in output
+    conn.close()
+
+
+@patch("t1d_analytics.analytics.get_database_schema", return_value="mock schema")
+@patch("any_llm.AnyLLM.create")
+def test_handle_natural_language_multi_provider_success(
+    mock_create: MagicMock,
+    mock_get_schema: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test natural language handling using an external provider with API key."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-123")
+    conn = duckdb.connect(":memory:")
+    conn.execute("CREATE TABLE users (name VARCHAR)")
+    conn.execute("INSERT INTO users VALUES ('Bob')")
+
+    mock_llm = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "```sql\nSELECT name FROM users;\n```"
+    mock_llm.completion.return_value = mock_response
+    mock_create.return_value = mock_llm
+
+    handle_natural_language(conn, "get users", model="gpt-4o", provider="openai")
+    output = capsys.readouterr().out
+    assert "SELECT name FROM users;" in output
+    assert "Bob" in output
+    mock_create.assert_called_once_with("openai")
+    mock_llm.completion.assert_called_once()
+    assert mock_llm.completion.call_args[1]["model"] == "gpt-4o"
+    conn.close()
 
 
 @patch("t1d_analytics.analytics.input", side_effect=["", "SELECT 1 AS val;", "exit"])
@@ -463,7 +508,24 @@ def test_handle_natural_language_no_result(mocker: typing.Any) -> None:
 
 
 def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
-    """Test run_query_repl when sql returns no result."""
+    """Test run_query_repl when sql returns no result and exercises natural language branch."""
+    from t1d_analytics.analytics import run_query_repl
+
+    db_path = tmp_path / "test.duckdb"
+    init_conn = duckdb.connect(str(db_path))
+    init_conn.execute("CREATE TABLE t (id INT)")
+    init_conn.close()
+
+    inputs = ["show me patients", "SELECT 1 WHERE 1=0", "exit"]
+    mocker.patch("builtins.input", side_effect=inputs)
+    mock_nl = mocker.patch("t1d_analytics.analytics.handle_natural_language")
+
+    run_query_repl(str(db_path))
+    mock_nl.assert_called_once()
+
+
+def test_run_query_repl_with_result(mocker: typing.Any, tmp_path: Path) -> None:
+    """Test run_query_repl displays results when query returns non-empty result."""
     from t1d_analytics.analytics import run_query_repl
 
     db_path = tmp_path / "test.duckdb"
@@ -473,11 +535,13 @@ def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
     mocker.patch("builtins.input", side_effect=inputs)
 
     mock_conn = mocker.MagicMock()
-    mock_conn.sql.return_value = None
+    mock_result = mocker.MagicMock()
+    mock_conn.sql.return_value = mock_result
     mocker.patch("duckdb.connect", return_value=mock_conn)
 
     run_query_repl(str(db_path))
     mock_conn.sql.assert_called_once()
+    mock_result.show.assert_called_once()
 
 
 def test_extract_zips_path_traversal_skipped(
@@ -566,9 +630,10 @@ def test_run_query_repl_custom_model_routing(
     mocker.patch("builtins.input", side_effect=inputs)
     mock_hnl = mocker.patch("t1d_analytics.analytics.handle_natural_language")
 
-    run_query_repl(str(db_path), model="custom-gemma")
+    run_query_repl(str(db_path), model="custom-gemma", provider="openai")
     mock_hnl.assert_called_once()
     assert mock_hnl.call_args[1]["model"] == "custom-gemma"
+    assert mock_hnl.call_args[1]["provider"] == "openai"
 
 
 def test_load_data_to_duckdb_fallback_delimiters(
@@ -634,3 +699,852 @@ def test_handle_natural_language_ollama_host_prefix(
     output = capsys.readouterr().out
     assert "SELECT 1;" in output
     conn.close()
+
+
+def test_load_data_to_duckdb_subdirectories_collision(tmp_path: Path) -> None:
+    """Test load_data_to_duckdb disambiguates duplicate stems across subdirectories."""
+    data_dir = tmp_path / "multi_study"
+    study_a = data_dir / "study_a"
+    study_b = data_dir / "study_b"
+    study_a.mkdir(parents=True)
+    study_b.mkdir(parents=True)
+    db_path = str(tmp_path / "multi.duckdb")
+
+    (study_a / "demographics.csv").write_text("id,age\n1,25\n")
+    (study_b / "demographics.csv").write_text("id,age\n2,30\n")
+
+    # With automatic collision detection
+    load_data_to_duckdb(str(data_dir), db_path)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    assert any("study_a_demographics" in t for t in tables)
+    assert any("study_b_demographics" in t for t in tables)
+    conn.close()
+
+
+def test_load_data_to_duckdb_numeric_stem_and_root_collision(tmp_path: Path) -> None:
+    """Test load_data_to_duckdb with numeric file stems and repeated table names."""
+    data_dir = tmp_path / "numeric_study"
+    data_dir.mkdir()
+    db_path = str(tmp_path / "numeric.duckdb")
+
+    # Numeric start
+    (data_dir / "123_results.csv").write_text("id,val\n1,10\n")
+    # Duplicate stem in same root folder
+    (data_dir / "results.csv").write_text("id,val\n2,20\n")
+    (data_dir / "results.txt").write_text("id,val\n3,30\n")
+
+    load_data_to_duckdb(str(data_dir), db_path, prefix_subdirs=True)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    assert "t_123_results" in tables
+    assert "results" in tables or "results_2" in tables
+    conn.close()
+
+
+def test_is_sql_query_advanced_heuristics() -> None:
+    """Test SQL vs Natural language heuristics including DuckDB shorthand and boundary keywords."""
+    from t1d_analytics.analytics import is_sql_query
+
+    # Natural language beginning with SQL keywords
+    assert not is_sql_query("Select patients with severe hypo events")
+    assert not is_sql_query(
+        "Describe the distribution of CGM glucose in pediatric patients"
+    )
+    assert not is_sql_query("Explain why patient 10 had glycemic variability")
+
+    # DuckDB shorthand statements
+    assert not is_sql_query("()")
+    assert is_sql_query("FROM patients")
+    assert is_sql_query("(SELECT 1)")
+    assert is_sql_query("SUMMARIZE patients")
+    assert is_sql_query("CALL current_setting('threads')")
+    assert is_sql_query("VALUES (1, 'a'), (2, 'b')")
+    assert is_sql_query("TABLE patients")
+
+
+def test_extract_zips_sibling_prefix_path_traversal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test extract_zips rejects zip entries targeting sibling directories with matching prefixes."""
+    data_dir = tmp_path / "zip_test"
+    data_dir.mkdir()
+    zip_path = data_dir / "sibling_attack.zip"
+
+    import io
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        # Traversal to sibling folder data_dir_evil
+        zf.writestr("../zip_test_evil/malicious.txt", "evil")
+
+    zip_path.write_bytes(zip_buffer.getvalue())
+
+    extract_zips(str(data_dir))
+    out = capsys.readouterr().out
+    assert "path traversal detected" in out.lower()
+
+
+def test_load_data_to_duckdb_parquet_and_gz(tmp_path: Path) -> None:
+    """Test load_data_to_duckdb ingests Parquet and gzip compressed CSV files."""
+    import gzip
+
+    data_dir = tmp_path / "multi_format"
+    data_dir.mkdir()
+    db_path = str(tmp_path / "mf.duckdb")
+
+    # Write parquet file
+    conn_tmp = duckdb.connect(":memory:")
+    conn_tmp.execute("CREATE TABLE temp_src (id INT, metric VARCHAR)")
+    conn_tmp.execute("INSERT INTO temp_src VALUES (101, 'A1c')")
+    pq_path = str(data_dir / "lab_metrics.parquet")
+    conn_tmp.execute(f"COPY temp_src TO '{pq_path}' (FORMAT PARQUET)")
+    conn_tmp.close()
+
+    # Write .csv.gz file
+    gz_path = data_dir / "cgm_readings.csv.gz"
+    with gzip.open(gz_path, "wt", encoding="utf-8") as gf:
+        gf.write("patient_id,glucose\n201,135\n")
+
+    load_data_to_duckdb(str(data_dir), db_path)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    assert "lab_metrics" in tables
+    assert "cgm_readings" in tables
+    pq_rows = conn.execute("SELECT * FROM lab_metrics").fetchall()
+    assert pq_rows == [(101, "A1c")]
+    gz_rows = conn.execute("SELECT * FROM cgm_readings").fetchall()
+    assert gz_rows == [(201, 135)]
+    conn.close()
+
+
+def test_load_data_to_duckdb_semicolon_fallback(
+    tmp_path: Path, monkeypatch: typing.Any
+) -> None:
+    """Test loading semicolon-delimited and comma fallback CSV when csv.Sniffer fails."""
+    import csv
+
+    data_dir = tmp_path / "semi_data"
+    data_dir.mkdir()
+    (data_dir / "readings.csv").write_text("patient_id;val\n1;99\n2;105\n")
+    (data_dir / "plain.csv").write_text("patient_id,val\n1,10\n2,20\n")
+    db_path = str(tmp_path / "semi.duckdb")
+
+    # Force csv.Sniffer to raise an exception to trigger the fallback
+    def mock_sniff(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        raise csv.Error("Sniffer failed")
+
+    monkeypatch.setattr(csv.Sniffer, "sniff", mock_sniff)
+
+    load_data_to_duckdb(str(data_dir), db_path)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    res = conn.execute("SELECT sum(val) FROM readings").fetchone()
+    assert res is not None
+    assert res[0] == 204
+    res_plain = conn.execute("SELECT sum(val) FROM plain").fetchone()
+    assert res_plain is not None
+    assert res_plain[0] == 30
+    conn.close()
+
+
+def test_load_data_to_duckdb_uppercase_extensions(tmp_path: Path) -> None:
+    """Test loading files with uppercase extensions like .CSV and .TXT on POSIX."""
+    data_dir = tmp_path / "upper_data"
+    data_dir.mkdir()
+    (data_dir / "UPPER.CSV").write_text("id,val\n1,50\n")
+    (data_dir / "TEXT.TXT").write_text("id,val\n2,60\n")
+    db_path = str(tmp_path / "upper.duckdb")
+
+    load_data_to_duckdb(str(data_dir), db_path)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    assert "upper" in tables
+    assert "text" in tables
+    conn.close()
+
+
+def test_load_data_to_duckdb_repeated_and_disambiguation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test load_data_to_duckdb skips already loaded file and disambiguates collisions from different files."""
+    data_dir_1 = tmp_path / "dir1"
+    data_dir_1.mkdir()
+    (data_dir_1 / "trial.csv").write_text("id,score\n1,10\n")
+
+    db_path = str(tmp_path / "idempotent.duckdb")
+
+    # First load
+    load_data_to_duckdb(str(data_dir_1), db_path)
+    conn = duckdb.connect(db_path)
+    assert "trial" in [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    conn.close()
+
+    # Second load on exact same directory: should skip
+    load_data_to_duckdb(str(data_dir_1), db_path)
+    out = capsys.readouterr().out
+    assert "already exists, skipping" in out
+
+    # Third load with a different file mapping to same table stem: should disambiguate as trial_2
+    data_dir_2 = tmp_path / "dir2"
+    data_dir_2.mkdir()
+    (data_dir_2 / "trial.csv").write_text("id,score\n2,20\n")
+
+    load_data_to_duckdb(str(data_dir_2), db_path)
+    conn = duckdb.connect(db_path)
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    assert "trial" in tables
+    assert "trial_2" in tables
+    conn.close()
+
+
+def test_is_sql_query_ddl_and_dml() -> None:
+    """Test is_sql_query recognizes standard DDL and DML statements."""
+    from t1d_analytics.analytics import is_sql_query
+
+    assert is_sql_query("CREATE TABLE test (id INT, name VARCHAR);")
+    assert is_sql_query("DROP TABLE IF EXISTS test;")
+    assert is_sql_query("ALTER TABLE test ADD COLUMN age INT;")
+    assert is_sql_query("INSERT INTO test VALUES (1, 'Alice', 30);")
+    assert is_sql_query("UPDATE test SET age = 31 WHERE id = 1;")
+    assert is_sql_query("DELETE FROM test WHERE id = 1;")
+    assert is_sql_query("COPY test TO 'out.csv' (FORMAT CSV);")
+    assert is_sql_query("CHECKPOINT;")
+
+
+def test_is_sql_query_without_extract_statements() -> None:
+    """Test is_sql_query fallback when extract_statements is absent on connection."""
+    from t1d_analytics.analytics import is_sql_query
+
+    mock_conn = MagicMock(spec=["execute", "close"])
+    mock_conn.execute.return_value = None
+
+    assert not hasattr(mock_conn, "extract_statements")
+    assert is_sql_query("SELECT 42", conn=mock_conn)
+    assert is_sql_query("EXPLAIN SELECT 42", conn=mock_conn)
+
+    # ParserException simulation
+    mock_conn.execute.side_effect = duckdb.ParserException("syntax error")
+    assert not is_sql_query("INVALID SYNTAX", conn=mock_conn)
+
+    # General Exception simulation (e.g. CatalogException) returns True
+    mock_conn.execute.side_effect = Exception("Catalog error")
+    assert is_sql_query("SELECT * FROM missing_table", conn=mock_conn)
+
+
+def test_extract_tar_and_nested_archives(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test extracting .tar.gz, .tgz, .tar.bz2, and nested archives recursively."""
+    import tarfile
+
+    from t1d_analytics.analytics import extract_zips
+
+    # 1. Create a tar.gz archive
+    tar_gz_path = tmp_path / "sample.tar.gz"
+    inner_file = tmp_path / "tar_content.txt"
+    inner_file.write_text("tar content")
+    with tarfile.open(tar_gz_path, "w:gz") as tar:
+        tar.add(inner_file, arcname="tar_content.txt")
+
+    # 2. Create a nested zip archive: outer.zip containing inner.zip
+    nested_dir = tmp_path / "nested_source"
+    nested_dir.mkdir()
+    inner_zip_path = nested_dir / "inner.zip"
+    with zipfile.ZipFile(inner_zip_path, "w") as zf:
+        zf.writestr("nested_data.txt", "deep data")
+
+    outer_zip_path = tmp_path / "outer.zip"
+    with zipfile.ZipFile(outer_zip_path, "w") as zf:
+        zf.write(inner_zip_path, arcname="inner.zip")
+
+    # 3. Create .tgz and .tar.bz2 archives
+    tgz_path = tmp_path / "archive.tgz"
+    with tarfile.open(tgz_path, "w:gz") as tar:
+        tar.add(inner_file, arcname="tgz_content.txt")
+
+    tbz_path = tmp_path / "archive.tar.bz2"
+    with tarfile.open(tbz_path, "w:bz2") as tar:
+        tar.add(inner_file, arcname="tbz_content.txt")
+
+    extract_zips(str(tmp_path), max_depth=3)
+
+    assert (tmp_path / "sample" / "tar_content.txt").exists()
+    assert (tmp_path / "archive" / "tgz_content.txt").exists()
+    assert (tmp_path / "outer" / "inner" / "nested_data.txt").exists()
+
+
+def test_extract_tar_path_traversal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test path traversal Zip Slip prevention in tar archives."""
+    import tarfile
+
+    from t1d_analytics.analytics import extract_zips
+
+    tar_path = tmp_path / "traversal.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tar:
+        ti = tarfile.TarInfo(name="../../evil.sh")
+        ti.size = 9
+        tar.addfile(ti, io.BytesIO(b"echo evil"))
+
+    extract_zips(str(tmp_path))
+    assert not (tmp_path.parent / "evil.sh").exists()
+    assert "path traversal detected" in capsys.readouterr().out
+
+
+def test_extract_bad_tar_archive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test handling corrupted tar archives."""
+    from t1d_analytics.analytics import extract_zips
+
+    bad_tar = tmp_path / "corrupt.tar.gz"
+    bad_tar.write_bytes(b"not a valid tar gzip stream")
+
+    extract_zips(str(tmp_path))
+    assert "Bad Archive File" in capsys.readouterr().out
+
+
+def test_clinical_data_ingestion_and_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test SAS (.xpt) and SPSS (.sav) data loading, type conversions, and manifest tracking."""
+    import numpy as np
+    import pandas as pd  # type: ignore[import-untyped]
+    import pyreadstat  # type: ignore[import-untyped]
+    from t1d_analytics.analytics import get_ingestion_manifest, load_data_to_duckdb
+
+    data_dir = tmp_path / "clinical_data"
+    data_dir.mkdir()
+    db_path = str(tmp_path / "clinical.duckdb")
+
+    # Create synthetic SPSS dataset with dates and NaNs
+    df_spss = pd.DataFrame(
+        {
+            "PATIENT_ID": [101, 102],
+            "VISIT_DATE": pd.date_range("2024-01-01", periods=2),
+            "GLUCOSE": [115.5, np.nan],
+        }
+    )
+    spss_file = data_dir / "trial_spss.sav"
+    pyreadstat.write_sav(df_spss, str(spss_file))
+
+    # Create synthetic SAS XPT dataset
+    df_xpt = pd.DataFrame(
+        {
+            "PATIENT_ID": [201, 202],
+            "HBA1C": [6.5, np.nan],
+        }
+    )
+    xpt_file = data_dir / "trial_sas.xpt"
+    pyreadstat.write_xport(df_xpt, str(xpt_file))
+
+    # First load with clinical flags
+    load_data_to_duckdb(
+        str(data_dir),
+        db_path,
+        include_sas=True,
+        include_spss=True,
+    )
+
+    manifest_records = get_ingestion_manifest(db_path)
+    assert len(manifest_records) == 2
+    table_names = [r["table_name"] for r in manifest_records]
+    assert "trial_spss" in table_names
+    assert "trial_sas" in table_names
+
+    conn = duckdb.connect(db_path)
+    spss_rows = conn.execute(
+        "SELECT subject_id, glucose_value FROM trial_spss ORDER BY subject_id"
+    ).fetchall()
+    assert spss_rows[0] == (101, 115.5)
+    assert spss_rows[1] == (102, None)  # NaN translated to NULL
+
+    sas_rows = conn.execute(
+        "SELECT subject_id, hba1c FROM trial_sas ORDER BY subject_id"
+    ).fetchall()
+    assert sas_rows[0] == (201, 6.5)
+    assert sas_rows[1] == (202, None)
+    conn.close()
+
+    # Second load: identical files should skip via manifest
+    capsys.readouterr()
+    load_data_to_duckdb(
+        str(data_dir),
+        db_path,
+        include_sas=True,
+        include_spss=True,
+    )
+    assert "already exists, skipping" in capsys.readouterr().out
+
+
+def test_read_clinical_dataframe_edge_cases(tmp_path: Path, mocker: MagicMock) -> None:
+    """Test error handling in _read_clinical_dataframe."""
+    from t1d_analytics.analytics import _read_clinical_dataframe
+
+    # Unsupported format
+    unsupported = tmp_path / "test.unsupported"
+    unsupported.write_text("sample")
+    with pytest.raises(ValueError, match="Unsupported clinical file format"):
+        _read_clinical_dataframe(unsupported)
+
+    # Empty/None returned
+    mocker.patch("pyreadstat.read_sav", return_value=(None, None))
+    sav_file = tmp_path / "empty.sav"
+    sav_file.write_text("data")
+    with pytest.raises(ValueError, match="Could not read clinical file"):
+        _read_clinical_dataframe(sav_file)
+
+
+def test_get_ingestion_manifest_edge_cases(tmp_path: Path) -> None:
+    """Test get_ingestion_manifest with non-existent database or missing table."""
+    from t1d_analytics.analytics import get_ingestion_manifest
+
+    assert get_ingestion_manifest(str(tmp_path / "nonexistent.duckdb")) == []
+
+    empty_db = str(tmp_path / "empty.duckdb")
+    conn = duckdb.connect(empty_db)
+    conn.execute("CREATE TABLE dummy (id INT)")
+    conn.close()
+    assert get_ingestion_manifest(empty_db) == []
+
+
+def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
+    tmp_path: Path, mocker: MagicMock
+) -> None:
+    """Test reading .sas7bdat, decoding bytes in columns, and fallback to pandas readers."""
+    import pandas as pd
+    from t1d_analytics.analytics import _read_clinical_dataframe
+
+    # 1. sas7bdat success with byte data to decode
+    raw_df = pd.DataFrame({b"col_bytes": [b"val_bytes", "str_val"]})
+    mocker.patch("pyreadstat.read_sas7bdat", return_value=(raw_df, None))
+    sas_file = tmp_path / "test.sas7bdat"
+    sas_file.write_text("data")
+    res_df = _read_clinical_dataframe(sas_file)
+    assert "col_bytes" in res_df.columns
+    assert res_df["col_bytes"].iloc[0] == "val_bytes"
+
+    # 2. SAS pyreadstat failure falling back to pd.read_sas
+    mocker.patch("pyreadstat.read_sas7bdat", side_effect=Exception("Read failure"))
+    mock_pandas_sas = mocker.patch(
+        "pandas.read_sas", return_value=pd.DataFrame({"a": [1]})
+    )
+    fallback_sas_df = _read_clinical_dataframe(sas_file)
+    assert fallback_sas_df["a"].iloc[0] == 1
+    mock_pandas_sas.assert_called_once_with(str(sas_file), format="sas7bdat")
+
+    # 3. SPSS pyreadstat failure falling back to pd.read_spss
+    sav_file = tmp_path / "test.sav"
+    sav_file.write_text("data")
+    mocker.patch("pyreadstat.read_sav", side_effect=Exception("Read failure"))
+    mock_pandas_spss = mocker.patch(
+        "pandas.read_spss", return_value=pd.DataFrame({"b": [2]})
+    )
+    fallback_sav_df = _read_clinical_dataframe(sav_file)
+    assert fallback_sav_df["b"].iloc[0] == 2
+    mock_pandas_spss.assert_called_once_with(str(sav_file))
+
+
+def test_extract_zips_max_depth_loop_completion(tmp_path: Path) -> None:
+    """Test that extract_zips terminates cleanly when max_depth iterations are exhausted."""
+    from t1d_analytics.analytics import extract_zips
+
+    # Create a zip that produces a nested zip
+    outer_zip = tmp_path / "depth_test.zip"
+    with zipfile.ZipFile(outer_zip, "w") as zf:
+        zf.writestr("test.txt", "content")
+
+    # With max_depth=1, loop completes without reaching break on empty unprocessed
+    extract_zips(str(tmp_path), max_depth=1)
+    assert (tmp_path / "depth_test" / "test.txt").exists()
+
+
+def test_extract_sql_from_response_variations() -> None:
+    """Test extract_sql_from_response under various LLM output formats."""
+    from t1d_analytics.analytics import extract_sql_from_response
+
+    # Non-string conversion
+    assert extract_sql_from_response(12345) == "12345"  # type: ignore[arg-type]
+
+    # Multi-block markdown with reasoning
+    response = """Here is my reasoning.
+```duckdb
+SELECT 1;
+```
+And here is the final query:
+```sql
+SELECT * FROM users WHERE age > 18;
+```
+Hope this helps!"""
+    assert extract_sql_from_response(response) == "SELECT * FROM users WHERE age > 18;"
+
+    # Plain sql\n and duckdb\n prefixes
+    assert extract_sql_from_response("sql\nSELECT 2;") == "SELECT 2;"
+    assert extract_sql_from_response("duckdb\nSELECT 3;") == "SELECT 3;"
+
+
+def test_get_clinical_variable_mappings(mocker: typing.Any) -> None:
+    """Test get_clinical_variable_mappings handling existing, missing, and malformed files."""
+    from t1d_analytics.analytics import get_clinical_variable_mappings
+
+    # Normal case
+    mappings = get_clinical_variable_mappings()
+    assert "subject_id" in mappings
+    assert "hba1c" in mappings
+
+    # Missing file
+    mocker.patch("pathlib.Path.exists", return_value=False)
+    assert get_clinical_variable_mappings() == {}
+
+    # Malformed JSON
+    mocker.patch("pathlib.Path.exists", return_value=True)
+    mocker.patch("builtins.open", mocker.mock_open(read_data="not json"))
+    assert get_clinical_variable_mappings() == {}
+
+    # JSON that is not a dictionary (e.g. list)
+    mocker.patch("builtins.open", mocker.mock_open(read_data='["not", "a", "dict"]'))
+    assert get_clinical_variable_mappings() == {}
+
+
+def test_profile_table(tmp_path: Path) -> None:
+    """Test profile_table data quality metrics, null calculation, and error cases."""
+    from t1d_analytics.analytics import profile_table
+
+    db_file = tmp_path / "profile_test.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute(
+        """
+        CREATE TABLE metrics (
+            id INT,
+            val FLOAT,
+            notes VARCHAR
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO metrics VALUES (1, 10.5, 'note1'), (2, 20.5, NULL), (3, NULL, 'note3')"
+    )
+    conn.close()
+
+    # Success
+    report = profile_table(str(db_file), "metrics")
+    assert report["table_name"] == "metrics"
+    assert report["total_rows"] == 3
+    assert report["column_count"] == 3
+
+    cols = {c["column_name"]: c for c in report["columns"]}
+    assert cols["id"]["null_count"] == 0
+    assert cols["id"]["min"] == 1
+    assert cols["id"]["max"] == 3
+    assert cols["val"]["null_count"] == 1
+    assert cols["val"]["min"] == 10.5
+    assert cols["notes"]["null_count"] == 1
+
+    # Empty table profile
+    empty_db = tmp_path / "empty.duckdb"
+    conn2 = duckdb.connect(str(empty_db))
+    conn2.execute("CREATE TABLE empty_tbl (id INT)")
+    conn2.execute("CREATE TABLE all_nulls (num FLOAT)")
+    conn2.execute("INSERT INTO all_nulls VALUES (NULL), (NULL)")
+    conn2.close()
+    empty_report = profile_table(str(empty_db), "empty_tbl")
+    assert empty_report["total_rows"] == 0
+    assert empty_report["columns"][0]["null_percentage"] == 0.0
+
+    null_report = profile_table(str(empty_db), "all_nulls")
+    assert null_report["columns"][0]["mean"] is None
+
+    # Invalid table name
+    with pytest.raises(ValueError, match="Invalid table identifier"):
+        profile_table(str(db_file), "metrics; DROP TABLE metrics;")
+
+    # Non-existent DB
+    with pytest.raises(FileNotFoundError, match="Database file not found"):
+        profile_table(str(tmp_path / "nonexistent.duckdb"), "metrics")
+
+    # Non-existent table in DB
+    with pytest.raises(ValueError, match="does not exist in database"):
+        profile_table(str(db_file), "missing_table")
+
+
+def test_load_data_to_duckdb_missing_dir(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test load_data_to_duckdb gracefully returns when data_dir does not exist."""
+    from t1d_analytics.analytics import load_data_to_duckdb
+
+    load_data_to_duckdb(
+        "/nonexistent/directory/path/that/does/not/exist", "test_dummy.duckdb"
+    )
+    assert "does not exist" in capsys.readouterr().out
+
+
+def test_profile_table_no_numeric_columns(tmp_path: Path) -> None:
+    """Test profile_table on table with only non-numeric columns."""
+    from t1d_analytics.analytics import profile_table
+
+    db = tmp_path / "str_only.duckdb"
+    conn = duckdb.connect(str(db))
+    conn.execute("CREATE TABLE text_tbl (name VARCHAR)")
+    conn.execute("INSERT INTO text_tbl VALUES ('alice'), ('bob')")
+    conn.close()
+
+    res = profile_table(str(db), "text_tbl")
+    assert "min" not in res["columns"][0]
+
+
+def test_extract_sql_from_response_blocks_without_keywords() -> None:
+    """Test extract_sql_from_response when code block has non-standard statement."""
+    from t1d_analytics.analytics import extract_sql_from_response
+
+    text = "```\nCREATE TABLE foo (a INT);\n```"
+    assert extract_sql_from_response(text) == "CREATE TABLE foo (a INT);"
+
+
+def test_profile_special_characters_and_quotes(tmp_path: Path) -> None:
+    """Test profiling table with complex quoted and unicode column names."""
+    from t1d_analytics.analytics import profile_table
+
+    db = tmp_path / "special_cols.duckdb"
+    conn = duckdb.connect(str(db))
+    conn.execute(
+        'CREATE TABLE "t_special" ("col""quoted""" INT, "Glucose (mg/dL)" FLOAT, "Patient #" VARCHAR, "日本語" VARCHAR)'
+    )
+    conn.execute(
+        "INSERT INTO \"t_special\" VALUES (10, 115.5, 'P-1', 'テスト'), (NULL, 130.0, 'P-2', NULL)"
+    )
+    conn.close()
+
+    res = profile_table(str(db), "t_special")
+    assert res["table_name"] == "t_special"
+    assert res["total_rows"] == 2
+    assert res["column_count"] == 4
+    col_names = [c["column_name"] for c in res["columns"]]
+    assert 'col"quoted"' in col_names
+    assert "Glucose (mg/dL)" in col_names
+    assert "Patient #" in col_names
+    assert "日本語" in col_names
+
+
+def test_extract_tar_symlink_and_hardlink_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test that tar archive members with symlinks or hardlinks are skipped safely."""
+    import io
+    import tarfile
+
+    from t1d_analytics.analytics import extract_zips
+
+    tar_path = tmp_path / "links.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tar:
+        # Regular file
+        regular = tarfile.TarInfo(name="regular.txt")
+        regular.size = 5
+        tar.addfile(regular, io.BytesIO(b"hello"))
+
+        # Symlink
+        sym = tarfile.TarInfo(name="symlink.txt")
+        sym.type = tarfile.SYMTYPE
+        sym.linkname = "/etc/passwd"
+        tar.addfile(sym)
+
+        # Hardlink
+        lnk = tarfile.TarInfo(name="hardlink.txt")
+        lnk.type = tarfile.LNKTYPE
+        lnk.linkname = "regular.txt"
+        tar.addfile(lnk)
+
+    extract_zips(str(tmp_path))
+    out = capsys.readouterr().out
+    assert "symlink or hardlink detected" in out
+    extract_dir = tmp_path / "links"
+    assert (extract_dir / "regular.txt").exists()
+    assert not (extract_dir / "symlink.txt").exists()
+
+
+def test_extract_zip_symlink_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test that zip archive entries with symlink attribute mode are skipped safely."""
+    import zipfile
+
+    from t1d_analytics.analytics import extract_zips
+
+    zip_path = tmp_path / "symlink.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        # Regular entry
+        zf.writestr("normal.txt", "normal file")
+        # Symlink entry
+        zi = zipfile.ZipInfo("sym_target.txt")
+        # Mode 0o120777: S_IFLNK (0o120000) | 0o777 permissions
+        zi.external_attr = 0o120777 << 16
+        zf.writestr(zi, "/outside/path")
+
+    extract_zips(str(tmp_path))
+    out = capsys.readouterr().out
+    assert "symlink detected" in out
+    extract_dir = tmp_path / "symlink"
+    assert (extract_dir / "normal.txt").exists()
+
+
+def test_is_sql_query_fallback_side_effect_free() -> None:
+    """Test is_sql_query fallback logic when extract_statements is absent on custom connection."""
+    from unittest.mock import MagicMock
+
+    from t1d_analytics.analytics import is_sql_query
+
+    mock_conn = MagicMock(spec=[])
+    assert is_sql_query("CHECKPOINT", conn=mock_conn)
+    assert is_sql_query("ATTACH 'foo.db'", conn=mock_conn)
+    assert is_sql_query("CALL my_proc()", conn=mock_conn)
+
+
+def test_profile_table_no_columns(tmp_path: Path, mocker: typing.Any) -> None:
+    """Test profile_table when table describe returns empty columns."""
+    from t1d_analytics.analytics import profile_table
+
+    db = tmp_path / "empty_cols.duckdb"
+    conn = duckdb.connect(str(db))
+    conn.execute("CREATE TABLE t_empty (id INT)")
+    conn.close()
+
+    mock_conn = mocker.MagicMock()
+    mock_conn.execute.return_value.fetchall.side_effect = [
+        [("t_empty",)],  # SHOW TABLES
+        [],  # DESCRIBE returns empty
+    ]
+    mock_conn.execute.return_value.fetchone.return_value = [0]
+    mocker.patch("duckdb.connect", return_value=mock_conn)
+
+    res = profile_table(str(db), "t_empty")
+    assert res["column_count"] == 0
+    assert res["columns"] == []
+
+
+def test_export_table_validations(tmp_path: Path) -> None:
+    """Test validation errors for export_table (invalid ID, missing file, missing table, bad format)."""
+    from t1d_analytics.analytics import export_table
+
+    db_file = tmp_path / "validations.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute("CREATE TABLE test_tbl (id INT)")
+    conn.close()
+
+    # Invalid table identifier
+    with pytest.raises(ValueError, match="Invalid table identifier"):
+        export_table(str(db_file), "bad table;", tmp_path / "out.csv", "csv")
+
+    # Missing DB file
+    with pytest.raises(FileNotFoundError, match="Database file not found"):
+        export_table(
+            str(tmp_path / "nonexistent.duckdb"),
+            "test_tbl",
+            tmp_path / "out.csv",
+            "csv",
+        )
+
+    # Unsupported format
+    with pytest.raises(ValueError, match="Unsupported export format"):
+        export_table(str(db_file), "test_tbl", tmp_path / "out.xml", "xml")
+
+    # Nonexistent table
+    with pytest.raises(ValueError, match="does not exist in database"):
+        export_table(str(db_file), "missing_tbl", tmp_path / "out.csv", "csv")
+
+
+def test_export_table_parquet_and_csv(tmp_path: Path) -> None:
+    """Test exporting table to Parquet and CSV formats."""
+    from t1d_analytics.analytics import export_table
+
+    db_file = tmp_path / "formats.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute("CREATE TABLE cohort AS SELECT 1 AS id, 'Alice' AS name, 5.5 AS a1c")
+    conn.close()
+
+    # Parquet export
+    pq_out = tmp_path / "cohort.parquet"
+    export_table(str(db_file), "cohort", pq_out, "parquet")
+    assert pq_out.exists()
+    conn_pq = duckdb.connect()
+    rows_pq = conn_pq.execute(f"SELECT * FROM read_parquet('{pq_out}')").fetchall()
+    assert len(rows_pq) == 1
+    assert rows_pq[0] == (1, "Alice", 5.5)
+    conn_pq.close()
+
+    # CSV export
+    csv_out = tmp_path / "nested" / "cohort.csv"
+    export_table(str(db_file), "cohort", csv_out, "csv")
+    assert csv_out.exists()
+    content = csv_out.read_text()
+    assert "id,name,a1c" in content
+    assert "1,Alice,5.5" in content
+
+
+def test_export_table_excel_formula_sanitization(tmp_path: Path) -> None:
+    """Test exporting table to Excel with formula injection sanitization."""
+    from openpyxl import load_workbook
+    from t1d_analytics.analytics import export_table
+
+    db_file = tmp_path / "excel.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute(
+        """
+        CREATE TABLE clinical (
+            id INT,
+            val_float DOUBLE,
+            null_col VARCHAR,
+            flag BOOLEAN,
+            note VARCHAR,
+            formula_inj VARCHAR,
+            num_negative VARCHAR,
+            plus_bad VARCHAR,
+            end_col VARCHAR
+        )
+    """
+    )
+    conn.execute(
+        """
+        INSERT INTO clinical VALUES
+        (1, 3.14, NULL, TRUE, 'normal note', '=HYPERLINK("http://evil.com")', '-42.5', '+bad_formula', 'done')
+    """
+    )
+    conn.close()
+
+    xlsx_out = tmp_path / "clinical.xlsx"
+    export_table(str(db_file), "clinical", xlsx_out, "excel")
+    assert xlsx_out.exists()
+
+    wb = load_workbook(str(xlsx_out), read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    assert rows[0] == (
+        "id",
+        "val_float",
+        "null_col",
+        "flag",
+        "note",
+        "formula_inj",
+        "num_negative",
+        "plus_bad",
+        "end_col",
+    )
+    row1 = rows[1]
+    assert row1[0] == 1
+    assert row1[1] == 3.14
+    assert row1[2] is None
+    assert row1[3] is True
+    assert row1[4] == "normal note"
+    # Escaped formula
+    assert row1[5].startswith("'=")
+    # -42.5 is numeric, so it should not be escaped with apostrophe
+    assert row1[6] == "-42.5"
+    # +bad_formula is non-numeric, so it should be escaped
+    assert row1[7].startswith("'+")
+    assert row1[8] == "done"
+    wb.close()

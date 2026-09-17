@@ -6,11 +6,17 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
-    "coverage": "vitest run --coverage"
+    "coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "docs": "typedoc --out ../docs/web src/main.ts src/ui.ts src/state.ts src/chart.ts src/i18n.ts",
+    "test:e2e": "playwright test --config=playwright.config.ts",
+    "test:e2e:full": "playwright test --config=playwright.full.config.ts",
+    "test:e2e:all": "npm run test:e2e && npm run test:e2e:full"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.59.1",
+    "@types/dompurify": "^3.0.5",
     "@types/highlight.js": "^9.12.4",
     "@types/marked": "^5.0.2",
     "@types/node": "^25.6.0",
@@ -20,12 +26,14 @@
     "monocart-reporter": "^2.12.4",
     "nyc": "^18.0.0",
     "prettier": "^3.8.2",
+    "typedoc": "^0.28.20",
     "typescript": "^5.4.3",
     "vite": "^5.2.7",
     "vite-plugin-istanbul": "^5.0.0",
     "vitest": "^1.4.0"
   },
   "dependencies": {
+    "dompurify": "^3.4.15",
     "highlight.js": "^11.11.1",
     "i18next": "^26.0.5",
     "marked": "^18.0.1"

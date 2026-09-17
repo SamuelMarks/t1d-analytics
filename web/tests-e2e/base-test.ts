@@ -64,6 +64,19 @@ export const test = baseTest.extend<{ page: Page }>({
       });
     });
 
+    await page.route("**/api/databases", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        json: {
+          databases: [
+            { name: "t1d.duckdb", path: "t1d.duckdb", size_bytes: 1024 },
+          ],
+          current_db: "t1d.duckdb",
+        },
+      });
+    });
+
     await page.route("**/api/chat", async (route) => {
       await route.fulfill({
         status: 200,

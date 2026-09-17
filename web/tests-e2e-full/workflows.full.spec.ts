@@ -278,4 +278,61 @@ test.describe("App Workflows Full E2E", () => {
     await expect(modal).not.toBeVisible();
     await expect(viewBtn).toBeFocused(); // focus returned to view button
   });
+
+  /**
+   * Tests exporting data directly from the table modal.
+   */
+  test("Table Modal: exports table data", async ({ page }) => {
+    const schemaTable = page
+      .locator(".schema-table")
+      .filter({ hasText: "tiny" })
+      .first();
+    await expect(schemaTable).toBeVisible({ timeout: 10000 });
+
+    await schemaTable.locator(".table-view-btn").click();
+    const modal = page.locator("#table-modal");
+    await expect(modal).toBeVisible();
+
+    // Verify export buttons exist and are enabled
+    const exportCsvBtn = page.locator("#modal-export-csv-btn");
+    await expect(exportCsvBtn).toBeVisible();
+    await expect(exportCsvBtn).toBeEnabled();
+
+    // Set up download promise
+    const downloadPromise = page.waitForEvent("download");
+    await exportCsvBtn.click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toContain(".csv");
+
+    await page.locator("#close-modal-btn").click();
+    await expect(modal).not.toBeVisible();
+  });
+
+  /**
+   * Tests multi-turn chat sessions where multiple queries execute consecutively.
+   */
+  test("Multi-turn Chat: executes consecutive queries in the same session", async ({
+    page,
+  }) => {
+    await page.selectOption("#model-select", "sql");
+
+    // Turn 1
+    await page.fill("#chat-input", "SELECT id, name FROM tiny WHERE id = 1;");
+    await page.click("#send-btn");
+
+    const firstMsg = page.locator(".message.assistant").first();
+    await expect(firstMsg).toBeVisible({ timeout: 10000 });
+    await expect(firstMsg.locator(".sql-table td").first()).toHaveText("1");
+
+    // Turn 2
+    await page.fill("#chat-input", "SELECT id, name FROM tiny WHERE id = 2;");
+    await page.click("#send-btn");
+
+    // Should now have 2 assistant messages
+    const assistantMsgs = page.locator(".message.assistant");
+    await expect(assistantMsgs).toHaveCount(2, { timeout: 10000 });
+    await expect(
+      assistantMsgs.nth(1).locator(".sql-table td").first(),
+    ).toHaveText("2");
+  });
 });

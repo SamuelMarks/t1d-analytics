@@ -76,6 +76,14 @@ goto :eof
 
 :build_docs
 if not exist "%DOCS_DIR%" mkdir "%DOCS_DIR%"
+call :activate_venv
+interrogate -vv --fail-under=100 src/t1d_analytics
+if errorlevel 1 goto :eof
+python3 -m sphinx -b html docs_src %DOCS_DIR%
+if errorlevel 1 goto :eof
+cd web
+call npm run docs
+cd ..
 echo Docs built in %DOCS_DIR%
 goto :eof
 

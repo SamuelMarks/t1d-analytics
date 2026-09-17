@@ -26,37 +26,24 @@
       "python3 -m pip install -e .",
       "(cd web && npm install)"
     ],
-    "build": ["(cd web && npm run build)"],
-    "pre_start": ["createdb t1d_analytics || true"]
+    "build": ["(cd web && npm run build)"]
   },
   "services": {
     "t1d-api": {
-      "command": "uvicorn t1d_analytics.api:app --host 0.0.0.0 --port 8001",
+      "command": "uvicorn t1d_analytics.api:app --host 0.0.0.0 --port 8000",
       "env": {
-        "DATABASE_URL": "postgres://postgres:password@127.0.0.1:5432/t1d_analytics",
         "T1D_DB_PATH": "/tmp/data/t1d_analytics.duckdb"
       }
     },
     "t1d-web": {
       "command": "cd web && npx vite preview --port 3000 --host",
       "env": {
-        "NODE_ENV": "production",
-        "DATABASE_URL": "postgres://postgres:password@127.0.0.1:5432/t1d_analytics"
+        "NODE_ENV": "production"
       }
     }
   },
   "dependencies": {
     "required": {
-      "databases": [
-        {
-          "name": "postgres",
-          "version": "latest",
-          "env": "DATABASE_URL",
-          "vars": {
-            "database_name": "t1d_analytics"
-          }
-        }
-      ],
       "servers": [
         {
           "name": "nginx",

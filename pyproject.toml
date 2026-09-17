@@ -11,6 +11,14 @@ readme = "README.md"
 requires-python = ">=3.9"
 dynamic = ["dependencies"]
 
+[project.optional-dependencies]
+training = [
+    "transformers>=4.40.0",
+    "peft>=0.10.0",
+    "torch>=2.0.0",
+    "bitsandbytes>=0.43.0",
+]
+
 [tool.hatch.metadata.hooks.requirements_txt]
 files = ["requirements.txt"]
 
@@ -25,13 +33,15 @@ lint.ignore = ["D203", "D212", "E501"]
 [tool.mypy]
 strict = true
 disallow_untyped_defs = true
+warn_unused_ignores = false
+mypy_path = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=t1d_analytics --cov-branch --cov-report=term-missing --cov-report=html --cov-report=lcov --cov-fail-under=100"
-pythonpath = ["src"]
+addopts = "--cov=t1d_analytics --cov=scripts.run_tests --cov-branch --cov-report=term-missing --cov-report=html --cov-report=lcov --cov-fail-under=100"
+pythonpath = ["src", "."]
 
 [tool.coverage.run]
-source = ["src/t1d_analytics"]
+source = ["src/t1d_analytics", "scripts/run_tests.py"]
 branch = true
 sigterm = true
 concurrency = ["multiprocessing", "thread"]

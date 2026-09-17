@@ -288,3 +288,33 @@ test("Chat input resizes dynamically with multi-line text and resets on send", a
   expect(sentBox).not.toBeNull();
   expect(sentBox!.height).toBeCloseTo(initialHeight, 1);
 });
+
+test("Cloud provider settings modal and model selection", async ({ page }) => {
+  await page.goto("/");
+  // 1. Open Provider settings modal
+  await page.click("#provider-settings-btn");
+  const modal = page.locator("#provider-modal");
+  await expect(modal).toBeVisible();
+
+  // 2. Fill in OpenAI key and save
+  await page.fill("#provider-key-openai", "sk-e2e-full-test-key-12345");
+  await page.click("#provider-save-btn");
+  await expect(modal).toBeHidden();
+
+  // 3. Verify key is preserved in localStorage
+  const savedKey = await page.evaluate(() =>
+    localStorage.getItem("t1d_api_key_openai"),
+  );
+  expect(savedKey).toBe("sk-e2e-full-test-key-12345");
+
+  // 4. Open modal again and clear keys
+  await page.click("#provider-settings-btn");
+  await expect(modal).toBeVisible();
+  await page.click("#provider-clear-btn");
+  const clearedKey = await page.evaluate(() =>
+    localStorage.getItem("t1d_api_key_openai"),
+  );
+  expect(clearedKey).toBeNull();
+  await page.click("#close-provider-modal-btn");
+  await expect(modal).toBeHidden();
+});

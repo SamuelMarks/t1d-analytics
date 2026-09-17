@@ -114,9 +114,60 @@
                   Literal SQL
                 </option>
               </select>
+              <button
+                id="provider-settings-btn"
+                class="icon-btn provider-settings-btn"
+                aria-label="Cloud LLM Providers & API Keys"
+                title="Cloud LLM Providers & API Keys"
+              >
+                ⚙️
+              </button>
+              <span
+                id="provider-status-dot"
+                class="provider-status-dot active"
+                title="Local Ollama Active"
+                >●</span
+              >
+            </div>
+            <div class="db-selector-container">
+              <label
+                id="db-select-label"
+                for="db-select"
+                data-i18n="app.database"
+                >Database:</label
+              >
+              <select id="db-select" aria-labelledby="db-select-label">
+                <option value="t1d.duckdb">t1d.duckdb</option>
+              </select>
             </div>
           </div>
           <div class="header-right">
+            <button
+              id="streaming-toggle-btn"
+              class="icon-btn"
+              aria-label="Toggle Streaming Mode"
+              title="Toggle Streaming Mode (SSE)"
+            >
+              ⚡
+            </button>
+            <button
+              id="cohort-filter-btn"
+              class="icon-btn"
+              aria-label="Cohort Query Builder"
+              data-i18n-aria-label="aria.cohortFilter"
+              title="Visual Cohort Query Builder"
+            >
+              🔬
+            </button>
+            <button
+              id="sync-sessions-btn"
+              class="icon-btn"
+              aria-label="Sync Sessions"
+              data-i18n-aria-label="aria.syncSessions"
+              title="Sync chats with server"
+            >
+              ☁️
+            </button>
             <button
               id="system-status-chip"
               class="status-chip status-healthy"
@@ -307,6 +358,36 @@
           </button>
         </div>
         <div class="modal-body" id="modal-body">
+          <div class="table-modal-toolbar">
+            <div class="table-search-wrapper">
+              <input
+                type="search"
+                id="modal-table-search"
+                class="table-search-input"
+                placeholder="Search table rows..."
+                aria-label="Search table rows"
+              />
+            </div>
+            <div class="table-sort-controls">
+              <label for="modal-table-sort-col" class="sort-label">Sort:</label>
+              <select
+                id="modal-table-sort-col"
+                class="table-sort-select"
+                aria-label="Sort by column"
+              >
+                <option value="">(Default)</option>
+              </select>
+              <button
+                type="button"
+                id="modal-table-sort-order"
+                class="btn-secondary sort-order-btn"
+                aria-label="Toggle sort order"
+                title="Toggle sort order"
+              >
+                ASC
+              </button>
+            </div>
+          </div>
           <div
             id="table-loading"
             style="display: none"
@@ -357,6 +438,280 @@
             aria-label="Export table page to JSON"
           >
             Export JSON
+          </button>
+        </div>
+      </div>
+    </div>
+    <!-- Cohort Filter Modal -->
+    <div
+      id="cohort-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cohort-modal-title"
+    >
+      <div class="modal-content cohort-modal-content">
+        <div class="modal-header">
+          <h3 id="cohort-modal-title" data-i18n="cohort.title">
+            Visual Cohort Query Builder
+          </h3>
+          <button
+            id="close-cohort-modal-btn"
+            class="icon-btn"
+            aria-label="Close modal"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="modal-body cohort-modal-body">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cohort-table-select" data-i18n="cohort.table"
+                >Primary Table:</label
+              >
+              <select id="cohort-table-select"></select>
+            </div>
+            <div class="form-group">
+              <label for="cohort-join-table-select" data-i18n="cohort.joinTable"
+                >Secondary Table (JOIN):</label
+              >
+              <select id="cohort-join-table-select">
+                <option value="">None (Single Table)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row" id="cohort-join-config-row">
+            <div class="form-group">
+              <label for="cohort-join-type-select" data-i18n="cohort.joinType"
+                >Join Type:</label
+              >
+              <select id="cohort-join-type-select">
+                <option value="INNER JOIN">INNER JOIN</option>
+                <option value="LEFT JOIN">LEFT JOIN</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="cohort-join-on-input" data-i18n="cohort.joinOn"
+                >Join Condition (ON):</label
+              >
+              <input
+                type="text"
+                id="cohort-join-on-input"
+                placeholder="table1.patient_id = table2.patient_id"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cohort-min-age" data-i18n="cohort.minAge"
+                >Min Age:</label
+              >
+              <input
+                type="number"
+                id="cohort-min-age"
+                min="0"
+                max="120"
+                placeholder="e.g. 18"
+              />
+            </div>
+            <div class="form-group">
+              <label for="cohort-max-age" data-i18n="cohort.maxAge"
+                >Max Age:</label
+              >
+              <input
+                type="number"
+                id="cohort-max-age"
+                min="0"
+                max="120"
+                placeholder="e.g. 65"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cohort-gender-select" data-i18n="cohort.gender"
+                >Gender:</label
+              >
+              <select id="cohort-gender-select">
+                <option value="">Any</option>
+                <option value="M">Male</option>
+                <option value="F">Female</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="cohort-txgroup" data-i18n="cohort.txGroup"
+                >Treatment Group:</label
+              >
+              <input
+                type="text"
+                id="cohort-txgroup"
+                placeholder="e.g. Closed-Loop"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cohort-max-tir" data-i18n="cohort.maxTIR"
+                >Max TIR % (&lt;=):</label
+              >
+              <input
+                type="number"
+                id="cohort-max-tir"
+                min="0"
+                max="100"
+                placeholder="e.g. 70"
+              />
+            </div>
+            <div class="form-group">
+              <label for="cohort-min-hba1c" data-i18n="cohort.minHbA1c"
+                >Min HbA1c % (&gt;=):</label
+              >
+              <input
+                type="number"
+                id="cohort-min-hba1c"
+                step="0.1"
+                min="3"
+                max="18"
+                placeholder="e.g. 8.0"
+              />
+            </div>
+          </div>
+          <div class="form-group">
+            <label data-i18n="cohort.sqlPreview">Generated DuckDB SQL:</label>
+            <pre><code id="cohort-sql-preview" class="sql-preview">SELECT * FROM ...</code></pre>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button
+            id="cohort-insert-chat-btn"
+            class="btn-secondary"
+            data-i18n="cohort.insertChat"
+          >
+            Insert into Chat
+          </button>
+          <button
+            id="cohort-execute-btn"
+            class="btn-primary"
+            data-i18n="cohort.execute"
+          >
+            Run Cohort Query
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Provider & API Key Settings Modal -->
+    <div
+      id="provider-modal"
+      class="modal hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="provider-modal-title"
+    >
+      <div class="modal-content provider-modal-content">
+        <div class="modal-header">
+          <h3 id="provider-modal-title" data-i18n="provider.title">
+            Cloud LLM Providers & API Keys
+          </h3>
+          <button
+            id="close-provider-modal-btn"
+            class="icon-btn"
+            aria-label="Close modal"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="modal-body provider-modal-body">
+          <p class="text-sm" data-i18n="provider.description">
+            Configure external cloud LLM providers (OpenAI, Anthropic, Google).
+            Keys are stored locally in your browser.
+          </p>
+          <div class="provider-item">
+            <div class="provider-header-line">
+              <strong>OpenAI</strong>
+              <span
+                id="provider-badge-openai"
+                class="provider-status-badge badge-missing"
+                >Missing Key</span
+              >
+            </div>
+            <div class="form-group">
+              <label for="provider-key-openai"
+                >OpenAI API Key (OPENAI_API_KEY):</label
+              >
+              <input
+                type="password"
+                id="provider-key-openai"
+                placeholder="sk-..."
+                autocomplete="off"
+              />
+            </div>
+          </div>
+          <div class="provider-item">
+            <div class="provider-header-line">
+              <strong>Anthropic</strong>
+              <span
+                id="provider-badge-anthropic"
+                class="provider-status-badge badge-missing"
+                >Missing Key</span
+              >
+            </div>
+            <div class="form-group">
+              <label for="provider-key-anthropic"
+                >Anthropic API Key (ANTHROPIC_API_KEY):</label
+              >
+              <input
+                type="password"
+                id="provider-key-anthropic"
+                placeholder="sk-ant-..."
+                autocomplete="off"
+              />
+            </div>
+          </div>
+          <div class="provider-item">
+            <div class="provider-header-line">
+              <strong>Google Gemini</strong>
+              <span
+                id="provider-badge-google"
+                class="provider-status-badge badge-missing"
+                >Missing Key</span
+              >
+            </div>
+            <div class="form-group">
+              <label for="provider-key-google"
+                >Google API Key (GEMINI_API_KEY):</label
+              >
+              <input
+                type="password"
+                id="provider-key-google"
+                placeholder="AIzaSy..."
+                autocomplete="off"
+              />
+            </div>
+          </div>
+          <div class="form-group opt-in-group">
+            <label>
+              <input type="checkbox" id="provider-store-consent" checked />
+              <span data-i18n="provider.consent"
+                >Save keys in browser localStorage</span
+              >
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button
+            id="provider-clear-btn"
+            class="btn-secondary"
+            data-i18n="provider.clear"
+          >
+            Clear Stored Keys
+          </button>
+          <button
+            id="provider-save-btn"
+            class="btn-primary"
+            data-i18n="provider.save"
+          >
+            Save Settings
           </button>
         </div>
       </div>

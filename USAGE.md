@@ -47,6 +47,46 @@ t1d-analytics load --data-dir /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb --db /Volum
 
 This script automatically detects file encodings (UTF-8, UTF-16) and delimiters (comma, tab, pipe) and populates the local `.duckdb` file.
 
+### Ingesting Proprietary Clinical Formats (SAS & SPSS)
+
+If your clinical trial data includes SAS transport files (`.xpt`), SAS datasets (`.sas7bdat`), or SPSS files (`.sav`), pass the respective inclusion flags:
+
+```bash
+t1d-analytics load \
+    --data-dir ./data/jaeb_raw \
+    --db t1d_analytics.duckdb \
+    --include-sas \
+    --include-spss \
+    --prefix-subdirs
+```
+
+You can view the historical audit log of all ingested files and row counts using:
+
+```bash
+t1d-analytics manifest --db t1d_analytics.duckdb
+```
+
+### Table Profiling & Directory Watching
+
+- **Profile table quality and missingness:**
+  ```bash
+  t1d-analytics profile --db t1d_analytics.duckdb --table patients
+  ```
+- **Watch a directory for newly arrived clinical files and auto-ingest:**
+  ```bash
+  t1d-analytics watch --data-dir ./data/incoming --db t1d_analytics.duckdb --interval 5.0
+  ```
+
+---
+
+## 🩺 System Diagnostics (Doctor)
+
+Run the CLI doctor command at any time to verify DuckDB database connectivity, schema readiness, and Ollama LLM availability:
+
+```bash
+t1d-analytics doctor --db t1d_analytics.duckdb
+```
+
 ---
 
 ## 🤖 Step 4: Generate Training Data (Optional)
@@ -57,10 +97,18 @@ If you are preparing to fine-tune `gemma-4-sql` on the T1D schema, you can use t
 t1d-analytics generate-training-data \
     --db t1d_analytics.duckdb \
     --num-pairs 1000 \
-    --model gemma4
+    --model gemma4 \
+    --split-ratios "0.8,0.1,0.1"
 ```
 
-This will output `pretrain_data`, `sft_data`, and `dpo_data` tables directly into the DuckDB instance, making it ready to be handed off to `gemma-4-sql etl`.
+This will output `pretrain_data`, `sft_data`, and `dpo_data` tables (plus stratified `_train`, `_val`, and `_test` partitions) directly into DuckDB.
+
+### Local Ollama vs. Remote TPU Multi-Node Execution
+
+- **Local Development / Prototyping:**
+  Use Ollama (`ollama run gemma4`) for local pair generation and query evaluation via `t1d-analytics evaluate --test-set test_benchmarks.json`.
+- **Distributed TPU Training:**
+  Follow [DEPLOY_TO_TPU.md](DEPLOY_TO_TPU.md) and [REPORT.md](REPORT.md) to export DuckDB tables (`sft_data`, `dpo_data`) to Parquet via `t1d-analytics export-training-data` and ingest into MaxText on Google Cloud TPU v4/v5e/v6e clusters.
 
 ---
 

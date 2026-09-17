@@ -20,4 +20,5 @@ if (appState.chats.length === 0) {
 }
 
 // Initialize UI
-new ChatUI(appState);
+const ui = new ChatUI(appState);
+void ui.fetchDatabases?.();

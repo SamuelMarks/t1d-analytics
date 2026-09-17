@@ -4,13 +4,15 @@
  */
 
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/core";
 import sql from "highlight.js/lib/languages/sql";
 import markdown from "highlight.js/lib/languages/markdown";
 import python from "highlight.js/lib/languages/python";
 import "highlight.js/styles/github-dark.css";
-import { ChatState } from "./state";
+import { ChatState, resolveTableJoin } from "./state";
 import i18next, { setLanguage } from "./i18n";
+import { renderCgmCard } from "./chart";
 
 hljs.registerLanguage("sql", sql);
 hljs.registerLanguage("markdown", markdown);
@@ -62,6 +64,79 @@ async function fetchWithBackendError(
 }
 
 /**
+ * Clinical cohort filter parameters for query generation.
+ */
+export interface CohortFilterParams {
+  /** Target primary table name. */
+  tableName: string;
+  /** Optional secondary table name for relational join. */
+  joinTableName?: string;
+  /** Relational join condition type ('INNER JOIN' or 'LEFT JOIN'). */
+  joinType?: "INNER JOIN" | "LEFT JOIN";
+  /** Explicit ON condition for table joining. */
+  joinCondition?: string;
+  /** Minimum patient age filter. */
+  minAge?: number;
+  /** Maximum patient age filter. */
+  maxAge?: number;
+  /** Biological sex or gender. */
+  gender?: string;
+  /** Clinical treatment group (e.g. Closed-Loop, MDI). */
+  txGroup?: string;
+  /** Time in Range maximum threshold percentage. */
+  maxTIR?: number;
+  /** Minimum glycated hemoglobin (HbA1c) threshold. */
+  minHbA1c?: number;
+}
+
+/**
+ * Construct an optimized DuckDB SQL query from clinician cohort filter parameters, supporting relational joins.
+ * @param {CohortFilterParams} params - The selected filter criteria.
+ * @returns {string} The generated DuckDB SQL query.
+ */
+export function buildCohortSql(params: CohortFilterParams): string {
+  const table1 = params.tableName || "patients";
+  const table2 = params.joinTableName?.trim();
+  const joinType = params.joinType || "INNER JOIN";
+  const joinOn = params.joinCondition?.trim();
+
+  const isJoin = Boolean(table2 && table2 !== table1);
+  const prefix = isJoin ? `"${table1.replace(/"/g, '""')}".` : "";
+  const predicates: string[] = [];
+
+  if (params.minAge !== undefined && Number.isFinite(params.minAge)) {
+    predicates.push(`${prefix}age >= ${params.minAge}`);
+  }
+  if (params.maxAge !== undefined && Number.isFinite(params.maxAge)) {
+    predicates.push(`${prefix}age <= ${params.maxAge}`);
+  }
+  if (params.gender) {
+    const safeGender = params.gender.replace(/'/g, "''");
+    predicates.push(`${prefix}gender = '${safeGender}'`);
+  }
+  if (params.txGroup) {
+    const safeTx = params.txGroup.replace(/'/g, "''");
+    predicates.push(`${prefix}txgroup ILIKE '%${safeTx}%'`);
+  }
+  if (params.maxTIR !== undefined && Number.isFinite(params.maxTIR)) {
+    predicates.push(`${prefix}tir <= ${params.maxTIR}`);
+  }
+  if (params.minHbA1c !== undefined && Number.isFinite(params.minHbA1c)) {
+    predicates.push(`${prefix}hba1c >= ${params.minHbA1c}`);
+  }
+
+  let fromClause = `FROM "${table1.replace(/"/g, '""')}"`;
+  if (isJoin && table2) {
+    const defaultOn = `"${table1.replace(/"/g, '""')}".patient_id = "${table2.replace(/"/g, '""')}".patient_id`;
+    fromClause += `\n${joinType} "${table2.replace(/"/g, '""')}"\n  ON ${joinOn || defaultOn}`;
+  }
+
+  const whereClause =
+    predicates.length > 0 ? `\nWHERE ${predicates.join("\n  AND ")}` : "";
+  return `SELECT *\n${fromClause}${whereClause};`;
+}
+
+/**
  * UI controller class that binds the state to the DOM elements.
  */
 export class ChatUI {
@@ -77,6 +152,10 @@ export class ChatUI {
   private chatInput: HTMLTextAreaElement;
   private sendBtn: HTMLButtonElement;
   private modelSelect: HTMLSelectElement;
+  private dbSelect: HTMLSelectElement | null;
+  private syncSessionsBtn: HTMLButtonElement | null;
+  private streamingToggleBtn: HTMLButtonElement | null;
+  public streamingEnabled: boolean = false;
   private langSelect: HTMLSelectElement;
   private openSidebarBtn: HTMLButtonElement;
   private closeSidebarBtn: HTMLButtonElement;
@@ -94,6 +173,39 @@ export class ChatUI {
   private bannerInstructionsBtn: HTMLButtonElement | null;
   private bannerInstructionsDrawer: HTMLElement | null;
   private bannerDismissBtn: HTMLButtonElement | null;
+
+  // Cohort filter elements
+  private cohortFilterBtn: HTMLButtonElement | null;
+  private cohortModal: HTMLElement | null;
+  private closeCohortModalBtn: HTMLButtonElement | null;
+  private cohortTableSelect: HTMLSelectElement | null;
+  private cohortJoinTableSelect: HTMLSelectElement | null;
+  private cohortJoinTypeSelect: HTMLSelectElement | null;
+  private cohortJoinOnInput: HTMLInputElement | null;
+  private cohortMinAge: HTMLInputElement | null;
+  private cohortMaxAge: HTMLInputElement | null;
+  private cohortGenderSelect: HTMLSelectElement | null;
+  private cohortTxGroup: HTMLInputElement | null;
+  private cohortMaxTIR: HTMLInputElement | null;
+  private cohortMinHbA1c: HTMLInputElement | null;
+  private cohortSqlPreview: HTMLElement | null;
+  private cohortInsertChatBtn: HTMLButtonElement | null;
+  private cohortExecuteBtn: HTMLButtonElement | null;
+
+  // Provider settings elements
+  private providerSettingsBtn: HTMLButtonElement | null;
+  private providerStatusDot: HTMLElement | null;
+  private providerModal: HTMLElement | null;
+  private closeProviderModalBtn: HTMLButtonElement | null;
+  private providerKeyOpenAI: HTMLInputElement | null;
+  private providerKeyAnthropic: HTMLInputElement | null;
+  private providerKeyGoogle: HTMLInputElement | null;
+  private providerStoreConsent: HTMLInputElement | null;
+  private providerSaveBtn: HTMLButtonElement | null;
+  private providerClearBtn: HTMLButtonElement | null;
+  private providerBadgeOpenAI: HTMLElement | null;
+  private providerBadgeAnthropic: HTMLElement | null;
+  private providerBadgeGoogle: HTMLElement | null;
 
   /**
    * Initializes the ChatUI.
@@ -124,6 +236,12 @@ export class ChatUI {
     this.modelSelect = document.getElementById(
       "model-select",
     ) as HTMLSelectElement;
+    this.dbSelect = document.getElementById(
+      "db-select",
+    ) as HTMLSelectElement | null;
+    this.syncSessionsBtn = document.getElementById(
+      "sync-sessions-btn",
+    ) as HTMLButtonElement | null;
     this.langSelect = document.getElementById(
       "lang-select",
     ) as HTMLSelectElement;
@@ -160,6 +278,91 @@ export class ChatUI {
     this.bannerDismissBtn = document.getElementById(
       "banner-dismiss-btn",
     ) as HTMLButtonElement | null;
+
+    // Cohort filter elements
+    this.cohortFilterBtn = document.getElementById(
+      "cohort-filter-btn",
+    ) as HTMLButtonElement | null;
+    this.cohortModal = document.getElementById("cohort-modal");
+    this.closeCohortModalBtn = document.getElementById(
+      "close-cohort-modal-btn",
+    ) as HTMLButtonElement | null;
+    this.cohortTableSelect = document.getElementById(
+      "cohort-table-select",
+    ) as HTMLSelectElement | null;
+    this.cohortJoinTableSelect = document.getElementById(
+      "cohort-join-table-select",
+    ) as HTMLSelectElement | null;
+    this.cohortJoinTypeSelect = document.getElementById(
+      "cohort-join-type-select",
+    ) as HTMLSelectElement | null;
+    this.cohortJoinOnInput = document.getElementById(
+      "cohort-join-on-input",
+    ) as HTMLInputElement | null;
+    this.cohortMinAge = document.getElementById(
+      "cohort-min-age",
+    ) as HTMLInputElement | null;
+    this.cohortMaxAge = document.getElementById(
+      "cohort-max-age",
+    ) as HTMLInputElement | null;
+    this.cohortGenderSelect = document.getElementById(
+      "cohort-gender-select",
+    ) as HTMLSelectElement | null;
+    this.cohortTxGroup = document.getElementById(
+      "cohort-txgroup",
+    ) as HTMLInputElement | null;
+    this.cohortMaxTIR = document.getElementById(
+      "cohort-max-tir",
+    ) as HTMLInputElement | null;
+    this.cohortMinHbA1c = document.getElementById(
+      "cohort-min-hba1c",
+    ) as HTMLInputElement | null;
+    this.cohortSqlPreview = document.getElementById("cohort-sql-preview");
+    this.cohortInsertChatBtn = document.getElementById(
+      "cohort-insert-chat-btn",
+    ) as HTMLButtonElement | null;
+    this.cohortExecuteBtn = document.getElementById(
+      "cohort-execute-btn",
+    ) as HTMLButtonElement | null;
+
+    // Provider settings elements
+    this.providerSettingsBtn = document.getElementById(
+      "provider-settings-btn",
+    ) as HTMLButtonElement | null;
+    this.providerStatusDot = document.getElementById("provider-status-dot");
+    this.providerModal = document.getElementById("provider-modal");
+    this.closeProviderModalBtn = document.getElementById(
+      "close-provider-modal-btn",
+    ) as HTMLButtonElement | null;
+    this.providerKeyOpenAI = document.getElementById(
+      "provider-key-openai",
+    ) as HTMLInputElement | null;
+    this.providerKeyAnthropic = document.getElementById(
+      "provider-key-anthropic",
+    ) as HTMLInputElement | null;
+    this.providerKeyGoogle = document.getElementById(
+      "provider-key-google",
+    ) as HTMLInputElement | null;
+    this.providerStoreConsent = document.getElementById(
+      "provider-store-consent",
+    ) as HTMLInputElement | null;
+    this.providerSaveBtn = document.getElementById(
+      "provider-save-btn",
+    ) as HTMLButtonElement | null;
+    this.providerClearBtn = document.getElementById(
+      "provider-clear-btn",
+    ) as HTMLButtonElement | null;
+    this.providerBadgeOpenAI = document.getElementById("provider-badge-openai");
+    this.providerBadgeAnthropic = document.getElementById(
+      "provider-badge-anthropic",
+    );
+    this.providerBadgeGoogle = document.getElementById("provider-badge-google");
+
+    this.streamingToggleBtn = document.getElementById(
+      "streaming-toggle-btn",
+    ) as HTMLButtonElement | null;
+    this.streamingEnabled = this.state.streamingMode;
+    this.updateStreamingToggleUi();
 
     this.bindEvents();
     this.loadModels();
@@ -229,8 +432,16 @@ export class ChatUI {
   ): void {
     if (!this.systemStatusChip) return;
     this.systemStatusChip.className = `status-chip status-${level}`;
-    this.systemStatusChip.setAttribute("aria-label", `System status: ${text}`);
-    this.systemStatusChip.setAttribute("title", `System status: ${text}`);
+    let tooltip = `System status: ${text}`;
+    if (this.state.systemStatus.dbFileSizeBytes) {
+      const mb = (
+        this.state.systemStatus.dbFileSizeBytes /
+        (1024 * 1024)
+      ).toFixed(1);
+      tooltip += ` | DB: ${mb} MB (${this.state.systemStatus.tableCount} tables)`;
+    }
+    this.systemStatusChip.setAttribute("aria-label", tooltip);
+    this.systemStatusChip.setAttribute("title", tooltip);
     if (this.statusChipText) {
       this.statusChipText.textContent = text;
     }
@@ -239,16 +450,23 @@ export class ChatUI {
   /**
    * Checks system health and updates UI indicators accordingly.
    * @param {boolean} [isManualRetry=false] Whether this is a manual user retry.
+   * @param {string} [dbPath] Optional custom database path.
    */
   public async checkSystemStatus(
     isManualRetry: boolean = false,
+    dbPath?: string,
   ): Promise<void> {
     if (isManualRetry && this.bannerRetryBtn) {
       this.bannerRetryBtn.textContent = i18next.t("status.reconnecting");
     }
 
     try {
-      const response = await fetchWithBackendError("/api/status");
+      const targetDb = dbPath || this.state.currentDb;
+      const url =
+        targetDb && targetDb !== "t1d.duckdb"
+          ? `/api/status?db_path=${encodeURIComponent(targetDb)}`
+          : "/api/status";
+      const response = await fetchWithBackendError(url);
       const health = await response.json();
 
       this.state.setSystemStatus({
@@ -265,6 +483,11 @@ export class ChatUI {
         ollamaOnline: Boolean(health.ollama?.accessible),
         ollamaMessage: health.ollama?.message || null,
         ollamaRemediation: health.ollama?.remediation || null,
+        dbFileSizeBytes: Number(health.database?.file_size_bytes) || 0,
+        dbWritable: Boolean(health.database?.writable),
+        dbIntegrityOk: health.database?.integrity_ok !== false,
+        diskFreeBytes: Number(health.database?.disk_free_bytes) || 0,
+        ollamaVersion: health.ollama?.version || null,
       });
 
       // Handle database statuses
@@ -326,10 +549,11 @@ export class ChatUI {
         backendOnline: false,
         status: "offline",
       });
+      const backendUrl = window.location.origin;
       this.showBanner(
         "danger",
         i18next.t("status.offlineTitle"),
-        i18next.t("status.offlineDesc"),
+        i18next.t("status.offlineDesc", { url: backendUrl }),
         "⚠️",
         true,
       );
@@ -388,13 +612,19 @@ export class ChatUI {
 
   /**
    * Fetches the database schema and renders it in the sidebar.
+   * @param {string} [dbPath] Optional custom database path.
    */
-  private async loadSchema(): Promise<void> {
+  public async loadSchema(dbPath?: string): Promise<void> {
     const schemaContent = document.getElementById("schema-content");
     if (!schemaContent) return;
 
     try {
-      const response = await fetchWithBackendError("/api/schema");
+      const targetDb = dbPath || this.state.currentDb;
+      const url =
+        targetDb && targetDb !== "t1d.duckdb"
+          ? `/api/schema?db_path=${encodeURIComponent(targetDb)}`
+          : "/api/schema";
+      const response = await fetchWithBackendError(url);
       const data = await response.json();
 
       schemaContent.innerHTML = ""; // Clear loading message
@@ -413,6 +643,10 @@ export class ChatUI {
           dbRemediation: dbStatus.remediation || null,
           tableCount: Number(dbStatus.table_count) || 0,
           hasInitialData: Boolean(dbStatus.has_initial_data),
+          dbFileSizeBytes: Number(dbStatus.file_size_bytes) || 0,
+          dbWritable: Boolean(dbStatus.writable),
+          dbIntegrityOk: dbStatus.integrity_ok !== false,
+          diskFreeBytes: Number(dbStatus.disk_free_bytes) || 0,
         });
 
         if (dbStatus.status_code === "missing_file") {
@@ -505,25 +739,37 @@ export class ChatUI {
 
           const headerDiv = document.createElement("div");
           headerDiv.className = "schema-table-header";
-          headerDiv.innerHTML = `
-          <button class="schema-table-header-toggle" aria-expanded="false" aria-controls="schema-table-${table.name}">
+
+          const toggleBtn = document.createElement("button");
+          toggleBtn.className = "schema-table-header-toggle";
+          toggleBtn.setAttribute("aria-expanded", "false");
+          toggleBtn.setAttribute("aria-controls", `schema-table-${table.name}`);
+          toggleBtn.innerHTML = `
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <polyline points="9 18 15 12 9 6"></polyline>
             </svg>
-            <span>${table.name}</span>
-          </button>
-          <button class="icon-btn table-view-btn" aria-label="${i18next.t("aria.viewTableData")}" title="${i18next.t("ui.viewTableData")}" data-table="${table.name}" data-i18n-aria-label="aria.viewTableData" data-i18n-title="ui.viewTableData">
+          `;
+          const titleSpan = document.createElement("span");
+          titleSpan.textContent = table.name;
+          toggleBtn.appendChild(titleSpan);
+
+          const viewBtn = document.createElement("button");
+          viewBtn.className = "icon-btn table-view-btn";
+          viewBtn.setAttribute("aria-label", i18next.t("aria.viewTableData"));
+          viewBtn.setAttribute("title", i18next.t("ui.viewTableData"));
+          viewBtn.setAttribute("data-table", table.name);
+          viewBtn.setAttribute("data-i18n-aria-label", "aria.viewTableData");
+          viewBtn.setAttribute("data-i18n-title", "ui.viewTableData");
+          viewBtn.innerHTML = `
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
               <line x1="3" y1="9" x2="21" y2="9"></line>
               <line x1="9" y1="21" x2="9" y2="9"></line>
             </svg>
-          </button>
-        `;
+          `;
 
-          const toggleBtn = headerDiv.querySelector(
-            ".schema-table-header-toggle",
-          ) as HTMLButtonElement;
+          headerDiv.appendChild(toggleBtn);
+          headerDiv.appendChild(viewBtn);
 
           /**
            * Toggles the expansion state of the table schema view.
@@ -537,8 +783,7 @@ export class ChatUI {
           };
           toggleBtn.addEventListener("click", toggleExpand);
 
-          const viewBtn = headerDiv.querySelector(".table-view-btn");
-          viewBtn?.addEventListener("click", (e) => {
+          viewBtn.addEventListener("click", (e) => {
             e.stopPropagation();
             this.openTableModal(table.name);
           });
@@ -549,10 +794,13 @@ export class ChatUI {
           table.columns.forEach((col) => {
             const colLi = document.createElement("li");
             colLi.className = "schema-column";
-            colLi.innerHTML = `
-            <span>${col.name}</span>
-            <span class="schema-column-type">${col.type}</span>
-          `;
+            const colNameSpan = document.createElement("span");
+            colNameSpan.textContent = col.name;
+            const colTypeSpan = document.createElement("span");
+            colTypeSpan.className = "schema-column-type";
+            colTypeSpan.textContent = col.type;
+            colLi.appendChild(colNameSpan);
+            colLi.appendChild(colTypeSpan);
             columnsList.appendChild(colLi);
           });
 
@@ -565,13 +813,14 @@ export class ChatUI {
       console.error("Failed to load schema:", error);
       const errMsg = i18next.t("ui.failedSchema");
       this.announce(errMsg, true);
+      const backendUrl = window.location.origin;
       schemaContent.innerHTML = `
         <div class="schema-diagnostic-card error-text" role="alert">
           <div class="schema-diagnostic-header">
             <span>⚠️</span>
             <span>${i18next.t("status.offlineTitle")}</span>
           </div>
-          <p class="schema-diagnostic-desc">${i18next.t("status.offlineDesc")}</p>
+          <p class="schema-diagnostic-desc">${i18next.t("status.offlineDesc", { url: backendUrl })}</p>
           <button class="btn btn-xs btn-primary reload-schema-btn">${i18next.t("status.reloadSchema")}</button>
         </div>
       `;
@@ -583,7 +832,7 @@ export class ChatUI {
       this.showBanner(
         "danger",
         i18next.t("status.offlineTitle"),
-        i18next.t("status.offlineDesc"),
+        i18next.t("status.offlineDesc", { url: backendUrl }),
         "⚠️",
         true,
       );
@@ -592,9 +841,9 @@ export class ChatUI {
   }
 
   /**
-   * Fetches available models from the backend and populates the dropdown.
+   * Fetches available models from the backend and populates the dropdown grouped by provider.
    */
-  private async loadModels(): Promise<void> {
+  public async loadModels(): Promise<void> {
     try {
       const response = await fetchWithBackendError("/api/models");
       const data = await response.json();
@@ -602,31 +851,107 @@ export class ChatUI {
       // Preserve the "Literal SQL" option
       this.modelSelect.innerHTML = `<option value="sql" data-i18n="app.literalSql">${i18next.t("app.literalSql")}</option>`;
 
-      data.models.forEach((model: { name: string; size?: number }) => {
-        const option = document.createElement("option");
-        option.value = model.name;
-        option.textContent = model.name;
-        this.modelSelect.appendChild(option);
-      });
+      const groups: Record<string, HTMLOptGroupElement> = {
+        ollama: document.createElement("optgroup"),
+        openai: document.createElement("optgroup"),
+        anthropic: document.createElement("optgroup"),
+        google: document.createElement("optgroup"),
+      };
+      groups.ollama.label = "Ollama (Local)";
+      groups.openai.label = "OpenAI";
+      groups.anthropic.label = "Anthropic";
+      groups.google.label = "Google";
+
+      const modelsList = Array.isArray(data.models) ? data.models : [];
+      modelsList.forEach(
+        (model: {
+          name: string;
+          size?: number;
+          provider?: string;
+          configured?: boolean;
+          requires_key?: boolean;
+          available?: boolean;
+          reachable?: boolean;
+          error_code?: string;
+        }) => {
+          const prov =
+            model.provider ||
+            (model.name.includes("/") ? model.name.split("/")[0] : "ollama");
+          const hasKey = Boolean(this.state.getApiKey(prov));
+          const isConfigured = model.configured || hasKey;
+          const isReachable = model.reachable !== false;
+          const isAvailable = model.available !== false && isConfigured;
+
+          let badge = "🟢";
+          if (!isReachable) {
+            badge = "🔴";
+          } else if (!isConfigured) {
+            badge = "🟡";
+          }
+
+          const option = document.createElement("option");
+          option.value = model.name;
+          option.setAttribute("data-provider", prov);
+          option.textContent = `${model.name} ${badge}`;
+          if (!isAvailable && model.error_code) {
+            option.title = `${model.name} (${model.error_code})`;
+          }
+
+          const targetGroup = groups[prov] || groups.ollama;
+          targetGroup.appendChild(option);
+        },
+      );
+
+      for (const grp of Object.values(groups)) {
+        if (grp.children.length > 0) {
+          this.modelSelect.appendChild(grp);
+        }
+      }
 
       // Reset the current model to match the active chat
       const activeChat = this.state.getActiveChat();
       if (activeChat) {
-        // If the model exists, set it, else fall back to the first available model that's not 'sql', or 'gemma4'
         const exists = Array.from(this.modelSelect.options).some(
           (opt) => opt.value === activeChat.model,
         );
         if (exists) {
           this.modelSelect.value = activeChat.model;
-        } else if (data.models.length > 0) {
-          this.modelSelect.value = data.models[0].name;
-          this.state.setActiveChatModel(data.models[0].name);
+        } else if (modelsList.length > 0) {
+          this.modelSelect.value = modelsList[0].name;
+          this.state.setActiveChatModel(modelsList[0].name);
         }
       }
+      this.updateProviderBadgeStatus();
     } catch (error) {
       console.warn("Failed to fetch models from API:", error);
-      // Fallback is handled by the default HTML structure if we didn't wipe it,
-      // but if we got here before wiping, it's fine.
+    }
+  }
+
+  /**
+   * Updates the provider status dot badge based on the currently selected model.
+   */
+  public updateProviderBadgeStatus(): void {
+    if (!this.providerStatusDot) return;
+    const selectedOption = this.modelSelect.selectedOptions?.[0];
+    const prov =
+      selectedOption?.getAttribute("data-provider") ||
+      (this.modelSelect.value.includes("/")
+        ? this.modelSelect.value.split("/")[0]
+        : "ollama");
+
+    this.state.setActiveChatProvider(prov);
+    if (prov === "ollama" || this.modelSelect.value === "sql") {
+      this.providerStatusDot.className = "provider-status-dot active";
+      this.providerStatusDot.title = "Local Engine Active";
+    } else {
+      const hasKey = Boolean(this.state.getApiKey(prov));
+      if (hasKey) {
+        this.providerStatusDot.className = "provider-status-dot active";
+        this.providerStatusDot.title = `${prov} Active (Configured)`;
+      } else {
+        this.providerStatusDot.className = "provider-status-dot warning";
+        this.providerStatusDot.title = `${prov} Missing API Key (Click ⚙️ to configure)`;
+      }
     }
   }
 
@@ -644,9 +969,42 @@ export class ChatUI {
   }
 
   /**
+   * Updates the visual indicator and accessibility attributes on the streaming toggle button.
+   */
+  public updateStreamingToggleUi(): void {
+    if (!this.streamingToggleBtn) return;
+    if (this.streamingEnabled) {
+      this.streamingToggleBtn.classList.add("active");
+      this.streamingToggleBtn.style.color = "#f1c40f";
+      this.streamingToggleBtn.title = "Streaming Mode: ON (⚡ SSE)";
+      this.streamingToggleBtn.setAttribute(
+        "aria-label",
+        "Streaming Mode: ON (⚡ SSE)",
+      );
+    } else {
+      this.streamingToggleBtn.classList.remove("active");
+      this.streamingToggleBtn.style.color = "";
+      this.streamingToggleBtn.title = "Streaming Mode: OFF (Standard Batch)";
+      this.streamingToggleBtn.setAttribute(
+        "aria-label",
+        "Streaming Mode: OFF (Standard Batch)",
+      );
+    }
+  }
+
+  /**
    * Binds global and static DOM events.
    */
   private bindEvents(): void {
+    if (this.streamingToggleBtn) {
+      this.streamingToggleBtn.addEventListener("click", () => {
+        this.streamingEnabled = !this.streamingEnabled;
+        this.state.streamingMode = this.streamingEnabled;
+        this.state.saveToLocalStorage();
+        this.updateStreamingToggleUi();
+      });
+    }
+
     this.newChatBtn.addEventListener("click", () => {
       this.state.createChat();
       this.render();
@@ -674,8 +1032,140 @@ export class ChatUI {
 
     this.modelSelect.addEventListener("change", () => {
       this.state.setActiveChatModel(this.modelSelect.value);
+      this.updateProviderBadgeStatus();
       this.syncHighlight();
     });
+
+    if (this.dbSelect) {
+      this.dbSelect.addEventListener("change", () => {
+        const selectedDb = this.dbSelect?.value;
+        if (selectedDb) {
+          this.state.setCurrentDb(selectedDb);
+          void this.loadSchema(selectedDb);
+          void this.checkSystemStatus(true, selectedDb);
+          this.announce(i18next.t("ui.databaseSwitched", { db: selectedDb }));
+        }
+      });
+    }
+
+    if (this.syncSessionsBtn) {
+      this.syncSessionsBtn.addEventListener("click", () => {
+        void this.syncAllChatsWithServer();
+      });
+    }
+
+    if (this.providerSettingsBtn) {
+      this.providerSettingsBtn.addEventListener("click", () => {
+        void this.openProviderModal();
+      });
+    }
+
+    if (this.closeProviderModalBtn) {
+      this.closeProviderModalBtn.addEventListener("click", () => {
+        this.closeProviderModal();
+      });
+    }
+
+    if (this.providerSaveBtn) {
+      this.providerSaveBtn.addEventListener("click", () => {
+        void this.saveProviderSettings();
+      });
+    }
+
+    if (this.providerClearBtn) {
+      this.providerClearBtn.addEventListener("click", () => {
+        void this.clearProviderSettings();
+      });
+    }
+
+    if (this.providerModal) {
+      this.providerModal.addEventListener("click", (e) => {
+        if (e.target === this.providerModal) {
+          this.closeProviderModal();
+        }
+      });
+    }
+
+    if (this.cohortFilterBtn) {
+      this.cohortFilterBtn.addEventListener("click", () => {
+        this.openCohortModal();
+      });
+    }
+
+    if (this.closeCohortModalBtn) {
+      this.closeCohortModalBtn.addEventListener("click", () => {
+        this.closeCohortModal();
+      });
+    }
+
+    if (this.cohortModal) {
+      this.cohortModal.addEventListener("click", (e) => {
+        if (e.target === this.cohortModal) {
+          this.closeCohortModal();
+        }
+      });
+    }
+
+    if (this.cohortTableSelect) {
+      this.cohortTableSelect.addEventListener("change", () => {
+        this.handleCohortJoinTableChange();
+        this.updateCohortSqlPreview();
+      });
+    }
+
+    if (this.cohortJoinTableSelect) {
+      this.cohortJoinTableSelect.addEventListener("change", () => {
+        this.handleCohortJoinTableChange();
+        this.updateCohortSqlPreview();
+      });
+    }
+
+    if (this.cohortJoinTypeSelect) {
+      this.cohortJoinTypeSelect.addEventListener("change", () => {
+        this.updateCohortSqlPreview();
+      });
+    }
+
+    if (this.cohortJoinOnInput) {
+      this.cohortJoinOnInput.addEventListener("input", () => {
+        this.updateCohortSqlPreview();
+      });
+    }
+
+    const cohortInputs = [
+      this.cohortMinAge,
+      this.cohortMaxAge,
+      this.cohortGenderSelect,
+      this.cohortTxGroup,
+      this.cohortMaxTIR,
+      this.cohortMinHbA1c,
+    ];
+    for (const inp of cohortInputs) {
+      if (inp) {
+        inp.addEventListener("input", () => this.updateCohortSqlPreview());
+        inp.addEventListener("change", () => this.updateCohortSqlPreview());
+      }
+    }
+
+    if (this.cohortInsertChatBtn) {
+      this.cohortInsertChatBtn.addEventListener("click", () => {
+        const sql = this.getCohortSql();
+        this.chatInput.value = sql;
+        this.syncHighlight();
+        this.closeCohortModal();
+        this.chatInput.focus();
+      });
+    }
+
+    if (this.cohortExecuteBtn) {
+      this.cohortExecuteBtn.addEventListener("click", () => {
+        const sql = this.getCohortSql();
+        this.closeCohortModal();
+        this.modelSelect.value = "sql";
+        this.state.setActiveChatModel("sql");
+        void this.handleSendMessage(sql, "sql");
+      });
+    }
 
     this.langSelect.value = i18next.language;
     this.langSelect.addEventListener("change", async () => {
@@ -862,21 +1352,119 @@ export class ChatUI {
     this.scrollToBottom();
 
     const model = modelOverride ?? this.modelSelect.value;
+    const selectedOption = this.modelSelect.selectedOptions?.[0];
+    const provider =
+      selectedOption?.getAttribute("data-provider") ||
+      (model.includes("/") ? model.split("/")[0] : undefined);
+    const apiKey = provider ? this.state.getApiKey(provider) : undefined;
 
-    try {
-      const response = await fetchWithBackendError("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: content, model }),
-      });
+    const requestHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (provider) {
+      requestHeaders["x-provider"] = provider;
+    }
+    if (apiKey) {
+      requestHeaders["x-provider-api-key"] = apiKey;
+    }
 
-      const data = await response.json();
+    const activeChat = this.state.getActiveChat();
+    const historyPayload = (activeChat?.messages ?? [])
+      .slice(0, -1)
+      .map((m) => ({
+        role: m.role,
+        content: m.content,
+        sqlQuery: m.sqlQuery,
+        sqlResult: m.sqlResult,
+        model: m.model,
+      }));
 
-      let assistantMsg = i18next.exists(data.content)
-        ? i18next.t(data.content)
-        : data.content;
-      if (data.error) {
-        const parsedError = parseApiError(data.error);
+    const payload = {
+      message: content,
+      model,
+      provider,
+      api_key: apiKey,
+      db_path: this.state.currentDb,
+      history: historyPayload,
+    };
+
+    let streamUsed = false;
+    let streamText = "";
+    let finalData: {
+      content?: string;
+      sqlResult?: Record<string, string | number | boolean | null>[];
+      sqlQuery?: string;
+      error?: unknown;
+    } | null = null;
+
+    if (this.streamingEnabled) {
+      try {
+        const streamResp = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: requestHeaders,
+          body: JSON.stringify(payload),
+        });
+
+        if (
+          streamResp.ok &&
+          streamResp.headers
+            ?.get("content-type")
+            ?.includes("text/event-stream") &&
+          streamResp.body?.getReader
+        ) {
+          const reader = streamResp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          loadingDiv.innerHTML = `<div class="message-content streaming-content"></div>`;
+          const contentEl = loadingDiv.querySelector(
+            ".streaming-content",
+          ) as HTMLElement;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const parts = buffer.split("\n\n");
+            buffer = parts.pop() || "";
+            for (const part of parts) {
+              const line = part.trim();
+              if (line.startsWith("data: ")) {
+                try {
+                  const eventData = JSON.parse(line.slice(6));
+                  if (eventData.event === "token" && eventData.token) {
+                    streamText += eventData.token;
+                    if (contentEl) {
+                      contentEl.textContent = streamText;
+                      this.scrollToBottom();
+                    }
+                  } else if (
+                    eventData.event === "result" ||
+                    eventData.event === "done"
+                  ) {
+                    finalData = eventData;
+                    streamUsed = true;
+                  }
+                } catch {
+                  // ignore JSON parse errors on partial chunks
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        streamUsed = false;
+      }
+    }
+
+    if (streamUsed && finalData) {
+      loadingDiv.remove();
+      let assistantMsg =
+        finalData.content && i18next.exists(finalData.content)
+          ? i18next.t(finalData.content)
+          : finalData.content || streamText || "";
+      if (finalData.error) {
+        const parsedError = parseApiError(finalData.error);
         assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
         this.announce(assistantMsg, true);
       }
@@ -884,34 +1472,370 @@ export class ChatUI {
       this.state.addMessageToActiveChat({
         role: "assistant",
         content: assistantMsg,
-        sqlResult: data.sqlResult,
-        sqlQuery: data.sqlQuery,
-        isError: !!data.error,
-        model: model,
+        sqlResult: finalData.sqlResult,
+        sqlQuery: finalData.sqlQuery,
+        isError: !!finalData.error,
+        model,
       });
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
-      this.announce(announcedErr, true);
-      this.state.addMessageToActiveChat({
-        role: "assistant",
-        content: announcedErr,
-        isError: true,
-        model: model,
-      });
-    } finally {
-      this.chatInput.disabled = false;
-      this.chatInputWrapper.classList.remove("disabled");
-      this.sendBtn.disabled = false;
-      this.modelSelect.disabled = false;
-      this.chatInput.focus();
+    } else {
+      try {
+        const response = await fetchWithBackendError("/api/chat", {
+          method: "POST",
+          headers: requestHeaders,
+          body: JSON.stringify(payload),
+        });
 
-      this.announce(i18next.t("aria.messageReceived", "Message received"));
+        const data = await response.json();
+        loadingDiv.remove();
+
+        let assistantMsg =
+          data.content && i18next.exists(data.content)
+            ? i18next.t(data.content)
+            : (data.content ?? "");
+        if (data.error) {
+          const parsedError = parseApiError(data.error);
+          assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
+          this.announce(assistantMsg, true);
+        }
+
+        this.state.addMessageToActiveChat({
+          role: "assistant",
+          content: assistantMsg,
+          sqlResult: data.sqlResult,
+          sqlQuery: data.sqlQuery,
+          isError: !!data.error,
+          model: model,
+        });
+      } catch (err) {
+        loadingDiv.remove();
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
+        this.announce(announcedErr, true);
+        this.state.addMessageToActiveChat({
+          role: "assistant",
+          content: announcedErr,
+          isError: true,
+          model: model,
+        });
+      }
     }
+
+    if (this.state.serverSyncEnabled) {
+      void this.syncAllChatsWithServer();
+    }
+
+    this.chatInput.disabled = false;
+    this.chatInputWrapper.classList.remove("disabled");
+    this.sendBtn.disabled = false;
+    this.modelSelect.disabled = false;
+    this.chatInput.focus();
+
+    this.announce(i18next.t("aria.messageReceived", "Message received"));
 
     this.renderSidebar();
     this.renderMessages();
     this.scrollToBottom();
+  }
+
+  /**
+   * Fetches available DuckDB databases from the backend and updates the dropdown.
+   */
+  public async fetchDatabases(): Promise<void> {
+    if (!this.dbSelect) return;
+    try {
+      const resp = await fetch("/api/databases");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const dbs: { name: string; path: string; size_bytes: number }[] =
+        data.databases || [];
+      this.state.setAvailableDbs(dbs, data.current_db);
+      this.renderDatabaseDropdown();
+    } catch {
+      // Ignore network failures fetching database list
+    }
+  }
+
+  /**
+   * Renders options in the database selector dropdown.
+   */
+  public renderDatabaseDropdown(): void {
+    if (!this.dbSelect) return;
+    this.dbSelect.innerHTML = "";
+    if (this.state.availableDbs.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = this.state.currentDb || "t1d.duckdb";
+      opt.textContent = opt.value;
+      this.dbSelect.appendChild(opt);
+      return;
+    }
+    for (const db of this.state.availableDbs) {
+      const opt = document.createElement("option");
+      opt.value = db.name;
+      opt.textContent = `${db.name} (${Math.round(db.size_bytes / 1024)} KB)`;
+      if (
+        db.name === this.state.currentDb ||
+        db.path === this.state.currentDb
+      ) {
+        opt.selected = true;
+      }
+      this.dbSelect.appendChild(opt);
+    }
+  }
+
+  /**
+   * Synchronizes all active non-temporary chats with the backend persistent store.
+   */
+  public async syncAllChatsWithServer(): Promise<void> {
+    try {
+      const ok = await this.state.syncWithServer();
+      if (ok) {
+        this.renderSidebar();
+        this.renderMessages();
+        this.announce(i18next.t("ui.sessionsSynced"));
+      }
+    } catch {
+      // Ignore sync network errors
+    }
+  }
+
+  /**
+   * Generates the cohort filter DuckDB SQL query from active modal inputs.
+   * @returns {string} The generated DuckDB SQL statement.
+   */
+  public getCohortSql(): string {
+    const tableName = this.cohortTableSelect?.value || "patients";
+    const joinTableName = this.cohortJoinTableSelect?.value || undefined;
+    const joinType =
+      (this.cohortJoinTypeSelect?.value as "INNER JOIN" | "LEFT JOIN") ||
+      "INNER JOIN";
+    const joinCondition = this.cohortJoinOnInput?.value?.trim() || undefined;
+    const minAge = this.cohortMinAge?.value
+      ? parseFloat(this.cohortMinAge.value)
+      : undefined;
+    const maxAge = this.cohortMaxAge?.value
+      ? parseFloat(this.cohortMaxAge.value)
+      : undefined;
+    const gender = this.cohortGenderSelect?.value || undefined;
+    const txGroup = this.cohortTxGroup?.value?.trim() || undefined;
+    const maxTIR = this.cohortMaxTIR?.value
+      ? parseFloat(this.cohortMaxTIR.value)
+      : undefined;
+    const minHbA1c = this.cohortMinHbA1c?.value
+      ? parseFloat(this.cohortMinHbA1c.value)
+      : undefined;
+
+    return buildCohortSql({
+      tableName,
+      joinTableName,
+      joinType,
+      joinCondition,
+      minAge,
+      maxAge,
+      gender,
+      txGroup,
+      maxTIR,
+      minHbA1c,
+    });
+  }
+
+  /**
+   * Updates join condition and types when target or secondary tables change.
+   */
+  public handleCohortJoinTableChange(): void {
+    const table1 = this.cohortTableSelect?.value || "patients";
+    const table2 = this.cohortJoinTableSelect?.value;
+    if (!table2 || table2 === table1) {
+      if (this.cohortJoinOnInput) this.cohortJoinOnInput.value = "";
+      return;
+    }
+
+    const rel = resolveTableJoin(table1, table2);
+    if (rel) {
+      if (this.cohortJoinTypeSelect) {
+        this.cohortJoinTypeSelect.value = rel.defaultJoinType;
+      }
+      if (this.cohortJoinOnInput) {
+        this.cohortJoinOnInput.value = `"${table1}".${rel.fromColumn} = "${table2}".${rel.toColumn}`;
+      }
+    } else {
+      if (this.cohortJoinOnInput) {
+        this.cohortJoinOnInput.value = `"${table1}".patient_id = "${table2}".patient_id`;
+      }
+    }
+  }
+
+  /**
+   * Updates the live DuckDB SQL preview in the cohort modal.
+   */
+  public updateCohortSqlPreview(): void {
+    if (this.cohortSqlPreview) {
+      this.cohortSqlPreview.textContent = this.getCohortSql();
+    }
+  }
+
+  /**
+   * Opens the Visual Cohort Query Builder modal and populates available clinical tables.
+   */
+  public openCohortModal(): void {
+    if (!this.cohortModal) return;
+    const tableHeaders = document.querySelectorAll(".schema-table-header h4");
+    const foundTables: string[] = [];
+    tableHeaders.forEach((h) => {
+      const tName = h.textContent?.trim();
+      if (tName) foundTables.push(tName);
+    });
+    const finalTables =
+      foundTables.length > 0
+        ? foundTables
+        : ["demographics", "cgm_data", "patients"];
+
+    if (this.cohortTableSelect) {
+      this.cohortTableSelect.innerHTML = "";
+      for (const t of finalTables) {
+        const opt = document.createElement("option");
+        opt.value = t;
+        opt.textContent = t;
+        this.cohortTableSelect.appendChild(opt);
+      }
+    }
+
+    if (this.cohortJoinTableSelect) {
+      this.cohortJoinTableSelect.innerHTML =
+        '<option value="">None (Single Table)</option>';
+      for (const t of finalTables) {
+        const opt = document.createElement("option");
+        opt.value = t;
+        opt.textContent = t;
+        this.cohortJoinTableSelect.appendChild(opt);
+      }
+    }
+
+    this.handleCohortJoinTableChange();
+    this.updateCohortSqlPreview();
+    this.cohortModal.classList.remove("hidden");
+    this.cohortMinAge?.focus();
+  }
+
+  /**
+   * Closes the Visual Cohort Query Builder modal.
+   */
+  public closeCohortModal(): void {
+    if (!this.cohortModal) return;
+    this.cohortModal.classList.add("hidden");
+    this.cohortFilterBtn?.focus();
+  }
+
+  /**
+   * Opens the Cloud LLM Providers & API Keys configuration modal.
+   */
+  public async openProviderModal(): Promise<void> {
+    if (!this.providerModal) return;
+
+    if (this.providerKeyOpenAI) {
+      this.providerKeyOpenAI.value = this.state.getApiKey("openai") || "";
+    }
+    if (this.providerKeyAnthropic) {
+      this.providerKeyAnthropic.value = this.state.getApiKey("anthropic") || "";
+    }
+    if (this.providerKeyGoogle) {
+      this.providerKeyGoogle.value = this.state.getApiKey("google") || "";
+    }
+
+    try {
+      const resp = await fetch("/api/providers/status");
+      if (resp.ok) {
+        const data = await resp.json();
+        for (const p of data.providers || []) {
+          this.updateModalBadge(
+            p.provider,
+            p.configured || Boolean(this.state.getApiKey(p.provider)),
+          );
+        }
+      } else {
+        this.updateModalBadgesFromLocal();
+      }
+    } catch {
+      this.updateModalBadgesFromLocal();
+    }
+
+    this.providerModal.classList.remove("hidden");
+    this.providerKeyOpenAI?.focus();
+  }
+
+  /**
+   * Updates badges in the provider modal using locally stored keys.
+   */
+  private updateModalBadgesFromLocal(): void {
+    for (const p of ["openai", "anthropic", "google"]) {
+      this.updateModalBadge(p, Boolean(this.state.getApiKey(p)));
+    }
+  }
+
+  /**
+   * Updates an individual provider status badge element.
+   * @param {string} provider Provider identifier.
+   * @param {boolean} isConfigured Whether provider has active credentials.
+   */
+  public updateModalBadge(provider: string, isConfigured: boolean): void {
+    const el = document.getElementById(`provider-badge-${provider}`);
+    if (!el) return;
+    if (isConfigured) {
+      el.className = "provider-status-badge badge-active";
+      el.textContent = "Configured 🟢";
+    } else {
+      el.className = "provider-status-badge badge-missing";
+      el.textContent = "Missing Key 🟡";
+    }
+  }
+
+  /**
+   * Closes the Cloud LLM Providers & API Keys configuration modal.
+   */
+  public closeProviderModal(): void {
+    if (!this.providerModal) return;
+    this.providerModal.classList.add("hidden");
+    this.providerSettingsBtn?.focus();
+  }
+
+  /**
+   * Saves provider API keys from the modal into localStorage.
+   */
+  public async saveProviderSettings(): Promise<void> {
+    const consent = this.providerStoreConsent
+      ? this.providerStoreConsent.checked
+      : true;
+    if (consent) {
+      if (this.providerKeyOpenAI) {
+        const val = this.providerKeyOpenAI.value.trim();
+        if (val) this.state.setApiKey("openai", val);
+      }
+      if (this.providerKeyAnthropic) {
+        const val = this.providerKeyAnthropic.value.trim();
+        if (val) this.state.setApiKey("anthropic", val);
+      }
+      if (this.providerKeyGoogle) {
+        const val = this.providerKeyGoogle.value.trim();
+        if (val) this.state.setApiKey("google", val);
+      }
+    }
+    await this.loadModels();
+    this.closeProviderModal();
+    this.announce(i18next.t("ui.settingsSaved", "Provider settings saved"));
+  }
+
+  /**
+   * Clears stored custom provider API keys from localStorage.
+   */
+  public async clearProviderSettings(): Promise<void> {
+    this.state.removeApiKey("openai");
+    this.state.removeApiKey("anthropic");
+    this.state.removeApiKey("google");
+    if (this.providerKeyOpenAI) this.providerKeyOpenAI.value = "";
+    if (this.providerKeyAnthropic) this.providerKeyAnthropic.value = "";
+    if (this.providerKeyGoogle) this.providerKeyGoogle.value = "";
+    this.updateModalBadgesFromLocal();
+    await this.loadModels();
+    this.announce(i18next.t("ui.settingsCleared", "Provider keys cleared"));
   }
 
   /**
@@ -1486,7 +2410,10 @@ export class ChatUI {
         contentDiv.appendChild(headerDiv);
         contentDiv.appendChild(preBlock);
       } else {
-        contentDiv.innerHTML = marked.parse(msg.content) as string;
+        const rawHtml = marked.parse(msg.content ?? "") as string;
+        contentDiv.innerHTML = DOMPurify.sanitize(rawHtml, {
+          ADD_ATTR: ["target"],
+        });
         const codeBlocks = contentDiv.querySelectorAll("pre code");
         codeBlocks.forEach((block) => {
           hljs.highlightElement(block as HTMLElement);
@@ -1619,6 +2546,13 @@ export class ChatUI {
           });
           table.appendChild(tbody);
 
+          const cgmCard = renderCgmCard(
+            msg.sqlResult as Array<Record<string, unknown>>,
+          );
+          if (cgmCard) {
+            tableContainer.appendChild(cgmCard);
+          }
+
           tableContainer.appendChild(table);
           msgDiv.appendChild(tableContainer);
         } else {
@@ -1638,6 +2572,9 @@ export class ChatUI {
   private currentPage: number = 1;
   private readonly ROWS_PER_PAGE = 25;
   private currentModalRows: Array<Record<string, unknown>> = [];
+  private currentSortBy: string = "";
+  private currentSortOrder: "asc" | "desc" = "asc";
+  private currentSearchTerm: string = "";
 
   /**
    * Opens the table modal and loads the first page of data.
@@ -1647,6 +2584,9 @@ export class ChatUI {
     const previousFocus = document.activeElement as HTMLElement | null;
     this.currentTable = tableName;
     this.currentPage = 1;
+    this.currentSortBy = "";
+    this.currentSortOrder = "asc";
+    this.currentSearchTerm = "";
 
     const modal = document.getElementById("table-modal");
     const modalTitle = document.getElementById("modal-title");
@@ -1658,10 +2598,31 @@ export class ChatUI {
       "next-page-btn",
     ) as HTMLButtonElement;
 
+    const searchInput = document.getElementById(
+      "modal-table-search",
+    ) as HTMLInputElement | null;
+    const sortSelect = document.getElementById(
+      "modal-table-sort-col",
+    ) as HTMLSelectElement | null;
+    const sortOrderBtn = document.getElementById(
+      "modal-table-sort-order",
+    ) as HTMLButtonElement | null;
+
     if (!modal || !modalTitle || !closeBtn || !prevBtn || !nextBtn) return;
+
+    if (searchInput) {
+      searchInput.value = "";
+    }
+    if (sortSelect) {
+      sortSelect.innerHTML = '<option value="">(Default)</option>';
+    }
+    if (sortOrderBtn) {
+      sortOrderBtn.textContent = "ASC";
+    }
 
     modalTitle.textContent = i18next.t("ui.tableName", { name: tableName });
     modal.removeAttribute("aria-hidden");
+    modal.setAttribute("aria-modal", "true");
 
     // Wire up modal export buttons if present
     const modalExportCsvBtn = document.getElementById(
@@ -1689,12 +2650,35 @@ export class ChatUI {
     // Focus the first interactive element
     closeBtn.focus();
 
-    // Trap focus inside modal
-    const trapFocus = (e: KeyboardEvent) => {
+    // Close listeners
+    const closeModal = () => {
+      modal.setAttribute("aria-hidden", "true");
+      modal.removeAttribute("aria-modal");
+      // Clean up event listeners
+      closeBtn.removeEventListener("click", closeModal);
+      modal.removeEventListener("click", overlayClick);
+      modal.removeEventListener("keydown", onModalKeyDown);
+
+      // Restore focus to where it was before opening the modal
+      if (previousFocus && document.body.contains(previousFocus)) {
+        previousFocus.focus();
+      } else {
+        document.getElementById("chat-input")?.focus();
+      }
+    };
+
+    // Trap focus and handle Escape inside modal
+    const onModalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeModal();
+        return;
+      }
       if (e.key !== "Tab") return;
       const focusableElements = modal.querySelectorAll<HTMLElement>(
         'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
       );
+      if (focusableElements.length === 0) return;
       const firstElement = focusableElements[0];
       const lastElement = focusableElements[focusableElements.length - 1];
 
@@ -1711,23 +2695,7 @@ export class ChatUI {
       }
     };
 
-    modal.addEventListener("keydown", trapFocus);
-
-    // Close listeners
-    const closeModal = () => {
-      modal.setAttribute("aria-hidden", "true");
-      // Clean up event listeners if needed
-      closeBtn.removeEventListener("click", closeModal);
-      modal.removeEventListener("click", overlayClick);
-      modal.removeEventListener("keydown", trapFocus);
-
-      // Restore focus to where it was before opening the modal
-      if (previousFocus && document.body.contains(previousFocus)) {
-        previousFocus.focus();
-      } else {
-        document.getElementById("chat-input")!.focus();
-      }
-    };
+    modal.addEventListener("keydown", onModalKeyDown);
 
     const overlayClick = (e: MouseEvent) => {
       if (e.target === modal) closeModal();
@@ -1735,6 +2703,40 @@ export class ChatUI {
 
     closeBtn.addEventListener("click", closeModal);
     modal.addEventListener("click", overlayClick);
+
+    // Wire search input with debouncing or immediate input
+    if (searchInput) {
+      const newSearchInput = searchInput.cloneNode(true) as HTMLInputElement;
+      searchInput.parentNode?.replaceChild(newSearchInput, searchInput);
+      newSearchInput.addEventListener("input", () => {
+        this.currentSearchTerm = newSearchInput.value.trim();
+        this.currentPage = 1;
+        this.fetchTableData();
+      });
+    }
+
+    // Wire sort controls
+    if (sortSelect) {
+      const newSortSelect = sortSelect.cloneNode(true) as HTMLSelectElement;
+      sortSelect.parentNode?.replaceChild(newSortSelect, sortSelect);
+      newSortSelect.addEventListener("change", () => {
+        this.currentSortBy = newSortSelect.value;
+        this.currentPage = 1;
+        this.fetchTableData();
+      });
+    }
+
+    if (sortOrderBtn) {
+      const newSortOrderBtn = sortOrderBtn.cloneNode(true) as HTMLButtonElement;
+      sortOrderBtn.parentNode?.replaceChild(newSortOrderBtn, sortOrderBtn);
+      newSortOrderBtn.addEventListener("click", () => {
+        this.currentSortOrder =
+          this.currentSortOrder === "asc" ? "desc" : "asc";
+        newSortOrderBtn.textContent = this.currentSortOrder.toUpperCase();
+        this.currentPage = 1;
+        this.fetchTableData();
+      });
+    }
 
     // Pagination listeners (use clean ones)
     const prevFn = () => {
@@ -1774,6 +2776,12 @@ export class ChatUI {
       "next-page-btn",
     ) as HTMLButtonElement;
     const indicator = document.getElementById("page-indicator");
+    const sortSelect = document.getElementById(
+      "modal-table-sort-col",
+    ) as HTMLSelectElement | null;
+    const sortOrderBtn = document.getElementById(
+      "modal-table-sort-order",
+    ) as HTMLButtonElement | null;
 
     if (!loading || !thead || !tbody || !prevBtn || !nextBtn || !indicator)
       return;
@@ -1793,9 +2801,15 @@ export class ChatUI {
     try {
       const limit = this.ROWS_PER_PAGE;
       const offset = (this.currentPage - 1) * limit;
-      const response = await fetchWithBackendError(
-        `/api/table/${encodeURIComponent(this.currentTable)}?limit=${limit}&offset=${offset}`,
-      );
+      let url = `/api/table/${encodeURIComponent(this.currentTable)}?limit=${limit}&offset=${offset}`;
+      if (this.currentSortBy) {
+        url += `&sort_by=${encodeURIComponent(this.currentSortBy)}&order=${this.currentSortOrder}`;
+      }
+      if (this.currentSearchTerm) {
+        url += `&search=${encodeURIComponent(this.currentSearchTerm)}`;
+      }
+
+      const response = await fetchWithBackendError(url);
       const data = await response.json();
 
       loading.style.display = "none";
@@ -1816,11 +2830,65 @@ export class ChatUI {
       if (data.rows.length > 0) {
         // Render header
         const columns = Object.keys(data.rows[0]);
+
+        // Populate sortSelect options if not already populated with these columns
+        if (sortSelect && sortSelect.options.length <= 1) {
+          columns.forEach((col) => {
+            const opt = document.createElement("option");
+            opt.value = col;
+            opt.textContent = col;
+            sortSelect.appendChild(opt);
+          });
+        }
+        if (sortSelect) {
+          sortSelect.value = this.currentSortBy;
+        }
+        if (sortOrderBtn) {
+          sortOrderBtn.textContent = this.currentSortOrder.toUpperCase();
+        }
+
         const trHead = document.createElement("tr");
         columns.forEach((col) => {
           const th = document.createElement("th");
           th.textContent = col;
           th.setAttribute("scope", "col");
+          th.setAttribute("tabindex", "0");
+          th.setAttribute("role", "columnheader");
+          th.setAttribute(
+            "aria-sort",
+            this.currentSortBy === col
+              ? this.currentSortOrder === "asc"
+                ? "ascending"
+                : "descending"
+              : "none",
+          );
+
+          if (this.currentSortBy === col) {
+            th.classList.add(
+              this.currentSortOrder === "asc" ? "sorted-asc" : "sorted-desc",
+            );
+          }
+
+          const onThSort = () => {
+            if (this.currentSortBy === col) {
+              this.currentSortOrder =
+                this.currentSortOrder === "asc" ? "desc" : "asc";
+            } else {
+              this.currentSortBy = col;
+              this.currentSortOrder = "asc";
+            }
+            this.currentPage = 1;
+            this.fetchTableData();
+          };
+
+          th.addEventListener("click", onThSort);
+          th.addEventListener("keydown", (e: KeyboardEvent) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onThSort();
+            }
+          });
+
           trHead.appendChild(th);
         });
         thead.appendChild(trHead);
@@ -1849,16 +2917,32 @@ export class ChatUI {
       } else {
         const msg = i18next.t("ui.noDataAvailable");
         this.announce(msg, false);
-        tbody.innerHTML = `<tr><td>${msg}</td></tr>`;
+        tbody.innerHTML = "";
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.textContent = msg;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
         prevBtn.disabled = true;
         nextBtn.disabled = true;
       }
     } catch (error) {
       console.error("Failed to fetch table data:", error);
       loading.style.display = "none";
-      const errMsg = i18next.t("ui.failedData", { error });
+      const errMsg = i18next.t("ui.failedData", {
+        error,
+        interpolation: { escapeValue: false },
+      });
       this.announce(errMsg, true);
-      tbody.innerHTML = `<tr><td class="error-text" role="alert" aria-live="assertive">${errMsg}</td></tr>`;
+      tbody.innerHTML = "";
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.className = "error-text";
+      td.setAttribute("role", "alert");
+      td.setAttribute("aria-live", "assertive");
+      td.textContent = errMsg;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
     }
   }
 
@@ -1881,11 +2965,13 @@ export class ChatUI {
         .map((col) => {
           const val = row[col];
           if (val === null || val === undefined) return '""';
-          return `"${String(val).replace(/"/g, '""')}"`;
+          const strVal =
+            typeof val === "object" ? JSON.stringify(val) : String(val);
+          return `"${strVal.replace(/"/g, '""')}"`;
         })
         .join(","),
     );
-    const csvContent = [headerLine, ...dataLines].join("\n");
+    const csvContent = "\uFEFF" + [headerLine, ...dataLines].join("\r\n");
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");

@@ -1,12 +1,9 @@
-"""Internationalization and localization module."""
+"""Internationalization and localization module for T1D Analytics."""
 
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
-# A simple dictionary-based fallback if we want to provide translations in code,
-# or we can just use a simple translation dict here.
-
-TRANSLATIONS = {
+TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "en": {},
     "ja": {
         "An error occurred: {}": "エラーが発生しました: {}",
@@ -73,6 +70,177 @@ TRANSLATIONS = {
         "Ollama LLM service is online and ready.": "Ollama LLMサービスはオンラインで準備完了です。",
         "Cannot connect to local Ollama LLM service at {}.": "{}にあるローカルOllama LLMサービスに接続できません。",
         "Start Ollama or select 'Literal SQL' mode in the web interface to query directly.": "直接クエリを実行するには、Ollamaを起動するか、Webインターフェースで'Literal SQL'モードを選択してください。",
+        "Download encountered errors: {} file(s) failed.": "ダウンロードでエラーが発生しました: {}個のファイルが失敗しました。",
+        "Export complete!": "エクスポートが完了しました！",
+        "Exporting table '{}' to {}...": "テーブル'{}'を{}にエクスポート中...",
+        "Failed to download {}: {}": "{}のダウンロードに失敗しました: {}",
+        "Failed to extract {} (Bad Archive File).": "{}の解凍に失敗しました（不正なアーカイブファイル）。",
+        "Initializing TrainingDataGenerator with model '{}' (provider: '{}')...": "モデル'{}'（プロバイダー: '{}'）でTrainingDataGeneratorを初期化中...",
+        "Internal server error: {}": "内部サーバーエラー: {}",
+        "Loading {} (clinical) into table {}...": "{}（臨床データ）をテーブル{}に読み込み中...",
+        "Loading {} (csv.gz) into table {}...": "{}（csv.gz）をテーブル{}に読み込み中...",
+        "Loading {} (parquet) into table {}...": "{}（parquet）をテーブル{}に読み込み中...",
+        "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "表形式のファイル（CSV、TXT、Parquet、GZ）をスキャン中...",
+        "Skipping unsafe entry {} in {} (symlink detected).": "{}内の安全でないエントリ{}をスキップしています（シンボリックリンクが検出されました）。",
+        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "{}内の安全でないエントリ{}をスキップしています（シンボリックリンクまたはハードリンクが検出されました）。",
+    },
+    "ar": {
+        "An error occurred: {}": "حدث خطأ: {}",
+        "Fetching HTML from {}...": "جاري جلب HTML من {}...",
+        "Parsing datasets...": "جاري تحليل مجموعات البيانات...",
+        "Found {} protocols.": "تم العثور على {} من البروتوكولات.",
+        "No datasets found. Exiting.": "لم يتم العثور على مجموعات بيانات. جارٍ الخروج.",
+        "Starting downloads to {}...": "بدء التنزيل إلى {}...",
+        "Done!": "تم بنجاح!",
+        "Data directory {} does not exist.": "دليل البيانات {} غير موجود.",
+        "Checking for zip files to extract...": "جاري البحث عن ملفات zip لاستخراجها...",
+        "Extracting {}...": "جاري استخراج {}...",
+        "Failed to extract {} (Bad Zip File).": "فشل استخراج {} (ملف Zip تالف).",
+        "No zip files found to extract.": "لم يتم العثور على ملفات zip لاستخراجها.",
+        "Extraction complete.": "اكتمل الاستخراج.",
+        "Skipping unsafe entry {} in {} (path traversal detected).": "تخطي الإدخال غير الآمن {} في {} (تم اكتشاف مسار غير آمن).",
+        "Connecting to DuckDB at {}...": "جاري الاتصال بـ DuckDB في {}...",
+        "Scanning for CSV and TXT files...": "جاري البحث عن ملفات CSV و TXT...",
+        "No tabular files found.": "لم يتم العثور على ملفات جداول.",
+        "Loading {} (encoding={}, sep='{}') into table {}...": "تحميل {} (الترميز={}, الفاصل='{}') إلى الجدول {}...",
+        "Table {} already exists, skipping...": "الجدول {} موجود بالفعل، جارٍ التخطي...",
+        "Failed to load {}: {}": "فشل تحميل {}: {}",
+        "Successfully populated {} tables in {}.": "تم ملء {} من الجداول بنجاح في {}.",
+        "Database {} does not exist.": "قاعدة البيانات {} غير موجودة.",
+        "Please run the 'load' command first to populate the database.": "يرجى تشغيل أمر 'load' أولاً لملء قاعدة البيانات.",
+        "Welcome to T1D Analytics Interface!": "مرحبًا بك في واجهة تحليلات T1D!",
+        "You can enter:": "يمكنك إدخال:",
+        "  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)": "  - استعلامات SQL القياسية (تبدأ بـ SELECT، WITH، SHOW، DESCRIBE، إلخ)",
+        "  - Natural language queries (will be translated to SQL via LLM)": "  - استعلامات باللغة الطبيعية (سيتم ترجمتها إلى SQL عبر LLM)",
+        "  - 'exit' or 'quit' to close.": "  - 'exit' أو 'quit' للإغلاق.",
+        "Exiting.": "جارٍ الخروج.",
+        "SQL Error: {}": "خطأ SQL: {}",
+        "Error: any-llm-sdk[ollama] is not installed. Please install it.": "خطأ: any-llm-sdk[ollama] غير مثبت. يرجى تثبيته.",
+        "Thinking...": "جارٍ التفكير...",
+        "Generated SQL: \n{}\n": "SQL المُنشأ: \n{}\n",
+        "Executing...\n": "جارٍ التنفيذ...\n",
+        "Failed to generate or execute query: {}": "فشل إنشاء أو تنفيذ الاستعلام: {}",
+        "Saved DOI link: {}": "تم حفظ رابط DOI: {}",
+        "DOI link already exists, skipping: {}": "رابط DOI موجود بالفعل، تخطي: {}",
+        "File already exists, skipping: {}": "الملف موجود بالفعل، تخطي: {}",
+        "Downloading {}...": "جارٍ تنزيل {}...",
+        "Processing protocol: {}": "معالجة البروتوكول: {}",
+        "Initializing TrainingDataGenerator with model '{}'...": "تهيئة TrainingDataGenerator بالنموذج '{}'...",
+        "Found {} tables in the schema.": "تم العثور على {} من الجداول في المخطط.",
+        "Generating {} pairs for table: {}...": "توليد {} من الأزواج للجدول: {}...",
+        "Training data generation complete!": "اكتمل توليد بيانات التدريب!",
+        "Database file '{}' does not exist.": "ملف قاعدة البيانات '{}' غير موجود.",
+        "Run 't1d-analytics load --data-dir <data_dir> --db {}' to create and populate the database.": "قم بتشغيل 't1d-analytics load --data-dir <data_dir> --db {}' لإنشاء قاعدة البيانات وملئها.",
+        "Database file '{}' is empty (0 bytes).": "ملف قاعدة البيانات '{}' فارغ (0 بايت).",
+        "Populate the database with 't1d-analytics load --data-dir <data_dir> --db {}'.": "املأ قاعدة البيانات باستخدام 't1d-analytics load --data-dir <data_dir> --db {}'.",
+        "Cannot access database file '{}': {}": "تعذر الوصول إلى ملف قاعدة البيانات '{}': {}",
+        "Verify filesystem read permissions for the database file.": "تحقق من أذونات قراءة نظام الملفات لملف قاعدة البيانات.",
+        "Failed to open DuckDB database '{}': {}": "فشل فتح قاعدة بيانات DuckDB '{}': {}",
+        "Check that the database is not corrupted or locked by another process.": "تأكد من أن قاعدة البيانات غير تالفة أو مقفلة بواسطة عملية أخرى.",
+        "Database '{}' connected successfully but contains 0 tables.": "تم الاتصال بقاعدة البيانات '{}' بنجاح ولكنها تحتوي على 0 جداول.",
+        "Run 't1d-analytics load --data-dir <data_dir> --db {}' to load clinical trial data.": "قم بتشغيل 't1d-analytics load --data-dir <data_dir> --db {}' لتحميل بيانات التجارب السريرية.",
+        "Database '{}' contains {} custom table(s), but lacks standard T1D clinical trial datasets (e.g. patients, cgms, dclp3).": "تحتوي قاعدة البيانات '{}' على {} جدول مخصص، ولكنها تفتقر إلى مجموعات بيانات التجارب السريرية القياسية لـ T1D (مثل patients، cgms، dclp3).",
+        "Download and load public clinical trial datasets using 't1d-analytics download' and 't1d-analytics load'.": "قم بتنزيل وتحميل مجموعات بيانات التجارب السريرية العامة باستخدام 't1d-analytics download' و 't1d-analytics load'.",
+        "Warning: Database {} contains 0 tables.": "تحذير: قاعدة البيانات {} تحتوي على 0 جداول.",
+        "Warning: Database {} lacks standard initial clinical trial datasets.": "تحذير: قاعدة البيانات {} تفتقر إلى مجموعات بيانات التجارب السريرية الأولية القياسية.",
+        "Database '{}' is healthy with {} table(s) ready.": "قاعدة البيانات '{}' بحالة جيدة مع جاهزية {} من الجداول.",
+        "Ollama is accessible, but recommended model '{}' is not pulled.": "يمكن الوصول إلى Ollama، ولكن لم يتم سحب النموذج الموصى به '{}'.",
+        "Run 'ollama pull {}' to enable full Natural Language query translation.": "قم بتشغيل 'ollama pull {}' لتمكين الترجمة الكاملة لاستعلامات اللغة الطبيعية.",
+        "Ollama LLM service is online and ready.": "خدمة Ollama LLM متصلة بالإنترنت وجاهزة.",
+        "Cannot connect to local Ollama LLM service at {}.": "تعذر الاتصال بخدمة Ollama LLM المحلية في {}.",
+        "Start Ollama or select 'Literal SQL' mode in the web interface to query directly.": "ابدأ تشغيل Ollama أو حدد وضع 'Literal SQL' في واجهة الويب للاستعلام مباشرة.",
+        "Download encountered errors: {} file(s) failed.": "واجه التنزيل أخطاء: فشل {} ملف (ملفات).",
+        "Export complete!": "اكتمل التصدير!",
+        "Exporting table '{}' to {}...": "تصدير الجدول '{}' إلى {}...",
+        "Failed to download {}: {}": "فشل تنزيل {}: {}",
+        "Failed to extract {} (Bad Archive File).": "فشل استخراج {} (ملف أرشيف تالف).",
+        "Initializing TrainingDataGenerator with model '{}' (provider: '{}')...": "تهيئة TrainingDataGenerator بالنموذج '{}' (المزود: '{}')...",
+        "Internal server error: {}": "خطأ داخلي في الخادم: {}",
+        "Loading {} (clinical) into table {}...": "تحميل {} (بيانات سريرية) إلى الجدول {}...",
+        "Loading {} (csv.gz) into table {}...": "تحميل {} (csv.gz) إلى الجدول {}...",
+        "Loading {} (parquet) into table {}...": "تحميل {} (parquet) إلى الجدول {}...",
+        "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "جاري البحث عن ملفات الجداول (CSV, TXT, Parquet, GZ)...",
+        "Skipping unsafe entry {} in {} (symlink detected).": "تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي).",
+        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي أو ثابت).",
+    },
+    "he": {
+        "An error occurred: {}": "אירעה שגיאה: {}",
+        "Fetching HTML from {}...": "מביא HTML מ-{}...",
+        "Parsing datasets...": "מנתח ערכות נתונים...",
+        "Found {} protocols.": "נמצאו {} פרוטוקולים.",
+        "No datasets found. Exiting.": "לא נמצאו ערכות נתונים. יוצא.",
+        "Starting downloads to {}...": "מתחיל הורדות ל-{}...",
+        "Done!": "בוצע!",
+        "Data directory {} does not exist.": "ספריית הנתונים {} אינה קיימת.",
+        "Checking for zip files to extract...": "בודק קובצי zip לחילוץ...",
+        "Extracting {}...": "מחלץ {}...",
+        "Failed to extract {} (Bad Zip File).": "חילוץ {} נכשל (קובץ Zip פגום).",
+        "No zip files found to extract.": "לא נמצאו קובצי zip לחילוץ.",
+        "Extraction complete.": "החילוץ הושלם.",
+        "Skipping unsafe entry {} in {} (path traversal detected).": "מדלג על פריט לא בטוח {} ב-{} (זוהה מעבר נתיב).",
+        "Connecting to DuckDB at {}...": "מתחבר ל-DuckDB ב-{}...",
+        "Scanning for CSV and TXT files...": "סורק קובצי CSV ו-TXT...",
+        "No tabular files found.": "לא נמצאו קבצים טבלאיים.",
+        "Loading {} (encoding={}, sep='{}') into table {}...": "טוען {} (קידוד={}, מפריד='{}') לטבלה {}...",
+        "Table {} already exists, skipping...": "הטבלה {} כבר קיימת, מדלג...",
+        "Failed to load {}: {}": "טעינת {} נכשלה: {}",
+        "Successfully populated {} tables in {}.": "אוכלסו בהצלחה {} טבלאות ב-{}.",
+        "Database {} does not exist.": "מסד הנתונים {} אינו קיים.",
+        "Please run the 'load' command first to populate the database.": "אנא הרץ תחילה את הפקודה 'load' כדי לאכלס את מסד הנתונים.",
+        "Welcome to T1D Analytics Interface!": "ברוכים הבאים לממשק ניתוח T1D!",
+        "You can enter:": "באפשרותך להזין:",
+        "  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)": "  - שאילתות SQL רגילות (המתחילות ב-SELECT, WITH, SHOW, DESCRIBE וכו')",
+        "  - Natural language queries (will be translated to SQL via LLM)": "  - שאילתות שפה טבעית (יתורגמו ל-SQL באמצעות LLM)",
+        "  - 'exit' or 'quit' to close.": "  - 'exit' או 'quit' לסגירה.",
+        "Exiting.": "יוצא.",
+        "SQL Error: {}": "שגיאת SQL: {}",
+        "Error: any-llm-sdk[ollama] is not installed. Please install it.": "שגיאה: any-llm-sdk[ollama] אינו מותקן. אנא התקן אותו.",
+        "Thinking...": "חושב...",
+        "Generated SQL: \n{}\n": "SQL שנוצר: \n{}\n",
+        "Executing...\n": "מבצע...\n",
+        "Failed to generate or execute query: {}": "יצירת או ביצוע השאילתה נכשלו: {}",
+        "Saved DOI link: {}": "קישור DOI נשמר: {}",
+        "DOI link already exists, skipping: {}": "קישור DOI כבר קיים, מדלג: {}",
+        "File already exists, skipping: {}": "הקובץ כבר קיים, מדלג: {}",
+        "Downloading {}...": "מוריד {}...",
+        "Processing protocol: {}": "מעבד פרוטוקול: {}",
+        "Initializing TrainingDataGenerator with model '{}'...": "מאתחל TrainingDataGenerator עם מודל '{}'...",
+        "Found {} tables in the schema.": "נמצאו {} טבלאות בסכמה.",
+        "Generating {} pairs for table: {}...": "מייצר {} זוגות עבור טבלה: {}...",
+        "Training data generation complete!": "יצירת נתוני האימון הושלמה!",
+        "Database file '{}' does not exist.": "קובץ מסד הנתונים '{}' אינו קיים.",
+        "Run 't1d-analytics load --data-dir <data_dir> --db {}' to create and populate the database.": "הרץ 't1d-analytics load --data-dir <data_dir> --db {}' כדי ליצור ולאכלס את מסד הנתונים.",
+        "Database file '{}' is empty (0 bytes).": "קובץ מסד הנתונים '{}' ריק (0 בתים).",
+        "Populate the database with 't1d-analytics load --data-dir <data_dir> --db {}'.": "אכלס את מסד הנתונים באמצעות 't1d-analytics load --data-dir <data_dir> --db {}'.",
+        "Cannot access database file '{}': {}": "לא ניתן לגשת לקובץ מסד הנתונים '{}': {}",
+        "Verify filesystem read permissions for the database file.": "ודא הרשאות קריאה במערכת הקבצים עבור קובץ מסד הנתונים.",
+        "Failed to open DuckDB database '{}': {}": "פתיחת מסד הנתונים DuckDB '{}' נכשלה: {}",
+        "Check that the database is not corrupted or locked by another process.": "בדוק שמסד הנתונים אינו פגום או נעול על ידי תהליך אחר.",
+        "Database '{}' connected successfully but contains 0 tables.": "מסד הנתונים '{}' חובר בהצלחה אך מכיל 0 טבלאות.",
+        "Run 't1d-analytics load --data-dir <data_dir> --db {}' to load clinical trial data.": "הרץ 't1d-analytics load --data-dir <data_dir> --db {}' כדי לטעון נתוני ניסויים קליניים.",
+        "Database '{}' contains {} custom table(s), but lacks standard T1D clinical trial datasets (e.g. patients, cgms, dclp3).": "מסד הנתונים '{}' מכיל {} טבלאות מותאמות אישית, אך חסרות בו ערכות נתוני ניסויים קליניים סטנדרטיים של T1D (לדוגמה: patients, cgms, dclp3).",
+        "Download and load public clinical trial datasets using 't1d-analytics download' and 't1d-analytics load'.": "הורד וטען ערכות נתוני ניסויים קליניים ציבוריים באמצעות 't1d-analytics download' ו-'t1d-analytics load'.",
+        "Warning: Database {} contains 0 tables.": "אזהרה: מסד הנתונים {} מכיל 0 טבלאות.",
+        "Warning: Database {} lacks standard initial clinical trial datasets.": "אזהרה: במסד הנתונים {} חסרות ערכות נתוני ניסויים ראשוניים סטנדרטיים.",
+        "Database '{}' is healthy with {} table(s) ready.": "מסד הנתונים '{}' תקין ו-{} טבלאות מוכנות לשימוש.",
+        "Ollama is accessible, but recommended model '{}' is not pulled.": "‏Ollama נגיש, אך המודל המומלץ '{}' לא הורד.",
+        "Run 'ollama pull {}' to enable full Natural Language query translation.": "הרץ 'ollama pull {}' כדי להפעיל תרגום מלא של שאילתות שפה טבעית.",
+        "Ollama LLM service is online and ready.": "שירות Ollama LLM מקוון ומוכן לפעולה.",
+        "Cannot connect to local Ollama LLM service at {}.": "לא ניתן להתחבר לשירות Ollama LLM המקומי ב-{}.",
+        "Start Ollama or select 'Literal SQL' mode in the web interface to query directly.": "הפעל את Ollama או בחר במצב 'Literal SQL' בממשק האינטרנט כדי לבצע שאילתות ישירות.",
+        "Download encountered errors: {} file(s) failed.": "ההורדה נתקלה בשגיאות: {} קבצים נכשלו.",
+        "Export complete!": "הייצוא הושלם!",
+        "Exporting table '{}' to {}...": "מייצא טבלה '{}' ל-{}...",
+        "Failed to download {}: {}": "הורדת {} נכשלה: {}",
+        "Failed to extract {} (Bad Archive File).": "חילוץ {} נכשל (קובץ ארכיון פגום).",
+        "Initializing TrainingDataGenerator with model '{}' (provider: '{}')...": "מאתחל TrainingDataGenerator עם מודל '{}' (ספק: '{}')...",
+        "Internal server error: {}": "שגיאת שרת פנימית: {}",
+        "Loading {} (clinical) into table {}...": "טוען {} (נתונים קליניים) לטבלה {}...",
+        "Loading {} (csv.gz) into table {}...": "טוען {} (csv.gz) לטבלה {}...",
+        "Loading {} (parquet) into table {}...": "טוען {} (parquet) לטבלה {}...",
+        "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "סורק קובצי נתונים טבלאיים (CSV, TXT, Parquet, GZ)...",
+        "Skipping unsafe entry {} in {} (symlink detected).": "מדלג על רשומה לא בטוחה {} ב-{} (זוהה קישור סימבולי).",
+        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "מדלג על רשומה לא בטוחה {} ב-{} (זוהה קישור סימבולי או קשיח).",
     },
 }
 
@@ -83,11 +251,11 @@ def get_translator(lang: Optional[str] = None) -> Callable[..., str]:
 
     Args:
     ----
-        lang: The language code (e.g., "en", "ja"). If None, uses the LANG env var.
+        lang: The language code (e.g., "en", "ja", "ar", "he"). If None, uses the LANG env var.
 
     Returns:
     -------
-        A translation function.
+        A translation function accepting a text key, format args, and kwargs.
 
     """
     if lang is None:
@@ -96,7 +264,20 @@ def get_translator(lang: Optional[str] = None) -> Callable[..., str]:
     lang_dict = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
 
     def translate(text: str, *args: Any, **kwargs: Any) -> str:
-        """Translate the given text and format it with args and kwargs."""
+        """
+        Translate the given text and format it with positional and keyword arguments.
+
+        Args:
+        ----
+            text: Message key to translate.
+            *args: Positional formatting values.
+            **kwargs: Keyword formatting values.
+
+        Returns:
+        -------
+            Translated and formatted text string.
+
+        """
         translated = lang_dict.get(text, text)
         if args or kwargs:
             return translated.format(*args, **kwargs)

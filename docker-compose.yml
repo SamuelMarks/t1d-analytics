@@ -1,0 +1,48 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: t1d-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - T1D_DB_PATH=/app/data/t1d.duckdb
+      - OLLAMA_HOST=http://ollama:11434
+      - DEBUG=1
+    volumes:
+      - t1d-data:/app/data
+    depends_on:
+      - ollama
+
+  frontend:
+    image: node:20-alpine
+    container_name: t1d-frontend
+    working_dir: /app/web
+    volumes:
+      - ./web:/app/web
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    command: sh -c "npm install && npx vite preview --port 3000 --host 0.0.0.0"
+    depends_on:
+      - backend
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: t1d-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  t1d-data:
+    name: t1d-data
+  ollama-models:
+    name: t1d-ollama-models

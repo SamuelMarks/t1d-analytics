@@ -74,6 +74,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Documentation build outputs
+docs/
+
 # Unit test / coverage reports
 htmlcov/
 .tox/

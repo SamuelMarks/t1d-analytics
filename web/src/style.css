@@ -788,7 +788,8 @@ body.light-mode {
 }
 
 /* Modal */
-.modal {
+.modal,
+.modal-overlay {
   display: none;
   position: fixed;
   z-index: 1000;
@@ -801,8 +802,13 @@ body.light-mode {
   justify-content: center;
 }
 
-.modal:not([aria-hidden="true"]) {
+.modal:not([aria-hidden="true"]):not(.hidden),
+.modal-overlay:not(.hidden) {
   display: flex;
+}
+
+.hidden {
+  display: none !important;
 }
 
 .modal-content {
@@ -838,6 +844,61 @@ body.light-mode {
   flex: 1;
 }
 
+.table-modal-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.table-search-wrapper {
+  flex: 1;
+  min-width: 200px;
+}
+
+.table-search-input {
+  width: 100%;
+  padding: 0.45rem 0.75rem;
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-light);
+  font-size: 0.9rem;
+}
+
+.table-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.table-sort-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sort-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.table-sort-select {
+  padding: 0.4rem 0.6rem;
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-light);
+  font-size: 0.85rem;
+}
+
+.sort-order-btn {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
 .table-container {
   overflow-x: auto;
 }
@@ -858,6 +919,24 @@ body.light-mode {
 #modal-table th {
   background-color: var(--bg-sidebar);
   font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+#modal-table th:hover {
+  background-color: var(--border);
+}
+
+#modal-table th.sorted-asc::after {
+  content: " ▲";
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+
+#modal-table th.sorted-desc::after {
+  content: " ▼";
+  font-size: 0.75rem;
+  color: var(--accent);
 }
 
 .modal-footer {
@@ -1203,4 +1282,80 @@ body.light-mode .hljs-deletion {
 
 [dir="rtl"] .status-chip {
   flex-direction: row-reverse;
+}
+
+/* Clinical AGP Print Styles */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .cgm-analytics-card,
+  .cgm-analytics-card * {
+    visibility: visible;
+  }
+  .cgm-analytics-card {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 20px !important;
+    border: none !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+  }
+  .print-report-btn {
+    display: none !important;
+  }
+}
+
+/* Provider Settings & Badges */
+.provider-status-dot {
+  display: inline-block;
+  font-size: 0.8rem;
+  margin-left: 0.35rem;
+  transition: color 0.2s ease;
+}
+.provider-status-dot.active {
+  color: #2ecc71;
+}
+.provider-status-dot.warning {
+  color: #f1c40f;
+}
+.provider-settings-btn {
+  margin-left: 0.25rem;
+  font-size: 0.9rem;
+}
+.provider-modal-content {
+  max-width: 540px;
+}
+.provider-item {
+  margin-bottom: 1.25rem;
+  padding: 0.75rem;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.provider-header-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+.provider-status-badge {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+}
+.badge-active {
+  background: rgba(46, 204, 113, 0.2);
+  color: #2ecc71;
+}
+.badge-missing {
+  background: rgba(241, 196, 15, 0.2);
+  color: #f1c40f;
+}
+.opt-in-group {
+  margin-top: 1rem;
 }

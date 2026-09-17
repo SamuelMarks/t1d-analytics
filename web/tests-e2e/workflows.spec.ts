@@ -342,4 +342,69 @@ test.describe("App Workflows E2E", () => {
     await expect(modal).not.toBeVisible();
     await expect(viewBtn).toBeFocused(); // focus returned to view button
   });
+
+  test("TEST-FE-03: End-to-end natural language query, SQL execution, table and AGP chart rendering, and multilingual switching", async ({
+    page,
+  }) => {
+    // Mock CGM SQL execution response with multi-day time and glucose readings
+    await page.route("**/api/chat", async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          content:
+            "Here is the query:\n```sql\nSELECT time, glucose FROM cgm_data;\n```",
+          sqlQuery: "SELECT time, glucose FROM cgm_data;",
+          sqlResult: [
+            { time: "2024-01-01 10:00", glucose: 115 },
+            { time: "2024-01-01 14:00", glucose: 165 },
+            { time: "2024-01-02 10:00", glucose: 130 },
+            { time: "2024-01-02 14:00", glucose: 180 },
+          ],
+        },
+      });
+    });
+
+    // 1. Submit clinical natural language question in UI
+    await page.fill(
+      "#chat-input",
+      "Show me the 24-hour CGM profile for patient 101",
+    );
+    await page.click("#send-btn");
+
+    // 2. Verify response message renders table and CGM analytics card
+    await expect(page.locator(".sql-table")).toBeVisible();
+    await expect(page.locator(".cgm-analytics-card")).toBeVisible();
+    await expect(page.locator(".cgm-analytics-card svg").first()).toBeVisible();
+
+    // 3. Test multilingual switching: EN -> JA -> AR -> HE with RTL layout verification
+    await page.selectOption("#lang-select", "ja");
+    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+    await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+
+    await page.selectOption("#lang-select", "ar");
+    await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+
+    await page.selectOption("#lang-select", "he");
+    await expect(page.locator("html")).toHaveAttribute("lang", "he");
+    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  });
+
+  /**
+   * Tests toggling streaming mode and UI button indicators.
+   */
+  test("Workflows: Toggle streaming mode and verify button indicators", async ({
+    page,
+  }) => {
+    const streamToggle = page.locator("#streaming-toggle-btn");
+    await expect(streamToggle).toBeVisible();
+
+    // Toggle ON
+    await streamToggle.click();
+    await expect(streamToggle).toHaveClass(/active/);
+
+    // Toggle OFF
+    await streamToggle.click();
+    await expect(streamToggle).not.toHaveClass(/active/);
+  });
 });

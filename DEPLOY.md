@@ -12,7 +12,7 @@ Ensure libscript is installed and you are authenticated to your chosen cloud pro
 
 ## T1D Domain Pipeline
 
-For users specifically looking to deploy the T1D domain pipeline for Text-to-SQL training with Gemma-4-SQL, please refer to the [T1D Integration Guide](T1D_INTEGRATION_GUIDE.md) and the granular [Execution Checklist](TODO_PLAN1.md) for a comprehensive step-by-step tutorial.
+For users specifically looking to deploy the T1D domain pipeline for Text-to-SQL training with Gemma-4-SQL, please refer to the [T1D Integration Guide](T1D_INTEGRATION_GUIDE.md) for a comprehensive step-by-step tutorial.
 
 ### TPU Research Cloud (TFRC) Deployments
 
@@ -158,3 +158,63 @@ To bring the environment back online, we use the restore command. This will map 
 ```sh
 ./libscript.sh cloud restore healthplatform-node --from-backup latest
 ```
+
+## 6. Automated Deployment & Health Verification (`test.sh` / `test.cmd`)
+
+To automate provisioning, remote service inspection, and health validation across providers:
+
+```bash
+# Test deployment in mock mode locally (zero cloud resources consumed)
+./test.sh --unit-mock
+
+# Force live cloud execution with strict pre-flight credential enforcement
+./test.sh --live-cloud
+
+# Test deployment on Azure (default) or override provider/region
+CLOUD_PROVIDER=azure RG_NAME=rg-analytics-test LOCATION=eastus ./test.sh
+
+# Run remote test suite as part of cloud verification
+./test.sh --run-remote-tests
+
+# Fall back to local execution without cloud provisioning
+./test.sh --local
+```
+
+For Windows environments, use `test.cmd` with identical parameters and flags:
+
+```cmd
+test.cmd --unit-mock
+test.cmd --live-cloud
+test.cmd --local
+test.cmd --run-remote-tests
+```
+
+### Reference: CLI Flags
+
+| Flag                                       | Description                                                                                                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--unit-mock`, `--mock-cloud`, `--dry-run` | Executes the full verification workflow in mock mode, validating signal handlers and smoke assertions without spending cloud resources.           |
+| `--live-cloud`                             | Enforces live cloud provisioning; performs mandatory pre-flight CLI checks for `az`, `gcloud`, or `aws` and exits immediately if unauthenticated. |
+| `--local`, `-l`                            | Runs the test suite locally on the current workstation using `pytest` and `npm test`.                                                             |
+| `--run-remote-tests`, `-t`                 | Runs `pytest` remotely on the provisioned compute node after health checks pass.                                                                  |
+
+### Reference: Environment Variables
+
+| Variable             | Default                            | Description                                                   |
+| -------------------- | ---------------------------------- | ------------------------------------------------------------- |
+| `CLOUD_PROVIDER`     | `azure`                            | Target cloud provider (`azure`, `gcp`, or `aws`).             |
+| `LIBSCRIPT_ROOT_DIR` | `$HOME/repos/libscript`            | Path to the Libscript root repository.                        |
+| `LIBSCRIPT_CLI`      | `$LIBSCRIPT_ROOT_DIR/libscript.sh` | Path to Libscript executable wrapper.                         |
+| `NODE_NAME`          | `test-t1d-analytics-node`          | Name of compute node to allocate.                             |
+| `RG_NAME`            | `rg-analytics-test`                | Resource group or GCP project ID.                             |
+| `LOCATION`           | `eastus`                           | Cloud region / datacenter zone.                               |
+| `REMOTE_DEST`        | `t1d-analytics-test`               | Target remote destination directory.                          |
+| `T1D_MOCK_TPU`       | `0`                                | When `1`, simulates TPU workload creation and status polling. |
+| `T1D_MOCK_GCS`       | `0`                                | When `1`, simulates GCS upload and checkpoint downloads.      |
+
+### Reference: Exit Codes
+
+| Code | Status  | Meaning                                                                         |
+| ---- | ------- | ------------------------------------------------------------------------------- |
+| `0`  | Success | Provisioning, remote smoke checks, and deprovisioning succeeded.                |
+| `1`  | Failure | Cloud provisioning failed, credentials were missing, or health check timed out. |

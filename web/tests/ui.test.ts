@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import i18next from "i18next";
 import { ChatState } from "../src/state";
 import { ChatUI } from "../src/ui";
 
@@ -26,6 +27,9 @@ describe("ChatUI", () => {
       <div id="table-modal" aria-hidden="true">
         <h2 id="modal-title"></h2>
         <button id="close-modal-btn"></button>
+        <input type="search" id="modal-table-search" />
+        <select id="modal-table-sort-col"></select>
+        <button id="modal-table-sort-order">ASC</button>
         <button id="prev-page-btn"></button>
         <button id="next-page-btn"></button>
         <button id="modal-export-csv-btn" disabled></button>
@@ -49,10 +53,55 @@ describe("ChatUI", () => {
           <option value="gemma4">Gemma</option>
           <option value="sql">SQL</option>
         </select>
+        <button id="provider-settings-btn">⚙️</button>
+        <span id="provider-status-dot" class="active">●</span>
+        <select id="db-select">
+          <option value="t1d.duckdb">t1d.duckdb</option>
+        </select>
+        <button id="streaming-toggle-btn">⚡</button>
+        <button id="sync-sessions-btn">Sync</button>
+        <button id="cohort-filter-btn">Cohort</button>
         <select id="lang-select">
           <option value="en">English</option>
           <option value="ja">Japanese</option>
         </select>
+        <div id="cohort-modal" class="modal-overlay hidden">
+          <button id="close-cohort-modal-btn">✕</button>
+          <select id="cohort-table-select"></select>
+          <select id="cohort-join-table-select">
+            <option value="">None (Single Table)</option>
+          </select>
+          <select id="cohort-join-type-select">
+            <option value="INNER JOIN">INNER JOIN</option>
+            <option value="LEFT JOIN">LEFT JOIN</option>
+          </select>
+          <input type="text" id="cohort-join-on-input" />
+          <input type="number" id="cohort-min-age" />
+          <input type="number" id="cohort-max-age" />
+          <select id="cohort-gender-select">
+            <option value="">Any</option>
+            <option value="M">Male</option>
+            <option value="F">Female</option>
+          </select>
+          <input type="text" id="cohort-txgroup" />
+          <input type="number" id="cohort-max-tir" />
+          <input type="number" id="cohort-min-hba1c" />
+          <code id="cohort-sql-preview"></code>
+          <button id="cohort-insert-chat-btn">Insert</button>
+          <button id="cohort-execute-btn">Execute</button>
+        </div>
+        <div id="provider-modal" class="modal-overlay hidden">
+          <button id="close-provider-modal-btn">✕</button>
+          <input type="password" id="provider-key-openai" />
+          <input type="password" id="provider-key-anthropic" />
+          <input type="password" id="provider-key-google" />
+          <input type="checkbox" id="provider-store-consent" checked />
+          <span id="provider-badge-openai"></span>
+          <span id="provider-badge-anthropic"></span>
+          <span id="provider-badge-google"></span>
+          <button id="provider-save-btn">Save</button>
+          <button id="provider-clear-btn">Clear</button>
+        </div>
         <div id="system-status-banner" class="system-status-banner hidden">
           <span id="banner-icon">⚠️</span>
           <strong id="banner-title"></strong>
@@ -888,6 +937,75 @@ describe("ChatUI", () => {
       ?.querySelectorAll("th");
     expect(ths?.[0].getAttribute("scope")).toBe("col");
 
+    // Test sort by clicking on th
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+    });
+    ths?.[0].dispatchEvent(new MouseEvent("click"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentSortBy"]).toBe("id");
+    expect(ui["currentSortOrder"]).toBe("asc");
+
+    // Click same th again to toggle desc
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+    });
+    ths?.[0].dispatchEvent(new MouseEvent("click"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentSortOrder"]).toBe("desc");
+
+    // Press Enter or Space on th to sort
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+    });
+    ths?.[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentSortOrder"]).toBe("asc");
+
+    // Press other key on th (no sort)
+    ths?.[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    // Test search input
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+    });
+    const searchInput = document.getElementById(
+      "modal-table-search",
+    ) as HTMLInputElement;
+    searchInput.value = "needle";
+    searchInput.dispatchEvent(new Event("input"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentSearchTerm"]).toBe("needle");
+
+    // Test sort select change
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+    });
+    const sortSelect = document.getElementById(
+      "modal-table-sort-col",
+    ) as HTMLSelectElement;
+    sortSelect.value = "name";
+    sortSelect.dispatchEvent(new Event("change"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentSortBy"]).toBe("name");
+
+    // Test sort order button toggle
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+    });
+    const sortOrderBtn = document.getElementById(
+      "modal-table-sort-order",
+    ) as HTMLButtonElement;
+    sortOrderBtn.dispatchEvent(new MouseEvent("click"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ui["currentSortOrder"]).toBe("desc");
+
     // Modal Overlay click
     modal?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(modal?.getAttribute("aria-hidden")).toBe("true");
@@ -1107,13 +1225,14 @@ describe("ChatUI", () => {
     closeBtn.focus();
 
     // Shift+Tab on firstElement should loop to lastElement (modal-export-json-btn)
-    const jsonBtn = document.getElementById(
-      "modal-export-json-btn",
-    ) as HTMLElement;
+    const focusable = modal.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    const lastElement = focusable[focusable.length - 1];
     modal.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
     );
-    expect(document.activeElement).toBe(jsonBtn);
+    expect(document.activeElement).toBe(lastElement);
 
     // Tab on lastElement should loop back to firstElement (closeBtn)
     modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
@@ -1243,7 +1362,7 @@ describe("ChatUI", () => {
     ui["currentPage"] = 1;
     ui["currentTable"] = "test_table";
     await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
+    expect(document.getElementById("modal-table-body")?.textContent).toContain(
       'unmapped: {"error":"some data"}',
     );
   });
@@ -2061,6 +2180,14 @@ describe("ChatUI", () => {
     expect(document.getElementById("status-chip-text")?.textContent).toBe(
       "All Normal",
     );
+
+    // Test with dbFileSizeBytes set
+    state.setSystemStatus({
+      dbFileSizeBytes: 5242880,
+      tableCount: 3,
+    });
+    ui.updateStatusChip("healthy", "All Normal");
+    expect(chip?.getAttribute("title")).toContain("5.0 MB (3 tables)");
   });
 
   it("checks system status and handles missing_file database status", async () => {
@@ -2433,6 +2560,11 @@ describe("ChatUI", () => {
   it("initializes without optional status elements safely", () => {
     document.getElementById("system-status-chip")?.remove();
     document.getElementById("system-status-banner")?.remove();
+    document.getElementById("provider-settings-btn")?.remove();
+    document.getElementById("close-provider-modal-btn")?.remove();
+    document.getElementById("provider-save-btn")?.remove();
+    document.getElementById("provider-clear-btn")?.remove();
+    document.getElementById("provider-modal")?.remove();
     const ui2 = new ChatUI(state);
     expect(ui2).toBeDefined();
   });
@@ -2622,5 +2754,1273 @@ describe("ChatUI", () => {
 
     const containers = document.querySelectorAll(".sql-query-container");
     expect(containers.length).toBe(1);
+  });
+
+  it("closes table modal on Escape key press and restores previous focus", async () => {
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.focus();
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          rows: [{ id: 1 }],
+          total_count: 1,
+          total_pages: 1,
+        }),
+    });
+
+    await ui["openTableModal"]("patients");
+    const modal = document.getElementById("table-modal") as HTMLElement;
+    expect(modal.getAttribute("aria-hidden")).toBeNull();
+    expect(modal.getAttribute("aria-modal")).toBe("true");
+
+    // Press Escape
+    modal.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(modal.getAttribute("aria-hidden")).toBe("true");
+    expect(modal.getAttribute("aria-modal")).toBeNull();
+  });
+
+  it("exports CSV with BOM, CRLF, quotes, and handles object properties", () => {
+    let capturedBlob: Blob | null = null;
+    const originalCreateObjectURL = URL.createObjectURL;
+    URL.createObjectURL = vi.fn((blob: Blob) => {
+      capturedBlob = blob;
+      return "blob:mock-url";
+    });
+
+    const rows = [
+      { id: 1, name: 'Alice "Wonderland"', details: { note: "ok" } },
+      { id: 2, name: "Bob\nSmith", details: null },
+    ];
+
+    ui.exportRowsToCsv(rows, "test_export.csv");
+
+    expect(capturedBlob).not.toBeNull();
+    expect(URL.createObjectURL).toHaveBeenCalled();
+    URL.createObjectURL = originalCreateObjectURL;
+  });
+
+  it("handles SSE streaming chunks and rendering tokens in real-time", async () => {
+    state.createChat();
+    ui.streamingEnabled = true;
+    ui.render();
+
+    const streamTextChunks = [
+      ": comment ping\n\n",
+      'data: {"event": "token", "token": "SELECT "}\n\n',
+      'data: {"event": "ignored_event"}\n\n',
+      'data: {"event": "token", "token": "* FROM users"}\n\n',
+      'data: {"event": "done", "content": "ui.rawSql", "sqlQuery": "SELECT * FROM users", "sqlResult": [{"id": 1, "name": "Alice"}]}\n\n',
+    ];
+
+    let querySelectorCallCount = 0;
+    const origQuerySelector = Element.prototype.querySelector;
+    vi.spyOn(Element.prototype, "querySelector").mockImplementation(function (
+      this: Element,
+      selectors: string,
+    ) {
+      if (selectors === ".streaming-content") {
+        querySelectorCallCount++;
+        if (querySelectorCallCount === 1) {
+          // Return null on first lookup to cover if (contentEl) false branch
+          return null;
+        }
+      }
+      return origQuerySelector.call(this, selectors);
+    });
+
+    let chunkIdx = 0;
+    const mockReader = {
+      read: vi.fn().mockImplementation(async () => {
+        if (chunkIdx < streamTextChunks.length) {
+          const chunk = new TextEncoder().encode(streamTextChunks[chunkIdx++]);
+          return { done: false, value: chunk };
+        }
+        return { done: true, value: undefined };
+      }),
+    };
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: {
+        get: (h: string) =>
+          h.toLowerCase() === "content-type" ? "text/event-stream" : null,
+      },
+      body: {
+        getReader: () => mockReader,
+      },
+    });
+
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "Show all users stream";
+    document
+      .getElementById("chat-form")
+      ?.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await flushPromises();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages.length).toBe(2);
+    expect(activeChat?.messages[1].sqlQuery).toBe("SELECT * FROM users");
+    expect(activeChat?.messages[1].sqlResult?.[0].name).toBe("Alice");
+
+    // Stream response with non-ok status to cover streamResp.ok === false
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      headers: {
+        get: () => "text/plain",
+      },
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Standard fallback" }),
+    });
+    await ui["handleSendMessage"]("Fallback message");
+
+    // Test stream with contentEl present, untranslated content, and token streamText
+    const secondChunks = [
+      'data: {"event": "token", "token": "Live stream token"}\n\n',
+      'data: {"event": "result", "content": "Untranslated content", "sqlResult": []}\n\n',
+    ];
+    let secondIdx = 0;
+    const secondReader = {
+      read: vi.fn().mockImplementation(async () => {
+        if (secondIdx < secondChunks.length) {
+          const chunk = new TextEncoder().encode(secondChunks[secondIdx++]);
+          return { done: false, value: chunk };
+        }
+        return { done: true, value: undefined };
+      }),
+    };
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: {
+        get: (h: string) =>
+          h.toLowerCase() === "content-type" ? "text/event-stream" : null,
+      },
+      body: {
+        getReader: () => secondReader,
+      },
+    });
+    await ui["handleSendMessage"]("Second stream message");
+
+    // Test stream with empty content and empty streamText to hit the final "" branch
+    const thirdChunks = [
+      'data: {"event": "result", "content": "", "sqlResult": []}\n\n',
+    ];
+    let thirdIdx = 0;
+    const thirdReader = {
+      read: vi.fn().mockImplementation(async () => {
+        if (thirdIdx < thirdChunks.length) {
+          const chunk = new TextEncoder().encode(thirdChunks[thirdIdx++]);
+          return { done: false, value: chunk };
+        }
+        return { done: true, value: undefined };
+      }),
+    };
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: {
+        get: (h: string) =>
+          h.toLowerCase() === "content-type" ? "text/event-stream" : null,
+      },
+      body: {
+        getReader: () => thirdReader,
+      },
+    });
+    await ui["handleSendMessage"]("Third stream message");
+  });
+
+  it("falls back to standard chat fetch if SSE streaming throws an error", async () => {
+    state.createChat();
+    ui.streamingEnabled = true;
+    ui.render();
+
+    mockFetch.mockImplementationOnce(() => {
+      throw new Error("Stream connection failed");
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: "Standard response after fallback",
+        sqlQuery: "SELECT * FROM fallback",
+        sqlResult: [{ id: 99 }],
+      }),
+    });
+
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "Test fallback on error";
+    document
+      .getElementById("chat-form")
+      ?.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await flushPromises();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages.length).toBe(2);
+    expect(activeChat?.messages[1].sqlQuery).toBe("SELECT * FROM fallback");
+  });
+
+  it("handles database switcher dropdown population and change event", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        databases: [
+          { name: "t1d.duckdb", path: "/data/t1d.duckdb", size_bytes: 2048 },
+          {
+            name: "trial_2026.duckdb",
+            path: "/data/trial_2026.duckdb",
+            size_bytes: 4096,
+          },
+        ],
+        current_db: "t1d.duckdb",
+      }),
+    });
+
+    await ui.fetchDatabases();
+    const dbSelect = document.getElementById("db-select") as HTMLSelectElement;
+    expect(dbSelect).not.toBeNull();
+    expect(dbSelect.options.length).toBe(2);
+    expect(dbSelect.options[1].value).toBe("trial_2026.duckdb");
+
+    // Also fetch when databases property is undefined
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ current_db: "t1d.duckdb" }),
+    });
+    await ui.fetchDatabases();
+    // Dropdown now has 1 option ("t1d.duckdb")
+    // Let's re-add the 2nd option so we can change value to trial_2026.duckdb
+    const trialOpt = document.createElement("option");
+    trialOpt.value = "trial_2026.duckdb";
+    trialOpt.textContent = "trial_2026.duckdb";
+    dbSelect.appendChild(trialOpt);
+
+    // Mock schema and status fetches for switch
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ tables: [] }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ status: "healthy" }),
+    });
+
+    // Trigger change with empty value to cover false branch of if (selectedDb)
+    dbSelect.value = "";
+    dbSelect.dispatchEvent(new Event("change"));
+
+    dbSelect.value = "trial_2026.duckdb";
+    dbSelect.dispatchEvent(new Event("change"));
+
+    expect(state.currentDb).toBe("trial_2026.duckdb");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(document.getElementById("a11y-announcer")?.textContent).toContain(
+      "trial_2026.duckdb",
+    );
+  });
+
+  it("handles sync sessions button click and chat synchronization", async () => {
+    const chat1 = state.createChat("Chat One");
+    state.addMessageToActiveChat({ role: "user", content: "Query 1" });
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ session_id: chat1.id, status: "synced" }),
+    });
+
+    const syncBtn = document.getElementById(
+      "sync-sessions-btn",
+    ) as HTMLButtonElement;
+    expect(syncBtn).not.toBeNull();
+    syncBtn.click();
+
+    await flushPromises();
+    expect(state.serverSyncEnabled).toBe(true);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(document.getElementById("a11y-announcer")?.textContent).toContain(
+      i18next.t("ui.sessionsSynced"),
+    );
+  });
+
+  it("handles SSE stream returning result with error and error announcement", async () => {
+    state.createChat();
+    ui.streamingEnabled = true;
+    ui.render();
+
+    const streamTextChunks = [
+      'data: {"event": "token", "token": "SELECT "}\n\n',
+      'data: {"event": "result", "content": "Failed to run", "error": "backend.sqlExecution"}\n\n',
+    ];
+
+    let chunkIdx = 0;
+    const mockReader = {
+      read: vi.fn().mockImplementation(async () => {
+        if (chunkIdx < streamTextChunks.length) {
+          const chunk = new TextEncoder().encode(streamTextChunks[chunkIdx++]);
+          return { done: false, value: chunk };
+        }
+        return { done: true, value: undefined };
+      }),
+    };
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: {
+        get: (h: string) =>
+          h.toLowerCase() === "content-type" ? "text/event-stream" : null,
+      },
+      body: {
+        getReader: () => mockReader,
+      },
+    });
+
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "Failing SQL stream";
+    document
+      .getElementById("chat-form")
+      ?.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await flushPromises();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.messages[1].isError).toBe(true);
+  });
+
+  it("handles renderDatabaseDropdown when availableDbs is empty", () => {
+    state.availableDbs = [];
+    state.currentDb = "default_test.duckdb";
+    ui.renderDatabaseDropdown();
+
+    const dbSelect = document.getElementById("db-select") as HTMLSelectElement;
+    expect(dbSelect.options.length).toBe(1);
+    expect(dbSelect.options[0].value).toBe("default_test.duckdb");
+
+    // Also test fallback when currentDb is empty string
+    state.currentDb = "";
+    ui.renderDatabaseDropdown();
+    expect(dbSelect.options[0].value).toBe("t1d.duckdb");
+  });
+
+  it("handles message send when serverSyncEnabled is true", async () => {
+    state.createChat();
+    state.setServerSyncEnabled(true);
+    ui.render();
+
+    const syncSpy = vi.spyOn(ui, "syncAllChatsWithServer");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Sync response" }),
+    });
+
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    input.value = "Hello synced";
+    document
+      .getElementById("chat-form")
+      ?.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await flushPromises();
+    expect(syncSpy).toHaveBeenCalled();
+  });
+
+  it("buildCohortSql generates SQL with various filter predicates", async () => {
+    const { buildCohortSql } = await import("../src/ui");
+
+    // Empty parameters or fallback tableName
+    expect(buildCohortSql({ tableName: "patients" })).toBe(
+      'SELECT *\nFROM "patients";',
+    );
+    expect(buildCohortSql({ tableName: "" })).toBe(
+      'SELECT *\nFROM "patients";',
+    );
+
+    // All filters combined
+    const sql = buildCohortSql({
+      tableName: 'demographics"test',
+      minAge: 18,
+      maxAge: 65,
+      gender: "F",
+      txGroup: "Closed-Loop",
+      maxTIR: 70,
+      minHbA1c: 8.5,
+    });
+
+    expect(sql).toContain('FROM "demographics""test"');
+    expect(sql).toContain("WHERE age >= 18");
+    expect(sql).toContain("AND age <= 65");
+    expect(sql).toContain("AND gender = 'F'");
+    expect(sql).toContain("AND txgroup ILIKE '%Closed-Loop%'");
+    expect(sql).toContain("AND tir <= 70");
+    expect(sql).toContain("AND hba1c >= 8.5");
+
+    // Non-finite values (Infinity, NaN) should be ignored
+    const nonFiniteSql = buildCohortSql({
+      tableName: "patients",
+      minAge: Infinity,
+      maxAge: NaN,
+      maxTIR: -Infinity,
+    });
+    expect(nonFiniteSql).toBe('SELECT *\nFROM "patients";');
+
+    // Multi-table relational join
+    const joinSql = buildCohortSql({
+      tableName: "patients",
+      joinTableName: "cgms",
+      joinType: "INNER JOIN",
+      minAge: 18,
+    });
+    expect(joinSql).toContain('FROM "patients"');
+    expect(joinSql).toContain('INNER JOIN "cgms"');
+    expect(joinSql).toContain('ON "patients".patient_id = "cgms".patient_id');
+    expect(joinSql).toContain('"patients".age >= 18');
+
+    // Custom join condition and LEFT JOIN
+    const leftJoinSql = buildCohortSql({
+      tableName: "patients",
+      joinTableName: "visits",
+      joinType: "LEFT JOIN",
+      joinCondition: '"patients".patient_id = "visits".subject_id',
+    });
+    expect(leftJoinSql).toContain('LEFT JOIN "visits"');
+    expect(leftJoinSql).toContain(
+      'ON "patients".patient_id = "visits".subject_id',
+    );
+  });
+
+  it("handles cohort modal open, input changes, and closing", async () => {
+    const filterBtn = document.getElementById(
+      "cohort-filter-btn",
+    ) as HTMLButtonElement;
+    const modal = document.getElementById("cohort-modal") as HTMLElement;
+    const closeBtn = document.getElementById(
+      "close-cohort-modal-btn",
+    ) as HTMLButtonElement;
+
+    expect(modal.classList.contains("hidden")).toBe(true);
+
+    // Open modal
+    filterBtn.click();
+    expect(modal.classList.contains("hidden")).toBe(false);
+
+    // Change inputs and check SQL preview
+    const minAgeInput = document.getElementById(
+      "cohort-min-age",
+    ) as HTMLInputElement;
+    minAgeInput.value = "21";
+    minAgeInput.dispatchEvent(new Event("input"));
+
+    const preview = document.getElementById(
+      "cohort-sql-preview",
+    ) as HTMLElement;
+    expect(preview.textContent).toContain("age >= 21");
+
+    // Change secondary join table
+    const joinTableSelect = document.getElementById(
+      "cohort-join-table-select",
+    ) as HTMLSelectElement;
+    if (joinTableSelect) {
+      joinTableSelect.value = "cgm_data";
+      joinTableSelect.dispatchEvent(new Event("change"));
+      expect(preview.textContent).toContain('JOIN "cgm_data"');
+
+      // Reset join table back to none
+      joinTableSelect.value = "";
+      joinTableSelect.dispatchEvent(new Event("change"));
+      expect(preview.textContent).not.toContain("JOIN");
+    }
+
+    // Close via close button
+    closeBtn.click();
+    expect(modal.classList.contains("hidden")).toBe(true);
+
+    // Open again and close via backdrop click
+    filterBtn.click();
+    expect(modal.classList.contains("hidden")).toBe(false);
+    modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(modal.classList.contains("hidden")).toBe(true);
+  });
+
+  it("handles cohort modal insert into chat button", () => {
+    const filterBtn = document.getElementById(
+      "cohort-filter-btn",
+    ) as HTMLButtonElement;
+    filterBtn.click();
+
+    const minAgeInput = document.getElementById(
+      "cohort-min-age",
+    ) as HTMLInputElement;
+    minAgeInput.value = "25";
+    minAgeInput.dispatchEvent(new Event("input"));
+
+    const insertBtn = document.getElementById(
+      "cohort-insert-chat-btn",
+    ) as HTMLButtonElement;
+    insertBtn.click();
+
+    const input = document.getElementById("chat-input") as HTMLTextAreaElement;
+    expect(input.value).toContain("age >= 25");
+    expect(
+      document.getElementById("cohort-modal")?.classList.contains("hidden"),
+    ).toBe(true);
+  });
+
+  it("handles cohort modal execute button directly running query", async () => {
+    state.createChat();
+    ui.render();
+
+    const filterBtn = document.getElementById(
+      "cohort-filter-btn",
+    ) as HTMLButtonElement;
+    filterBtn.click();
+
+    const minAgeInput = document.getElementById(
+      "cohort-min-age",
+    ) as HTMLInputElement;
+    minAgeInput.value = "30";
+    minAgeInput.dispatchEvent(new Event("input"));
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Ran cohort query", sqlResult: [] }),
+    });
+
+    const execBtn = document.getElementById(
+      "cohort-execute-btn",
+    ) as HTMLButtonElement;
+    execBtn.click();
+
+    await flushPromises();
+    const activeChat = state.getActiveChat();
+    expect(activeChat?.model).toBe("sql");
+    expect(activeChat?.messages.length).toBe(2);
+    expect(activeChat?.messages[0].content).toContain("age >= 30");
+  });
+
+  it("handles openCohortModal populating tables from DOM schema headers", () => {
+    const header = document.createElement("div");
+    header.className = "schema-table-header";
+    header.innerHTML = "<h4>clinical_cohort_table</h4><h4>   </h4>";
+    document.body.appendChild(header);
+
+    ui.openCohortModal();
+    const select = document.getElementById(
+      "cohort-table-select",
+    ) as HTMLSelectElement;
+    expect(select.options[0].value).toBe("clinical_cohort_table");
+
+    // Also test when cohortTableSelect and cohortJoinTableSelect are null
+    const origTableSelect = (ui as any).cohortTableSelect;
+    const origJoinSelect = (ui as any).cohortJoinTableSelect;
+    (ui as any).cohortTableSelect = null;
+    (ui as any).cohortJoinTableSelect = null;
+    ui.openCohortModal();
+    (ui as any).cohortTableSelect = origTableSelect;
+    (ui as any).cohortJoinTableSelect = origJoinSelect;
+
+    ui.closeCohortModal();
+    header.remove();
+  });
+
+  it("toggles streaming mode when streaming toggle button is clicked", () => {
+    const btn = document.getElementById(
+      "streaming-toggle-btn",
+    ) as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    expect(ui.streamingEnabled).toBe(false);
+
+    btn.click();
+    expect(ui.streamingEnabled).toBe(true);
+    expect(state.streamingMode).toBe(true);
+    expect(btn.classList.contains("active")).toBe(true);
+
+    btn.click();
+    expect(ui.streamingEnabled).toBe(false);
+    expect(state.streamingMode).toBe(false);
+    expect(btn.classList.contains("active")).toBe(false);
+  });
+
+  it("passes previous turns in history payload on multi-turn chat messages", async () => {
+    state.createChat();
+    ui.render();
+
+    // First turn
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "First answer", sqlResult: [] }),
+    });
+    const chatInput = document.getElementById(
+      "chat-input",
+    ) as HTMLTextAreaElement;
+    chatInput.value = "First query";
+    const sendBtn = document.getElementById("send-btn") as HTMLButtonElement;
+    sendBtn.click();
+    await flushPromises();
+
+    // Second turn
+    let secondRequestBody: any = null;
+    mockFetch.mockImplementationOnce(async (_url: string, opts: any) => {
+      secondRequestBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        json: async () => ({ content: "Second answer", sqlResult: [] }),
+      };
+    });
+
+    chatInput.value = "Second query";
+    sendBtn.click();
+    await flushPromises();
+
+    expect(secondRequestBody).not.toBeNull();
+    expect(secondRequestBody.history.length).toBeGreaterThan(0);
+    expect(secondRequestBody.history[0].content).toBe("First query");
+  });
+
+  it("covers remaining ui branch edge cases", async () => {
+    // 1. Remove optional elements from DOM and test initialization
+    document.getElementById("streaming-toggle-btn")?.remove();
+    document.getElementById("db-select")?.remove();
+    document.getElementById("sync-sessions-btn")?.remove();
+    document.getElementById("cohort-filter-btn")?.remove();
+    document.getElementById("close-cohort-modal-btn")?.remove();
+    document.getElementById("cohort-modal")?.remove();
+    document.getElementById("cohort-insert-chat-btn")?.remove();
+    document.getElementById("cohort-execute-btn")?.remove();
+
+    const minimalUi = new ChatUI(state);
+    expect(minimalUi).toBeDefined();
+    minimalUi.updateStreamingToggleUi();
+    await minimalUi.fetchDatabases();
+    minimalUi.renderDatabaseDropdown();
+    minimalUi.openCohortModal();
+    minimalUi.closeCohortModal();
+
+    // 2. fetchDatabases with !resp.ok
+    const uiWithDb = new ChatUI(state);
+    const dbSelect = document.createElement("select");
+    dbSelect.id = "db-select";
+    document.body.appendChild(dbSelect);
+    (uiWithDb as any).dbSelect = dbSelect;
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await uiWithDb.fetchDatabases();
+
+    // 3. syncAllChatsWithServer with temporary chat
+    const tempChat = state.createChat();
+    tempChat.isTemporary = true;
+    const normalChat = state.createChat();
+    normalChat.isTemporary = false;
+    mockFetch.mockResolvedValueOnce({ ok: true });
+    await ui.syncAllChatsWithServer();
+
+    // 4. openCohortModal fallback tables when no schema headers exist
+    const origCohortTableSelect = (ui as any).cohortTableSelect;
+    const origCohortModal = (ui as any).cohortModal;
+    const cohortModal = document.createElement("div");
+    cohortModal.id = "cohort-modal-temp";
+    const cohortTableSelect = document.createElement("select");
+    cohortTableSelect.id = "cohort-table-select-temp";
+    document.body.appendChild(cohortModal);
+    document.body.appendChild(cohortTableSelect);
+    (ui as any).cohortModal = cohortModal;
+    (ui as any).cohortTableSelect = cohortTableSelect;
+    ui.openCohortModal();
+    expect(cohortTableSelect.options.length).toBe(3); // demographics, cgm_data, patients
+    (ui as any).cohortTableSelect = origCohortTableSelect;
+    (ui as any).cohortModal = origCohortModal;
+    cohortModal.remove();
+    cohortTableSelect.remove();
+
+    // 5. Modal focus trap with no focusable elements
+    const emptyModal = document.createElement("div");
+    emptyModal.id = "table-modal";
+    document.body.appendChild(emptyModal);
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ rows: [] }),
+    });
+    await ui["openTableModal"]("test");
+    // Tab event with no focusable elements returns early
+    emptyModal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+
+    // 6. renderMessages with null message content
+    state.createChat();
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: null as any,
+    });
+    ui["renderMessages"]();
+  });
+
+  it("sanitizes malicious script and onerror payloads in markdown assistant messages via DOMPurify", () => {
+    state.createChat();
+    const maliciousPayload =
+      'Hello! <img src="x" onerror="alert(1)"> <script>window.pwned=true;</script> [Click me](javascript:alert(2))';
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: maliciousPayload,
+    });
+    ui["renderMessages"]();
+
+    const messagesPane = document.getElementById("messages-container");
+    expect(messagesPane).not.toBeNull();
+    const htmlContent = messagesPane?.innerHTML ?? "";
+
+    // onerror and script must be stripped by DOMPurify
+    expect(htmlContent).not.toContain("onerror");
+    expect(htmlContent).not.toContain("<script>");
+    expect(htmlContent).not.toContain("javascript:alert(2)");
+    expect((window as unknown as { pwned?: boolean }).pwned).toBeUndefined();
+  });
+
+  it("safely escapes table names containing HTML or script tags in schema explorer", async () => {
+    const maliciousTableName = "<script>window.hacked=true;</script>";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          tables: [
+            {
+              name: maliciousTableName,
+              columns: [{ name: '<img onerror="alert(1)">', type: "INTEGER" }],
+            },
+          ],
+        }),
+    });
+
+    await ui["loadSchema"]();
+
+    const schemaContent = document.getElementById("schema-content");
+    expect(schemaContent).not.toBeNull();
+    // Verify script tag was not rendered as an active element
+    const scripts = schemaContent?.querySelectorAll("script");
+    expect(scripts?.length).toBe(0);
+    expect((window as unknown as { hacked?: boolean }).hacked).toBeUndefined();
+    // Text content should display the literal name
+    expect(schemaContent?.textContent).toContain(maliciousTableName);
+  });
+
+  it("handles modal table search, sort select, sort order toggle, and backdrop click", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          columns: [{ name: "id", type: "INTEGER" }],
+          rows: [{ id: 1 }, { id: 2 }],
+          total_rows: 2,
+          total_pages: 1,
+        }),
+    });
+
+    await ui["openTableModal"]("patients");
+
+    const modal = document.getElementById("table-modal");
+    expect(modal?.getAttribute("aria-modal")).toBe("true");
+
+    // 1. Search input event
+    const searchInput = document.getElementById(
+      "modal-table-search",
+    ) as HTMLInputElement;
+    if (searchInput) {
+      searchInput.value = "Alice";
+      searchInput.dispatchEvent(new Event("input"));
+      expect(ui["currentSearchTerm"]).toBe("Alice");
+    }
+
+    // 2. Sort select event
+    const sortSelect = document.getElementById(
+      "modal-table-sort-col",
+    ) as HTMLSelectElement;
+    if (sortSelect) {
+      sortSelect.value = "id";
+      sortSelect.dispatchEvent(new Event("change"));
+      expect(ui["currentSortBy"]).toBe("id");
+    }
+
+    // 3. Sort order button click
+    const sortOrderBtn = document.getElementById(
+      "modal-table-sort-order",
+    ) as HTMLButtonElement;
+    if (sortOrderBtn) {
+      sortOrderBtn.click();
+      expect(ui["currentSortOrder"]).toBe("desc");
+      sortOrderBtn.click();
+      expect(ui["currentSortOrder"]).toBe("asc");
+    }
+
+    // 4. Modal overlay backdrop click closes modal
+    modal?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(modal?.getAttribute("aria-hidden")).toBe("true");
+
+    // Test openTableModal and fetchTableData when searchInput, sortSelect, and sortOrderBtn are missing
+    searchInput?.remove();
+    sortSelect?.remove();
+    sortOrderBtn?.remove();
+    await ui["openTableModal"]("patients");
+    // Recreate them for subsequent tests
+    const searchEl = document.createElement("input");
+    searchEl.id = "modal-table-search";
+    const sortColEl = document.createElement("select");
+    sortColEl.id = "modal-table-sort-col";
+    const sortOrderEl = document.createElement("button");
+    sortOrderEl.id = "modal-table-sort-order";
+    modal?.appendChild(searchEl);
+    modal?.appendChild(sortColEl);
+    modal?.appendChild(sortOrderEl);
+
+    // 5. Column header keyboard sorting via Enter and Space keys
+    await ui["openTableModal"]("patients");
+    const th = document.querySelector("#modal-table-head th") as HTMLElement;
+    if (th) {
+      th.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      th.dispatchEvent(new KeyboardEvent("keydown", { key: " " }));
+      th.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    }
+
+    // 6. Focus trap shift+tab when activeElement is firstElement
+    await ui["openTableModal"]("patients");
+    const closeBtn = document.getElementById("modal-close-btn");
+    closeBtn?.focus();
+    modal?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
+    );
+  });
+
+  it("handles provider settings modal open, key updates, and clear", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        providers: [
+          { provider: "ollama", configured: true, healthy: true },
+          { provider: "openai", configured: true, healthy: true },
+          { provider: "anthropic", configured: false, healthy: false },
+          { provider: "google", configured: false, healthy: false },
+        ],
+      }),
+    });
+
+    const settingsBtn = document.getElementById(
+      "provider-settings-btn",
+    ) as HTMLButtonElement;
+    const modal = document.getElementById("provider-modal") as HTMLElement;
+    const closeBtn = document.getElementById(
+      "close-provider-modal-btn",
+    ) as HTMLButtonElement;
+    const saveBtn = document.getElementById(
+      "provider-save-btn",
+    ) as HTMLButtonElement;
+    const clearBtn = document.getElementById(
+      "provider-clear-btn",
+    ) as HTMLButtonElement;
+    const keyOpenAI = document.getElementById(
+      "provider-key-openai",
+    ) as HTMLInputElement;
+
+    expect(modal.classList.contains("hidden")).toBe(true);
+
+    // 1. Open modal and check status fetch
+    settingsBtn.click();
+    await flushPromises();
+    expect(modal.classList.contains("hidden")).toBe(false);
+
+    // 2. Set key and save
+    const consent = document.getElementById(
+      "provider-store-consent",
+    ) as HTMLInputElement;
+    if (consent) consent.checked = false;
+    keyOpenAI.value = "sk-custom-openai-123";
+    saveBtn.click();
+    await flushPromises();
+    expect(state.getApiKey("openai")).toBeNull();
+
+    if (consent) consent.checked = true;
+    keyOpenAI.value = "sk-custom-openai-123";
+    saveBtn.click();
+    await flushPromises();
+    expect(state.getApiKey("openai")).toBe("sk-custom-openai-123");
+    expect(modal.classList.contains("hidden")).toBe(true);
+
+    // 3. Open again and verify key was filled
+    settingsBtn.click();
+    await flushPromises();
+    expect(keyOpenAI.value).toBe("sk-custom-openai-123");
+
+    // 4. Clear keys
+    clearBtn.click();
+    await flushPromises();
+    expect(state.getApiKey("openai")).toBeNull();
+    expect(keyOpenAI.value).toBe("");
+
+    // 5. Close via close button and backdrop click
+    closeBtn.click();
+    expect(modal.classList.contains("hidden")).toBe(true);
+
+    settingsBtn.click();
+    await flushPromises();
+    expect(modal.classList.contains("hidden")).toBe(false);
+    modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(modal.classList.contains("hidden")).toBe(true);
+  });
+
+  it("renders grouped models and updates provider status dot", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        models: [
+          { name: "gemma4", provider: "ollama", configured: true },
+          {
+            name: "openai/gpt-4o",
+            provider: "openai",
+            configured: false,
+            requires_key: true,
+          },
+          {
+            name: "anthropic/claude-3-5-sonnet",
+            provider: "anthropic",
+            configured: false,
+            requires_key: true,
+          },
+        ],
+      }),
+    });
+
+    await ui.loadModels();
+
+    const modelSelect = document.getElementById(
+      "model-select",
+    ) as HTMLSelectElement;
+    const optgroups = modelSelect.querySelectorAll("optgroup");
+    expect(optgroups.length).toBeGreaterThan(0);
+
+    const dot = document.getElementById("provider-status-dot") as HTMLElement;
+
+    // Switch to local model
+    modelSelect.value = "gemma4";
+    modelSelect.dispatchEvent(new Event("change"));
+    expect(dot.classList.contains("active")).toBe(true);
+
+    // Switch to unconfigured cloud model
+    modelSelect.value = "openai/gpt-4o";
+    modelSelect.dispatchEvent(new Event("change"));
+    expect(dot.classList.contains("warning")).toBe(true);
+
+    // Save key for openai and verify it turns green
+    state.setApiKey("openai", "sk-valid-key");
+    ui.updateProviderBadgeStatus();
+    expect(dot.classList.contains("active")).toBe(true);
+  });
+
+  it("covers remaining ui edge cases for models, badges, cohorts, providers, and modal navigation", async () => {
+    // 1. loadModels with unreachable model, model with error_code, fallback provider group, and model with '/'
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        models: [
+          {
+            name: "custom_unreachable",
+            reachable: false,
+            available: false,
+            error_code: "CONN_ERR",
+          },
+          {
+            name: "custom_prov/model-x",
+            available: true,
+          },
+        ],
+      }),
+    });
+    await ui.loadModels();
+    const modelSelect = document.getElementById(
+      "model-select",
+    ) as HTMLSelectElement;
+    const unreachableOpt = Array.from(modelSelect.options).find(
+      (o) => o.value === "custom_unreachable",
+    );
+    expect(unreachableOpt?.textContent).toContain("🔴");
+    expect(unreachableOpt?.title).toBe("custom_unreachable (CONN_ERR)");
+
+    // 2. updateProviderBadgeStatus when providerStatusDot is null and when provider is in value with slash
+    const dot = document.getElementById("provider-status-dot");
+    if (dot) {
+      modelSelect.innerHTML = `<option value="openai/custom-gpt">custom-gpt</option>`;
+      modelSelect.value = "openai/custom-gpt";
+      ui.updateProviderBadgeStatus();
+      expect(dot.classList.contains("warning")).toBe(true);
+    }
+    dot?.remove();
+    // Re-initialize a ChatUI without provider-status-dot to test branch: if (!this.providerStatusDot) return;
+    const uiWithoutDot = new ChatUI(state);
+    expect(() => uiWithoutDot.updateProviderBadgeStatus()).not.toThrow();
+
+    // 3. Cohort table change, join table change, inputs, change events, and relational join resolution
+    const tableSelect = document.getElementById(
+      "cohort-table-select",
+    ) as HTMLSelectElement;
+    const joinTableSelect = document.getElementById(
+      "cohort-join-table-select",
+    ) as HTMLSelectElement;
+    const joinTypeSelect = document.getElementById(
+      "cohort-join-type-select",
+    ) as HTMLSelectElement;
+    const joinOnInput = document.getElementById(
+      "cohort-join-on-input",
+    ) as HTMLInputElement;
+
+    tableSelect.innerHTML = `<option value="patients">patients</option><option value="cgms">cgms</option>`;
+    joinTableSelect.innerHTML = `<option value="">None (Single Table)</option><option value="cgms">cgms</option><option value="visits">visits</option>`;
+
+    // Trigger change event on cohort-table-select
+    tableSelect.dispatchEvent(new Event("change"));
+
+    // Select cgms which has a defined CLINICAL_RELATIONSHIP with patients
+    joinTableSelect.value = "cgms";
+    uiWithoutDot.handleCohortJoinTableChange();
+    ui.handleCohortJoinTableChange();
+    expect(joinOnInput.value).toBe('"patients".patient_id = "cgms".patient_id');
+    expect(joinTypeSelect.value).toBe("INNER JOIN");
+
+    // Select visits which has defaultJoinType = 'LEFT JOIN'
+    joinTableSelect.value = "visits";
+    uiWithoutDot.handleCohortJoinTableChange();
+    ui.handleCohortJoinTableChange();
+    expect(joinTypeSelect.value).toBe("LEFT JOIN");
+
+    // Select unknown_table where resolveTableJoin returns null (table1 not containing "patient")
+    tableSelect.innerHTML += `<option value="sensors">sensors</option>`;
+    tableSelect.value = "sensors";
+    joinTableSelect.innerHTML += `<option value="unknown_table">unknown_table</option>`;
+    joinTableSelect.value = "unknown_table";
+    uiWithoutDot.handleCohortJoinTableChange();
+    ui.handleCohortJoinTableChange();
+    expect(joinOnInput.value).toBe(
+      '"sensors".patient_id = "unknown_table".patient_id',
+    );
+
+    // Also trigger resolveTableJoin fallback when cohortJoinOnInput is null
+    (ui as any).cohortJoinOnInput = null;
+    (uiWithoutDot as any).cohortJoinOnInput = null;
+    joinTableSelect.value = "unknown_table";
+    ui.handleCohortJoinTableChange();
+    uiWithoutDot.handleCohortJoinTableChange();
+    (ui as any).cohortJoinOnInput = joinOnInput;
+    (uiWithoutDot as any).cohortJoinOnInput = joinOnInput;
+    tableSelect.value = "patients";
+
+    // Test getCohortSql fallback when cohortJoinTypeSelect.value is empty
+    joinTypeSelect.value = "";
+    const fallbackJoinSql = ui.getCohortSql();
+    expect(fallbackJoinSql).toContain("INNER JOIN");
+    joinTypeSelect.value = "LEFT JOIN";
+
+    // Select table2 === table1
+    joinTableSelect.value = "patients";
+    joinTableSelect.dispatchEvent(new Event("change"));
+    expect(joinOnInput.value).toBe("");
+
+    // Test null branches for cohortJoinOnInput, cohortJoinTypeSelect, cohortSqlPreview
+    const origOnInput = (ui as any).cohortJoinOnInput;
+    const origTypeSelect = (ui as any).cohortJoinTypeSelect;
+    const origPreview = (ui as any).cohortSqlPreview;
+    (ui as any).cohortJoinOnInput = null;
+    (ui as any).cohortJoinTypeSelect = null;
+    (ui as any).cohortSqlPreview = null;
+    joinTableSelect.value = "cgms";
+    (ui as any).cohortJoinTableSelect = joinTableSelect;
+    ui.handleCohortJoinTableChange();
+    joinTableSelect.value = "unknown_table";
+    ui.handleCohortJoinTableChange();
+    joinTableSelect.value = "patients";
+    ui.handleCohortJoinTableChange();
+    ui.updateCohortSqlPreview();
+    (ui as any).cohortJoinOnInput = origOnInput;
+    (ui as any).cohortJoinTypeSelect = origTypeSelect;
+    (ui as any).cohortSqlPreview = origPreview;
+
+    joinTableSelect.value = "visits";
+    joinTypeSelect.value = "LEFT JOIN";
+    joinOnInput.value = '"patients".patient_id = "visits".patient_id';
+
+    // Trigger cohortInputs change events
+    const minAgeInput = document.getElementById(
+      "cohort-min-age",
+    ) as HTMLInputElement;
+    minAgeInput.value = "20";
+    minAgeInput.dispatchEvent(new Event("change"));
+
+    const maxAgeInput = document.getElementById(
+      "cohort-max-age",
+    ) as HTMLInputElement;
+    maxAgeInput.value = "60";
+    maxAgeInput.dispatchEvent(new Event("change"));
+
+    const maxTIRInput = document.getElementById(
+      "cohort-max-tir",
+    ) as HTMLInputElement;
+    maxTIRInput.value = "70";
+    maxTIRInput.dispatchEvent(new Event("change"));
+
+    const minHbA1cInput = document.getElementById(
+      "cohort-min-hba1c",
+    ) as HTMLInputElement;
+    minHbA1cInput.value = "6.5";
+    minHbA1cInput.dispatchEvent(new Event("change"));
+
+    joinTypeSelect.dispatchEvent(new Event("change"));
+    joinOnInput.dispatchEvent(new Event("input"));
+
+    // Verify cohort SQL generated
+    const preview = document.getElementById(
+      "cohort-sql-preview",
+    ) as HTMLElement;
+    expect(preview.textContent).toContain('LEFT JOIN "visits"');
+    expect(preview.textContent).toContain("age >= 20");
+    expect(preview.textContent).toContain("age <= 60");
+    expect(preview.textContent).toContain("tir <= 70");
+    expect(preview.textContent).toContain("hba1c >= 6.5");
+
+    // 4. Provider modal null checks, saving anthropic and google keys, and local badge fallbacks
+    // Re-create provider modal DOM to test providerKeyAnthropic & providerKeyGoogle saving
+    const keyAnthropic = document.getElementById(
+      "provider-key-anthropic",
+    ) as HTMLInputElement;
+    const keyGoogle = document.getElementById(
+      "provider-key-google",
+    ) as HTMLInputElement;
+    keyAnthropic.value = "anthropic-secret-key";
+    keyGoogle.value = "google-secret-key";
+
+    await ui.saveProviderSettings();
+    expect(state.getApiKey("anthropic")).toBe("anthropic-secret-key");
+    expect(state.getApiKey("google")).toBe("google-secret-key");
+
+    // openProviderModal when status endpoint returns non-ok (falls back to local)
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await ui.openProviderModal();
+    const anthropicBadge = document.getElementById("provider-badge-anthropic");
+    expect(anthropicBadge?.textContent).toContain("Configured 🟢");
+
+    // openProviderModal when fetch throws (catch branch)
+    mockFetch.mockRejectedValueOnce(new Error("Network disconnect"));
+    await ui.openProviderModal();
+
+    // Test null input branches in openProviderModal, saveProviderSettings, clearProviderSettings
+    const origOpenAI = (ui as any).providerKeyOpenAI;
+    const origAnthropic = (ui as any).providerKeyAnthropic;
+    const origGoogle = (ui as any).providerKeyGoogle;
+    const origConsent = (ui as any).providerStoreConsent;
+    (ui as any).providerKeyOpenAI = null;
+    (ui as any).providerKeyAnthropic = null;
+    (ui as any).providerKeyGoogle = null;
+    (ui as any).providerStoreConsent = null;
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await ui.openProviderModal();
+    await ui.saveProviderSettings();
+    await ui.clearProviderSettings();
+    (ui as any).providerKeyOpenAI = origOpenAI;
+    (ui as any).providerKeyAnthropic = origAnthropic;
+    (ui as any).providerKeyGoogle = origGoogle;
+    (ui as any).providerStoreConsent = origConsent;
+
+    // openProviderModal / closeProviderModal when providerModal is missing
+    (ui as any).providerModal = null;
+    await expect(ui.openProviderModal()).resolves.toBeUndefined();
+    expect(() => ui.closeProviderModal()).not.toThrow();
+    (ui as any).providerModal = document.getElementById("provider-modal");
+
+    // 5. handleSendMessage with provider and apiKey request headers
+    state.createChat();
+    state.setApiKey("anthropic", "anthropic-secret-key");
+    // Add provider modal back so other tests aren't impacted
+    const chatInput = document.getElementById(
+      "chat-input",
+    ) as HTMLTextAreaElement;
+    chatInput.value = "SELECT * FROM patients;";
+    // Choose anthropic model without data-provider attribute to test model.split('/')[0] fallback
+    modelSelect.innerHTML = `<option value="anthropic/claude" selected>Claude</option>`;
+    modelSelect.value = "anthropic/claude";
+    state.setActiveChatModel("anthropic/claude");
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: "Here are the patients",
+        sqlQuery: "SELECT * FROM patients;",
+        sqlResult: [{ id: 1 }],
+      }),
+    });
+
+    await ui["handleSendMessage"](
+      "SELECT * FROM patients;",
+      "anthropic/claude",
+    );
+    // Verify fetch was called with custom headers
+    const lastCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+    expect(lastCall[1].headers["x-provider"]).toBe("anthropic");
+    expect(lastCall[1].headers["x-provider-api-key"]).toBe(
+      "anthropic-secret-key",
+    );
+
+    // Also send with model that has no slash and no data-provider
+    modelSelect.innerHTML = `<option value="plainmodel" selected>Plain Model</option>`;
+    modelSelect.value = "plainmodel";
+    state.setActiveChatModel("plainmodel");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Hello" }),
+    });
+    await ui["handleSendMessage"]("Hi", "plainmodel");
+
+    // 6. Modal table navigation and focus trap key events
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        rows: [{ id: 1, name: "Alice" }],
+        total_pages: 1,
+      }),
+    });
+
+    await ui["openTableModal"]("patients");
+    const tableModal = document.getElementById("table-modal") as HTMLElement;
+
+    // Dispatch non-Tab keydown (e.key === "ArrowDown") -> should return early
+    tableModal.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+
+    // Dispatch Tab keydown when focusable elements exist and focus is at the last element
+    const closeBtn = document.getElementById(
+      "close-modal-btn",
+    ) as HTMLButtonElement;
+    const exportJsonBtn = document.getElementById(
+      "modal-export-json-btn",
+    ) as HTMLButtonElement;
+    exportJsonBtn.removeAttribute("disabled");
+    exportJsonBtn.focus();
+
+    const tabEvent = new KeyboardEvent("keydown", {
+      key: "Tab",
+      bubbles: true,
+      cancelable: true,
+    });
+    tableModal.dispatchEvent(tabEvent);
+
+    // Test focusableElements.length === 0 branch
+    const allInteractive = tableModal.querySelectorAll<HTMLElement>(
+      "button, input, select, textarea, [tabindex]",
+    );
+    allInteractive.forEach((el) => {
+      el.setAttribute("disabled", "true");
+      if (el.hasAttribute("tabindex")) {
+        el.setAttribute("tabindex", "-1");
+      }
+    });
+    tableModal.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
   });
 });

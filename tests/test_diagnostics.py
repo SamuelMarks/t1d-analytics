@@ -2,11 +2,13 @@
 
 import json
 import logging
+import typing
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import duckdb
+import pytest
 from t1d_analytics.diagnostics import (
     DatabaseStatusCode,
     check_database_health,
@@ -323,3 +325,196 @@ def test_log_startup_diagnostics_no_remediations() -> None:
         "t1d_analytics.diagnostics.get_system_health", return_value=mock_health_err
     ):
         log_startup_diagnostics()
+
+
+def test_check_ollama_health_host_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test check_ollama_health honors OLLAMA_HOST environment variable."""
+    import io
+    from urllib.request import Request
+
+    # Test bare hostname without http:// prefix
+    monkeypatch.setenv("OLLAMA_HOST", "remote-gpu:11434")
+    requested_urls = []
+
+    def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+        requested_urls.append(req.full_url)
+        return io.BytesIO(b'{"models": [{"name": "gemma4:latest"}]}')
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        status = check_ollama_health()
+        assert status.accessible is True
+        assert "http://remote-gpu:11434/api/tags" in requested_urls
+
+    # Test hostname with http:// prefix
+    monkeypatch.setenv("OLLAMA_HOST", "http://remote-gpu:11434")
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        status2 = check_ollama_health()
+        assert status2.accessible is True
+
+    # Test explicit ollama_url parameter
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        status3 = check_ollama_health(ollama_url="http://explicit-host:11434/api/tags")
+        assert status3.accessible is True
+
+
+def test_check_disk_space(tmp_path: Path) -> None:
+    """Test check_disk_space on directory and nonexistent path."""
+    from t1d_analytics.diagnostics import check_disk_space
+
+    usage = check_disk_space(tmp_path)
+    assert usage["total_bytes"] > 0
+    assert usage["free_bytes"] > 0
+
+    nonexistent = tmp_path / "does_not_exist" / "sub"
+    usage_fallback = check_disk_space(nonexistent)
+    assert usage_fallback["total_bytes"] > 0
+
+
+def test_check_database_health_metrics(tmp_path: Path) -> None:
+    """Test check_database_health populates file size, writable, integrity, and disk space."""
+    db_file = tmp_path / "metrics.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute("CREATE TABLE patients (id INT)")
+    conn.close()
+
+    status = check_database_health(str(db_file))
+    assert status.exists is True
+    assert status.file_size_bytes > 0
+    assert status.writable is True
+    assert status.integrity_ok is True
+    assert status.disk_free_bytes > 0
+    d = status.to_dict()
+    assert d["file_size_bytes"] == status.file_size_bytes
+    assert d["writable"] is True
+    assert d["integrity_ok"] is True
+
+
+def test_check_database_health_integrity_fail(tmp_path: Path) -> None:
+    """Test check_database_health when PRAGMA integrity_check fails."""
+    db_file = tmp_path / "bad_integrity.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute("CREATE TABLE patients (id INT)")
+    conn.close()
+
+    class FakeConn:
+        def execute(self, sql: str) -> typing.Any:
+            if "duckdb_tables" in sql:
+                raise Exception("Corrupt block detected")
+            res = MagicMock()
+            res.fetchall.return_value = [("patients",)]
+            return res
+
+        def close(self) -> None:
+            pass
+
+    with patch("duckdb.connect", return_value=FakeConn()):
+        status = check_database_health(str(db_file))
+        assert status.integrity_ok is False
+
+
+def test_check_ollama_health_with_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test check_ollama_health populates version string when /api/version responds."""
+    import io
+    from urllib.request import Request
+
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+    def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+        if "/api/version" in req.full_url:
+            return io.BytesIO(b'{"version": "0.1.28"}')
+        return io.BytesIO(b'{"models": [{"name": "gemma4:latest"}]}')
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        status = check_ollama_health()
+        assert status.accessible is True
+        assert status.version == "0.1.28"
+        d = status.to_dict()
+        assert d["version"] == "0.1.28"
+
+
+def test_check_ollama_health_version_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test check_ollama_health gracefully handles error when querying /api/version."""
+    import io
+    from urllib.request import Request
+
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+    def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+        if "/api/version" in req.full_url:
+            raise urllib.error.URLError("Not found")
+        return io.BytesIO(b'{"models": [{"name": "gemma4:latest"}]}')
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        status = check_ollama_health()
+        assert status.accessible is True
+        assert status.version is None
+
+
+def test_check_disk_space_exception() -> None:
+    """Test check_disk_space fallback when resolving path raises Exception."""
+    from t1d_analytics.diagnostics import check_disk_space
+
+    with patch("pathlib.Path.resolve", side_effect=Exception("Disk error")):
+        usage = check_disk_space("any_path")
+        assert usage["total_bytes"] > 0
+
+
+def test_check_provider_health_all_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test check_provider_health across configured, missing SDK, and missing key branches."""
+    import sys
+    from unittest.mock import MagicMock
+
+    from t1d_analytics.diagnostics import check_provider_health
+
+    # Branch 1: SDK installed and API key set
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with patch.dict(sys.modules, {"any_llm": MagicMock()}):
+        status = check_provider_health("openai")
+        assert status.configured is True
+        assert status.sdk_installed is True
+        assert status.api_key_set is True
+        assert "ready" in status.message
+        assert status.remediation is None
+        d = status.to_dict()
+        assert d["configured"] is True
+
+    # Branch 2: SDK missing
+    with patch.dict(sys.modules, {"any_llm": None}):
+        status_no_sdk = check_provider_health("anthropic")
+        assert status_no_sdk.configured is False
+        assert status_no_sdk.sdk_installed is False
+        assert status_no_sdk.remediation is not None
+        assert "pip install" in status_no_sdk.remediation
+
+    # Branch 3: SDK installed, API key missing
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with patch.dict(sys.modules, {"any_llm": MagicMock()}):
+        status_no_key = check_provider_health("anthropic")
+        assert status_no_key.configured is False
+        assert status_no_key.sdk_installed is True
+        assert status_no_key.api_key_set is False
+        assert "API key" in status_no_key.message
+        assert status_no_key.remediation is not None
+
+    # Branch 4: Google GEMINI_API_KEY / GOOGLE_API_KEY
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini")
+    with patch.dict(sys.modules, {"any_llm": MagicMock()}):
+        status_google = check_provider_health("google")
+        assert status_google.api_key_set is True
+        assert status_google.configured is True
+
+
+def test_get_system_health_providers_dict(tmp_path: Path) -> None:
+    """Test get_system_health populates provider status in object and dictionary."""
+    from t1d_analytics.diagnostics import get_system_health
+
+    health = get_system_health()
+    assert "openai" in health.providers
+    assert "anthropic" in health.providers
+    assert "google" in health.providers
+    d = health.to_dict()
+    assert "providers" in d
+    providers_dict = d["providers"]
+    assert isinstance(providers_dict, dict)
+    assert "openai" in providers_dict

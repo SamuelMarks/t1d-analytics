@@ -40,6 +40,9 @@ install_deps:
 
 build_docs:
 	mkdir -p $(DOCS_DIR)
+	$(VENV_ACTIVATE) interrogate -vv --fail-under=100 src/t1d_analytics
+	$(VENV_ACTIVATE) python3 -m sphinx -b html docs_src $(DOCS_DIR)
+	cd web && npm run docs
 	@echo "Docs built in $(DOCS_DIR)"
 
 build:

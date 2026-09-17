@@ -1,3 +1,85 @@
 {
-  "numhospdka": ["Pt_NumHospDKA", "NumHospDKA"]
+  "subject_id": [
+    "PtID",
+    "SubjectID",
+    "subject_id",
+    "RecID",
+    "Participant_ID",
+    "pt_id",
+    "patientid",
+    "patient_id"
+  ],
+  "age": [
+    "Age",
+    "AgeBaseline",
+    "AgeVisit",
+    "AgeYears",
+    "age_baseline",
+    "baseline_age"
+  ],
+  "gender": ["Gender", "Sex", "pt_sex", "pt_gender"],
+  "hba1c": [
+    "HbA1c",
+    "A1C",
+    "A1cVal",
+    "glycated_hb",
+    "hemoglobin_a1c",
+    "baseline_a1c"
+  ],
+  "tir": [
+    "TIR",
+    "PctInTarget",
+    "PercentInRange",
+    "cgm_in_range",
+    "pct_in_range_70_180",
+    "time_in_range"
+  ],
+  "tbr": [
+    "TBR",
+    "PctBelow70",
+    "PercentUnder70",
+    "cgm_tbr",
+    "pct_time_under_70",
+    "time_below_range"
+  ],
+  "tar": [
+    "TAR",
+    "PctAbove180",
+    "PercentOver180",
+    "cgm_tar",
+    "pct_time_over_180",
+    "time_above_range"
+  ],
+  "mean_glucose": [
+    "MeanCGM",
+    "MeanGlucose",
+    "avg_glucose",
+    "cgm_mean",
+    "mean_cgm_val"
+  ],
+  "glucose_value": [
+    "HistoricGlucose",
+    "SensorGlucose",
+    "cgm_val",
+    "cgm",
+    "glucose",
+    "glucosevalue",
+    "glucose_level",
+    "value"
+  ],
+  "timestamp": [
+    "cgm_datetime",
+    "timestamp",
+    "datetime",
+    "reading_time",
+    "time",
+    "date_time",
+    "devicetimestamp"
+  ],
+  "numhospdka": [
+    "Pt_NumHospDKA",
+    "NumHospDKA",
+    "num_hosp_dka",
+    "hosp_dka_count"
+  ]
 }
