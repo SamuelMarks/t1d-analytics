@@ -11,7 +11,12 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from t1d_analytics.models import MaxTextConfig, TrainingBackend, TrainingJobConfig
+from t1d_analytics.models import (
+    MaxTextConfig,
+    MockEnvironmentController,
+    TrainingBackend,
+    TrainingJobConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +115,248 @@ class BaseTrainingRunner(ABC):
             Dict[str, Any]: Execution results containing training loss, steps, and duration.
 
         """
+
+
+class DeterministicSubwordTokenizer:
+    """
+    Deterministic subword and byte-level offline fallback tokenizer.
+
+    Provides stable, vocabulary-based tokenization with support for SQL keywords,
+    clinical Type-1 Diabetes terminology, punctuation, and character-level fallbacks.
+
+    Attributes
+    ----------
+        vocab_size: Total vocabulary size threshold.
+        pad_token_id: Token identifier for padding (default 0).
+        unk_token_id: Token identifier for unknown tokens (default 1).
+        bos_token_id: Token identifier for beginning-of-sequence (default 2).
+        eos_token_id: Token identifier for end-of-sequence (default 3).
+
+    """
+
+    def __init__(self, vocab_size: int = 1000) -> None:
+        """
+        Initialize the deterministic tokenizer with bundled clinical and SQL vocabulary.
+
+        Args:
+        ----
+            vocab_size: Maximum vocabulary dimension.
+
+        """
+        self.vocab_size = vocab_size
+        self.pad_token_id: int = 0
+        self.unk_token_id: int = 1
+        self.bos_token_id: int = 2
+        self.eos_token_id: int = 3
+
+        special_tokens: List[str] = [
+            "<pad>",
+            "<unk>",
+            "<bos>",
+            "<eos>",
+            "<start_of_turn>",
+            "<end_of_turn>",
+            "user",
+            "model",
+        ]
+
+        sql_tokens: List[str] = [
+            "SELECT",
+            "FROM",
+            "WHERE",
+            "JOIN",
+            "INNER",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "ON",
+            "GROUP BY",
+            "GROUP",
+            "ORDER BY",
+            "ORDER",
+            "BY",
+            "ASC",
+            "DESC",
+            "HAVING",
+            "LIMIT",
+            "OFFSET",
+            "UNION",
+            "ALL",
+            "AS",
+            "AND",
+            "OR",
+            "NOT",
+            "IN",
+            "IS",
+            "NULL",
+            "LIKE",
+            "BETWEEN",
+            "CASE",
+            "WHEN",
+            "THEN",
+            "ELSE",
+            "END",
+            "AVG",
+            "SUM",
+            "COUNT",
+            "MIN",
+            "MAX",
+            "DISTINCT",
+            "CAST",
+            "ROUND",
+            "select",
+            "from",
+            "where",
+            "join",
+            "inner",
+            "left",
+            "on",
+            "group",
+            "order",
+            "by",
+            "avg",
+            "sum",
+            "count",
+            "min",
+            "max",
+        ]
+
+        clinical_tokens: List[str] = [
+            "patient",
+            "subject",
+            "visit",
+            "time",
+            "glucose",
+            "cgm",
+            "tir",
+            "tbr",
+            "tar",
+            "hypo",
+            "hyper",
+            "a1c",
+            "hba1c",
+            "mean",
+            "cv",
+            "sd",
+            "dka",
+            "insulin",
+            "pump",
+            "baseline",
+            "dclp3",
+            "dclp5",
+            "pedap",
+            "trial",
+        ]
+
+        punctuation_tokens: List[str] = [
+            "\n",
+            " ",
+            ",",
+            "(",
+            ")",
+            ";",
+            "=",
+            "<",
+            ">",
+            "<=",
+            ">=",
+            "!=",
+            "+",
+            "-",
+            "*",
+            "/",
+            ".",
+            "'",
+            '"',
+            "_",
+            ":",
+            "%",
+            "[",
+            "]",
+            "{",
+            "}",
+        ]
+
+        ascii_chars: List[str] = [chr(c) for c in range(32, 127)]
+        all_raw_tokens = (
+            special_tokens
+            + sql_tokens
+            + clinical_tokens
+            + punctuation_tokens
+            + ascii_chars
+        )
+        vocab_tokens: List[str] = list(dict.fromkeys(all_raw_tokens))
+
+        self._token_to_id: Dict[str, int] = {}
+        self._id_to_token: Dict[int, str] = {}
+        for idx, tok in enumerate(vocab_tokens[:vocab_size]):
+            self._token_to_id[tok] = idx
+            self._id_to_token[idx] = tok
+
+        self._max_token_len: int = max((len(t) for t in self._token_to_id), default=1)
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+        """
+        Encode input text into deterministic subword token identifiers.
+
+        Args:
+        ----
+            text: Input string to tokenize.
+            add_special_tokens: Whether to prepend BOS and append EOS tokens.
+
+        Returns:
+        -------
+            List[int]: List of integer token IDs.
+
+        """
+        if not text:
+            return []
+
+        tokens: List[int] = []
+        if add_special_tokens:
+            tokens.append(self.bos_token_id)
+
+        i = 0
+        n = len(text)
+        while i < n:
+            matched = False
+            max_len = min(n - i, self._max_token_len)
+            for length in range(max_len, 0, -1):
+                sub = text[i : i + length]
+                if sub in self._token_to_id:
+                    tokens.append(self._token_to_id[sub])
+                    i += length
+                    matched = True
+                    break
+            if not matched:
+                char = text[i]
+                tokens.append(self._token_to_id.get(char, self.unk_token_id))
+                i += 1
+
+        if add_special_tokens:
+            tokens.append(self.eos_token_id)
+
+        return tokens
+
+    def decode(self, token_ids: List[int]) -> str:
+        """
+        Decode token identifiers back into string representation.
+
+        Args:
+        ----
+            token_ids: Sequence of token identifiers.
+
+        Returns:
+        -------
+            str: Reconstructed text string.
+
+        """
+        pieces: List[str] = []
+        for tid in token_ids:
+            tok = self._id_to_token.get(tid)
+            if tok and tok not in ("<pad>", "<unk>", "<bos>", "<eos>"):
+                pieces.append(tok)
+        return "".join(pieces)
 
 
 def prepare_torch_dataset(
@@ -231,48 +478,36 @@ def prepare_torch_dataset(
                 f"Could not load Hugging Face tokenizer '{tokenizer_name}': {e}. Using fallback."
             )
 
+    if active_tok is None:
+        active_tok = DeterministicSubwordTokenizer(vocab_size=vocab_size)
+
     tokenized_pairs: List[Tuple[Any, Any]] = []
     nl = "\n"
     for prompt, target in records:
-        if active_tok is not None:
-            # Gemma instruction template formatting
-            prompt_str = f"<start_of_turn>user{nl}{prompt}<end_of_turn>{nl}<start_of_turn>model{nl}"
-            full_str = f"{prompt_str}{target}<end_of_turn>"
+        # Gemma instruction template formatting
+        prompt_str = (
+            f"<start_of_turn>user{nl}{prompt}<end_of_turn>{nl}<start_of_turn>model{nl}"
+        )
+        full_str = f"{prompt_str}{target}<end_of_turn>"
 
-            prompt_ids = active_tok.encode(prompt_str, add_special_tokens=False)
-            full_ids = active_tok.encode(full_str, add_special_tokens=False)
+        prompt_ids = active_tok.encode(prompt_str, add_special_tokens=False)
+        full_ids = active_tok.encode(full_str, add_special_tokens=False)
 
-            # Mask prompt tokens with -100 so loss is only computed on target SQL
-            labels_list = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
+        # Mask prompt tokens with -100 so loss is only computed on target SQL
+        labels_list = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
 
-            if len(full_ids) > max_seq_length:
-                full_ids = full_ids[:max_seq_length]
-                labels_list = labels_list[:max_seq_length]
-            else:
-                pad_id = getattr(active_tok, "pad_token_id", 0) or 0
-                pad_len = max_seq_length - len(full_ids)
-                full_ids = full_ids + [pad_id] * pad_len
-                labels_list = labels_list + [-100] * pad_len
-
-            inp_ids = torch.tensor(full_ids[:-1], dtype=torch.long)
-            labels = torch.tensor(labels_list[1:], dtype=torch.long)
-            tokenized_pairs.append((inp_ids, labels))
+        if len(full_ids) > max_seq_length:
+            full_ids = full_ids[:max_seq_length]
+            labels_list = labels_list[:max_seq_length]
         else:
-            full_text = f"{prompt} {target}".strip()
-            tokens = [
-                min(ord(c) % vocab_size, vocab_size - 1)
-                for c in full_text[:max_seq_length]
-            ]
-            if not tokens:
-                tokens = [0]
-            if len(tokens) < max_seq_length:
-                tokens.extend([0] * (max_seq_length - len(tokens)))
-            else:
-                tokens = tokens[:max_seq_length]
+            pad_id = getattr(active_tok, "pad_token_id", 0) or 0
+            pad_len = max_seq_length - len(full_ids)
+            full_ids = full_ids + [pad_id] * pad_len
+            labels_list = labels_list + [-100] * pad_len
 
-            inp_ids = torch.tensor(tokens[:-1], dtype=torch.long)
-            labels = torch.tensor(tokens[1:], dtype=torch.long)
-            tokenized_pairs.append((inp_ids, labels))
+        inp_ids = torch.tensor(full_ids[:-1], dtype=torch.long)
+        labels = torch.tensor(labels_list[1:], dtype=torch.long)
+        tokenized_pairs.append((inp_ids, labels))
 
     return tokenized_pairs
 
@@ -589,11 +824,31 @@ class LocalCpuRunner(BaseTrainingRunner):
             import torch
 
             dataset = prepare_torch_dataset(ds_path)
-            model = TinyCausalLMFactory().create_model(config.model_name, device="cpu")
+            if (
+                config.use_tiny_model
+                or config.model_architecture == "tiny"
+                or (
+                    config.model_architecture == "auto"
+                    and not config.use_lora
+                    and not config.quantization
+                    and "/" not in config.model_name
+                )
+            ):
+                model = TinyCausalLMFactory().create_model(
+                    config.model_name, device="cpu"
+                )
+            else:
+                model = HuggingFaceCausalLMFactory().create_model(
+                    model_name=config.model_name,
+                    device="cpu",
+                    quantization=config.quantization,
+                    use_lora=config.use_lora,
+                )
 
             if config.dry_run:
                 inp, _ = dataset[0]
-                _ = model(inp.unsqueeze(0))
+                outputs = model(inp.unsqueeze(0))
+                _ = getattr(outputs, "logits", outputs)
                 loss_history = [0.0] * total_steps
                 final_loss = 0.0
             else:
@@ -618,8 +873,9 @@ class LocalCpuRunner(BaseTrainingRunner):
                         batch = dataset[i : i + batch_size]
                         inps = torch.stack([b[0] for b in batch])
                         lbls = torch.stack([b[1] for b in batch])
-                        logits = model(inps)
-                        loss = loss_fn(logits.view(-1, 1000), lbls.view(-1))
+                        outputs = model(inps)
+                        logits = getattr(outputs, "logits", outputs)
+                        loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
                         loss = loss / accum_steps
                         loss.backward()
 
@@ -640,7 +896,10 @@ class LocalCpuRunner(BaseTrainingRunner):
 
                 ckpt_dir = out_path / "checkpoint-final"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
-                torch.save(model.state_dict(), ckpt_dir / "model.pt")
+                if hasattr(model, "save_pretrained"):
+                    model.save_pretrained(str(ckpt_dir))
+                else:
+                    torch.save(model.state_dict(), ckpt_dir / "model.pt")
         except Exception as e:
             raise TrainingExecutionError(f"CPU training execution failed: {e}") from e
 
@@ -687,6 +946,71 @@ class LocalCpuRunner(BaseTrainingRunner):
         }
 
 
+def resolve_device_telemetry(device: str) -> Tuple[str, float]:
+    """
+    Resolve descriptive hardware identifier and total memory for the active execution device.
+
+    Args:
+    ----
+        device: Target hardware device string ('cuda:0', 'mps', 'cpu', etc.).
+
+    Returns:
+    -------
+        Tuple[str, float]: (device_name, total_memory_mb).
+
+    """
+    if device.startswith("cuda"):
+        try:
+            import torch
+
+            idx = int(device.split(":", 1)[1]) if ":" in device else 0
+            if torch.cuda.is_available():
+                dev_name = str(torch.cuda.get_device_name(idx))
+                _, total_vram = torch.cuda.mem_get_info(idx)
+                return dev_name, round(total_vram / (1024 * 1024), 2)
+        except Exception:
+            pass
+        return "NVIDIA CUDA Device", 0.0
+
+    if device == "mps":
+        dev_name = "Apple Silicon GPU (MPS)"
+        try:
+            import subprocess
+
+            res = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                dev_name = f"Apple Silicon ({res.stdout.strip()})"
+        except Exception:
+            pass
+        return dev_name, 0.0
+
+    if MockEnvironmentController.is_gpu_mocked():
+        return "Mock Accelerator", 0.0
+
+    cpu_name = "Host CPU"
+    try:
+        import platform
+
+        proc = platform.processor()
+        if proc:
+            cpu_name = f"Host CPU ({proc})"
+        elif Path("/proc/cpuinfo").exists():
+            content = Path("/proc/cpuinfo").read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if "model name" in line:
+                    cpu_name = line.split(":", 1)[1].strip()
+                    break
+    except Exception:
+        pass
+
+    return cpu_name, 0.0
+
+
 class LocalGpuRunner(BaseTrainingRunner):
     """Training runner executing on local GPU (CUDA / Apple MPS)."""
 
@@ -705,7 +1029,7 @@ class LocalGpuRunner(BaseTrainingRunner):
         """
         if (
             os.environ.get("CUDA_VISIBLE_DEVICES")
-            or os.environ.get("T1D_MOCK_GPU") == "1"
+            or MockEnvironmentController.is_gpu_mocked()
         ):
             return True
 
@@ -765,7 +1089,6 @@ class LocalGpuRunner(BaseTrainingRunner):
         loss_history: List[float] = []
 
         device = "cpu"
-        device_name = "Mock Accelerator"
         peak_memory_mb = 0.0
         mixed_precision = "fp32"
 
@@ -774,25 +1097,40 @@ class LocalGpuRunner(BaseTrainingRunner):
 
             if torch.cuda.is_available():
                 device = "cuda:0"
-                try:
-                    device_name = torch.cuda.get_device_name(0)
-                    _, total_vram = torch.cuda.mem_get_info(0)
-                    peak_memory_mb = round(total_vram / (1024 * 1024), 2)
-                except Exception:
-                    device_name = "NVIDIA CUDA Device"
                 mixed_precision = "fp16"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 device = "mps"
-                device_name = "Apple Silicon GPU (MPS)"
                 mixed_precision = "fp32"
 
+            device_name, peak_memory_mb = resolve_device_telemetry(device)
+
             dataset = prepare_torch_dataset(ds_path)
-            model = TinyCausalLMFactory().create_model(config.model_name, device=device)
+            if (
+                config.use_tiny_model
+                or config.model_architecture == "tiny"
+                or (
+                    config.model_architecture == "auto"
+                    and not config.use_lora
+                    and not config.quantization
+                    and "/" not in config.model_name
+                )
+            ):
+                model = TinyCausalLMFactory().create_model(
+                    config.model_name, device=device
+                )
+            else:
+                model = HuggingFaceCausalLMFactory().create_model(
+                    model_name=config.model_name,
+                    device=device,
+                    quantization=config.quantization,
+                    use_lora=config.use_lora,
+                )
 
             if config.dry_run:
                 inp, _ = dataset[0]
                 target_dev = torch.device(device) if hasattr(torch, "device") else "cpu"
-                _ = model(inp.unsqueeze(0).to(target_dev))
+                outputs = model(inp.unsqueeze(0).to(target_dev))
+                _ = getattr(outputs, "logits", outputs)
                 loss_history = [0.0] * total_steps
                 final_loss = 0.0
             else:
@@ -824,11 +1162,17 @@ class LocalGpuRunner(BaseTrainingRunner):
                             with torch.autocast(
                                 device_type="cuda", dtype=torch.float16
                             ):
-                                logits = model(inps)
-                                loss = loss_fn(logits.view(-1, 1000), lbls.view(-1))
+                                outputs = model(inps)
+                                logits = getattr(outputs, "logits", outputs)
+                                loss = loss_fn(
+                                    logits.view(-1, logits.size(-1)), lbls.view(-1)
+                                )
                         else:
-                            logits = model(inps)
-                            loss = loss_fn(logits.view(-1, 1000), lbls.view(-1))
+                            outputs = model(inps)
+                            logits = getattr(outputs, "logits", outputs)
+                            loss = loss_fn(
+                                logits.view(-1, logits.size(-1)), lbls.view(-1)
+                            )
 
                         loss = loss / accum_steps
                         loss.backward()
@@ -850,7 +1194,10 @@ class LocalGpuRunner(BaseTrainingRunner):
 
                 ckpt_dir = out_path / "checkpoint-gpu-final"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
-                torch.save(model.state_dict(), ckpt_dir / "model.pt")
+                if hasattr(model, "save_pretrained"):
+                    model.save_pretrained(str(ckpt_dir))
+                else:
+                    torch.save(model.state_dict(), ckpt_dir / "model.pt")
         except Exception as e:
             raise TrainingExecutionError(f"GPU training execution failed: {e}") from e
 
@@ -1188,7 +1535,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             RuntimeError: If gcloud or xpk CLI is missing.
 
         """
-        if os.environ.get("T1D_MOCK_TPU") == "1":
+        if MockEnvironmentController.is_tpu_mocked():
             return True
 
         has_gcloud = shutil.which("gcloud") is not None
@@ -1282,7 +1629,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         workload_name = f"t1d-{config.model_name.replace('/', '-').replace(':', '-')}"
         cluster_name = f"tpu-cluster-{max_cfg.accelerator_type.value}"
 
-        if os.environ.get("T1D_MOCK_TPU") == "1":
+        if MockEnvironmentController.is_tpu_mocked():
             return subprocess.CompletedProcess(
                 args=["xpk", "workload", "create"],
                 returncode=0,
@@ -1322,6 +1669,128 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             raise RuntimeError(f"TPU dispatch failed: {proc.stderr.strip()}")
         return proc
 
+    def _poll_gcloud_tpu_status(
+        self,
+        workload_name: str,
+        zone: str,
+        timeout_seconds: float = 30.0,
+    ) -> str:
+        """
+        Poll TPU VM workload status using Google Cloud CLI (gcloud).
+
+        Args:
+        ----
+            workload_name: Identifier of the TPU VM instance.
+            zone: GCP availability zone of the TPU VM instance.
+            timeout_seconds: Timeout threshold in seconds.
+
+        Returns:
+        -------
+            str: Normalized lifecycle status ('SUCCESS', 'RUNNING', 'FAILED', or 'PENDING').
+
+        Raises:
+        ------
+            RuntimeError: If gcloud CLI is missing, instance is not found, or preemption occurs.
+            TimeoutError: If polling exceeds timeout threshold.
+
+        """
+        gcloud_bin = shutil.which("gcloud")
+        if not gcloud_bin:
+            raise RuntimeError("Google Cloud CLI (gcloud) is not installed.")
+
+        cmd = [
+            gcloud_bin,
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "describe",
+            workload_name,
+            f"--zone={zone}",
+            "--format=json",
+        ]
+        start = time.time()
+        while time.time() - start < timeout_seconds:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                try:
+                    data = json.loads(res.stdout)
+                    state = str(data.get("state", "")).upper()
+                    health_desc = str(data.get("healthDescription", "")).upper()
+                    if state == "PREEMPTED" or "PREEMPTED" in health_desc:
+                        raise RuntimeError(
+                            f"Workload '{workload_name}' was PREEMPTED on spot TPU capacity."
+                        )
+                    if "ERROR" in health_desc or state == "FAILED":
+                        raise RuntimeError(
+                            f"Workload '{workload_name}' encountered fatal error: {data.get('healthDescription')}"
+                        )
+                    if state in ("READY", "ACTIVE", "RUNNING", "STOPPED", "TERMINATED"):
+                        return "SUCCESS"
+                except json.JSONDecodeError:
+                    if "READY" in res.stdout.upper():
+                        return "SUCCESS"
+            else:
+                if "NOT_FOUND" in res.stderr.upper():
+                    raise RuntimeError(
+                        f"Workload '{workload_name}' not found in zone '{zone}'."
+                    )
+            time.sleep(0.05)
+
+        raise TimeoutError(
+            f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
+        )
+
+    def _reclaim_gcloud_tpu_workload(
+        self,
+        workload_name: str,
+        zone: str,
+        max_retries: int = 3,
+    ) -> bool:
+        """
+        Reclaim and delete TPU VM instance using Google Cloud CLI (gcloud).
+
+        Args:
+        ----
+            workload_name: Identifier of the TPU VM instance to delete.
+            zone: GCP availability zone of the TPU VM.
+            max_retries: Maximum deletion retry attempts upon failure.
+
+        Returns:
+        -------
+            bool: True if workload resource was successfully deleted.
+
+        Raises:
+        ------
+            RuntimeError: If deletion fails after maximum retries or gcloud CLI is missing.
+
+        """
+        gcloud_bin = shutil.which("gcloud")
+        if not gcloud_bin:
+            raise RuntimeError("Google Cloud CLI (gcloud) is not installed.")
+
+        cmd = [
+            gcloud_bin,
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "delete",
+            workload_name,
+            f"--zone={zone}",
+            "--quiet",
+        ]
+        last_error = ""
+        for attempt in range(1, max_retries + 1):
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                return True
+            last_error = res.stderr.strip()
+            if attempt < max_retries:
+                time.sleep(0.05 * (2 ** (attempt - 1)))
+
+        raise RuntimeError(
+            f"Failed to reclaim TPU VM workload '{workload_name}' via gcloud: {last_error}"
+        )
+
     def poll_workload_status(
         self,
         workload_name: str,
@@ -1359,12 +1828,16 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 )
             return override_status
 
-        if os.environ.get("T1D_MOCK_TPU") == "1":
+        if MockEnvironmentController.is_tpu_mocked():
             return "SUCCESS"
 
         xpk_bin = shutil.which("xpk")
         if not xpk_bin:
-            return "SUCCESS"
+            return self._poll_gcloud_tpu_status(
+                workload_name=workload_name,
+                zone=max_cfg.zone,
+                timeout_seconds=timeout_seconds,
+            )
 
         cmd = [
             xpk_bin,
@@ -1422,12 +1895,15 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             RuntimeError: If reclamation command returns non-zero error.
 
         """
-        if os.environ.get("T1D_MOCK_TPU") == "1":
+        if MockEnvironmentController.is_tpu_mocked():
             return True
 
         xpk_bin = shutil.which("xpk")
         if not xpk_bin:
-            return True
+            return self._reclaim_gcloud_tpu_workload(
+                workload_name=workload_name,
+                zone=max_cfg.zone,
+            )
 
         cluster_name = f"tpu-cluster-{max_cfg.accelerator_type.value}"
         cmd = [
@@ -1475,8 +1951,8 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             )
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        if os.environ.get("T1D_MOCK_GCS") == "1":
-            if os.environ.get("T1D_MOCK_GCS_FAIL") == "1":
+        if MockEnvironmentController.is_gcs_mocked():
+            if MockEnvironmentController.is_gcs_failure_simulated():
                 raise RuntimeError(
                     f"GCS checkpoint download failed after {max_retries} attempts: Mock error"
                 )
@@ -1484,7 +1960,10 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             mock_ckpt.mkdir(parents=True, exist_ok=True)
             manifest = mock_ckpt / "model_manifest.json"
             manifest.write_text('{"status": "downloaded", "md5": "abc123"}')
-            if validate_checksum and os.environ.get("T1D_MOCK_GCS_CORRUPT") == "1":
+            if (
+                validate_checksum
+                and MockEnvironmentController.is_gcs_corruption_simulated()
+            ):
                 shutil.rmtree(output_dir)
                 raise ValueError(
                     "Checksum verification failed for downloaded checkpoint."
@@ -1663,12 +2142,15 @@ def sync_dataset_to_gcs(
     bucket_clean = gcs_bucket.rstrip("/")
     dest_uri = f"{bucket_clean}/{local_path.name}"
 
-    if os.environ.get("T1D_MOCK_GCS") == "1":
-        if os.environ.get("T1D_MOCK_GCS_FAIL") == "1":
+    if MockEnvironmentController.is_gcs_mocked():
+        if MockEnvironmentController.is_gcs_failure_simulated():
             raise RuntimeError(
                 f"GCS upload failed after {max_retries} attempts: Mock upload failure"
             )
-        if validate_checksum and os.environ.get("T1D_MOCK_GCS_CORRUPT") == "1":
+        if (
+            validate_checksum
+            and MockEnvironmentController.is_gcs_corruption_simulated()
+        ):
             raise ValueError("Checksum verification failed for uploaded dataset.")
         return dest_uri
 

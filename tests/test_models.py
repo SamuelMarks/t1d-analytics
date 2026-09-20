@@ -6,6 +6,7 @@ from t1d_analytics.models import (
     GrainDatasetConfig,
     JaxFlaxModelConfig,
     MaxTextConfig,
+    MockEnvironmentController,
     TpuAcceleratorType,
     TpuSchedulingType,
     TrainingBackend,
@@ -237,3 +238,37 @@ def test_maxtext_config_build_full_parameters() -> None:
     params_min = cfg_minimal.build_full_maxtext_parameters()
     assert params_min["project_id"] == "p1"
     assert "dtype" not in params_min
+
+
+def test_mock_environment_controller() -> None:
+    """Test MockEnvironmentController methods with set and unset environment variables."""
+    import os
+    from unittest.mock import patch
+
+    # All unset
+    with patch.dict(os.environ, {}, clear=True):
+        assert MockEnvironmentController.is_tpu_mocked() is False
+        assert MockEnvironmentController.is_gcs_mocked() is False
+        assert MockEnvironmentController.is_gcs_failure_simulated() is False
+        assert MockEnvironmentController.is_gcs_corruption_simulated() is False
+        assert MockEnvironmentController.is_gpu_mocked() is False
+        assert MockEnvironmentController.is_gemma_sql_mocked() is False
+
+    # All set to "1"
+    with patch.dict(
+        os.environ,
+        {
+            "T1D_MOCK_TPU": "1",
+            "T1D_MOCK_GCS": "1",
+            "T1D_MOCK_GCS_FAIL": "1",
+            "T1D_MOCK_GCS_CORRUPT": "1",
+            "T1D_MOCK_GPU": "1",
+            "T1D_MOCK_GEMMA_SQL": "1",
+        },
+    ):
+        assert MockEnvironmentController.is_tpu_mocked() is True
+        assert MockEnvironmentController.is_gcs_mocked() is True
+        assert MockEnvironmentController.is_gcs_failure_simulated() is True
+        assert MockEnvironmentController.is_gcs_corruption_simulated() is True
+        assert MockEnvironmentController.is_gpu_mocked() is True
+        assert MockEnvironmentController.is_gemma_sql_mocked() is True

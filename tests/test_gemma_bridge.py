@@ -331,3 +331,84 @@ def test_gemma_sql_pipeline_engine_missing_files(tmp_path: Path) -> None:
 
         with pytest.raises(FileNotFoundError, match="DuckDB database file not found"):
             engine.evaluate_sql("gemma-7b", valid_file, missing_file)
+
+
+def test_gemma_sql_pipeline_engine_native_fallbacks(tmp_path: Path) -> None:
+    """Test GemmaSqlPipelineEngine native in-process fallbacks when gemma_4_sql is unavailable."""
+    import duckdb
+
+    # 1. Initialize with fallback enabled when import fails
+    with patch(
+        "importlib.import_module",
+        side_effect=ImportError("No module named 'gemma_4_sql'"),
+    ):
+        engine = GemmaSqlPipelineEngine(allow_native_fallback=True)
+        assert engine.is_library_available is False
+
+        # Create test DuckDB database with clinical data
+        db_file = tmp_path / "clinical.duckdb"
+        conn = duckdb.connect(str(db_file))
+        conn.execute(
+            "CREATE TABLE cgm_metrics (patient_id INT, mean_glucose DOUBLE, tir DOUBLE)"
+        )
+        conn.execute(
+            "INSERT INTO cgm_metrics VALUES (1, 142.5, 76.2), (2, 168.0, 62.4)"
+        )
+        conn.close()
+
+        # 2. Native run_etl (with and without output_dir)
+        etl_res = engine.run_etl(
+            "sft", db_file, "cgm_metrics", output_dir=tmp_path / "etl_out"
+        )
+        assert etl_res["status"] == "completed"
+        assert etl_res["execution_mode"] == "native_in_process"
+        assert etl_res["result"]["rows"] == 2
+        assert (tmp_path / "etl_out" / "sft_data.jsonl").exists()
+        assert (tmp_path / "etl_out" / "sft_data.parquet").exists()
+
+        etl_res_no_out = engine.run_etl("sft", db_file, "cgm_metrics", output_dir=None)
+        assert etl_res_no_out["status"] == "completed"
+
+        # 3. Native run_sft (with and without hyperparameters)
+        ds_file = tmp_path / "etl_out" / "sft_data.jsonl"
+        sft_res = engine.run_sft(
+            "gemma-2b", ds_file, tmp_path / "sft_out", hyperparameters={"num_epochs": 1}
+        )
+        assert sft_res["status"] == "completed"
+        assert sft_res["execution_mode"] == "native_in_process"
+
+        sft_res_no_hparams = engine.run_sft(
+            "gemma-2b", ds_file, tmp_path / "sft_out2", hyperparameters=None
+        )
+        assert sft_res_no_hparams["status"] == "completed"
+
+        # 4. Native run_dpo
+        pref_file = tmp_path / "pref.jsonl"
+        pref_file.write_text('{"prompt": "q", "chosen": "a", "rejected": "b"}\n')
+        dpo_res = engine.run_dpo("gemma-2b", pref_file, tmp_path / "dpo_out", beta=0.05)
+        assert dpo_res["status"] == "completed"
+        assert dpo_res["execution_mode"] == "native_in_process"
+        assert dpo_res["result"]["beta"] == 0.05
+
+        # 5. Native evaluate_sql - empty test cases
+        empty_tc = tmp_path / "empty_cases.jsonl"
+        empty_tc.write_text("\n")
+        eval_empty = engine.evaluate_sql("gemma-2b", empty_tc, db_file)
+        assert eval_empty["accuracy"]["total"] == 0
+
+        # 6. Native evaluate_sql - valid test cases (including malformed json and non-dict lines)
+        valid_tc = tmp_path / "test_cases.jsonl"
+        valid_tc.write_text(
+            "not a json line\n"
+            '"just a json string"\n'
+            '{"gold_sql": "SELECT * FROM cgm_metrics WHERE patient_id = 1", "predicted_sql": "SELECT * FROM cgm_metrics WHERE patient_id = 1;"}\n'
+            '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT tir FROM cgm_metrics"}\n'
+            '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT mean_glucose FROM cgm_metrics"}\n'
+            '{"gold_sql": "SELECT * FROM cgm_metrics", "predicted_sql": "INVALID SYNTAX %%%"}\n'
+        )
+        eval_res = engine.evaluate_sql("gemma-2b", valid_tc, db_file)
+        assert eval_res["status"] == "completed"
+        assert eval_res["execution_mode"] == "native_in_process"
+        assert eval_res["accuracy"]["total"] == 4
+        assert eval_res["accuracy"]["exact_match"] == 0.5
+        assert eval_res["accuracy"]["execution_accuracy"] == 0.5

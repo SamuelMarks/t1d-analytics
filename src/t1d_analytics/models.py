@@ -321,6 +321,8 @@ class TrainingJobConfig:
         use_lora: Whether to attach LoRA parameter-efficient fine-tuning adapters.
         quantization: Optional quantization mode ('4bit', '8bit', or None).
         validation_dataset_path: Optional filepath to validation dataset split.
+        use_tiny_model: Whether to use lightweight 2-layer TinyCausalLM for unit tests.
+        model_architecture: Architecture selection strategy ('auto', 'tiny', or 'transformer').
 
     """
 
@@ -334,3 +336,98 @@ class TrainingJobConfig:
     use_lora: bool = False
     quantization: Optional[str] = None
     validation_dataset_path: Optional[str] = None
+    use_tiny_model: bool = False
+    model_architecture: str = "auto"
+
+
+class MockEnvironmentController:
+    """
+    Centralized controller governing simulation and test mock flags.
+
+    Enforces structured interrogation of environment variable overrides
+    (e.g., T1D_MOCK_TPU, T1D_MOCK_GCS, T1D_MOCK_GPU, T1D_MOCK_GEMMA_SQL).
+    """
+
+    @staticmethod
+    def is_tpu_mocked() -> bool:
+        """
+        Check if TPU execution and XPK workloads are mocked.
+
+        Returns
+        -------
+            bool: True if T1D_MOCK_TPU environment variable is set to '1'.
+
+        """
+        import os
+
+        return os.environ.get("T1D_MOCK_TPU") == "1"
+
+    @staticmethod
+    def is_gcs_mocked() -> bool:
+        """
+        Check if Google Cloud Storage operations are mocked.
+
+        Returns
+        -------
+            bool: True if T1D_MOCK_GCS environment variable is set to '1'.
+
+        """
+        import os
+
+        return os.environ.get("T1D_MOCK_GCS") == "1"
+
+    @staticmethod
+    def is_gcs_failure_simulated() -> bool:
+        """
+        Check if simulated GCS operation failure is requested.
+
+        Returns
+        -------
+            bool: True if T1D_MOCK_GCS_FAIL environment variable is set to '1'.
+
+        """
+        import os
+
+        return os.environ.get("T1D_MOCK_GCS_FAIL") == "1"
+
+    @staticmethod
+    def is_gcs_corruption_simulated() -> bool:
+        """
+        Check if simulated GCS checksum corruption is requested.
+
+        Returns
+        -------
+            bool: True if T1D_MOCK_GCS_CORRUPT environment variable is set to '1'.
+
+        """
+        import os
+
+        return os.environ.get("T1D_MOCK_GCS_CORRUPT") == "1"
+
+    @staticmethod
+    def is_gpu_mocked() -> bool:
+        """
+        Check if GPU hardware availability is mocked.
+
+        Returns
+        -------
+            bool: True if T1D_MOCK_GPU environment variable is set to '1'.
+
+        """
+        import os
+
+        return os.environ.get("T1D_MOCK_GPU") == "1"
+
+    @staticmethod
+    def is_gemma_sql_mocked() -> bool:
+        """
+        Check if gemma-4-sql CLI and toolchain execution is mocked.
+
+        Returns
+        -------
+            bool: True if T1D_MOCK_GEMMA_SQL environment variable is set to '1'.
+
+        """
+        import os
+
+        return os.environ.get("T1D_MOCK_GEMMA_SQL") == "1"

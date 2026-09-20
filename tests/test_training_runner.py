@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +15,7 @@ from t1d_analytics.models import (
     TrainingJobConfig,
 )
 from t1d_analytics.training_runner import (
+    DeterministicSubwordTokenizer,
     Gemma4SqlRunner,
     HuggingFaceCausalLMFactory,
     HuggingFaceCausalLMRunner,
@@ -27,6 +28,7 @@ from t1d_analytics.training_runner import (
     TrainingExecutionError,
     get_training_runner,
     prepare_torch_dataset,
+    resolve_device_telemetry,
     sync_dataset_to_gcs,
 )
 
@@ -787,11 +789,11 @@ def test_prepare_torch_dataset_edge_cases(tmp_path: Path) -> None:
     jsonl_file.write_text(
         "123\n"  # non-dict line
         '"plain string"\n'  # non-dict line
-        '{"prompt": "", "completion": ""}\n'  # empty text -> tokens = [0]
+        '{"prompt": "", "completion": ""}\n'  # empty text -> formatted with prompt tokens
     )
     dataset = prepare_torch_dataset(jsonl_file, max_seq_length=16)
     assert len(dataset) == 1
-    assert dataset[0][0].tolist()[0] == 0
+    assert dataset[0][0].tolist()[0] == 4  # <start_of_turn> token ID
 
 
 def test_prepare_torch_dataset_parquet_empty_and_no_cols(tmp_path: Path) -> None:
@@ -1145,9 +1147,23 @@ def test_remote_tpu_poll_workload_status_branches() -> None:
         assert runner.poll_workload_status("t1d-test", max_cfg) == "SUCCESS"
 
     with patch.dict("os.environ", {"T1D_MOCK_TPU": "0"}):
-        # No XPK binary
+        # Neither XPK nor gcloud binary -> raises
         with patch("shutil.which", return_value=None):
-            assert runner.poll_workload_status("t1d-test", max_cfg) == "SUCCESS"
+            with pytest.raises(
+                RuntimeError, match="Google Cloud CLI .* is not installed"
+            ):
+                runner.poll_workload_status("t1d-test", max_cfg)
+
+        # No XPK binary, gcloud binary available -> delegates to _poll_gcloud_tpu_status
+        def mock_gcloud_only(cmd: str) -> Optional[str]:
+            return "/usr/bin/gcloud" if cmd == "gcloud" else None
+
+        with patch("shutil.which", side_effect=mock_gcloud_only):
+            with patch.object(
+                runner, "_poll_gcloud_tpu_status", return_value="SUCCESS"
+            ) as mock_g:
+                assert runner.poll_workload_status("t1d-test", max_cfg) == "SUCCESS"
+                mock_g.assert_called_once()
 
         # XPK success
         with patch("shutil.which", return_value="/usr/bin/xpk"):
@@ -1838,10 +1854,25 @@ def test_tpu_workload_reclamation() -> None:
     with patch.dict(os.environ, {"T1D_MOCK_TPU": "1"}):
         assert runner.reclaim_tpu_workload("workload-1", max_cfg) is True
 
-    # Subprocess without xpk
+    # Subprocess without xpk or gcloud -> raises
     with patch.dict(os.environ, {"T1D_MOCK_TPU": ""}):
         with patch("shutil.which", return_value=None):
-            assert runner.reclaim_tpu_workload("workload-1", max_cfg) is True
+            with pytest.raises(
+                RuntimeError, match="Google Cloud CLI .* is not installed"
+            ):
+                runner.reclaim_tpu_workload("workload-1", max_cfg)
+
+    # Subprocess without xpk, with gcloud -> delegates to _reclaim_gcloud_tpu_workload
+    def mock_gcloud_reclaim(cmd: str) -> Optional[str]:
+        return "/usr/bin/gcloud" if cmd == "gcloud" else None
+
+    with patch.dict(os.environ, {"T1D_MOCK_TPU": ""}):
+        with patch("shutil.which", side_effect=mock_gcloud_reclaim):
+            with patch.object(
+                runner, "_reclaim_gcloud_tpu_workload", return_value=True
+            ) as mock_rg:
+                assert runner.reclaim_tpu_workload("workload-1", max_cfg) is True
+                mock_rg.assert_called_once()
 
     # Subprocess with xpk success
     mock_succ = MagicMock()
@@ -1957,3 +1988,478 @@ def test_remote_tpu_run_training_preemption_and_retries(tmp_path: Path) -> None:
         ):
             res_retry_succ = runner.run_training(cfg)
             assert res_retry_succ["status"] == "SUCCESS"
+
+
+def test_poll_gcloud_tpu_status_missing_binary() -> None:
+    """Test _poll_gcloud_tpu_status raises when gcloud is missing."""
+    runner = RemoteTpuMaxTextRunner()
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="Google Cloud CLI .* is not installed"):
+            runner._poll_gcloud_tpu_status("node-1", "us-central2-b")
+
+
+def test_poll_gcloud_tpu_status_states_and_errors() -> None:
+    """Test _poll_gcloud_tpu_status for normal states, preemption, failures, non-json, not found, and timeout."""
+    runner = RemoteTpuMaxTextRunner()
+    with patch("shutil.which", return_value="/usr/bin/gcloud"):
+        # 1. State READY
+        mock_proc_ready = MagicMock(returncode=0, stdout='{"state": "READY"}')
+        with patch("subprocess.run", return_value=mock_proc_ready):
+            assert (
+                runner._poll_gcloud_tpu_status("node-1", "us-central2-b") == "SUCCESS"
+            )
+
+        # 2. State STOPPED
+        mock_proc_stopped = MagicMock(returncode=0, stdout='{"state": "STOPPED"}')
+        with patch("subprocess.run", return_value=mock_proc_stopped):
+            assert (
+                runner._poll_gcloud_tpu_status("node-1", "us-central2-b") == "SUCCESS"
+            )
+
+        # 3. State PREEMPTED
+        mock_proc_preempt = MagicMock(returncode=0, stdout='{"state": "PREEMPTED"}')
+        with patch("subprocess.run", return_value=mock_proc_preempt):
+            with pytest.raises(RuntimeError, match="was PREEMPTED"):
+                runner._poll_gcloud_tpu_status("node-1", "us-central2-b")
+
+        # 4. healthDescription PREEMPTED
+        mock_proc_health_preempt = MagicMock(
+            returncode=0,
+            stdout='{"state": "STOPPING", "healthDescription": "Node was preempted"}',
+        )
+        with patch("subprocess.run", return_value=mock_proc_health_preempt):
+            with pytest.raises(RuntimeError, match="was PREEMPTED"):
+                runner._poll_gcloud_tpu_status("node-1", "us-central2-b")
+
+        # 5. healthDescription ERROR
+        mock_proc_err = MagicMock(
+            returncode=0,
+            stdout='{"state": "RUNNING", "healthDescription": "Fatal hardware ERROR"}',
+        )
+        with patch("subprocess.run", return_value=mock_proc_err):
+            with pytest.raises(RuntimeError, match="encountered fatal error"):
+                runner._poll_gcloud_tpu_status("node-1", "us-central2-b")
+
+        # 6. Non-JSON but output contains READY
+        mock_proc_text_ready = MagicMock(
+            returncode=0, stdout="State: READY (non-json output)"
+        )
+        with patch("subprocess.run", return_value=mock_proc_text_ready):
+            assert (
+                runner._poll_gcloud_tpu_status("node-1", "us-central2-b") == "SUCCESS"
+            )
+
+        # 7. Non-zero returncode with NOT_FOUND in stderr
+        mock_proc_nf = MagicMock(
+            returncode=1, stderr="ERROR: (gcloud) NOT_FOUND: Resource not found"
+        )
+        with patch("subprocess.run", return_value=mock_proc_nf):
+            with pytest.raises(RuntimeError, match="not found in zone"):
+                runner._poll_gcloud_tpu_status("node-1", "us-central2-b")
+
+        # 8. Timeout
+        mock_proc_pending = MagicMock(returncode=0, stdout='{"state": "CREATING"}')
+        with patch("subprocess.run", return_value=mock_proc_pending):
+            with pytest.raises(TimeoutError, match="polling timed out"):
+                runner._poll_gcloud_tpu_status(
+                    "node-1", "us-central2-b", timeout_seconds=0.08
+                )
+
+        # 9. JSONDecodeError without READY (times out)
+        mock_proc_bad_json = MagicMock(
+            returncode=0, stdout="Some garbled text without status"
+        )
+        with patch("subprocess.run", return_value=mock_proc_bad_json):
+            with pytest.raises(TimeoutError, match="polling timed out"):
+                runner._poll_gcloud_tpu_status(
+                    "node-1", "us-central2-b", timeout_seconds=0.08
+                )
+
+        # 10. Non-zero returncode without NOT_FOUND (transient error, times out)
+        mock_proc_transient = MagicMock(returncode=1, stderr="Connection reset by peer")
+        with patch("subprocess.run", return_value=mock_proc_transient):
+            with pytest.raises(TimeoutError, match="polling timed out"):
+                runner._poll_gcloud_tpu_status(
+                    "node-1", "us-central2-b", timeout_seconds=0.08
+                )
+
+
+def test_reclaim_gcloud_tpu_workload_lifecycle() -> None:
+    """Test _reclaim_gcloud_tpu_workload missing binary, success, and retry failure."""
+    runner = RemoteTpuMaxTextRunner()
+    # Missing binary
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="Google Cloud CLI .* is not installed"):
+            runner._reclaim_gcloud_tpu_workload("node-1", "us-central2-b")
+
+    with patch("shutil.which", return_value="/usr/bin/gcloud"):
+        # Success
+        mock_ok = MagicMock(returncode=0, stderr="")
+        with patch("subprocess.run", return_value=mock_ok):
+            assert (
+                runner._reclaim_gcloud_tpu_workload("node-1", "us-central2-b") is True
+            )
+
+        # Retry failure
+        mock_fail = MagicMock(returncode=1, stderr="PermissionDenied")
+        with patch("subprocess.run", return_value=mock_fail):
+            with pytest.raises(RuntimeError, match="Failed to reclaim TPU VM workload"):
+                runner._reclaim_gcloud_tpu_workload(
+                    "node-1", "us-central2-b", max_retries=2
+                )
+
+
+def test_poll_and_reclaim_workload_delegation_without_xpk() -> None:
+    """Test poll_workload_status and reclaim_tpu_workload delegate to gcloud methods when xpk is absent."""
+    runner = RemoteTpuMaxTextRunner()
+    max_cfg = MaxTextConfig(project_id="p1", zone="us-central2-b")
+
+    def mock_which(cmd: str) -> Optional[str]:
+        if cmd == "xpk":
+            return None
+        return "/usr/bin/gcloud"
+
+    with patch("shutil.which", side_effect=mock_which):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("T1D_MOCK_TPU", None)
+            os.environ.pop("T1D_TPU_STATUS_OVERRIDE", None)
+            with patch.object(
+                runner, "_poll_gcloud_tpu_status", return_value="SUCCESS"
+            ) as mock_p:
+                res = runner.poll_workload_status("wl-1", max_cfg)
+                assert res == "SUCCESS"
+                mock_p.assert_called_once_with(
+                    workload_name="wl-1", zone="us-central2-b", timeout_seconds=30.0
+                )
+
+            with patch.object(
+                runner, "_reclaim_gcloud_tpu_workload", return_value=True
+            ) as mock_r:
+                res2 = runner.reclaim_tpu_workload("wl-1", max_cfg)
+                assert res2 is True
+                mock_r.assert_called_once_with(
+                    workload_name="wl-1", zone="us-central2-b"
+                )
+
+
+def test_local_cpu_runner_architecture_selection(tmp_path: Path) -> None:
+    """Test LocalCpuRunner model factory selection for tiny, transformer, auto, and HF execution."""
+    import torch
+
+    runner = LocalCpuRunner()
+    ds = tmp_path / "dataset.jsonl"
+    ds.write_text('{"prompt": "question", "completion": "answer"}\n')
+
+    # 1. Explicit tiny model
+    cfg_tiny = TrainingJobConfig(
+        model_name="test-tiny",
+        dataset_path=str(ds),
+        output_dir=str(tmp_path / "out_tiny"),
+        use_tiny_model=True,
+        dry_run=True,
+    )
+    with patch.object(
+        TinyCausalLMFactory, "create_model", wraps=TinyCausalLMFactory().create_model
+    ) as mock_tiny:
+        res = runner.run_training(cfg_tiny)
+        assert res["status"] == "dry_run_completed"
+        mock_tiny.assert_called_once()
+
+    # 2. Explicit transformer model architecture (HuggingFace)
+    cfg_hf = TrainingJobConfig(
+        model_name="google/gemma-2b",
+        dataset_path=str(ds),
+        output_dir=str(tmp_path / "out_hf"),
+        model_architecture="transformer",
+        dry_run=True,
+    )
+    mock_model = MagicMock()
+    mock_model.return_value = MagicMock(logits=torch.zeros((1, 5, 100)))
+    with patch.object(
+        HuggingFaceCausalLMFactory, "create_model", return_value=mock_model
+    ) as mock_hf:
+        res_hf = runner.run_training(cfg_hf)
+        assert res_hf["status"] == "dry_run_completed"
+        mock_hf.assert_called_once_with(
+            model_name="google/gemma-2b",
+            device="cpu",
+            quantization=None,
+            use_lora=False,
+        )
+
+    # 3. Full training run with HuggingFace model and save_pretrained
+    cfg_hf_train = TrainingJobConfig(
+        model_name="google/gemma-2b",
+        dataset_path=str(ds),
+        output_dir=str(tmp_path / "out_hf_train"),
+        model_architecture="transformer",
+        dry_run=False,
+        hyperparameters=TrainingHyperparameters(num_epochs=1, batch_size=1),
+    )
+    mock_model_train = MagicMock()
+    mock_model_train.parameters.return_value = [torch.nn.Parameter(torch.zeros(2, 2))]
+    grad_logits = torch.randn(1, 127, 1000, requires_grad=True)
+    mock_model_train.return_value = MagicMock(logits=grad_logits)
+    mock_model_train.save_pretrained = MagicMock()
+
+    with patch.object(
+        HuggingFaceCausalLMFactory, "create_model", return_value=mock_model_train
+    ):
+        res_train = runner.run_training(cfg_hf_train)
+        assert res_train["status"] == "completed"
+        mock_model_train.save_pretrained.assert_called_once()
+
+
+def test_local_gpu_runner_architecture_selection(tmp_path: Path) -> None:
+    """Test LocalGpuRunner model factory selection with quantization, LoRA, and HF model execution."""
+    import torch
+
+    runner = LocalGpuRunner()
+    ds = tmp_path / "dataset_gpu.jsonl"
+    ds.write_text('{"prompt": "question", "completion": "answer"}\n')
+
+    # 1. Explicit tiny model on GPU
+    cfg_tiny_gpu = TrainingJobConfig(
+        model_name="custom-model",
+        dataset_path=str(ds),
+        output_dir=str(tmp_path / "out_gpu_tiny"),
+        use_tiny_model=True,
+        dry_run=True,
+    )
+    with patch.dict(os.environ, {"T1D_MOCK_GPU": "1"}):
+        with patch.object(
+            TinyCausalLMFactory,
+            "create_model",
+            wraps=TinyCausalLMFactory().create_model,
+        ) as mock_tiny:
+            res = runner.run_training(cfg_tiny_gpu)
+            assert res["status"] == "dry_run_completed"
+            mock_tiny.assert_called_once()
+
+    # 2. HF with LoRA and 4-bit quantization on GPU
+    cfg_hf_gpu = TrainingJobConfig(
+        model_name="meta-llama/Llama-2-7b",
+        dataset_path=str(ds),
+        output_dir=str(tmp_path / "out_gpu_hf"),
+        model_architecture="transformer",
+        use_lora=True,
+        quantization="4bit",
+        dry_run=True,
+    )
+    mock_gpu_model = MagicMock()
+    mock_gpu_model.return_value = MagicMock(logits=torch.zeros((1, 5, 100)))
+    with patch.dict(os.environ, {"T1D_MOCK_GPU": "1"}):
+        with patch("torch.cuda.is_available", return_value=False):
+            with patch("torch.backends.mps.is_available", return_value=False):
+                with patch.object(
+                    HuggingFaceCausalLMFactory,
+                    "create_model",
+                    return_value=mock_gpu_model,
+                ) as mock_hf:
+                    res_gpu = runner.run_training(cfg_hf_gpu)
+                    assert res_gpu["status"] == "dry_run_completed"
+                    mock_hf.assert_called_once_with(
+                        model_name="meta-llama/Llama-2-7b",
+                        device="cpu",
+                        quantization="4bit",
+                        use_lora=True,
+                    )
+
+    # 3. Full training loop on GPU with HF model and save_pretrained
+    cfg_hf_gpu_train = TrainingJobConfig(
+        model_name="meta-llama/Llama-2-7b",
+        dataset_path=str(ds),
+        output_dir=str(tmp_path / "out_gpu_hf_train"),
+        model_architecture="transformer",
+        use_lora=True,
+        dry_run=False,
+        hyperparameters=TrainingHyperparameters(num_epochs=1, batch_size=1),
+    )
+    mock_train_model = MagicMock()
+    mock_train_model.parameters.return_value = [torch.nn.Parameter(torch.zeros(2, 2))]
+    grad_gpu_logits = torch.randn(1, 127, 1000, requires_grad=True)
+    mock_train_model.return_value = MagicMock(logits=grad_gpu_logits)
+    mock_train_model.save_pretrained = MagicMock()
+
+    with patch.dict(os.environ, {"T1D_MOCK_GPU": "1"}):
+        with patch("torch.cuda.is_available", return_value=False):
+            with patch("torch.backends.mps.is_available", return_value=False):
+                with patch.object(
+                    HuggingFaceCausalLMFactory,
+                    "create_model",
+                    return_value=mock_train_model,
+                ):
+                    res_train = runner.run_training(cfg_hf_gpu_train)
+                    assert res_train["status"] == "completed"
+                    mock_train_model.save_pretrained.assert_called_once()
+
+
+def test_deterministic_subword_tokenizer_operations() -> None:
+    """Test DeterministicSubwordTokenizer encoding, decoding, special tokens, and unknown fallbacks."""
+    tok = DeterministicSubwordTokenizer(vocab_size=500)
+    assert tok.pad_token_id == 0
+    assert tok.unk_token_id == 1
+    assert tok.bos_token_id == 2
+    assert tok.eos_token_id == 3
+
+    # Empty string
+    assert tok.encode("") == []
+
+    # Text encoding without and with special tokens
+    query = "SELECT AVG(glucose) FROM cgm WHERE patient = 42"
+    ids = tok.encode(query, add_special_tokens=False)
+    assert len(ids) > 0
+    assert 2 not in ids
+    assert 3 not in ids
+
+    ids_special = tok.encode(query, add_special_tokens=True)
+    assert ids_special[0] == 2
+    assert ids_special[-1] == 3
+
+    # Reconstructed decode
+    decoded = tok.decode(ids)
+    assert decoded == query
+
+    # Decode with special tokens and out-of-vocab IDs (should be filtered out)
+    filtered_decode = tok.decode([tok.pad_token_id, tok.unk_token_id, 99999, ids[0]])
+    assert filtered_decode == "SELECT"
+
+    # Unknown character fallback
+    unknown_text = "SELECT 🌟"
+    ids_unk = tok.encode(unknown_text)
+    assert tok.unk_token_id in ids_unk
+
+
+def test_prepare_torch_dataset_deterministic_fallback(tmp_path: Path) -> None:
+    """Test prepare_torch_dataset using DeterministicSubwordTokenizer with padding, truncation, and prompt masking."""
+    ds = tmp_path / "dataset_subword.jsonl"
+    ds.write_text(
+        '{"prompt": "Calculate average glucose", "completion": "SELECT AVG(glucose) FROM cgm;"}\n'
+    )
+
+    # Sequence length 32 (requires padding)
+    pairs = prepare_torch_dataset(ds, max_seq_length=32)
+    assert len(pairs) == 1
+    inp_ids, labels = pairs[0]
+    assert inp_ids.shape[0] == 31
+    assert labels.shape[0] == 31
+
+    # Labels must contain -100 for prompt tokens and pad tokens
+    assert -100 in labels.tolist()
+
+    # Short sequence length 8 (forces truncation)
+    pairs_trunc = prepare_torch_dataset(ds, max_seq_length=8)
+    inp_ids_t, labels_t = pairs_trunc[0]
+    assert inp_ids_t.shape[0] == 7
+    assert labels_t.shape[0] == 7
+
+
+def test_resolve_device_telemetry_branches(tmp_path: Path) -> None:
+    """Test resolve_device_telemetry for CUDA, MPS, CPU, and mock accelerator environments."""
+    import subprocess
+
+    # 1. CUDA success with explicit index
+    with patch("torch.cuda.is_available", return_value=True):
+        with patch("torch.cuda.get_device_name", return_value="NVIDIA A100-SXM4-80GB"):
+            with patch(
+                "torch.cuda.mem_get_info",
+                return_value=(40 * 1024 * 1024 * 1024, 80 * 1024 * 1024 * 1024),
+            ):
+                name, mem = resolve_device_telemetry("cuda:1")
+                assert name == "NVIDIA A100-SXM4-80GB"
+                assert mem == 81920.0
+
+    # 2. CUDA success without colon index
+    with patch("torch.cuda.is_available", return_value=True):
+        with patch("torch.cuda.get_device_name", return_value="NVIDIA RTX 4090"):
+            with patch(
+                "torch.cuda.mem_get_info",
+                return_value=(10 * 1024 * 1024 * 1024, 24 * 1024 * 1024 * 1024),
+            ):
+                name_def, mem_def = resolve_device_telemetry("cuda")
+                assert name_def == "NVIDIA RTX 4090"
+                assert mem_def == 24576.0
+
+    # 3. CUDA unavailable or exception during query
+    with patch("torch.cuda.is_available", return_value=False):
+        name_no_cuda, _ = resolve_device_telemetry("cuda:0")
+        assert name_no_cuda == "NVIDIA CUDA Device"
+
+    with patch("torch.cuda.is_available", return_value=True):
+        with patch(
+            "torch.cuda.get_device_name", side_effect=RuntimeError("CUDA query error")
+        ):
+            name_err, _ = resolve_device_telemetry("cuda:invalid")
+            assert name_err == "NVIDIA CUDA Device"
+
+    # 4. MPS with sysctl success
+    mock_sysctl = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Apple M2 Max\n", stderr=""
+    )
+    with patch("subprocess.run", return_value=mock_sysctl):
+        name_mps, mem_mps = resolve_device_telemetry("mps")
+        assert name_mps == "Apple Silicon (Apple M2 Max)"
+        assert mem_mps == 0.0
+
+    # 5. MPS with sysctl failure
+    mock_sysctl_fail = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr=""
+    )
+    with patch("subprocess.run", return_value=mock_sysctl_fail):
+        name_mps_fail, _ = resolve_device_telemetry("mps")
+        assert name_mps_fail == "Apple Silicon GPU (MPS)"
+
+    # 6. MPS with subprocess exception
+    with patch("subprocess.run", side_effect=RuntimeError("sysctl missing")):
+        name_mps_exc, _ = resolve_device_telemetry("mps")
+        assert name_mps_exc == "Apple Silicon GPU (MPS)"
+
+    # 7. CPU with T1D_MOCK_GPU=1
+    with patch.dict(os.environ, {"T1D_MOCK_GPU": "1"}):
+        name_mock, mem_mock = resolve_device_telemetry("cpu")
+        assert name_mock == "Mock Accelerator"
+        assert mem_mock == 0.0
+
+    # 8. CPU with platform.processor()
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("T1D_MOCK_GPU", None)
+        with patch("platform.processor", return_value="x86_64"):
+            name_proc, _ = resolve_device_telemetry("cpu")
+            assert name_proc == "Host CPU (x86_64)"
+
+    # 9. CPU fallback reading /proc/cpuinfo with matching line
+    cpuinfo_match = (
+        "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD EPYC 7B12\n"
+    )
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("T1D_MOCK_GPU", None)
+        with patch("platform.processor", return_value=""):
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("pathlib.Path.read_text", return_value=cpuinfo_match):
+                    name_cpuinfo, _ = resolve_device_telemetry("cpu")
+                    assert name_cpuinfo == "AMD EPYC 7B12"
+
+    # 10. CPU fallback reading /proc/cpuinfo without matching line
+    cpuinfo_nomatch = "processor\t: 0\nvendor_id\t: Unknown\n"
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("T1D_MOCK_GPU", None)
+        with patch("platform.processor", return_value=""):
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("pathlib.Path.read_text", return_value=cpuinfo_nomatch):
+                    name_nomatch, _ = resolve_device_telemetry("cpu")
+                    assert name_nomatch == "Host CPU"
+
+    # 11. CPU fallback where platform.processor() is empty and /proc/cpuinfo does not exist
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("T1D_MOCK_GPU", None)
+        with patch("platform.processor", return_value=""):
+            with patch("pathlib.Path.exists", return_value=False):
+                name_no_proc_file, _ = resolve_device_telemetry("cpu")
+                assert name_no_proc_file == "Host CPU"
+
+    # 12. CPU fallback generic exception
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("T1D_MOCK_GPU", None)
+        with patch("platform.processor", side_effect=RuntimeError("platform error")):
+            name_fallback, _ = resolve_device_telemetry("cpu")
+            assert name_fallback == "Host CPU"
