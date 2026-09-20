@@ -1379,12 +1379,17 @@ export class ChatUI {
         model: m.model,
       }));
 
+    const dbPathPayload =
+      this.state.currentDb && this.state.currentDb !== "t1d.duckdb"
+        ? this.state.currentDb
+        : undefined;
+
     const payload = {
       message: content,
       model,
       provider,
       api_key: apiKey,
-      db_path: this.state.currentDb,
+      ...(dbPathPayload ? { db_path: dbPathPayload } : {}),
       history: historyPayload,
     };
 

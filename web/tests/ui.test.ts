@@ -3975,6 +3975,19 @@ describe("ChatUI", () => {
     });
     await ui["handleSendMessage"]("Hi", "plainmodel");
 
+    // Also send with custom database configured to verify db_path inclusion in payload
+    state.setCurrentDb("custom_clinical.duckdb");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Result with custom db" }),
+    });
+    await ui["handleSendMessage"]("Query with custom db", "plainmodel");
+    const customDbCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+    expect(JSON.parse(customDbCall[1].body).db_path).toBe(
+      "custom_clinical.duckdb",
+    );
+    state.setCurrentDb("t1d.duckdb");
+
     // 6. Modal table navigation and focus trap key events
     mockFetch.mockResolvedValueOnce({
       ok: true,
