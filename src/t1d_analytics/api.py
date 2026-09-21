@@ -1227,7 +1227,8 @@ def generate_sql_from_nl(
             model=actual_model,
             messages=[{"role": "user", "content": prompt}],
         )
-        full_response = response.choices[0].message.content.strip()
+        raw_choice = response.choices[0].message.content
+        full_response = (raw_choice or "").strip()
         logger.info(f"LLM response:\n{full_response}")
         sql_query = _extract_sql_from_response(full_response)
         return full_response, sql_query

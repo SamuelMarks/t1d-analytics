@@ -253,7 +253,8 @@ class TrainingDataGenerator:
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
                     )
-                    content_str = resp.choices[0].message.content.strip()
+                    raw_choice = resp.choices[0].message.content
+                    content_str = (raw_choice or "").strip()
                     parsed = _parse_llm_json_array(content_str)
                 except Exception as e:
                     logger.warning(f"any-llm generation attempt {attempts} failed: {e}")

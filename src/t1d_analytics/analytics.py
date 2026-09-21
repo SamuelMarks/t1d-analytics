@@ -900,7 +900,8 @@ User request: {query}
             model=actual_model,
             messages=[{"role": "user", "content": prompt}],
         )
-        full_response = response.choices[0].message.content.strip()
+        raw_choice = response.choices[0].message.content
+        full_response = (raw_choice or "").strip()
         sql_query = extract_sql_from_response(full_response)
 
         print(_("Generated SQL: \n{}\n", sql_query))

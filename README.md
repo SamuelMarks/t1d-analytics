@@ -58,7 +58,7 @@ t1d-analytics/
 ```
 
 - **Database**: DuckDB
-- **Backend API**: Python 3.9+, FastAPI, Uvicorn, Pydantic
+- **Backend API**: Python 3.12+, FastAPI, Uvicorn, Pydantic
 - **LLM Engine**: Ollama (gemma4)
 - **Frontend**: HTML5, Vanilla CSS, TypeScript, Vite
 - **Testing**: Pytest, Vitest, Playwright
@@ -67,7 +67,7 @@ t1d-analytics/
 
 Before you begin, ensure you have the following installed:
 
-1. **Python 3.9+** (Tested and optimized for Python 3.12)
+1. **Python 3.12+** (Tested and optimized for Python 3.12)
 2. **Node.js** (v18+ recommended) and `npm`
 3. **Ollama**: Installed and running locally with the `gemma4` model pulled.
    ```bash
