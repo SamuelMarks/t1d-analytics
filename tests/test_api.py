@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
+
 from t1d_analytics.api import app, execute_sql, generate_sql_from_nl
 
 if "any_llm" not in sys.modules:
@@ -531,6 +532,7 @@ def test_global_exception_handler() -> None:
     """Test that unhandled exceptions are caught by the global exception handler."""
     from fastapi import APIRouter
     from fastapi.testclient import TestClient
+
     from t1d_analytics.api import app
 
     router = APIRouter()
@@ -860,6 +862,7 @@ def test_chat_stream_nl_translation_error(mock_stream: MagicMock, mock_db: str) 
 def test_validate_db_path_null_byte() -> None:
     """Test validate_db_path rejects null byte injection."""
     from fastapi import HTTPException
+
     from t1d_analytics.api import validate_db_path
 
     with pytest.raises(HTTPException) as exc_info:
@@ -874,6 +877,7 @@ def test_validate_db_path_traversal() -> None:
     from pathlib import Path
 
     from fastapi import HTTPException
+
     from t1d_analytics.api import validate_db_path
 
     allowed = [Path("/mock/allowed/dir")]
@@ -1721,6 +1725,7 @@ def test_rate_limiter_backends_and_retry_after(
     from concurrent.futures import ThreadPoolExecutor
 
     from fastapi import HTTPException
+
     from t1d_analytics.api import (
         DuckDbRateLimiter,
         MemoryRateLimiter,

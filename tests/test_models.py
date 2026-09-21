@@ -1,6 +1,7 @@
 """Tests for the models."""
 
 import pytest
+
 from t1d_analytics.models import (
     DatasetInfo,
     GrainDatasetConfig,

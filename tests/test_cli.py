@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 from pytest import CaptureFixture
+
 from t1d_analytics.cli import main
 from t1d_analytics.diagnostics import OllamaStatus
 

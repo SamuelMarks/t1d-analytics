@@ -9,6 +9,7 @@ import pytest
 import requests
 from pytest import CaptureFixture
 from requests import HTTPError
+
 from t1d_analytics.downloader import (
     download_file,
     process_datasets,

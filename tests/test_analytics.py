@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
+
 from t1d_analytics.analytics import (
     extract_zips,
     get_database_schema,
@@ -476,6 +477,7 @@ def test_extract_zips_already_extracted(tmp_path: Path) -> None:
 def test_load_data_no_matches_file(tmp_path: Path, mocker: typing.Any) -> None:
     """Test load_data_to_duckdb when matches file does not exist."""
     import duckdb
+
     from t1d_analytics.analytics import load_data_to_duckdb
 
     mocker.patch(
@@ -1017,6 +1019,7 @@ def test_clinical_data_ingestion_and_manifest(
     import numpy as np
     import pandas as pd  # type: ignore[import-untyped]
     import pyreadstat  # type: ignore[import-untyped]
+
     from t1d_analytics.analytics import get_ingestion_manifest, load_data_to_duckdb
 
     data_dir = tmp_path / "clinical_data"
@@ -1119,6 +1122,7 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
 ) -> None:
     """Test reading .sas7bdat, decoding bytes in columns, and fallback to pandas readers."""
     import pandas as pd
+
     from t1d_analytics.analytics import _read_clinical_dataframe
 
     # 1. sas7bdat success with byte data to decode
@@ -1489,6 +1493,7 @@ def test_export_table_parquet_and_csv(tmp_path: Path) -> None:
 def test_export_table_excel_formula_sanitization(tmp_path: Path) -> None:
     """Test exporting table to Excel with formula injection sanitization."""
     from openpyxl import load_workbook
+
     from t1d_analytics.analytics import export_table
 
     db_file = tmp_path / "excel.duckdb"

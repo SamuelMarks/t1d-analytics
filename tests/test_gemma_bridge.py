@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from t1d_analytics.gemma_bridge import (
     GemmaSqlPipelineEngine,
     check_gemma_sql_installed,

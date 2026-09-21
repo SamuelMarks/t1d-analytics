@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
+
 from t1d_analytics.cli import main
 
 

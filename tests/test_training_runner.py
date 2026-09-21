@@ -6,6 +6,7 @@ from typing import Any, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from t1d_analytics.models import (
     MaxTextConfig,
     TpuAcceleratorType,

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import duckdb
 from fastapi.testclient import TestClient
+
 from t1d_analytics.api import app, execute_sql
 
 

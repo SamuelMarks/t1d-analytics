@@ -9,7 +9,6 @@ from typing import Any
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
-
 import scripts.run_tests as srt
 from scripts.run_tests import main, run_cmd
 

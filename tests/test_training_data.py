@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
+
 from t1d_analytics.training_data import TrainingDataGenerator
 
 
