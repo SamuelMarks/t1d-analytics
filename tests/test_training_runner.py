@@ -6,6 +6,7 @@ from typing import Any, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from t1d_analytics.models import (
     MaxTextConfig,
@@ -32,6 +33,24 @@ from t1d_analytics.training_runner import (
     resolve_device_telemetry,
     sync_dataset_to_gcs,
 )
+
+_real_torch_device = torch.device
+
+
+class _MockTorchDeviceType(type):
+    """Metaclass for torch.device mock to preserve isinstance checks in PyTorch accelerator utils."""
+
+    def __instancecheck__(cls, instance: object) -> bool:
+        """Verify instance is a real torch.device instance."""
+        return isinstance(instance, _real_torch_device)
+
+
+class MockTorchDevice(metaclass=_MockTorchDeviceType):
+    """Mock class redirecting torch.device instantiation to CPU while retaining type identity."""
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+        """Return a real CPU torch device."""
+        return _real_torch_device("cpu")
 
 
 def test_prepare_dataset_raises_when_missing(tmp_path: Path) -> None:
@@ -400,7 +419,6 @@ def test_local_gpu_runner_real_datasets_and_telemetry(
 ) -> None:
     """Test LocalGpuRunner with real datasets, CUDA telemetry, and MPS device detection."""
     import duckdb
-    import torch
 
     runner = LocalGpuRunner()
     monkeypatch.setenv("T1D_MOCK_GPU", "1")
@@ -422,7 +440,7 @@ def test_local_gpu_runner_real_datasets_and_telemetry(
                     "torch.cuda.mem_get_info",
                     return_value=(500 * 1024 * 1024, 1000 * 1024 * 1024),
                 ):
-                    with patch("torch.device", return_value=torch.device("cpu")):
+                    with patch("torch.device", MockTorchDevice):
                         config_cuda = TrainingJobConfig(
                             model_name="gemma-7b",
                             backend=TrainingBackend.LOCAL_GPU,
@@ -456,7 +474,7 @@ def test_local_gpu_runner_real_datasets_and_telemetry(
     monkeypatch.delenv("T1D_MOCK_GPU", raising=False)
     with patch("torch.cuda.is_available", return_value=False):
         with patch("torch.backends.mps.is_available", return_value=True):
-            with patch("torch.device", return_value=torch.device("cpu")):
+            with patch("torch.device", MockTorchDevice):
                 config_mps = TrainingJobConfig(
                     model_name="gemma-7b",
                     backend=TrainingBackend.LOCAL_GPU,
@@ -889,8 +907,6 @@ def test_local_cpu_runner_fallback_exception_paths(tmp_path: Path) -> None:
 
 def test_local_gpu_runner_real_training_cuda_pipeline(tmp_path: Path) -> None:
     """Test LocalGpuRunner authentic training execution with CUDA telemetry and checkpoints."""
-    import torch
-
     runner = LocalGpuRunner()
     ds = tmp_path / "train_gpu.jsonl"
     ds.write_text(
@@ -924,7 +940,7 @@ def test_local_gpu_runner_real_training_cuda_pipeline(tmp_path: Path) -> None:
                         "torch.cuda.max_memory_allocated",
                         return_value=1024 * 1024 * 64,
                     ):
-                        with patch("torch.device", return_value=torch.device("cpu")):
+                        with patch("torch.device", MockTorchDevice):
                             res = runner.run_training(config)
                             assert res["status"] == "completed"
                             assert res["device"] == "cuda:0"
@@ -937,8 +953,6 @@ def test_local_gpu_runner_real_training_cuda_pipeline(tmp_path: Path) -> None:
 
 def test_local_gpu_runner_real_training_mps_and_dry_run(tmp_path: Path) -> None:
     """Test LocalGpuRunner real training execution with MPS device and dry-run mode."""
-    import torch
-
     runner = LocalGpuRunner()
     ds = tmp_path / "train_gpu.jsonl"
     ds.write_text(
@@ -958,7 +972,7 @@ def test_local_gpu_runner_real_training_mps_and_dry_run(tmp_path: Path) -> None:
     with patch.dict("os.environ", {"T1D_MOCK_GPU": "0"}):
         with patch("torch.cuda.is_available", return_value=False):
             with patch("torch.backends.mps.is_available", return_value=True):
-                with patch("torch.device", return_value=torch.device("cpu")):
+                with patch("torch.device", MockTorchDevice):
                     res_mps = runner.run_training(config_mps)
                     assert res_mps["device"] == "mps"
                     assert res_mps["mixed_precision"] == "fp32"
@@ -974,7 +988,7 @@ def test_local_gpu_runner_real_training_mps_and_dry_run(tmp_path: Path) -> None:
         dry_run=True,
     )
     with patch.dict("os.environ", {"T1D_MOCK_GPU": "1"}):
-        with patch("torch.device", return_value=torch.device("cpu")):
+        with patch("torch.device", MockTorchDevice):
             res_dry = runner.run_training(config_dry)
             assert res_dry["status"] == "dry_run_completed"
             assert res_dry["final_loss"] == 0.0
@@ -1025,8 +1039,6 @@ def test_local_gpu_runner_fallback_on_exception(tmp_path: Path) -> None:
 
 def test_local_gpu_runner_device_info_exceptions(tmp_path: Path) -> None:
     """Test LocalGpuRunner handling exceptions when probing GPU device name and VRAM."""
-    import torch
-
     runner = LocalGpuRunner()
     ds = tmp_path / "train_gpu_exc.jsonl"
     ds.write_text('{"prompt": "q1", "completion": "SELECT 1"}\n')
@@ -1051,7 +1063,7 @@ def test_local_gpu_runner_device_info_exceptions(tmp_path: Path) -> None:
                     side_effect=RuntimeError("Mem info error"),
                 ):
                     with patch("torch.cuda.max_memory_allocated", return_value=0):
-                        with patch("torch.device", return_value=torch.device("cpu")):
+                        with patch("torch.device", MockTorchDevice):
                             res = runner.run_training(config)
                             assert res["status"] == "dry_run_completed"
                             assert res["device"] == "cuda:0"
@@ -1426,8 +1438,6 @@ def test_huggingface_causal_lm_factory_all_branches() -> None:
 
 def test_gradient_accumulation_in_cpu_and_gpu(tmp_path: Path) -> None:
     """Test gradient accumulation stepping in LocalCpuRunner and LocalGpuRunner."""
-    import torch
-
     ds = tmp_path / "data_accum.jsonl"
     ds.write_text(
         '{"prompt": "q1", "completion": "SELECT 1"}\n'
@@ -1462,7 +1472,7 @@ def test_gradient_accumulation_in_cpu_and_gpu(tmp_path: Path) -> None:
         dry_run=False,
     )
     with patch.dict(os.environ, {"T1D_MOCK_GPU": "1"}):
-        with patch("torch.device", return_value=torch.device("cpu")):
+        with patch("torch.device", MockTorchDevice):
             res_gpu = gpu_runner.run_training(cfg_gpu)
             assert res_gpu["status"] == "completed"
 
@@ -1664,7 +1674,7 @@ def test_hf_runner_and_factory_remaining_branches(tmp_path: Path) -> None:
         dry_run=True,
     )
     with patch("torch.cuda.is_available", return_value=True):
-        with patch("torch.device", return_value=torch.device("cpu")):
+        with patch("torch.device", MockTorchDevice):
             with patch.object(
                 HuggingFaceCausalLMFactory, "create_model"
             ) as mock_create:
@@ -1732,7 +1742,7 @@ def test_hf_runner_and_factory_remaining_branches(tmp_path: Path) -> None:
         dry_run=False,
     )
     with patch.dict(os.environ, {"T1D_MOCK_GPU": "1"}):
-        with patch("torch.device", return_value=torch.device("cpu")):
+        with patch("torch.device", MockTorchDevice):
             with patch.object(torch.optim.lr_scheduler, "CosineAnnealingLR", None):
                 res_gpu_no_sched = gpu_r.run_training(cfg_gpu)
                 assert res_gpu_no_sched["status"] == "completed"
