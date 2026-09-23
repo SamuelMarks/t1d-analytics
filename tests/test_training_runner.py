@@ -440,7 +440,21 @@ def test_local_gpu_runner_real_datasets_and_telemetry(
                     "torch.cuda.mem_get_info",
                     return_value=(500 * 1024 * 1024, 1000 * 1024 * 1024),
                 ):
-                    with patch("torch.device", MockTorchDevice):
+                    with (
+                        patch("torch.device", MockTorchDevice),
+                        patch.object(
+                            torch.optim.Optimizer,
+                            "_accelerator_graph_capture_health_check",
+                            lambda self: None,
+                            create=True,
+                        ),
+                        patch.object(
+                            torch.optim.Optimizer,
+                            "_cuda_graph_capture_health_check",
+                            lambda self: None,
+                            create=True,
+                        ),
+                    ):
                         config_cuda = TrainingJobConfig(
                             model_name="gemma-7b",
                             backend=TrainingBackend.LOCAL_GPU,
@@ -940,7 +954,21 @@ def test_local_gpu_runner_real_training_cuda_pipeline(tmp_path: Path) -> None:
                         "torch.cuda.max_memory_allocated",
                         return_value=1024 * 1024 * 64,
                     ):
-                        with patch("torch.device", MockTorchDevice):
+                        with (
+                            patch("torch.device", MockTorchDevice),
+                            patch.object(
+                                torch.optim.Optimizer,
+                                "_accelerator_graph_capture_health_check",
+                                lambda self: None,
+                                create=True,
+                            ),
+                            patch.object(
+                                torch.optim.Optimizer,
+                                "_cuda_graph_capture_health_check",
+                                lambda self: None,
+                                create=True,
+                            ),
+                        ):
                             res = runner.run_training(config)
                             assert res["status"] == "completed"
                             assert res["device"] == "cuda:0"
@@ -1683,6 +1711,27 @@ def test_hf_runner_and_factory_remaining_branches(tmp_path: Path) -> None:
                 mock_create.return_value = mock_hf_m
                 res_c = runner.run_training(cfg_cuda)
                 assert res_c["status"] == "dry_run_completed"
+
+    # 5b. MPS device resolution in HuggingFaceCausalLMRunner
+    cfg_mps = TrainingJobConfig(
+        model_name="gemma-2b",
+        backend=TrainingBackend.HUGGINGFACE,
+        dataset_path=str(ds),
+        validation_dataset_path=str(tmp_path / "nonexistent_val.jsonl"),
+        output_dir=str(tmp_path / "hf_mps_out"),
+        dry_run=True,
+    )
+    with (
+        patch("torch.cuda.is_available", return_value=False),
+        patch("torch.backends.mps.is_available", return_value=True),
+        patch("torch.device", MockTorchDevice),
+        patch.object(HuggingFaceCausalLMFactory, "create_model") as mock_create_mps,
+    ):
+        mock_hf_m_mps = MagicMock()
+        mock_hf_m_mps.to.side_effect = RuntimeError("to fail")
+        mock_create_mps.return_value = mock_hf_m_mps
+        res_m = runner.run_training(cfg_mps)
+        assert res_m["status"] == "dry_run_completed"
 
     # 6. Model without save_pretrained (falls back to torch.save) and scheduler None
     class SimpleModel(nn.Module):
