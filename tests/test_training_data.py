@@ -1,9 +1,15 @@
 """Tests for the training_data module."""
 
 import json
+import sys
+import types
 from pathlib import Path
 from typing import Generator
 from unittest.mock import MagicMock, patch
+
+if "any_llm" not in sys.modules:
+    sys.modules["any_llm"] = types.ModuleType("any_llm")
+    setattr(sys.modules["any_llm"], "AnyLLM", MagicMock())
 
 import duckdb
 import pytest
@@ -540,3 +546,150 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
     mocker.patch("t1d_analytics.api.generate_sql_from_nl", side_effect=mock_gen)
     res = evaluate_text_to_sql(str(db_file), test_cases)
     assert res["execution_accuracy"] == 50.0
+
+
+def test_make_hashable() -> None:
+    """Test _make_hashable converts nested unhashable structures into hashable immutable tuples."""
+    from t1d_analytics.training_data import _make_hashable
+
+    data = {
+        "a": [1, 2, {"k": "v"}],
+        "b": {3, 4},
+        "c": (5, [6, 7]),
+        "d": 42,
+    }
+    hashable = _make_hashable(data)
+    assert isinstance(hashable, tuple)
+    # Verify it can be hashed and stored in set/Counter
+    hash_set = {hashable}
+    assert hashable in hash_set
+
+
+def test_evaluate_text_to_sql_nested_complex_types(
+    tmp_path: Path, mocker: MagicMock
+) -> None:
+    """Test evaluate_text_to_sql handles DuckDB STRUCT and LIST types without unhashable TypeError."""
+    from t1d_analytics.training_data import evaluate_text_to_sql
+
+    db_file = tmp_path / "nested.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute(
+        "CREATE TABLE complex_tbl (id INT, items INT[], info STRUCT(name VARCHAR))"
+    )
+    conn.execute("INSERT INTO complex_tbl VALUES (1, [10, 20], {'name': 'alice'})")
+    conn.close()
+
+    test_cases = [
+        {
+            "prompt": "Get complex data",
+            "gold_sql": "SELECT items, info FROM complex_tbl",
+        }
+    ]
+
+    mocker.patch(
+        "t1d_analytics.api.generate_sql_from_nl",
+        return_value=("ok", "SELECT items, info FROM complex_tbl"),
+    )
+    res = evaluate_text_to_sql(str(db_file), test_cases)
+    assert res["execution_accuracy"] == 100.0
+
+
+def test_write_pairs_to_tables_empty_and_error(tmp_path: Path) -> None:
+    """Test _write_pairs_to_tables handles empty lists and rolls back on execution errors."""
+    from t1d_analytics.training_data import TrainingDataGenerator
+
+    db_file = tmp_path / "rollback.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute("CREATE TABLE dummy (x INT)")
+
+    gen = TrainingDataGenerator(conn, "gemma4")
+    # Empty pairs returns early
+    gen._write_pairs_to_tables([], suffix="_empty")
+
+    # Error inside transaction triggers rollback
+    mock_conn = MagicMock()
+    mock_conn.executemany.side_effect = RuntimeError("Disk full")
+    gen.conn = mock_conn
+
+    with pytest.raises(RuntimeError, match="Disk full"):
+        gen._write_pairs_to_tables([("q", "c", "r")], suffix="_err")
+    mock_conn.execute.assert_any_call("ROLLBACK")
+    conn.close()
+
+
+def test_generate_pairs_checkpointing_and_custom_template(
+    tmp_path: Path, mocker: MagicMock
+) -> None:
+    """Test _generate_pairs checkpoint save/load and custom prompt template formatting."""
+    conn = duckdb.connect(":memory:")
+    conn.execute("CREATE TABLE users (id INT, name VARCHAR)")
+    gen = TrainingDataGenerator(conn, "ollama/gemma4")
+
+    # 1. Existing valid checkpoint with complete pairs
+    ckpt_file = tmp_path / "checkpoint.json"
+    ckpt_file.write_text(
+        json.dumps(
+            [
+                {
+                    "prompt": "Count users",
+                    "chosen": "SELECT COUNT(*) FROM users",
+                    "rejected": "SELECT 1",
+                },
+                42,  # Non-dict item to test isinstance(item, dict) check
+                {"chosen": "SELECT 2"},  # Missing prompt to test "prompt" in item check
+            ]
+        )
+    )
+    cached_pairs = gen._generate_pairs("schema", count=1, checkpoint_path=ckpt_file)
+    assert len(cached_pairs) == 1
+    assert cached_pairs[0][0] == "Count users"
+
+    mock_llm = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = (
+        '["New Question", "SELECT id FROM users", "SELECT bad"]'
+    )
+    mock_llm.completion.return_value = MagicMock(choices=[mock_choice])
+
+    # 1b. Partial checkpoint with count=2 (resumes generation)
+    with patch("any_llm.AnyLLM.create", return_value=mock_llm):
+        resumed_pairs = gen._generate_pairs(
+            "schema", count=2, checkpoint_path=ckpt_file
+        )
+        assert len(resumed_pairs) == 2
+
+    # 2. Corrupt checkpoint file recovers gracefully
+    corrupt_file = tmp_path / "corrupt.json"
+    corrupt_file.write_text("{bad json")
+
+    # 2b. Checkpoint containing non-list JSON root
+    dict_file = tmp_path / "dict_root.json"
+    dict_file.write_text('{"key": "value"}')
+    gen._generate_pairs("schema", count=1, checkpoint_path=dict_file)
+
+    with patch("any_llm.AnyLLM.create", return_value=mock_llm):
+        out_ckpt = tmp_path / "new_ckpt.json"
+        pairs = gen._generate_pairs(
+            "schema",
+            count=1,
+            checkpoint_path=out_ckpt,
+            custom_prompt_template="Custom: {schema}",
+            temperature=0.2,
+            max_tokens=256,
+        )
+        assert len(pairs) == 1
+        assert out_ckpt.exists()
+
+    # 3. Checkpoint write error handled gracefully
+    with patch("any_llm.AnyLLM.create", return_value=mock_llm):
+        bad_dir = tmp_path / "read_only"
+        bad_dir.mkdir()
+        bad_ckpt = (
+            bad_dir  # Writing text to a directory raises IsADirectoryError / OSError
+        )
+        pairs_write_err = gen._generate_pairs(
+            "schema", count=1, checkpoint_path=bad_ckpt
+        )
+        assert len(pairs_write_err) == 1
+
+    conn.close()

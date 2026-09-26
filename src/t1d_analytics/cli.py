@@ -5,7 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from t1d_analytics.downloader import process_datasets
 from t1d_analytics.i18n import get_translator
@@ -355,6 +355,16 @@ def main() -> None:
         "--prefix-subdirs",
         action="store_true",
         help="Prefix table names with subdirectory name.",
+    )
+    watch_parser.add_argument(
+        "--include-sas",
+        action="store_true",
+        help="Include SAS dataset files (*.sas7bdat, *.xpt) in watch directory discovery.",
+    )
+    watch_parser.add_argument(
+        "--include-spss",
+        action="store_true",
+        help="Include SPSS dataset files (*.sav) in watch directory discovery.",
     )
 
     # Train subcommand
@@ -950,6 +960,8 @@ def handle_watch(args: argparse.Namespace) -> None:
         args: Arguments containing data_dir, db, interval, iterations, and prefix_subdirs.
 
     """
+    import duckdb
+
     from t1d_analytics.analytics import compute_file_hash, load_data_to_duckdb
 
     data_path = Path(args.data_dir)
@@ -961,14 +973,39 @@ def handle_watch(args: argparse.Namespace) -> None:
     count = 0
     while True:
         count += 1
+        exts = ["*.csv", "*.parquet", "*.txt", "*.csv.gz"]
+        if getattr(args, "include_sas", False):
+            exts.extend(["*.sas7bdat", "*.xpt"])
+        if getattr(args, "include_spss", False):
+            exts.append("*.sav")
+
         current_files: list[Path] = []
         if data_path.exists():
-            for ext in ("*.csv", "*.parquet", "*.txt"):
+            for ext in exts:
                 current_files.extend(data_path.rglob(ext))
+
+        # Detect deleted files and prune manifest records
+        current_paths_set = {str(f.resolve()) for f in current_files}
+        deleted_files = [
+            f_str for f_str in seen_hashes if f_str not in current_paths_set
+        ]
+        for del_f in deleted_files:
+            del seen_hashes[del_f]
+            print(f"Detected file deletion: '{del_f}'. Pruning manifest...")
+            if Path(args.db).exists():
+                try:
+                    conn = duckdb.connect(args.db)
+                    conn.execute(
+                        "DELETE FROM _t1d_ingestion_manifest WHERE file_path = ?",
+                        (del_f,),
+                    )
+                    conn.close()
+                except Exception:
+                    pass
 
         changed = False
         for f in current_files:
-            f_str = str(f)
+            f_str = str(f.resolve())
             h = compute_file_hash(f)
             if seen_hashes.get(f_str) != h:
                 seen_hashes[f_str] = h
@@ -1034,15 +1071,56 @@ def handle_train(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     formats = [f.strip().lower() for f in args.export_formats.split(",")]
-    if "jsonl" in formats:
-        jsonl_path = out_dir / "training_data.jsonl"
-        print(f"Exporting JSONL to {jsonl_path}...")
-        generator.export_to_jsonl("sft_data", jsonl_path)
+    stages_to_export = ["sft_data", "pretrain_data", "dpo_data"]
+    if getattr(args, "split_validation", False):
+        stages_to_export.extend(["sft_data_train", "sft_data_val", "sft_data_test"])
 
-    if "parquet" in formats:
-        parquet_path = out_dir / "training_data.parquet"
-        print(f"Exporting Parquet to {parquet_path}...")
-        generator.export_to_parquet("sft_data", parquet_path)
+    all_tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    manifest_stages: dict[str, Any] = {}
+
+    for stage in stages_to_export:
+        if stage in all_tables:
+            count_res = conn.execute(f'SELECT COUNT(*) FROM "{stage}"').fetchone()
+            stage_count = count_res[0] if count_res else 0
+            manifest_stages[stage] = {"rows": stage_count, "files": []}
+
+            if "jsonl" in formats:
+                p = out_dir / f"{stage}.jsonl"
+                print(f"Exporting JSONL to {p}...")
+                generator.export_to_jsonl(stage, p)
+                manifest_stages[stage]["files"].append(str(p.name))
+
+            if "parquet" in formats:
+                p = out_dir / f"{stage}.parquet"
+                print(f"Exporting Parquet to {p}...")
+                generator.export_to_parquet(stage, p)
+                manifest_stages[stage]["files"].append(str(p.name))
+
+    # Maintain training_data.jsonl and training_data.parquet aliases for compatibility
+    if "jsonl" in formats and (out_dir / "sft_data.jsonl").exists():
+        import shutil
+
+        shutil.copyfile(out_dir / "sft_data.jsonl", out_dir / "training_data.jsonl")
+
+    if "parquet" in formats and (out_dir / "sft_data.parquet").exists():
+        import shutil
+
+        shutil.copyfile(out_dir / "sft_data.parquet", out_dir / "training_data.parquet")
+
+    manifest_file = out_dir / "training_manifest.json"
+    import datetime
+
+    manifest_file.write_text(
+        json.dumps(
+            {
+                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "database": args.db,
+                "model": f"{args.provider}/{args.model}",
+                "stages": manifest_stages,
+            },
+            indent=2,
+        )
+    )
 
     split_validation_passed = True
     if getattr(args, "split_validation", False):
@@ -1136,11 +1214,13 @@ def handle_train(args: argparse.Namespace) -> None:
                 model_name=args.model,
             )
 
+        target_parquet = out_dir / "sft_data.parquet"
+        target_jsonl = out_dir / "sft_data.jsonl"
         ds_target = (
-            str(parquet_path)
+            str(target_parquet)
             if "parquet" in formats
             else (
-                str(jsonl_path)
+                str(target_jsonl)
                 if "jsonl" in formats
                 else str(out_dir / "training_data.parquet")
             )

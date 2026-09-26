@@ -168,6 +168,24 @@ export const enTranslations = {
     emptyDbPrompt:
       "Database has no tables loaded. Use 't1d-analytics load' to import clinical data.",
   },
+  cgm: {
+    title: "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
+    reportPdf: "🖨️ Clinical AGP Report (PDF)",
+    wearValid:
+      "✓ Sensor Wear: {{pct}}% ({{days}} days, {{readings}} readings) - Valid (>=70%)",
+    wearCaution:
+      "⚠️ Sensor Wear: {{pct}}% ({{days}} days) - Caution (<70% wear)",
+    gmi: "GMI: {{gmi}}% (Mean: {{mean}} mg/dL)",
+    cv: "CV: {{cv}}% (Target ≤36% | SD: {{sd}} mg/dL)",
+    lbgiHbgi: "LBGI: {{lbgi}} | HBGI: {{hbgi}}",
+    dayNight: "Day: {{day}}% | Night: {{night}}%",
+    obsWindow: "Observation Window:",
+    days7: "7 Days",
+    days14: "14 Days (Standard)",
+    days30: "30 Days",
+    days90: "90 Days",
+    daysAll: "All Available Data",
+  },
 };
 
 /**

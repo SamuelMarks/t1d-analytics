@@ -33,6 +33,28 @@ def normalize_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", sql).strip().lower()
 
 
+def _make_hashable(val: Any) -> Any:
+    """
+    Recursively convert unhashable types into immutable hashable equivalents.
+
+    Args:
+    ----
+        val: Any Python value (lists, dicts, tuples, primitives).
+
+    Returns:
+    -------
+        Any: An immutable, hashable version of the input value.
+
+    """
+    if isinstance(val, (list, tuple)):
+        return tuple(_make_hashable(x) for x in val)
+    if isinstance(val, dict):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in val.items()))
+    if isinstance(val, set):
+        return tuple(sorted(_make_hashable(x) for x in val))
+    return val
+
+
 def _parse_llm_json_array(content_str: str) -> Optional[list[object]]:
     """
     Parse a JSON array from LLM response text, stripping markdown blocks if present.
@@ -192,7 +214,14 @@ class TrainingDataGenerator:
             return False
 
     def _generate_pairs(
-        self, schema: str, count: int, validate_sql: bool = True
+        self,
+        schema: str,
+        count: int,
+        validate_sql: bool = True,
+        temperature: float = 0.7,
+        max_tokens: int = 512,
+        checkpoint_path: Optional[Path] = None,
+        custom_prompt_template: Optional[str] = None,
     ) -> list[tuple[str, str, str]]:
         """
         Generate (prompt, chosen_sql, rejected_sql) pairs using the LLM.
@@ -202,6 +231,10 @@ class TrainingDataGenerator:
             schema: The textual representation of the table's schema.
             count: The number of pairs to generate.
             validate_sql: Whether to validate chosen SQL queries against DuckDB schema.
+            temperature: Sampling temperature for generation.
+            max_tokens: Maximum tokens per generation request.
+            checkpoint_path: Optional path to save intermediate progress and resume.
+            custom_prompt_template: Optional custom prompt template string containing {schema}.
 
         Returns:
         -------
@@ -212,6 +245,20 @@ class TrainingDataGenerator:
 
         """
         pairs: list[tuple[str, str, str]] = []
+        if checkpoint_path and checkpoint_path.exists():
+            try:
+                ckpt = json.loads(checkpoint_path.read_text())
+                if isinstance(ckpt, list):
+                    for item in ckpt:
+                        if isinstance(item, dict) and "prompt" in item:
+                            pairs.append(
+                                (item["prompt"], item["chosen"], item["rejected"])
+                            )
+                if len(pairs) >= count:
+                    return pairs[:count]
+            except Exception as e:
+                logger.warning(f"Could not load checkpoint from {checkpoint_path}: {e}")
+
         base_url = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
         if not base_url.startswith("http://") and not base_url.startswith("https://"):
             base_url = f"http://{base_url}"
@@ -236,14 +283,17 @@ class TrainingDataGenerator:
 
         while len(pairs) < count and attempts < max_attempts:
             attempts += 1
-            prompt = (
-                f"Given the following database schema:\n{schema}\n"
-                "Generate a natural language question, a correct SQL query to answer it, "
-                "and an incorrect SQL query with a subtle mistake. "
-                "Output as a JSON array with exactly three strings: "
-                '["Question", "Correct SQL", "Incorrect SQL"]. '
-                "Do not include any other text."
-            )
+            if custom_prompt_template:
+                prompt = custom_prompt_template.format(schema=schema)
+            else:
+                prompt = (
+                    f"Given the following database schema:\n{schema}\n"
+                    "Generate a natural language question, a correct SQL query to answer it, "
+                    "and an incorrect SQL query with a subtle mistake. "
+                    "Output as a JSON array with exactly three strings: "
+                    '["Question", "Correct SQL", "Incorrect SQL"]. '
+                    "Do not include any other text."
+                )
 
             parsed: Optional[list[object]] = None
 
@@ -252,6 +302,8 @@ class TrainingDataGenerator:
                     resp = llm_instance.completion(
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
+                        temperature=temperature,
+                        max_tokens=max_tokens,
                     )
                     raw_choice = resp.choices[0].message.content
                     content_str = (raw_choice or "").strip()
@@ -265,6 +317,10 @@ class TrainingDataGenerator:
                     "prompt": prompt,
                     "stream": False,
                     "format": "json",
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
                 }
                 req = urllib.request.Request(
                     api_url,
@@ -291,6 +347,19 @@ class TrainingDataGenerator:
                     logger.warning(f"Discarding pair with invalid chosen SQL: {chosen}")
                     continue
                 pairs.append((q, chosen, rej))
+                if checkpoint_path:
+                    try:
+                        checkpoint_path.write_text(
+                            json.dumps(
+                                [
+                                    {"prompt": p, "chosen": c, "rejected": r}
+                                    for p, c, r in pairs
+                                ],
+                                indent=2,
+                            )
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not write checkpoint: {e}")
 
         return pairs
 
@@ -355,18 +424,24 @@ class TrainingDataGenerator:
             f'CREATE TABLE IF NOT EXISTS "{dpo_tbl}" (prompt TEXT, chosen TEXT, rejected TEXT)'
         )
 
-        for prompt, chosen, rejected in pairs:
-            pretrain_text = f"Question: {prompt}\nSQL: {chosen}"
-            self.conn.execute(
-                f'INSERT INTO "{pretrain_tbl}" VALUES (?)', (pretrain_text,)
+        if not pairs:
+            return
+
+        pretrain_rows = [(f"Question: {p}\nSQL: {c}",) for p, c, _ in pairs]
+        sft_rows = [(p, c) for p, c, _ in pairs]
+        dpo_rows = [(p, c, r) for p, c, r in pairs]
+
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            self.conn.executemany(
+                f'INSERT INTO "{pretrain_tbl}" VALUES (?)', pretrain_rows
             )
-            self.conn.execute(
-                f'INSERT INTO "{sft_tbl}" VALUES (?, ?)', (prompt, chosen)
-            )
-            self.conn.execute(
-                f'INSERT INTO "{dpo_tbl}" VALUES (?, ?, ?)',
-                (prompt, chosen, rejected),
-            )
+            self.conn.executemany(f'INSERT INTO "{sft_tbl}" VALUES (?, ?)', sft_rows)
+            self.conn.executemany(f'INSERT INTO "{dpo_tbl}" VALUES (?, ?, ?)', dpo_rows)
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
 
     def export_to_jsonl(self, table_name: str, output_path: Path) -> None:
         """
@@ -470,7 +545,11 @@ def evaluate_text_to_sql(
             else:
                 import collections
 
-                ex = collections.Counter(pred_rows) == collections.Counter(gold_rows)
+                hashable_pred = [_make_hashable(r) for r in pred_rows]
+                hashable_gold = [_make_hashable(r) for r in gold_rows]
+                ex = collections.Counter(hashable_pred) == collections.Counter(
+                    hashable_gold
+                )
             if ex:
                 ex_count += 1
 

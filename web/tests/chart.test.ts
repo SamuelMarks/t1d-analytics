@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import i18next from "i18next";
 import {
   detectCgmColumns,
   calculateTIR,
@@ -13,6 +14,7 @@ import {
   computePercentile,
   calculateAGP,
   renderAGPSvg,
+  filterObservationWindow,
   filter14DayWindow,
   calculateActiveWear,
   parseDateAndMinuteOfDay,
@@ -262,6 +264,50 @@ describe("CGM Charting Module", () => {
     expect(cautionWear.wearPercentage).toBeLessThan(70.0);
   });
 
+  it("renders CGM card with RTL and handles observation window select changes", async () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+
+    await i18next.changeLanguage("ar");
+    const sampleRows = [
+      { time: "2024-01-01T12:00:00Z", glucose: 100 },
+      { time: "2024-01-05T12:00:00Z", glucose: 110 },
+      { time: "2024-01-20T12:00:00Z", glucose: 120 },
+    ];
+    const card = renderCgmCard(sampleRows);
+    expect(card).not.toBeNull();
+    expect(card?.getAttribute("dir")).toBe("rtl");
+    parent.appendChild(card!);
+
+    const select = card?.querySelector(
+      ".agp-window-select",
+    ) as HTMLSelectElement | null;
+    expect(select).not.toBeNull();
+    if (select && select.onchange) {
+      select.value = "30";
+      select.onchange(new Event("change") as any);
+      expect(parent.querySelector(".cgm-analytics-card")).not.toBeNull();
+    }
+
+    // Test onchange when container is unattached (container.parentNode is null)
+    const unattached = renderCgmCard(sampleRows);
+    const unattachedSelect = unattached?.querySelector(
+      ".agp-window-select",
+    ) as HTMLSelectElement | null;
+    if (unattachedSelect && unattachedSelect.onchange) {
+      unattachedSelect.onchange(new Event("change") as any);
+    }
+
+    // Test filterObservationWindow with days <= 0 and with default days argument
+    const allData = filterObservationWindow(sampleRows, "time", 0);
+    expect(allData.length).toBe(sampleRows.length);
+    const defaultData = filterObservationWindow(sampleRows, "time");
+    expect(defaultData.length).toBeGreaterThan(0);
+
+    await i18next.changeLanguage("en");
+    document.body.removeChild(parent);
+  });
+
   it("covers chart edge branches", () => {
     // 1. Glucose <= 0 or invalid in calculateAGP
     const zeroRows = [
@@ -316,7 +362,7 @@ describe("CGM Charting Module", () => {
     expect(badTimeCard?.querySelectorAll("svg").length).toBe(2); // TIR and histogram, no AGP
 
     // 7. parseDateAndMinuteOfDay with invalid offset date string falling back to literal
-    expect(parseDateAndMinuteOfDay("1000-00-00T00:00:00+00:00")).toEqual({
+    expect(parseDateAndMinuteOfDay("1000-00-00T00:00:00+00:00")).toMatchObject({
       dayKey: "1000--1-0",
       minuteOfDay: 0,
     });
@@ -641,5 +687,148 @@ describe("CGM Charting Module", () => {
       { glucose: 110, time: "bad_timestamp_2" },
     ]);
     expect(cardUnparseableTime).not.toBeNull();
+  });
+
+  it("handles CDISC SAS and European dates in filter14DayWindow and calculateActiveWear", () => {
+    const cdiscRows = [
+      { time: "01-JAN-2024 10:00:00", glucose: 100 },
+      { time: "10-JAN-2024 12:00:00", glucose: 110 },
+      { time: "14-JAN-2024 16:30:00", glucose: 120 },
+      { time: "15-JAN-2024 08:00:00", glucose: 130 },
+    ];
+    const filtered = filter14DayWindow(cdiscRows, "time");
+    expect(filtered.length).toBe(4);
+
+    const wear = calculateActiveWear(cdiscRows, "time");
+    expect(wear.activeDays).toBe(4);
+    expect(wear.calendarDays).toBe(15);
+    expect(wear.totalReadings).toBe(4);
+
+    // European date slash format
+    const euroRows = [
+      { time: "15/01/2024 09:00:00", glucose: 105 },
+      { time: "16/01/2024 09:00:00", glucose: 115 },
+    ];
+    const euroFiltered = filter14DayWindow(euroRows, "time");
+    expect(euroFiltered.length).toBe(2);
+  });
+
+  it("correctly identifies mmol/L units even with severe DKA hyperglycemia spikes >= 35 mmol/L", () => {
+    // Normal readings 5-9 mmol/L with a spike to 38 mmol/L
+    const mmolWithSpike = [5.5, 6.0, 7.2, 8.1, 6.5, 38.0, 5.8, 6.2, 7.0, 8.5];
+    const tir = calculateTIR(mmolWithSpike);
+    // Values scaled to mg/dL: 5.5 * 18.0182 = 99.1 mg/dL (in range 70-180)
+    // 38 * 18.0182 = 684.7 mg/dL (very high > 250)
+    expect(tir.veryLow).toBe(0);
+    expect(tir.inRange).toBeGreaterThan(50);
+    expect(tir.veryHigh).toBe(10); // Exactly 1 out of 10 is very high
+  });
+
+  it("calculates Day/Night TIR with mmol/L values scaled consistently", () => {
+    const dayNightMmol = [
+      { time: "2024-01-01T10:00:00Z", glucose: 6.5 },
+      { time: "2024-01-01T11:00:00Z", glucose: 7.0 },
+      { time: "2024-01-01T23:00:00Z", glucose: 6.0 },
+      { time: "2024-01-02T01:00:00Z", glucose: 5.8 },
+    ];
+    const dn = calculateDayNightTIR(dayNightMmol, "time", "glucose");
+    expect(dn.day.inRange).toBe(100);
+    expect(dn.night.inRange).toBe(100);
+    expect(dn.day.mean).toBeGreaterThan(100); // scaled by 18.0182
+
+    // calculateActiveWear with expectedReadingsPerDay = 0
+    const zeroExpectWear = calculateActiveWear(dayNightMmol, "time", 0);
+    expect(zeroExpectWear.wearPercentage).toBe(0);
+
+    // calculateActiveWear with zero timestamp (minTime stays Infinity, triggers fallback calendarDays = days.size)
+    const zeroTimeWear = calculateActiveWear([{ time: 0 }], "time");
+    expect(zeroTimeWear.calendarDays).toBe(1);
+  });
+
+  it("validates generic value/val columns contextually based on clinical ranges", () => {
+    // Table with generic "val" and valid blood glucose numbers (median ~120)
+    const validCgmTable = [
+      { time: "2024-01-01T12:00:00Z", val: 110 },
+      { time: "2024-01-01T12:05:00Z", val: "125" },
+      { time: "2024-01-01T12:10:00Z", val: 130 },
+    ];
+    const detected1 = detectCgmColumns(validCgmTable);
+    expect(detected1.glucoseCol).toBe("val");
+
+    // Table with generic "value" containing non-glucose values (e.g. insulin doses 0.5 - 2.0 units)
+    const insulinSettingsTable = [
+      { time: "2024-01-01T12:00:00Z", value: 0.5 },
+      { time: "2024-01-01T12:05:00Z", value: 1.0 },
+      { time: "2024-01-01T12:10:00Z", value: 1.5 },
+    ];
+    const detected2 = detectCgmColumns(insulinSettingsTable);
+    expect(detected2.glucoseCol).toBeUndefined();
+
+    // Table with generic "value" with non-numeric samples (numSamples.length === 0)
+    const textValueTable = [
+      { time: "2024-01-01T12:00:00Z", value: "hello" },
+      { time: "2024-01-01T12:05:00Z", value: null },
+    ];
+    const detected3 = detectCgmColumns(textValueTable);
+    expect(detected3.glucoseCol).toBeUndefined();
+
+    // Table with generic "value" with extreme median > 500
+    const highMedianTable = [
+      { time: "2024-01-01T12:00:00Z", value: 1000 },
+      { time: "2024-01-01T12:05:00Z", value: 1200 },
+    ];
+    const detected4 = detectCgmColumns(highMedianTable);
+    expect(detected4.glucoseCol).toBeUndefined();
+
+    // Table without time column should not match generic "value"
+    const noTimeTable = [{ value: 120 }, { value: 130 }];
+    const detected5 = detectCgmColumns(noTimeTable);
+    expect(detected5.glucoseCol).toBeUndefined();
+
+    // Table with time column but no glucose column and no generic value column
+    const timeOnlyTable = [{ timestamp: "2024-01-01", patient_name: "Alice" }];
+    const detected6 = detectCgmColumns(timeOnlyTable);
+    expect(detected6.glucoseCol).toBeUndefined();
+    expect(detected6.timeCol).toBe("timestamp");
+  });
+
+  it("comprehensively tests clinical dates, daylight saving transitions, leap years, and day/night boundary crossing", () => {
+    // 1. CDISC SAS format dates
+    const cdisc1 = parseDateAndMinuteOfDay("01-JAN-2024 08:30:00");
+    expect(cdisc1).not.toBeNull();
+    expect(cdisc1?.minuteOfDay).toBe(8 * 60 + 30);
+
+    const cdisc2 = parseDateAndMinuteOfDay("15-FEB-2024 23:45:00");
+    expect(cdisc2).not.toBeNull();
+    expect(cdisc2?.minuteOfDay).toBe(23 * 60 + 45);
+
+    // 2. Leap year date (February 29, 2024)
+    const leapYearCdisc = parseDateAndMinuteOfDay("29-FEB-2024 12:00:00");
+    expect(leapYearCdisc).not.toBeNull();
+    expect(leapYearCdisc?.dayKey).toBe("2024-1-29");
+
+    const leapYearIso = parseDateAndMinuteOfDay("2024-02-29T15:30:00Z");
+    expect(leapYearIso).not.toBeNull();
+    expect(leapYearIso?.dayKey).toBe("2024-1-29");
+
+    // 3. Day/Night boundary crossing (Day: 06:00:00 - 21:59:59; Night: 22:00:00 - 05:59:59)
+    const boundaryRows = [
+      { time: "2024-01-01 06:00:00", glucose: 100 }, // Exactly 06:00:00 -> minute 360 -> Day
+      { time: "2024-01-01 21:59:00", glucose: 110 }, // 21:59 -> Day
+      { time: "2024-01-01 22:00:00", glucose: 120 }, // Exactly 22:00:00 -> minute 1320 -> Night
+      { time: "2024-01-01 05:59:00", glucose: 130 }, // 05:59 -> Night
+    ];
+    const dn = calculateDayNightTIR(boundaryRows, "time", "glucose");
+    expect(dn.day.count).toBe(2);
+    expect(dn.night.count).toBe(2);
+
+    // 4. Daylight saving transition timezone strings
+    const dst1 = parseDateAndMinuteOfDay("2024-03-10T01:59:00-05:00");
+    expect(dst1).not.toBeNull();
+    expect(dst1?.epochMs).toBeGreaterThan(0);
+
+    const dst2 = parseDateAndMinuteOfDay("2024-03-10T03:00:00-04:00");
+    expect(dst2).not.toBeNull();
+    expect(dst2?.epochMs).toBeGreaterThan(0);
   });
 });

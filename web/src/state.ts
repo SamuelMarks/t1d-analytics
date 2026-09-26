@@ -38,6 +38,10 @@ export interface Chat {
   provider?: string;
   /** Whether the chat is a temporary placeholder. */
   isTemporary?: boolean;
+  /** Optional timestamp (epoch ms) of last modification. */
+  updatedAt?: number;
+  /** Whether the chat title was locally modified and needs sync. */
+  titleModified?: boolean;
 }
 
 /**
@@ -388,11 +392,16 @@ export class ChatState {
         }
       }
 
-      // 2. Upload any local non-temporary chats not on server or having newer local messages
+      // 2. Upload any local non-temporary chats not on server or having newer local messages or modified titles
       for (const localChat of this.chats) {
         if (localChat.isTemporary) continue;
         const remote = serverMap.get(localChat.id);
-        if (!remote || localChat.messages.length > remote.messages.length) {
+        const hasNewerMessages =
+          !remote || localChat.messages.length > remote.messages.length;
+        const hasModifiedTitle =
+          Boolean(localChat.titleModified) && localChat.title !== remote?.title;
+
+        if (hasNewerMessages || hasModifiedTitle) {
           await fetch("/api/sessions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -402,6 +411,7 @@ export class ChatState {
               messages: localChat.messages,
             }),
           });
+          localChat.titleModified = false;
         }
       }
 
@@ -415,6 +425,7 @@ export class ChatState {
           continue;
         }
         const local = this.chats.find((c) => c.id === s.session_id);
+        const remoteTime = s.updated_at ? new Date(s.updated_at).getTime() : 0;
         if (!local) {
           this.chats.push({
             id: s.session_id,
@@ -422,13 +433,16 @@ export class ChatState {
             messages: s.messages || [],
             model: "gemma4",
             isTemporary: false,
+            updatedAt: remoteTime,
           });
         } else {
           if ((s.messages?.length || 0) > local.messages.length) {
             local.messages = s.messages;
+            local.updatedAt = remoteTime;
           }
-          if (s.title && s.title !== local.title) {
+          if (s.title && s.title !== local.title && !local.titleModified) {
             local.title = s.title;
+            local.updatedAt = remoteTime;
           }
         }
       }
@@ -467,6 +481,7 @@ export class ChatState {
       messages: [],
       model: "gemma4",
       isTemporary,
+      updatedAt: Date.now(),
     };
     this.chats.push(chat);
     this.activeChatId = chat.id;
@@ -529,7 +544,20 @@ export class ChatState {
     const chat = this.chats.find((c) => c.id === id);
     if (chat && newTitle.trim()) {
       chat.title = newTitle.trim();
+      chat.updatedAt = Date.now();
+      chat.titleModified = true;
       this.saveToLocalStorage();
+      if (this.serverSyncEnabled && !chat.isTemporary) {
+        fetch("/api/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: chat.id,
+            title: chat.title,
+            messages: chat.messages,
+          }),
+        }).catch(() => {});
+      }
     }
   }
 
@@ -565,6 +593,7 @@ export class ChatState {
     const chat = this.getActiveChat();
     if (chat) {
       chat.messages.push(message);
+      chat.updatedAt = Date.now();
       if (chat.isTemporary) {
         chat.isTemporary = false;
         chat.title = i18next.t("app.chatNumber", { count: this.chatCounter++ });

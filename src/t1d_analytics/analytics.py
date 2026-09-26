@@ -504,8 +504,14 @@ def load_data_to_duckdb(
                     py_encoding = "utf-8-sig"
                     duckdb_encoding = "utf-8"
                 else:
-                    py_encoding = "utf-8"
-                    duckdb_encoding = "utf-8"
+                    try:
+                        with open(data_file, "r", encoding="utf-8") as f_chk:
+                            f_chk.read(8192)
+                        py_encoding = "utf-8"
+                        duckdb_encoding = "utf-8"
+                    except UnicodeDecodeError:
+                        py_encoding = "latin1"
+                        duckdb_encoding = "latin-1"
 
                 # 2. Detect Separator using csv.Sniffer with fallback
                 sep = ","

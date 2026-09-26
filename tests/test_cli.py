@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -657,9 +658,83 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     data_dir.mkdir()
     sample_file = data_dir / "sample.csv"
     sample_file.write_text("id,val\n1,10\n")
+    unchanged_file = data_dir / "unchanged.csv"
+    unchanged_file.write_text("id\n100\n")
     db_file = tmp_path / "watch.duckdb"
+    conn_init = duckdb.connect(str(db_file))
+    conn_init.execute(
+        "CREATE TABLE _t1d_ingestion_manifest (file_path VARCHAR, table_name VARCHAR, file_hash VARCHAR, ingested_at TIMESTAMP)"
+    )
+    conn_init.execute(
+        "INSERT INTO _t1d_ingestion_manifest VALUES ('sample', 'tbl', 'hash', CURRENT_TIMESTAMP)"
+    )
+    conn_init.close()
 
-    # Run with 2 iterations: iteration 1 sees new file, iteration 2 sees no change
+    # Iteration 1 detects sample_file, unlinks it during load so iteration 2 detects deletion
+    from t1d_analytics import analytics
+
+    orig_load = analytics.load_data_to_duckdb
+
+    def side_effect_load(*args: Any, **kwargs: Any) -> None:
+        sample_file.unlink()
+        orig_load(*args, **kwargs)
+
+    with patch(
+        "t1d_analytics.analytics.load_data_to_duckdb", side_effect=side_effect_load
+    ):
+        with patch(
+            "sys.argv",
+            [
+                "t1d-analytics",
+                "watch",
+                "--data-dir",
+                str(data_dir),
+                "--db",
+                str(db_file),
+                "--interval",
+                "0.001",
+                "--iterations",
+                "2",
+                "--include-sas",
+                "--include-spss",
+            ],
+        ):
+            main()
+
+    out = capsys.readouterr().out
+    assert "Watching directory" in out
+    assert "Ingestion complete" in out
+    assert "Detected file deletion" in out
+
+    # Test deletion when db connection raises error
+    sample_file2 = data_dir / "sample2.csv"
+    sample_file2.write_text("id\n1\n")
+    with patch("duckdb.connect", side_effect=Exception("DB locked")):
+        with patch(
+            "sys.argv",
+            [
+                "t1d-analytics",
+                "watch",
+                "--data-dir",
+                str(data_dir),
+                "--db",
+                str(db_file),
+                "--interval",
+                "0.001",
+                "--iterations",
+                "2",
+            ],
+        ):
+            with patch(
+                "t1d_analytics.analytics.load_data_to_duckdb",
+                side_effect=lambda *a, **k: sample_file2.unlink(),
+            ):
+                main()
+
+    # Test deletion when db file does not exist (covers not Path(args.db).exists())
+    missing_db_file = tmp_path / "missing_watch.duckdb"
+    sample_file3 = data_dir / "sample3.csv"
+    sample_file3.write_text("id\n3\n")
     with patch(
         "sys.argv",
         [
@@ -668,18 +743,18 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
             "--data-dir",
             str(data_dir),
             "--db",
-            str(db_file),
+            str(missing_db_file),
             "--interval",
             "0.001",
             "--iterations",
             "2",
         ],
     ):
-        main()
-
-    out = capsys.readouterr().out
-    assert "Watching directory" in out
-    assert "Ingestion complete" in out
+        with patch(
+            "t1d_analytics.analytics.load_data_to_duckdb",
+            side_effect=lambda *a, **k: sample_file3.unlink(),
+        ):
+            main()
 
     # Run when data-dir does not exist
     non_existent = tmp_path / "does_not_exist"
@@ -739,6 +814,10 @@ def test_main_train(
     assert "Training orchestration completed successfully" in out
     assert (out_dir / "training_data.jsonl").exists()
     assert (out_dir / "training_data.parquet").exists()
+    assert (out_dir / "training_manifest.json").exists()
+    assert (out_dir / "sft_data.jsonl").exists()
+    assert (out_dir / "pretrain_data.jsonl").exists()
+    assert (out_dir / "dpo_data.jsonl").exists()
 
     # Test with no formats requested
     with patch(

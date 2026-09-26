@@ -15,6 +15,7 @@ if "%~1"=="build_docs" goto build_docs
 if "%~1"=="build" goto build
 if "%~1"=="serve" goto serve
 if "%~1"=="test" goto test
+if "%~1"=="fmt" goto fmt
 
 echo Unknown target: %~1
 goto help
@@ -31,6 +32,7 @@ echo   build_docs    Build the API docs (override with DOCS_DIR=%%DOCS_DIR%%)
 echo   build         Build the frontend and backend
 echo   serve         Serve the frontend behind the backend local dir static file server (which is enabled in DEBUG mode only)
 echo   test          Run tests locally
+echo   fmt           Format backend and frontend code
 echo   help          Show help text
 goto :eof
 
@@ -108,3 +110,13 @@ cd web
 call npm run test
 cd ..
 goto :eof
+
+:fmt
+call :activate_venv
+ruff check --fix .
+ruff format .
+cd web
+call npm run format
+cd ..
+goto :eof
+

@@ -1379,10 +1379,7 @@ export class ChatUI {
         model: m.model,
       }));
 
-    const dbPathPayload =
-      this.state.currentDb && this.state.currentDb !== "t1d.duckdb"
-        ? this.state.currentDb
-        : undefined;
+    const dbPathPayload = this.state.currentDb || undefined;
 
     const payload = {
       message: content,
@@ -2636,6 +2633,15 @@ export class ChatUI {
     const modalExportJsonBtn = document.getElementById(
       "modal-export-json-btn",
     ) as HTMLButtonElement | null;
+    const modalExportFullCsvBtn = document.getElementById(
+      "modal-export-full-csv-btn",
+    ) as HTMLButtonElement | null;
+    const modalExportExcelBtn = document.getElementById(
+      "modal-export-excel-btn",
+    ) as HTMLButtonElement | null;
+    const modalExportParquetBtn = document.getElementById(
+      "modal-export-parquet-btn",
+    ) as HTMLButtonElement | null;
 
     if (modalExportCsvBtn) {
       modalExportCsvBtn.onclick = () =>
@@ -2650,6 +2656,36 @@ export class ChatUI {
           this.currentModalRows,
           `${this.currentTable}_page${this.currentPage}.json`,
         );
+    }
+    if (modalExportFullCsvBtn) {
+      modalExportFullCsvBtn.onclick = () => {
+        const dbParam = this.state.currentDb
+          ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
+          : "";
+        window.open(
+          `/api/export/csv?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`,
+        );
+      };
+    }
+    if (modalExportExcelBtn) {
+      modalExportExcelBtn.onclick = () => {
+        const dbParam = this.state.currentDb
+          ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
+          : "";
+        window.open(
+          `/api/export/excel?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`,
+        );
+      };
+    }
+    if (modalExportParquetBtn) {
+      modalExportParquetBtn.onclick = () => {
+        const dbParam = this.state.currentDb
+          ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
+          : "";
+        window.open(
+          `/api/export/parquet?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`,
+        );
+      };
     }
 
     // Focus the first interactive element
@@ -2800,8 +2836,21 @@ export class ChatUI {
     const modalExportJsonBtn = document.getElementById(
       "modal-export-json-btn",
     ) as HTMLButtonElement | null;
+    const modalExportFullCsvBtn = document.getElementById(
+      "modal-export-full-csv-btn",
+    ) as HTMLButtonElement | null;
+    const modalExportExcelBtn = document.getElementById(
+      "modal-export-excel-btn",
+    ) as HTMLButtonElement | null;
+    const modalExportParquetBtn = document.getElementById(
+      "modal-export-parquet-btn",
+    ) as HTMLButtonElement | null;
+
     if (modalExportCsvBtn) modalExportCsvBtn.disabled = true;
     if (modalExportJsonBtn) modalExportJsonBtn.disabled = true;
+    if (modalExportFullCsvBtn) modalExportFullCsvBtn.disabled = true;
+    if (modalExportExcelBtn) modalExportExcelBtn.disabled = true;
+    if (modalExportParquetBtn) modalExportParquetBtn.disabled = true;
 
     try {
       const limit = this.ROWS_PER_PAGE;
@@ -2918,6 +2967,9 @@ export class ChatUI {
         nextBtn.disabled = !hasMore;
         if (modalExportCsvBtn) modalExportCsvBtn.disabled = false;
         if (modalExportJsonBtn) modalExportJsonBtn.disabled = false;
+        if (modalExportFullCsvBtn) modalExportFullCsvBtn.disabled = false;
+        if (modalExportExcelBtn) modalExportExcelBtn.disabled = false;
+        if (modalExportParquetBtn) modalExportParquetBtn.disabled = false;
         this.announce(i18next.t("app.tableData") + " loaded", false);
       } else {
         const msg = i18next.t("ui.noDataAvailable");
@@ -2961,7 +3013,15 @@ export class ChatUI {
     filename: string,
   ): void {
     if (!rows || rows.length === 0) return;
-    const columns = Object.keys(rows[0]);
+    const columnSet = new Set<string>();
+    for (const r of rows) {
+      for (const k of Object.keys(r)) {
+        columnSet.add(k);
+      }
+    }
+    const columns = Array.from(columnSet);
+    if (columns.length === 0) return;
+
     const headerLine = columns
       .map((col) => `"${col.replace(/"/g, '""')}"`)
       .join(",");
@@ -2970,8 +3030,18 @@ export class ChatUI {
         .map((col) => {
           const val = row[col];
           if (val === null || val === undefined) return '""';
-          const strVal =
+          let strVal =
             typeof val === "object" ? JSON.stringify(val) : String(val);
+          if (strVal && ["=", "+", "-", "@", "\t", "\r"].includes(strVal[0])) {
+            let isNumeric = false;
+            if (strVal[0] === "+" || strVal[0] === "-") {
+              const num = Number(strVal);
+              isNumeric = !isNaN(num) && isFinite(num);
+            }
+            if (!isNumeric) {
+              strVal = `'${strVal}`;
+            }
+          }
           return `"${strVal.replace(/"/g, '""')}"`;
         })
         .join(","),

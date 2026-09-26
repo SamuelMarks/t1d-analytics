@@ -2523,3 +2523,101 @@ def test_resolve_device_telemetry_branches(tmp_path: Path) -> None:
         with patch("platform.processor", side_effect=RuntimeError("platform error")):
             name_fallback, _ = resolve_device_telemetry("cpu")
             assert name_fallback == "Host CPU"
+
+
+def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> None:
+    """Test TrainingJobManager background thread execution, status tracking, cancellation, and error handling."""
+    import threading
+    import time
+
+    from t1d_analytics.models import TrainingBackend, TrainingJobConfig
+    from t1d_analytics.training_runner import TrainingJobManager
+
+    mgr = TrainingJobManager()
+
+    # 1. Non-existent job queries
+    assert mgr.get_job("non-existent") is None
+    assert mgr.cancel_job("non-existent") is False
+    assert mgr.list_jobs() == []
+
+    # 2. Successful job execution
+    mocker.patch(
+        "t1d_analytics.training_runner.LocalCpuRunner.run_training",
+        return_value={"status": "completed", "loss": 0.05},
+    )
+    config = TrainingJobConfig(
+        dataset_path=str(tmp_path / "ds.jsonl"),
+        output_dir=str(tmp_path / "out"),
+        backend=TrainingBackend.LOCAL_CPU,
+        model_name="gemma4-sql",
+        dry_run=True,
+    )
+    job_id = mgr.submit_job(config)
+    assert job_id.startswith("job-")
+    time.sleep(0.15)  # wait for thread to finish
+    job = mgr.get_job(job_id)
+    assert job is not None
+    assert job["status"] == "completed"
+    assert len(mgr.list_jobs()) == 1
+
+    # Cancel on completed job returns True but status stays completed
+    assert mgr.cancel_job(job_id) is True
+    completed_job = mgr.get_job(job_id)
+    assert completed_job is not None
+    assert completed_job["status"] == "completed"
+
+    # 3. Failed job execution
+    mocker.patch(
+        "t1d_analytics.training_runner.LocalCpuRunner.run_training",
+        side_effect=RuntimeError("Training failed fatally"),
+    )
+    job_id_fail = mgr.submit_job(config)
+    time.sleep(0.15)
+    job_fail = mgr.get_job(job_id_fail)
+    assert job_fail is not None
+    assert job_fail["status"] == "failed"
+    assert "Training failed fatally" in str(job_fail["error"])
+
+    # 4. Cancelled job execution while running
+    mgr2 = TrainingJobManager()
+    event_start = threading.Event()
+    event_release = threading.Event()
+
+    def slow_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        event_start.set()
+        event_release.wait(timeout=2.0)
+        return {"status": "done"}
+
+    mocker.patch(
+        "t1d_analytics.training_runner.LocalCpuRunner.run_training",
+        side_effect=slow_run,
+    )
+    job_id_cancel = mgr2.submit_job(config)
+    event_start.wait(timeout=1.0)
+    assert mgr2.cancel_job(job_id_cancel) is True
+    event_release.set()
+    time.sleep(0.15)
+    job_cancel = mgr2.get_job(job_id_cancel)
+    assert job_cancel is not None
+    assert job_cancel["status"] == "cancelled"
+
+    # 5. Pre-run cancellation (cancel before runner.run_training is called)
+    from t1d_analytics import training_runner
+
+    mgr3 = TrainingJobManager()
+    orig_get_runner = training_runner.get_training_runner
+
+    def cancel_on_get_runner(backend: Any) -> Any:
+        for f in mgr3._cancel_flags.values():
+            f.set()
+        return orig_get_runner(backend)
+
+    mocker.patch(
+        "t1d_analytics.training_runner.get_training_runner",
+        side_effect=cancel_on_get_runner,
+    )
+    job_id_pre = mgr3.submit_job(config)
+    time.sleep(0.15)
+    job_pre = mgr3.get_job(job_id_pre)
+    assert job_pre is not None
+    assert job_pre["status"] == "cancelled"

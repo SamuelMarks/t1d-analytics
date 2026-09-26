@@ -4,6 +4,8 @@
  * Computes Time-in-Range (TIR) metrics and renders clinical charts.
  */
 
+import i18next from "i18next";
+
 /**
  * Clinical Time-in-Range (TIR) metrics percentages and statistics.
  */
@@ -37,16 +39,21 @@ export interface TIRMetrics {
 /**
  * Known column names representing CGM or blood glucose values.
  */
-const GLUCOSE_COLUMNS = [
+const SPECIFIC_GLUCOSE_COLUMNS = [
   "cgm",
   "glucose",
   "historic_glucose",
   "blood_glucose",
   "sensor_glucose",
   "bg",
-  "value",
-  "val",
+  "sg",
+  "egv",
+  "glucose_value",
+  "glucose_val",
+  "cgm_value",
 ];
+
+const GENERIC_VALUE_COLUMNS = ["value", "val"];
 
 /**
  * Detect whether a tabular dataset has continuous glucose monitoring columns.
@@ -61,8 +68,8 @@ export function detectCgmColumns(rows: Array<Record<string, unknown>>): {
   const sample = rows[0];
   const keys = Object.keys(sample);
 
-  const glucoseCol = keys.find((k) =>
-    GLUCOSE_COLUMNS.includes(k.toLowerCase().trim()),
+  let glucoseCol = keys.find((k) =>
+    SPECIFIC_GLUCOSE_COLUMNS.includes(k.toLowerCase().trim()),
   );
 
   const timeCol = keys.find((k) => {
@@ -74,6 +81,29 @@ export function detectCgmColumns(rows: Array<Record<string, unknown>>): {
       lk === "ts"
     );
   });
+
+  if (!glucoseCol && timeCol) {
+    const genericCol = keys.find((k) =>
+      GENERIC_VALUE_COLUMNS.includes(k.toLowerCase().trim()),
+    );
+    if (genericCol) {
+      const numSamples = rows
+        .slice(0, 10)
+        .map((r) => {
+          const v = r[genericCol];
+          return typeof v === "number" ? v : parseFloat(String(v));
+        })
+        .filter((v) => !isNaN(v) && v > 0);
+      if (numSamples.length > 0) {
+        const median = numSamples.sort((a, b) => a - b)[
+          Math.floor(numSamples.length / 2)
+        ];
+        if (median >= 2 && median <= 500) {
+          glucoseCol = genericCol;
+        }
+      }
+    }
+  }
 
   return { glucoseCol, timeCol };
 }
@@ -104,11 +134,12 @@ export function calculateTIR(values: number[]): TIRMetrics {
     };
   }
 
-  // Check if readings might be in mmol/L (median reading < 25)
+  // Check if readings might be in mmol/L (median reading < 25, 95th percentile < 45)
   // Scale to mg/dL for clinical standard formula (1 mmol/L = 18.0182 mg/dL)
   const sorted = [...valid].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
-  const isMmol = median > 0 && median < 25 && valid.every((v) => v < 35);
+  const p95 = sorted[Math.floor(sorted.length * 0.95)];
+  const isMmol = median > 0 && median < 25 && p95 < 55;
   const scaledValues = isMmol ? valid.map((v) => v * 18.0182) : valid;
 
   let vl = 0;
@@ -209,9 +240,21 @@ export function calculateDayNightTIR(
     }
   }
 
+  const allValues = [...dayValues, ...nightValues].filter(
+    (v) => !isNaN(v) && v > 0,
+  );
+  const sorted = [...allValues].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const p95 = sorted[Math.floor(sorted.length * 0.95)];
+  const isMmol = median > 0 && median < 25 && p95 < 55;
+  const scaledDay = isMmol ? dayValues.map((v) => v * 18.0182) : dayValues;
+  const scaledNight = isMmol
+    ? nightValues.map((v) => v * 18.0182)
+    : nightValues;
+
   return {
-    day: calculateTIR(dayValues),
-    night: calculateTIR(nightValues),
+    day: calculateTIR(scaledDay),
+    night: calculateTIR(scaledNight),
   };
 }
 
@@ -424,16 +467,17 @@ const MONTH_NAMES: Record<string, number> = {
 /**
  * Parse a raw timestamp value into date day key and minute of the day without timezone shifts.
  * @param {unknown} rawTime - The raw date/time string, Date, or timestamp number.
- * @returns {{ dayKey: string; minuteOfDay: number } | null} Parsed day key and minute of day.
+ * @returns {{ dayKey: string; minuteOfDay: number; epochMs: number } | null} Parsed day key, minute of day, and epoch milliseconds.
  */
 export function parseDateAndMinuteOfDay(
   rawTime: unknown,
-): { dayKey: string; minuteOfDay: number } | null {
+): { dayKey: string; minuteOfDay: number; epochMs: number } | null {
   if (rawTime instanceof Date) {
-    if (isNaN(rawTime.getTime())) return null;
+    const epochMs = rawTime.getTime();
+    if (isNaN(epochMs)) return null;
     const dayKey = `${rawTime.getUTCFullYear()}-${rawTime.getUTCMonth()}-${rawTime.getUTCDate()}`;
     const minuteOfDay = rawTime.getUTCHours() * 60 + rawTime.getUTCMinutes();
-    return { dayKey, minuteOfDay };
+    return { dayKey, minuteOfDay, epochMs };
   }
 
   if (typeof rawTime === "string") {
@@ -449,12 +493,14 @@ export function parseDateAndMinuteOfDay(
       const day = parseInt(isoMatch[3], 10);
       const hours = isoMatch[4] ? parseInt(isoMatch[4], 10) : 0;
       const minutes = isoMatch[5] ? parseInt(isoMatch[5], 10) : 0;
+      const seconds = isoMatch[6] ? parseInt(isoMatch[6], 10) : 0;
       const tz = isoMatch[7];
 
       if (tz && tz.toUpperCase() === "Z") {
         return {
           dayKey: `${year}-${month}-${day}`,
           minuteOfDay: hours * 60 + minutes,
+          epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
         };
       } else if (tz) {
         const d = new Date(trimmed);
@@ -462,6 +508,7 @@ export function parseDateAndMinuteOfDay(
           return {
             dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
             minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+            epochMs: d.getTime(),
           };
         }
       }
@@ -469,6 +516,7 @@ export function parseDateAndMinuteOfDay(
       return {
         dayKey: `${year}-${month}-${day}`,
         minuteOfDay: hours * 60 + minutes,
+        epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
       };
     }
 
@@ -483,21 +531,24 @@ export function parseDateAndMinuteOfDay(
       const year = parseInt(cdiscMatch[3], 10);
       const hours = cdiscMatch[4] ? parseInt(cdiscMatch[4], 10) : 0;
       const minutes = cdiscMatch[5] ? parseInt(cdiscMatch[5], 10) : 0;
+      const seconds = cdiscMatch[6] ? parseInt(cdiscMatch[6], 10) : 0;
       const tz = cdiscMatch[7];
 
       if (tz && tz.toUpperCase() !== "Z") {
-        const isoStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:00${tz}`;
+        const isoStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${tz}`;
         const d = new Date(isoStr);
         if (!isNaN(d.getTime())) {
           return {
             dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
             minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+            epochMs: d.getTime(),
           };
         }
       }
       return {
         dayKey: `${year}-${month}-${day}`,
         minuteOfDay: hours * 60 + minutes,
+        epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
       };
     }
 
@@ -511,6 +562,7 @@ export function parseDateAndMinuteOfDay(
       const year = parseInt(slashMatch[3], 10);
       const hours = slashMatch[4] ? parseInt(slashMatch[4], 10) : 0;
       const minutes = slashMatch[5] ? parseInt(slashMatch[5], 10) : 0;
+      const seconds = slashMatch[6] ? parseInt(slashMatch[6], 10) : 0;
       const tz = slashMatch[7];
 
       let month: number;
@@ -524,18 +576,20 @@ export function parseDateAndMinuteOfDay(
       }
 
       if (tz && tz.toUpperCase() !== "Z") {
-        const isoStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:00${tz}`;
+        const isoStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${tz}`;
         const d = new Date(isoStr);
         if (!isNaN(d.getTime())) {
           return {
             dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
             minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+            epochMs: d.getTime(),
           };
         }
       }
       return {
         dayKey: `${year}-${month}-${day}`,
         minuteOfDay: hours * 60 + minutes,
+        epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
       };
     }
 
@@ -549,16 +603,19 @@ export function parseDateAndMinuteOfDay(
         minuteOfDay: hasTz
           ? d.getUTCHours() * 60 + d.getUTCMinutes()
           : d.getHours() * 60 + d.getMinutes(),
+        epochMs: d.getTime(),
       };
     }
   }
 
   if (typeof rawTime === "number") {
-    const d = new Date(rawTime);
+    const epoch = rawTime < 1e11 ? rawTime * 1000 : rawTime;
+    const d = new Date(epoch);
     if (!isNaN(d.getTime())) {
       return {
         dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
         minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+        epochMs: d.getTime(),
       };
     }
   }
@@ -884,15 +941,18 @@ export function renderAGPSvg(agp: AGPData): SVGSVGElement {
 }
 
 /**
- * Filter CGM rows to the most recent 14-day window.
+ * Filter CGM rows to a configurable observation window.
  * @param {Array<Record<string, unknown>>} rows - Full CGM dataset rows.
  * @param {string} timeCol - Column name representing date/time.
- * @returns {Array<Record<string, unknown>>} Filtered rows within 14 days of latest reading.
+ * @param {number} days - Duration of the observation window in days (0 for all data).
+ * @returns {Array<Record<string, unknown>>} Filtered rows within the window of latest reading.
  */
-export function filter14DayWindow(
+export function filterObservationWindow(
   rows: Array<Record<string, unknown>>,
   timeCol: string,
+  days: number = 14,
 ): Array<Record<string, unknown>> {
+  if (days <= 0) return rows;
   let maxTime = -Infinity;
   const parsedRows: Array<{ row: Record<string, unknown>; timeMs: number }> =
     [];
@@ -902,19 +962,7 @@ export function filter14DayWindow(
     const parsed = parseDateAndMinuteOfDay(rawTime);
     if (!parsed) continue;
 
-    let timeMs = 0;
-    if (rawTime instanceof Date) {
-      timeMs = rawTime.getTime();
-    } else if (typeof rawTime === "string") {
-      const normalized = rawTime.trim().replace(" ", "T");
-      const d = new Date(normalized);
-      if (!isNaN(d.getTime())) {
-        timeMs = d.getTime();
-      }
-    } else if (typeof rawTime === "number" && rawTime > 0) {
-      timeMs = rawTime;
-    }
-
+    const timeMs = parsed.epochMs;
     if (timeMs > 0) {
       parsedRows.push({ row: r, timeMs });
       if (timeMs > maxTime) maxTime = timeMs;
@@ -923,11 +971,23 @@ export function filter14DayWindow(
 
   if (maxTime === -Infinity) return rows;
 
-  const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000;
-  const cutoff = maxTime - fourteenDaysMs;
+  const cutoff = maxTime - days * 24 * 60 * 60 * 1000;
   return parsedRows
     .filter((item) => item.timeMs >= cutoff)
     .map((item) => item.row);
+}
+
+/**
+ * Filter CGM rows to the most recent 14-day window.
+ * @param {Array<Record<string, unknown>>} rows - Full CGM dataset rows.
+ * @param {string} timeCol - Column name representing date/time.
+ * @returns {Array<Record<string, unknown>>} Filtered rows within 14 days of latest reading.
+ */
+export function filter14DayWindow(
+  rows: Array<Record<string, unknown>>,
+  timeCol: string,
+): Array<Record<string, unknown>> {
+  return filterObservationWindow(rows, timeCol, 14);
 }
 
 /**
@@ -963,19 +1023,11 @@ export function calculateActiveWear(
     if (parsed) {
       days.add(parsed.dayKey);
       totalReadings++;
-    }
-    let tMs = 0;
-    if (rawTime instanceof Date) {
-      if (!isNaN(rawTime.getTime())) tMs = rawTime.getTime();
-    } else if (typeof rawTime === "string") {
-      const d = new Date(rawTime.trim().replace(" ", "T"));
-      if (!isNaN(d.getTime())) tMs = d.getTime();
-    } else if (typeof rawTime === "number") {
-      if (!isNaN(rawTime) && rawTime > 0) tMs = rawTime;
-    }
-    if (tMs > 0) {
-      if (tMs < minTime) minTime = tMs;
-      if (tMs > maxTime) maxTime = tMs;
+      const tMs = parsed.epochMs;
+      if (tMs > 0) {
+        if (tMs < minTime) minTime = tMs;
+        if (tMs > maxTime) maxTime = tMs;
+      }
     }
   }
 
@@ -1036,16 +1088,23 @@ export function calculateActiveWear(
 /**
  * Render a complete CGM analytics card element from table rows.
  * @param {Array<Record<string, unknown>>} rows - The data rows.
+ * @param {number} [observationDays=14] - Duration in days for observation window (default: 14, 0 for all data).
  * @returns {HTMLElement | null} The analytics card element or null if not CGM data.
  */
 export function renderCgmCard(
   rows: Array<Record<string, unknown>>,
+  observationDays: number = 14,
 ): HTMLElement | null {
   const { glucoseCol, timeCol } = detectCgmColumns(rows);
   if (!glucoseCol) return null;
 
+  const displayRows =
+    timeCol && observationDays > 0
+      ? filterObservationWindow(rows, timeCol, observationDays)
+      : rows;
+
   const values: number[] = [];
-  for (const r of rows) {
+  for (const r of displayRows) {
     const raw = r[glucoseCol];
     if (typeof raw === "number") values.push(raw);
     else if (typeof raw === "string") {
@@ -1065,30 +1124,80 @@ export function renderCgmCard(
   container.style.borderRadius = "8px";
   container.style.backgroundColor = "var(--bg-secondary, #fafafa)";
 
+  const isRtl = i18next.language === "ar" || i18next.language === "he";
+  if (isRtl) {
+    container.setAttribute("dir", "rtl");
+  }
+
   const headerRow = document.createElement("div");
   headerRow.style.display = "flex";
   headerRow.style.justifyContent = "space-between";
   headerRow.style.alignItems = "center";
+  headerRow.style.flexWrap = "wrap";
+  headerRow.style.gap = "0.5rem";
   headerRow.style.marginBottom = "0.5rem";
 
   const title = document.createElement("h4");
-  title.textContent = "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)";
+  title.textContent = i18next.t(
+    "cgm.title",
+    "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
+  );
   title.style.margin = "0";
   title.style.fontSize = "0.95rem";
   headerRow.appendChild(title);
 
+  const controlsRow = document.createElement("div");
+  controlsRow.style.display = "flex";
+  controlsRow.style.alignItems = "center";
+  controlsRow.style.gap = "0.5rem";
+
+  // Window selector dropdown if time column is available
+  if (timeCol) {
+    const windowSelect = document.createElement("select");
+    windowSelect.className = "agp-window-select form-select form-select-sm";
+    windowSelect.style.fontSize = "0.8rem";
+    windowSelect.style.padding = "0.2rem 0.4rem";
+
+    const options = [
+      { val: 7, label: i18next.t("cgm.days7", "7 Days") },
+      { val: 14, label: i18next.t("cgm.days14", "14 Days (Standard)") },
+      { val: 30, label: i18next.t("cgm.days30", "30 Days") },
+      { val: 90, label: i18next.t("cgm.days90", "90 Days") },
+      { val: 0, label: i18next.t("cgm.daysAll", "All Available Data") },
+    ];
+    for (const opt of options) {
+      const el = document.createElement("option");
+      el.value = String(opt.val);
+      el.textContent = opt.label;
+      if (opt.val === observationDays) el.selected = true;
+      windowSelect.appendChild(el);
+    }
+    windowSelect.onchange = () => {
+      const selectedDays = parseInt(windowSelect.value, 10);
+      const newCard = renderCgmCard(rows, selectedDays);
+      if (newCard && container.parentNode) {
+        container.parentNode.replaceChild(newCard, container);
+      }
+    };
+    controlsRow.appendChild(windowSelect);
+  }
+
   const printBtn = document.createElement("button");
   printBtn.className = "btn-secondary btn-sm print-report-btn";
-  printBtn.textContent = "🖨️ Clinical AGP Report (PDF)";
+  printBtn.textContent = i18next.t(
+    "cgm.reportPdf",
+    "🖨️ Clinical AGP Report (PDF)",
+  );
   printBtn.style.padding = "0.25rem 0.6rem";
   printBtn.style.fontSize = "0.8rem";
   printBtn.onclick = () => window.print();
-  headerRow.appendChild(printBtn);
+  controlsRow.appendChild(printBtn);
+  headerRow.appendChild(controlsRow);
   container.appendChild(headerRow);
 
   // Active wear badge if time column present
   if (timeCol) {
-    const wear = calculateActiveWear(rows, timeCol);
+    const wear = calculateActiveWear(displayRows, timeCol, 288);
     const wearBadge = document.createElement("div");
     wearBadge.style.fontSize = "0.8rem";
     wearBadge.style.marginBottom = "0.5rem";
@@ -1098,11 +1207,27 @@ export function renderCgmCard(
     if (wear.isValidWear) {
       wearBadge.style.backgroundColor = "rgba(46, 204, 113, 0.2)";
       wearBadge.style.color = "#27ae60";
-      wearBadge.textContent = `✓ Sensor Wear: ${wear.wearPercentage}% (${wear.activeDays} days, ${wear.totalReadings} readings) - Valid (>=70%)`;
+      wearBadge.textContent = i18next.t(
+        "cgm.wearValid",
+        `✓ Sensor Wear: ${wear.wearPercentage}% (${wear.activeDays} days, ${wear.totalReadings} readings) - Valid (>=70%)`,
+        {
+          pct: wear.wearPercentage,
+          days: wear.activeDays,
+          readings: wear.totalReadings,
+        },
+      );
     } else {
       wearBadge.style.backgroundColor = "rgba(243, 156, 18, 0.2)";
       wearBadge.style.color = "#d35400";
-      wearBadge.textContent = `⚠️ Sensor Wear: ${wear.wearPercentage}% (${wear.activeDays} days) - Caution (<70% wear)`;
+      wearBadge.textContent = i18next.t(
+        "cgm.wearCaution",
+        `⚠️ Sensor Wear: ${wear.wearPercentage}% (${wear.activeDays} days) - Caution (<70% wear)`,
+        {
+          pct: wear.wearPercentage,
+          days: wear.activeDays,
+          readings: wear.totalReadings,
+        },
+      );
     }
     container.appendChild(wearBadge);
   }
@@ -1121,7 +1246,11 @@ export function renderCgmCard(
   gmiBadge.style.borderRadius = "4px";
   gmiBadge.style.backgroundColor = "rgba(52, 152, 219, 0.15)";
   gmiBadge.style.color = "#2980b9";
-  gmiBadge.textContent = `GMI: ${metrics.gmi}% (Mean: ${metrics.mean} mg/dL)`;
+  gmiBadge.textContent = i18next.t(
+    "cgm.gmi",
+    `GMI: ${metrics.gmi}% (Mean: ${metrics.mean} mg/dL)`,
+    { gmi: metrics.gmi, mean: metrics.mean },
+  );
   badgesRow.appendChild(gmiBadge);
 
   const cvBadge = document.createElement("div");
@@ -1133,7 +1262,11 @@ export function renderCgmCard(
     ? "rgba(46, 204, 113, 0.15)"
     : "rgba(231, 76, 60, 0.15)";
   cvBadge.style.color = isCvOptimal ? "#27ae60" : "#c0392b";
-  cvBadge.textContent = `CV: ${metrics.cv}% (Target ≤36% | SD: ${metrics.sd} mg/dL)`;
+  cvBadge.textContent = i18next.t(
+    "cgm.cv",
+    `CV: ${metrics.cv}% (Target ≤36% | SD: ${metrics.sd} mg/dL)`,
+    { cv: metrics.cv, sd: metrics.sd },
+  );
   badgesRow.appendChild(cvBadge);
 
   const lbgiBadge = document.createElement("div");
@@ -1142,11 +1275,15 @@ export function renderCgmCard(
   lbgiBadge.style.borderRadius = "4px";
   lbgiBadge.style.backgroundColor = "rgba(155, 89, 182, 0.15)";
   lbgiBadge.style.color = "#8e44ad";
-  lbgiBadge.textContent = `LBGI: ${metrics.lbgi} | HBGI: ${metrics.hbgi}`;
+  lbgiBadge.textContent = i18next.t(
+    "cgm.lbgiHbgi",
+    `LBGI: ${metrics.lbgi} | HBGI: ${metrics.hbgi}`,
+    { lbgi: metrics.lbgi, hbgi: metrics.hbgi },
+  );
   badgesRow.appendChild(lbgiBadge);
 
   if (timeCol) {
-    const dn = calculateDayNightTIR(rows, timeCol, glucoseCol);
+    const dn = calculateDayNightTIR(displayRows, timeCol, glucoseCol);
     if (dn.day.count > 0 && dn.night.count > 0) {
       const dnBadge = document.createElement("div");
       dnBadge.style.fontSize = "0.8rem";
@@ -1167,7 +1304,7 @@ export function renderCgmCard(
 
   // 2. 24-Hour Ambulatory Glucose Profile (AGP) Curve
   if (timeCol) {
-    const agpData = calculateAGP(rows, timeCol, glucoseCol);
+    const agpData = calculateAGP(displayRows, timeCol, glucoseCol);
     if (agpData && agpData.totalReadings > 0) {
       const agpChart = renderAGPSvg(agpData);
       container.appendChild(agpChart);

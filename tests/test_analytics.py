@@ -1553,3 +1553,28 @@ def test_export_table_excel_formula_sanitization(tmp_path: Path) -> None:
     assert row1[7].startswith("'+")
     assert row1[8] == "done"
     wb.close()
+
+
+def test_load_data_to_duckdb_legacy_latin1_encoding(tmp_path: Path) -> None:
+    """Test load_data_to_duckdb detects and ingests legacy Latin-1 / Windows-1252 encoded CSVs."""
+    import duckdb
+
+    from t1d_analytics.analytics import load_data_to_duckdb
+
+    data_dir = tmp_path / "latin1_data"
+    data_dir.mkdir()
+    csv_file = data_dir / "legacy_clinical.csv"
+    # Write bytes containing Latin-1 characters: °C (0xb0) and µg (0xb5)
+    raw_content = "id,temp,dose\n1,37°C,50µg\n2,38°C,100µg\n".encode("latin1")
+    csv_file.write_bytes(raw_content)
+
+    db_file = tmp_path / "legacy.duckdb"
+    load_data_to_duckdb(str(data_dir), str(db_file))
+
+    conn = duckdb.connect(str(db_file), read_only=True)
+    rows = conn.execute("SELECT temp, dose FROM legacy_clinical ORDER BY id").fetchall()
+    conn.close()
+
+    assert len(rows) == 2
+    assert "37°C" in rows[0][0]
+    assert "50µg" in rows[0][1]

@@ -34,6 +34,9 @@ describe("ChatUI", () => {
         <button id="next-page-btn"></button>
         <button id="modal-export-csv-btn" disabled></button>
         <button id="modal-export-json-btn" disabled></button>
+        <button id="modal-export-full-csv-btn" disabled></button>
+        <button id="modal-export-excel-btn" disabled></button>
+        <button id="modal-export-parquet-btn" disabled></button>
         <div id="table-loading"></div>
         <table id="modal-table">
           <caption class="sr-only" id="modal-table-caption">Table Data</caption>
@@ -2578,6 +2581,20 @@ describe("ChatUI", () => {
     btn.click();
   });
 
+  it("renders CGM card inside table container when assistant message has CGM sqlResult", () => {
+    state.createChat();
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: "Here are your CGM readings",
+      sqlResult: [
+        { time: "2024-01-01T12:00:00Z", glucose: 110 },
+        { time: "2024-01-01T12:05:00Z", glucose: 115 },
+      ],
+    });
+    ui["renderActiveChat"]();
+    expect(document.querySelector(".cgm-analytics-card")).not.toBeNull();
+  });
+
   it("updates status chip when statusChipText is null", () => {
     const orig = ui["statusChipText"];
     (ui as any)["statusChipText"] = null;
@@ -2623,7 +2640,11 @@ describe("ChatUI", () => {
   });
 
   it("exports rows to CSV and handles edge cases", () => {
-    const createObjectURL = vi.fn().mockReturnValue("blob:mock-csv");
+    let capturedBlob: Blob | null = null;
+    const createObjectURL = vi.fn().mockImplementation((blob: Blob) => {
+      capturedBlob = blob;
+      return "blob:mock-csv";
+    });
     const revokeObjectURL = vi.fn();
     globalThis.URL.createObjectURL = createObjectURL;
     globalThis.URL.revokeObjectURL = revokeObjectURL;
@@ -2632,14 +2653,38 @@ describe("ChatUI", () => {
     ui.exportRowsToCsv([], "test.csv");
     expect(createObjectURL).not.toHaveBeenCalled();
 
-    // Valid rows with null, undefined, strings needing escaping
+    // Rows with empty objects return early
+    ui.exportRowsToCsv([{}, {}], "test.csv");
+    expect(createObjectURL).not.toHaveBeenCalled();
+
+    // Valid rows with null, undefined, strings needing escaping and formula injection
     const sampleRows = [
-      { id: 1, name: 'Alice "Wonderland"', note: null, extra: undefined },
-      { id: 2, name: "Bob", note: "some note", extra: 42 },
+      {
+        id: 1,
+        name: 'Alice "Wonderland"',
+        note: null,
+        extra: undefined,
+        formula1: "=1+1",
+        formula2: "@SUM",
+        formula3: "\tTab",
+        numPos: "+12.5",
+        numNeg: "-42",
+      },
+      {
+        id: 2,
+        name: "Bob",
+        note: "some note",
+        extra: 42,
+        formula1: "+CMD",
+        formula2: "-CALC",
+        formula3: "\rReturn",
+        otherKey: "disparate",
+      },
     ];
     ui.exportRowsToCsv(sampleRows, "test.csv");
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-csv");
+    expect(capturedBlob).not.toBeNull();
   });
 
   it("exports rows to JSON and handles edge cases", () => {
@@ -2724,11 +2769,69 @@ describe("ChatUI", () => {
 
     modalJsonBtn?.click();
     expect(exportJsonSpy).toHaveBeenCalled();
+
+    const windowOpenSpy = vi
+      .spyOn(window, "open")
+      .mockImplementation(() => null);
+    const modalFullCsvBtn = document.getElementById(
+      "modal-export-full-csv-btn",
+    );
+    const modalExcelBtn = document.getElementById("modal-export-excel-btn");
+    const modalParquetBtn = document.getElementById("modal-export-parquet-btn");
+
+    expect(modalFullCsvBtn).not.toBeNull();
+    expect(modalExcelBtn).not.toBeNull();
+    expect(modalParquetBtn).not.toBeNull();
+
+    state.setCurrentDb("my_custom.duckdb");
+    modalFullCsvBtn?.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/export/csv?table_name=patients&db_path=my_custom.duckdb",
+      ),
+    );
+
+    modalExcelBtn?.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/export/excel?table_name=patients&db_path=my_custom.duckdb",
+      ),
+    );
+
+    modalParquetBtn?.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/api/export/parquet?table_name=patients&db_path=my_custom.duckdb",
+      ),
+    );
+
+    // Also test with empty db
+    state.setCurrentDb("");
+    modalFullCsvBtn?.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      "/api/export/csv?table_name=patients",
+    );
+
+    modalExcelBtn?.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      "/api/export/excel?table_name=patients",
+    );
+
+    modalParquetBtn?.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      "/api/export/parquet?table_name=patients",
+    );
+
+    state.setCurrentDb("t1d.duckdb");
+    windowOpenSpy.mockRestore();
   });
 
   it("handles openTableModal and fetchTableData when modal export buttons are missing from DOM", async () => {
     document.getElementById("modal-export-csv-btn")?.remove();
     document.getElementById("modal-export-json-btn")?.remove();
+    document.getElementById("modal-export-full-csv-btn")?.remove();
+    document.getElementById("modal-export-excel-btn")?.remove();
+    document.getElementById("modal-export-parquet-btn")?.remove();
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -2881,6 +2984,31 @@ describe("ChatUI", () => {
       json: async () => ({ content: "Standard fallback" }),
     });
     await ui["handleSendMessage"]("Fallback message");
+
+    // Test client-side SSE streaming abort and reader cancellation
+    const abortReader = {
+      read: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DOMException("The user aborted a request.", "AbortError"),
+        ),
+      cancel: vi.fn().mockResolvedValue(undefined),
+    };
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: {
+        get: (h: string) => (h === "content-type" ? "text/event-stream" : null),
+      },
+      body: {
+        getReader: () => abortReader,
+      },
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Recovered after abort" }),
+    });
+    await ui["handleSendMessage"]("Stream to abort");
+    await flushPromises();
 
     // Test stream with contentEl present, untranslated content, and token streamText
     const secondChunks = [
@@ -3986,6 +4114,17 @@ describe("ChatUI", () => {
     expect(JSON.parse(customDbCall[1].body).db_path).toBe(
       "custom_clinical.duckdb",
     );
+
+    // Send with empty db string to test falsy dbPathPayload branch
+    state.setCurrentDb("");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Result with empty db" }),
+    });
+    await ui["handleSendMessage"]("Query with empty db", "plainmodel");
+    const emptyDbCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+    expect(JSON.parse(emptyDbCall[1].body).db_path).toBeUndefined();
+
     state.setCurrentDb("t1d.duckdb");
 
     // 6. Modal table navigation and focus trap key events

@@ -1,4 +1,4 @@
-.PHONY: build_docker run_docker test_docker clean_docker install_base install_deps build_docs build serve test help
+.PHONY: build_docker run_docker test_docker clean_docker install_base install_deps build_docs build serve test fmt help
 
 DOCS_DIR ?= docs
 VENV_ACTIVATE := $(shell for d in .venv venv .venv-* venv-*; do if [ -f "$$d/bin/activate" ]; then echo ". $$d/bin/activate && "; break; fi; done)
@@ -15,6 +15,7 @@ help:
 	@echo "  build         Build the frontend and backend"
 	@echo "  serve         Serve the frontend behind the backend local dir static file server (which is enabled in DEBUG mode only)"
 	@echo "  test          Run tests locally"
+	@echo "  fmt           Format backend and frontend code"
 	@echo "  help          Show help text"
 
 build_docker:
@@ -55,3 +56,8 @@ serve:
 test:
 	$(VENV_ACTIVATE) pytest
 	cd web && npm run test
+
+fmt:
+	$(VENV_ACTIVATE) ruff check --fix .
+	$(VENV_ACTIVATE) ruff format .
+	cd web && npm run format

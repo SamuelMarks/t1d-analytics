@@ -1573,6 +1573,143 @@ def test_export_parquet_endpoint(mock_db: str, mocker: typing.Any) -> None:
     assert resp_500b.status_code == 500
 
 
+def test_export_csv_endpoint(mock_db: str, mocker: typing.Any) -> None:
+    """Test /api/export/csv endpoint streaming, formula escaping, and error handling."""
+    # 1. Successful export
+    resp = client.get(f"/api/export/csv?table_name=users&db_path={mock_db}")
+    assert resp.status_code == 200
+    assert "text/csv" in resp.headers["content-type"]
+    assert "users_export.csv" in resp.headers["content-disposition"]
+    text = resp.content.decode("utf-8")
+    assert text.startswith("\ufeff")  # BOM
+    assert '"id","name"' in text or '"id"' in text
+
+    # 1b. Test with formula injection, nulls, and numeric leading signs
+    conn = duckdb.connect(mock_db)
+    conn.execute("CREATE TABLE csv_formulas (id INT, val VARCHAR, num VARCHAR)")
+    conn.execute(
+        "INSERT INTO csv_formulas VALUES (1, '=CMD', NULL), (2, '@SUM', '-99.9'), (3, '+CMD', '-CALC')"
+    )
+    conn.execute("CREATE TABLE multi_chunk (id INT, txt VARCHAR)")
+    conn.execute(
+        "INSERT INTO multi_chunk SELECT i, repeat('X', 120) FROM range(800) tbl(i)"
+    )
+    conn.close()
+    resp_f = client.get(f"/api/export/csv?table_name=csv_formulas&db_path={mock_db}")
+    assert resp_f.status_code == 200
+    text_f = resp_f.content.decode("utf-8")
+    assert "'=CMD" in text_f
+    assert '""' in text_f  # Null value encoded as empty quoted string
+    assert "'+42.5" not in text_f
+    assert "'+99.9" not in text_f
+
+    # Multi-chunk export to exhaust while loop chunk iteration
+    resp_multi = client.get(f"/api/export/csv?table_name=multi_chunk&db_path={mock_db}")
+    assert resp_multi.status_code == 200
+    assert len(resp_multi.content) > 70000
+
+    # 2. Missing DB
+    resp_no_db = client.get("/api/export/csv?table_name=users&db_path=no_db.duckdb")
+    assert resp_no_db.status_code == 404
+
+    # 3. Invalid table name
+    resp_inv = client.get(f"/api/export/csv?table_name=users;drop&db_path={mock_db}")
+    assert resp_inv.status_code == 400
+
+    # 4. Table not found
+    resp_no_tbl = client.get(f"/api/export/csv?table_name=missing&db_path={mock_db}")
+    assert resp_no_tbl.status_code == 404
+
+    # 5. Server error on connect
+    mocker.patch("duckdb.connect", side_effect=Exception("CSV export failure"))
+    resp_500 = client.get(f"/api/export/csv?table_name=users&db_path={mock_db}")
+    assert resp_500.status_code == 500
+
+    # 5b. Server error with open conn during SHOW TABLES
+    mock_conn_open = mocker.MagicMock()
+    mock_conn_open.execute.side_effect = Exception("Show tables error")
+    mocker.patch("duckdb.connect", return_value=mock_conn_open)
+    resp_500b = client.get(f"/api/export/csv?table_name=users&db_path={mock_db}")
+    assert resp_500b.status_code == 500
+    mock_conn_open.close.assert_called()
+
+    # 5c. Server error during fetch
+    mock_conn = mocker.MagicMock()
+    mock_res = mocker.MagicMock()
+    mock_res.description = [("id",)]
+    mock_res.fetchmany.side_effect = Exception("Read failure")
+    mock_conn.execute.side_effect = [
+        mocker.MagicMock(fetchall=lambda: [("users",)]),
+        mock_res,
+    ]
+    mocker.patch("duckdb.connect", return_value=mock_conn)
+    resp_500c = client.get(f"/api/export/csv?table_name=users&db_path={mock_db}")
+    assert resp_500c.status_code == 500
+
+
+def test_export_json_endpoint(mock_db: str, mocker: typing.Any) -> None:
+    """Test /api/export/json endpoint streaming JSON array and error handling."""
+    # 1. Successful export
+    resp = client.get(f"/api/export/json?table_name=users&db_path={mock_db}")
+    assert resp.status_code == 200
+    assert "application/json" in resp.headers["content-type"]
+    assert "users_export.json" in resp.headers["content-disposition"]
+    data = json.loads(resp.content.decode("utf-8"))
+    assert isinstance(data, list)
+    assert len(data) > 0
+
+    # Multi-chunk export to exhaust while loop chunk iteration
+    conn = duckdb.connect(mock_db)
+    conn.execute("CREATE TABLE multi_chunk (id INT, txt VARCHAR)")
+    conn.execute(
+        "INSERT INTO multi_chunk SELECT i, repeat('X', 120) FROM range(800) tbl(i)"
+    )
+    conn.close()
+    resp_multi_j = client.get(
+        f"/api/export/json?table_name=multi_chunk&db_path={mock_db}"
+    )
+    assert resp_multi_j.status_code == 200
+    assert len(resp_multi_j.content) > 70000
+
+    # 2. Missing DB
+    resp_no_db = client.get("/api/export/json?table_name=users&db_path=no_db.duckdb")
+    assert resp_no_db.status_code == 404
+
+    # 3. Invalid table name
+    resp_inv = client.get(f"/api/export/json?table_name=users;drop&db_path={mock_db}")
+    assert resp_inv.status_code == 400
+
+    # 4. Table not found
+    resp_no_tbl = client.get(f"/api/export/json?table_name=missing&db_path={mock_db}")
+    assert resp_no_tbl.status_code == 404
+
+    # 5. Server error on connect
+    mocker.patch("duckdb.connect", side_effect=Exception("JSON export failure"))
+    resp_500 = client.get(f"/api/export/json?table_name=users&db_path={mock_db}")
+    assert resp_500.status_code == 500
+
+    # 5b. Server error with open conn during SHOW TABLES
+    mock_conn_open = mocker.MagicMock()
+    mock_conn_open.execute.side_effect = Exception("JSON show tables error")
+    mocker.patch("duckdb.connect", return_value=mock_conn_open)
+    resp_500b = client.get(f"/api/export/json?table_name=users&db_path={mock_db}")
+    assert resp_500b.status_code == 500
+    mock_conn_open.close.assert_called()
+
+    # 5c. Server error during fetch
+    mock_conn = mocker.MagicMock()
+    mock_res = mocker.MagicMock()
+    mock_res.description = [("id",)]
+    mock_res.fetchmany.side_effect = Exception("JSON read failure")
+    mock_conn.execute.side_effect = [
+        mocker.MagicMock(fetchall=lambda: [("users",)]),
+        mock_res,
+    ]
+    mocker.patch("duckdb.connect", return_value=mock_conn)
+    resp_500c = client.get(f"/api/export/json?table_name=users&db_path={mock_db}")
+    assert resp_500c.status_code == 500
+
+
 def test_export_excel_with_null_and_formula(tmp_path: typing.Any) -> None:
     """Test /api/export/excel with null values and formula injection prefix."""
     import openpyxl
@@ -1796,6 +1933,7 @@ def test_multiprovider_llm_validation(
     from t1d_analytics.api import generate_sql_from_nl, stream_llm_tokens
 
     # 1. stream_llm_tokens with provider prefix
+    monkeypatch.setenv("OPENAI_API_KEY", "test-stream-key")
     mock_llm = MagicMock()
     mock_llm.completion.return_value = ["token1 ", "token2"]
     with patch("any_llm.AnyLLM.create", return_value=mock_llm):
@@ -2106,7 +2244,7 @@ def test_get_providers_status_unprefixed_host_and_non_200(
 def test_generate_sql_from_nl_with_direct_api_key(
     monkeypatch: pytest.MonkeyPatch, mock_db: str
 ) -> None:
-    """Test generate_sql_from_nl propagates client-supplied api_key to environment."""
+    """Test generate_sql_from_nl passes client-supplied api_key to AnyLLM without polluting environment."""
     from t1d_analytics.api import generate_sql_from_nl
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -2115,7 +2253,7 @@ def test_generate_sql_from_nl_with_direct_api_key(
     mock_choice.message.content = "```sql\nSELECT 1;\n```"
     mock_llm.completion.return_value = MagicMock(choices=[mock_choice])
 
-    with patch("any_llm.AnyLLM.create", return_value=mock_llm):
+    with patch("any_llm.AnyLLM.create", return_value=mock_llm) as mock_create:
         full, sql = generate_sql_from_nl(
             mock_db,
             "Count users",
@@ -2123,7 +2261,8 @@ def test_generate_sql_from_nl_with_direct_api_key(
             api_key="direct_secret_key_123",
         )
         assert sql == "SELECT 1;"
-        assert os.environ.get("OPENAI_API_KEY") == "direct_secret_key_123"
+        mock_create.assert_called_with("openai", api_key="direct_secret_key_123")
+        assert os.environ.get("OPENAI_API_KEY") is None
 
 
 def test_stream_chat_events_nl_without_sql(mock_db: str) -> None:
@@ -2212,3 +2351,221 @@ def test_extract_stream_delta_dict_empty() -> None:
 
     # Unknown provider with arbitrary object
     assert extract_stream_delta(object(), "unknown_provider") == ""
+
+
+def test_stream_llm_tokens_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test stream_llm_tokens raises RuntimeError when external cloud provider key is missing."""
+    from t1d_analytics.api import stream_llm_tokens
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="backend.missingApiKey"):
+        list(stream_llm_tokens("test prompt", "openai/gpt-4o"))
+
+
+def test_stream_llm_tokens_with_direct_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test stream_llm_tokens accepts direct api_key without checking or polluting os.environ."""
+    from t1d_analytics.api import stream_llm_tokens
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    mock_llm = MagicMock()
+    mock_llm.completion.return_value = ["token1", "token2"]
+
+    with patch("any_llm.AnyLLM.create", return_value=mock_llm) as mock_create:
+        tokens = list(
+            stream_llm_tokens(
+                "test prompt",
+                "openai/gpt-4o",
+                api_key="sk-test-stream-key",
+            )
+        )
+        assert tokens == ["token1", "token2"]
+        mock_create.assert_called_with("openai", api_key="sk-test-stream-key")
+        assert os.environ.get("OPENAI_API_KEY") is None
+
+
+def test_get_table_data_zero_columns(tmp_path: Path) -> None:
+    """Test get_table_data gracefully handles tables when table_info reports 0 columns."""
+    from typing import Any
+
+    import duckdb
+
+    db_file = tmp_path / "zero_cols.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute("CREATE TABLE dummy_tbl (id INT)")
+    conn.close()
+
+    orig_connect = duckdb.connect
+
+    class MockConn:
+        def __init__(self, real_conn: Any) -> None:
+            self._real = real_conn
+
+        def execute(self, query: str, params: Any = None) -> Any:
+            if "PRAGMA table_info" in query or "DESCRIBE" in query:
+                mock_res = MagicMock()
+                mock_res.fetchall.return_value = []
+                mock_res.description = []
+                return mock_res
+            if params is not None:
+                return self._real.execute(query, params)
+            return self._real.execute(query)
+
+        def close(self) -> None:
+            self._real.close()
+
+    def mock_conn_factory(path: str, **kwargs: Any) -> Any:
+        real = orig_connect(path, **kwargs)
+        return MockConn(real)
+
+    with patch("duckdb.connect", side_effect=mock_conn_factory):
+        resp = client.get(
+            "/api/table/dummy_tbl",
+            params={"db_path": str(db_file)},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["rows"] == []
+        assert data["total_count"] == 0
+
+
+def test_verify_api_auth_with_bearer_token(
+    monkeypatch: pytest.MonkeyPatch, mock_db: str
+) -> None:
+    """Test API authentication middleware with T1D_API_BEARER_TOKEN."""
+    # 1. Unset auth -> allows access
+    monkeypatch.delenv("T1D_API_KEY", raising=False)
+    monkeypatch.delenv("T1D_API_BEARER_TOKEN", raising=False)
+    resp = client.get(f"/api/table/users?db_path={mock_db}")
+    assert resp.status_code == 200
+
+    # 2. Set T1D_API_BEARER_TOKEN -> rejects missing and invalid tokens
+    monkeypatch.setenv("T1D_API_BEARER_TOKEN", "secret-bearer-999")
+    resp_unauth = client.get(f"/api/table/users?db_path={mock_db}")
+    assert resp_unauth.status_code == 401
+
+    resp_bad = client.get(
+        f"/api/table/users?db_path={mock_db}",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert resp_bad.status_code == 401
+
+    # 3. Valid Bearer token
+    resp_ok = client.get(
+        f"/api/table/users?db_path={mock_db}",
+        headers={"Authorization": "Bearer secret-bearer-999"},
+    )
+    assert resp_ok.status_code == 200
+
+    # 4. Valid x-api-key header
+    resp_ok_hdr = client.get(
+        f"/api/table/users?db_path={mock_db}",
+        headers={"x-api-key": "secret-bearer-999"},
+    )
+    assert resp_ok_hdr.status_code == 200
+
+    # 5. Exempt health endpoint
+    resp_health = client.get("/api/health")
+    assert resp_health.status_code == 200
+
+
+def test_training_job_endpoints(tmp_path: Path, mocker: typing.Any) -> None:
+    """Test /api/training/jobs lifecycle: submit, list, get, and cancel."""
+    payload = {
+        "dataset_path": str(tmp_path / "ds.jsonl"),
+        "output_dir": str(tmp_path / "out"),
+        "backend": "cpu",
+        "model_name": "gemma4-sql",
+        "dry_run": True,
+    }
+    mocker.patch(
+        "t1d_analytics.training_runner.LocalCpuRunner.run_training",
+        return_value={"loss": 0.12},
+    )
+    resp_post = client.post("/api/training/jobs", json=payload)
+    assert resp_post.status_code == 200
+    job_id = resp_post.json()["job_id"]
+    assert job_id.startswith("job-")
+
+    # Shorthand backends (gpu, tpu)
+    resp_gpu = client.post("/api/training/jobs", json={**payload, "backend": "gpu"})
+    assert resp_gpu.status_code == 200
+    resp_tpu = client.post("/api/training/jobs", json={**payload, "backend": "tpu"})
+    assert resp_tpu.status_code == 200
+
+    # Invalid backend -> 400
+    resp_inv = client.post(
+        "/api/training/jobs", json={**payload, "backend": "quantum-processor"}
+    )
+    assert resp_inv.status_code == 400
+
+    # 2. List jobs
+    resp_list = client.get("/api/training/jobs")
+    assert resp_list.status_code == 200
+    jobs = resp_list.json()["jobs"]
+    assert any(j["job_id"] == job_id for j in jobs)
+
+    # 3. Get job details
+    resp_get = client.get(f"/api/training/jobs/{job_id}")
+    assert resp_get.status_code == 200
+    assert resp_get.json()["job_id"] == job_id
+
+    # 4. Get non-existent job -> 404
+    resp_404 = client.get("/api/training/jobs/non-existent-job-id")
+    assert resp_404.status_code == 404
+
+    # 5. Cancel non-existent job -> 404
+    resp_cancel_404 = client.delete("/api/training/jobs/non-existent-job-id")
+    assert resp_cancel_404.status_code == 404
+
+    # 6. Cancel existing job
+    resp_cancel = client.delete(f"/api/training/jobs/{job_id}")
+    assert resp_cancel.status_code == 200
+    assert resp_cancel.json()["status"] == "cancelled"
+
+
+def test_multiturn_history_truncation_50_plus_turns() -> None:
+    """Test conversations with 50+ turns properly truncate to sliding window without token overflow."""
+    from t1d_analytics.api import ChatMessageModel, _build_sql_prompt
+
+    # Create 60 turns of conversation history
+    history = [
+        ChatMessageModel(
+            role="user" if i % 2 == 0 else "assistant",
+            content=f"Turn message {i}",
+            sqlQuery=f"SELECT {i}" if i % 2 == 1 else None,
+        )
+        for i in range(60)
+    ]
+    prompt = _build_sql_prompt("schema text", "Final query", history=history)
+    # Verify older turns (e.g. Turn message 0 - 50) are truncated
+    assert "Turn message 0" not in prompt
+    assert "Turn message 40" not in prompt
+    assert "Turn message 50" not in prompt
+    # Verify recent turns (54 to 59) are present
+    assert "Turn message 58" in prompt
+    assert "Turn message 59" in prompt
+    assert "Final query" in prompt
+
+
+def test_malformed_prior_assistant_responses() -> None:
+    """Test SQL extraction robustly handles unclosed code fences and malformed markdown."""
+    from t1d_analytics.api import _extract_sql_from_response
+
+    # Unclosed code fence
+    malformed_unclosed = (
+        "Here is the query:\n```sql\nSELECT * FROM patients WHERE id = 1"
+    )
+    sql1 = _extract_sql_from_response(malformed_unclosed)
+    assert "SELECT * FROM patients" in sql1
+
+    # Multiple code blocks with mixed fences
+    mixed_fences = (
+        "Some thoughts...\n```\nSELECT 1;\n```\nAnd another:\n```sql\nSELECT 2;\n```"
+    )
+    sql2 = _extract_sql_from_response(mixed_fences)
+    assert "SELECT 2" in sql2 or "SELECT 1" in sql2
+
+    # Plain text without fences but valid SELECT
+    plain_select = "You can run this query:\nSELECT id, glucose FROM cgm LIMIT 10;"
+    sql3 = _extract_sql_from_response(plain_select)
+    assert "SELECT id, glucose FROM cgm" in sql3

@@ -359,9 +359,10 @@ def verify_api_auth(request: Request) -> None:
     """
     Validate optional API key or Bearer token authentication.
 
-    If T1D_API_KEY is configured in the environment, requests must provide either
-    a matching 'X-API-Key' header or 'Authorization: Bearer <token>' header.
-    Public health check endpoints (/api/health, /api/ready) are exempt.
+    If T1D_API_KEY or T1D_API_BEARER_TOKEN is configured in the environment,
+    requests must provide either a matching 'X-API-Key' header or
+    'Authorization: Bearer <token>' header. Public health check endpoints
+    (/api/health, /api/ready) are exempt.
 
     Args:
     ----
@@ -372,7 +373,9 @@ def verify_api_auth(request: Request) -> None:
         HTTPException: 401 Unauthorized if auth fails or token is missing.
 
     """
-    required_key = os.environ.get("T1D_API_KEY")
+    required_key = os.environ.get("T1D_API_KEY") or os.environ.get(
+        "T1D_API_BEARER_TOKEN"
+    )
     if not required_key:
         return
 
@@ -1092,9 +1095,30 @@ def stream_llm_tokens(
     if "/" in model_name and not provider:
         resolved_provider, actual_model = model_name.split("/", 1)
 
+    env_keys = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "google": "GEMINI_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+    }
+    effective_api_key = api_key
+    if not effective_api_key and resolved_provider.lower() in env_keys:
+        effective_api_key = os.environ.get(env_keys[resolved_provider.lower()])
+
+    if resolved_provider.lower() in env_keys and not effective_api_key:
+        env_var = env_keys[resolved_provider.lower()]
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "error_code": "backend.missingApiKey",
+                    "params": {"provider": resolved_provider, "env_var": env_var},
+                }
+            )
+        )
+
     llm_kwargs: Dict[str, Any] = {}
-    if api_key:
-        llm_kwargs["api_key"] = api_key
+    if effective_api_key:
+        llm_kwargs["api_key"] = effective_api_key
 
     llm = AnyLLM.create(resolved_provider, **llm_kwargs)
     try:
@@ -1180,20 +1204,20 @@ def generate_sql_from_nl(
         "google": "GEMINI_API_KEY",
         "gemini": "GEMINI_API_KEY",
     }
-    if api_key and resolved_provider.lower() in env_keys:
-        os.environ.setdefault(env_keys[resolved_provider.lower()], api_key)
+    effective_api_key = api_key
+    if not effective_api_key and resolved_provider.lower() in env_keys:
+        effective_api_key = os.environ.get(env_keys[resolved_provider.lower()])
 
-    if resolved_provider.lower() in env_keys:
+    if resolved_provider.lower() in env_keys and not effective_api_key:
         env_var = env_keys[resolved_provider.lower()]
-        if not os.environ.get(env_var):
-            raise RuntimeError(
-                json.dumps(
-                    {
-                        "error_code": "backend.missingApiKey",
-                        "params": {"provider": resolved_provider, "env_var": env_var},
-                    }
-                )
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "error_code": "backend.missingApiKey",
+                    "params": {"provider": resolved_provider, "env_var": env_var},
+                }
             )
+        )
 
     try:
         conn = duckdb.connect(db_path, read_only=True)
@@ -1220,8 +1244,8 @@ def generate_sql_from_nl(
     try:
         logger.info(f"Sending prompt to LLM ({resolved_provider}/{actual_model})...")
         llm_kwargs: Dict[str, Any] = {}
-        if api_key:
-            llm_kwargs["api_key"] = api_key
+        if effective_api_key:
+            llm_kwargs["api_key"] = effective_api_key
         llm = AnyLLM.create(resolved_provider, **llm_kwargs)
         response = llm.completion(
             model=actual_model,
@@ -1834,7 +1858,9 @@ def get_table_data(
         page = (offset // limit) + 1 if limit > 0 else 1
 
         # Enforce deterministic ordering
-        if sort_by is not None and sort_by != "":
+        if not column_names:
+            order_by_clause = ""
+        elif sort_by is not None and sort_by != "":
             escaped_sort = sort_by.replace('"', '""')
             order_by_clause = f'ORDER BY "{escaped_sort}" {sort_order_clean.upper()}'
         else:
@@ -2170,6 +2196,223 @@ def export_parquet(
         )
 
 
+@app.get("/api/export/csv")
+def export_csv(
+    table_name: str,
+    db_path: Optional[str] = None,
+) -> StreamingResponse:
+    """
+    Export table data formatted as a streaming CSV file with spreadsheet formula defense.
+
+    Args:
+    ----
+        table_name: Table to export.
+        db_path: Optional path to database file.
+
+    Returns:
+    -------
+        StreamingResponse: Streamed CSV file with text/csv MIME type.
+
+    Raises:
+    ------
+        HTTPException: If table or DB is invalid.
+
+    """
+    target_db = validate_db_path(db_path)
+    if not Path(target_db).exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "backend.dbNotFound", "params": {"path": target_db}},
+        )
+
+    if not table_name.isidentifier():
+        raise HTTPException(
+            status_code=400,
+            detail={"error_code": "backend.invalidTable", "params": {}},
+        )
+
+    conn = None
+    try:
+        conn = duckdb.connect(target_db, read_only=True)
+        try:
+            tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+            if table_name not in tables:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error_code": "backend.tableNotFound", "params": {}},
+                )
+
+            escaped_table = table_name.replace('"', '""')
+            result = conn.execute(f'SELECT * FROM "{escaped_table}"')
+            columns = (
+                [desc[0] for desc in result.description] if result.description else []
+            )
+
+            def _csv_quote(s: str) -> str:
+                """
+                Escape double quotes for standard CSV field representation.
+
+                Args:
+                ----
+                    s: Raw cell string.
+
+                Returns:
+                -------
+                    str: Quoted CSV string.
+
+                """
+                return '"' + s.replace('"', '""') + '"'
+
+            output = io.BytesIO()
+            output.write("\ufeff".encode("utf-8"))
+            header_line = ",".join(_csv_quote(col) for col in columns) + "\r\n"
+            output.write(header_line.encode("utf-8"))
+
+            while True:
+                batch = result.fetchmany(5000)
+                if not batch:
+                    break
+                lines: List[str] = []
+                for row in batch:
+                    formatted_cells: List[str] = []
+                    for val in row:
+                        if val is None:
+                            formatted_cells.append('""')
+                        elif isinstance(val, (int, float, bool)):
+                            formatted_cells.append(str(val))
+                        else:
+                            s_val = str(val)
+                            if s_val and s_val[0] in (
+                                "=",
+                                "+",
+                                "-",
+                                "@",
+                                "\t",
+                                "\r",
+                            ):
+                                is_numeric = False
+                                if s_val[0] in ("+", "-"):
+                                    try:
+                                        float(s_val)
+                                        is_numeric = True
+                                    except ValueError:
+                                        is_numeric = False
+                                if not is_numeric:
+                                    s_val = f"'{s_val}"
+                            formatted_cells.append(_csv_quote(s_val))
+                    lines.append(",".join(formatted_cells) + "\r\n")
+                output.write("".join(lines).encode("utf-8"))
+        finally:
+            conn.close()
+
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{table_name}_export.csv"',
+                "Cache-Control": "no-cache",
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting table to csv: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={"error_code": "backend.serverError", "params": {"error": str(e)}},
+        )
+
+
+@app.get("/api/export/json")
+def export_json(
+    table_name: str,
+    db_path: Optional[str] = None,
+) -> StreamingResponse:
+    """
+    Export table data formatted as a streaming JSON array of row objects.
+
+    Args:
+    ----
+        table_name: Table to export.
+        db_path: Optional path to database file.
+
+    Returns:
+    -------
+        StreamingResponse: Streamed JSON file with application/json MIME type.
+
+    Raises:
+    ------
+        HTTPException: If table or DB is invalid.
+
+    """
+    target_db = validate_db_path(db_path)
+    if not Path(target_db).exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "backend.dbNotFound", "params": {"path": target_db}},
+        )
+
+    if not table_name.isidentifier():
+        raise HTTPException(
+            status_code=400,
+            detail={"error_code": "backend.invalidTable", "params": {}},
+        )
+
+    conn = None
+    try:
+        conn = duckdb.connect(target_db, read_only=True)
+        try:
+            tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+            if table_name not in tables:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error_code": "backend.tableNotFound", "params": {}},
+                )
+
+            escaped_table = table_name.replace('"', '""')
+            result = conn.execute(f'SELECT * FROM "{escaped_table}"')
+            columns = (
+                [desc[0] for desc in result.description] if result.description else []
+            )
+
+            output = io.BytesIO()
+            output.write(b"[\n")
+            first_row = True
+            while True:
+                batch = result.fetchmany(5000)
+                if not batch:
+                    break
+                chunk_parts: List[str] = []
+                for row in batch:
+                    row_dict = dict(zip(columns, row))
+                    prefix = "  " if first_row else ",\n  "
+                    first_row = False
+                    chunk_parts.append(prefix + json.dumps(row_dict, default=str))
+                output.write("".join(chunk_parts).encode("utf-8"))
+            output.write(b"\n]\n")
+        finally:
+            conn.close()
+
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{table_name}_export.json"',
+                "Cache-Control": "no-cache",
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting table to json: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={"error_code": "backend.serverError", "params": {"error": str(e)}},
+        )
+
+
 class ColumnInfo(BaseModel):
     """Information about a column in a table."""
 
@@ -2447,6 +2690,146 @@ def list_databases() -> DatabaseListResponse:
             )
 
     return DatabaseListResponse(databases=found_dbs, current_db=default_db)
+
+
+class TrainingJobRequest(BaseModel):
+    """Request model for submitting an asynchronous background training job."""
+
+    dataset_path: str
+    output_dir: str
+    backend: str = "cpu"
+    model_name: str = "gemma4-sql"
+    dry_run: bool = False
+
+
+@app.post("/api/training/jobs")
+def submit_training_job(
+    job_req: TrainingJobRequest,
+    req: Request,
+) -> Dict[str, Any]:
+    """
+    Submit a background training job using the configured accelerator backend.
+
+    Args:
+    ----
+        job_req: Training job specification.
+        req: Incoming FastAPI request.
+
+    Returns:
+    -------
+        Dict[str, Any]: Job ID and initial status.
+
+    """
+    from t1d_analytics.models import TrainingBackend, TrainingJobConfig
+    from t1d_analytics.training_runner import global_training_job_manager
+
+    backend_val = job_req.backend.lower()
+    if backend_val == "cpu":
+        backend_val = "local-cpu"
+    elif backend_val == "gpu":
+        backend_val = "local-gpu"
+    elif backend_val == "tpu":
+        backend_val = "remote-tpu-maxtext"
+
+    try:
+        backend_enum = TrainingBackend(backend_val)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": "backend.invalidBackend",
+                "params": {"backend": job_req.backend},
+            },
+        )
+
+    config = TrainingJobConfig(
+        dataset_path=job_req.dataset_path,
+        output_dir=job_req.output_dir,
+        backend=backend_enum,
+        model_name=job_req.model_name,
+        dry_run=job_req.dry_run,
+    )
+    job_id = global_training_job_manager.submit_job(config)
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/training/jobs")
+def list_training_jobs(req: Request) -> Dict[str, Any]:
+    """
+    List all tracked background training jobs.
+
+    Args:
+    ----
+        req: Incoming FastAPI request.
+
+    Returns:
+    -------
+        Dict[str, Any]: Dictionary containing list of training jobs.
+
+    """
+    from t1d_analytics.training_runner import global_training_job_manager
+
+    return {"jobs": global_training_job_manager.list_jobs()}
+
+
+@app.get("/api/training/jobs/{job_id}")
+def get_training_job(job_id: str, req: Request) -> Dict[str, Any]:
+    """
+    Retrieve details and execution metrics for a specific background training job.
+
+    Args:
+    ----
+        job_id: Unique job identifier string.
+        req: Incoming FastAPI request.
+
+    Returns:
+    -------
+        Dict[str, Any]: Job status and execution results.
+
+    Raises:
+    ------
+        HTTPException: 404 if the job ID is not found.
+
+    """
+    from t1d_analytics.training_runner import global_training_job_manager
+
+    job = global_training_job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "backend.jobNotFound", "params": {"job_id": job_id}},
+        )
+    return job
+
+
+@app.delete("/api/training/jobs/{job_id}")
+def cancel_training_job(job_id: str, req: Request) -> Dict[str, Any]:
+    """
+    Request cancellation of a running background training job.
+
+    Args:
+    ----
+        job_id: Unique job identifier string.
+        req: Incoming FastAPI request.
+
+    Returns:
+    -------
+        Dict[str, Any]: Cancellation outcome.
+
+    Raises:
+    ------
+        HTTPException: 404 if the job ID is not found.
+
+    """
+    from t1d_analytics.training_runner import global_training_job_manager
+
+    cancelled = global_training_job_manager.cancel_job(job_id)
+    if not cancelled:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "backend.jobNotFound", "params": {"job_id": job_id}},
+        )
+    return {"job_id": job_id, "status": "cancelled"}
 
 
 if os.environ.get("DEBUG"):  # pragma: no cover

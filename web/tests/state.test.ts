@@ -78,6 +78,22 @@ describe("ChatState", () => {
     const chat = state.createChat();
     state.renameChat(chat.id, "My Custom Title");
     expect(state.chats[0].title).toBe("My Custom Title");
+
+    // With server sync enabled, triggers POST fetch
+    state.serverSyncEnabled = true;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ status: "ok" }),
+    } as any);
+    state.renameChat(chat.id, "Synced Title");
+    expect(fetchSpy).toHaveBeenCalled();
+
+    // Catch branch when fetch rejects
+    fetchSpy.mockRejectedValueOnce(new Error("Network failed"));
+    state.renameChat(chat.id, "Catch Branch Title");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    fetchSpy.mockRestore();
+    state.serverSyncEnabled = false;
   });
 
   it("does not rename chat if title is empty or chat not found", () => {
@@ -386,6 +402,27 @@ describe("ChatState", () => {
     expect(ok).toBe(true);
     expect(local.title).toBe("New Remote Title");
     expect(local.messages.length).toBe(2);
+
+    // Test when titleModified is true but matches remote title exactly (falsy branch of title !== remote?.title)
+    local.titleModified = true;
+    local.title = "New Remote Title";
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          session_id: local.id,
+          title: "New Remote Title",
+          created_at: "2024-01-01",
+          updated_at: "2024-01-01",
+          messages: [
+            { role: "user", content: "Hello" },
+            { role: "assistant", content: "Hi" },
+          ],
+        },
+      ],
+    } as any);
+    await state.syncWithServer();
+    expect(local.title).toBe("New Remote Title");
 
     fetchSpy.mockRestore();
   });
