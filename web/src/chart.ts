@@ -1137,7 +1137,8 @@ export function renderCgmCard(
   headerRow.style.gap = "0.5rem";
   headerRow.style.marginBottom = "0.5rem";
 
-  const title = document.createElement("h4");
+  const title = document.createElement("h2");
+  title.className = "cgm-card-title";
   title.textContent = i18next.t(
     "cgm.title",
     "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
@@ -1204,9 +1205,8 @@ export function renderCgmCard(
     wearBadge.style.padding = "0.2rem 0.5rem";
     wearBadge.style.borderRadius = "4px";
     wearBadge.style.display = "inline-block";
+    wearBadge.className = `cgm-badge ${wear.isValidWear ? "cgm-badge-success" : "cgm-badge-warning"}`;
     if (wear.isValidWear) {
-      wearBadge.style.backgroundColor = "rgba(46, 204, 113, 0.2)";
-      wearBadge.style.color = "#27ae60";
       wearBadge.textContent = i18next.t(
         "cgm.wearValid",
         `✓ Sensor Wear: ${wear.wearPercentage}% (${wear.activeDays} days, ${wear.totalReadings} readings) - Valid (>=70%)`,
@@ -1217,8 +1217,6 @@ export function renderCgmCard(
         },
       );
     } else {
-      wearBadge.style.backgroundColor = "rgba(243, 156, 18, 0.2)";
-      wearBadge.style.color = "#d35400";
       wearBadge.textContent = i18next.t(
         "cgm.wearCaution",
         `⚠️ Sensor Wear: ${wear.wearPercentage}% (${wear.activeDays} days) - Caution (<70% wear)`,
@@ -1241,11 +1239,7 @@ export function renderCgmCard(
   badgesRow.style.margin = "0.5rem 0";
 
   const gmiBadge = document.createElement("div");
-  gmiBadge.style.fontSize = "0.8rem";
-  gmiBadge.style.padding = "0.2rem 0.5rem";
-  gmiBadge.style.borderRadius = "4px";
-  gmiBadge.style.backgroundColor = "rgba(52, 152, 219, 0.15)";
-  gmiBadge.style.color = "#2980b9";
+  gmiBadge.className = "cgm-badge cgm-badge-info";
   gmiBadge.textContent = i18next.t(
     "cgm.gmi",
     `GMI: ${metrics.gmi}% (Mean: ${metrics.mean} mg/dL)`,
@@ -1254,14 +1248,8 @@ export function renderCgmCard(
   badgesRow.appendChild(gmiBadge);
 
   const cvBadge = document.createElement("div");
-  cvBadge.style.fontSize = "0.8rem";
-  cvBadge.style.padding = "0.2rem 0.5rem";
-  cvBadge.style.borderRadius = "4px";
   const isCvOptimal = metrics.cv <= 36.0;
-  cvBadge.style.backgroundColor = isCvOptimal
-    ? "rgba(46, 204, 113, 0.15)"
-    : "rgba(231, 76, 60, 0.15)";
-  cvBadge.style.color = isCvOptimal ? "#27ae60" : "#c0392b";
+  cvBadge.className = `cgm-badge ${isCvOptimal ? "cgm-badge-success" : "cgm-badge-danger"}`;
   cvBadge.textContent = i18next.t(
     "cgm.cv",
     `CV: ${metrics.cv}% (Target ≤36% | SD: ${metrics.sd} mg/dL)`,
@@ -1270,11 +1258,7 @@ export function renderCgmCard(
   badgesRow.appendChild(cvBadge);
 
   const lbgiBadge = document.createElement("div");
-  lbgiBadge.style.fontSize = "0.8rem";
-  lbgiBadge.style.padding = "0.2rem 0.5rem";
-  lbgiBadge.style.borderRadius = "4px";
-  lbgiBadge.style.backgroundColor = "rgba(155, 89, 182, 0.15)";
-  lbgiBadge.style.color = "#8e44ad";
+  lbgiBadge.className = "cgm-badge cgm-badge-purple";
   lbgiBadge.textContent = i18next.t(
     "cgm.lbgiHbgi",
     `LBGI: ${metrics.lbgi} | HBGI: ${metrics.hbgi}`,
@@ -1286,11 +1270,7 @@ export function renderCgmCard(
     const dn = calculateDayNightTIR(displayRows, timeCol, glucoseCol);
     if (dn.day.count > 0 && dn.night.count > 0) {
       const dnBadge = document.createElement("div");
-      dnBadge.style.fontSize = "0.8rem";
-      dnBadge.style.padding = "0.2rem 0.5rem";
-      dnBadge.style.borderRadius = "4px";
-      dnBadge.style.backgroundColor = "rgba(241, 196, 15, 0.15)";
-      dnBadge.style.color = "#d68910";
+      dnBadge.className = "cgm-badge cgm-badge-warning";
       dnBadge.textContent = `TIR Day: ${dn.day.inRange}% (n=${dn.day.count}) | Night: ${dn.night.inRange}% (n=${dn.night.count})`;
       badgesRow.appendChild(dnBadge);
     }

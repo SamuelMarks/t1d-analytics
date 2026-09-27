@@ -508,6 +508,11 @@ def validate_db_path(
 
     """
     raw_path = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
+    if raw_path == "t1d.duckdb" and not Path(raw_path).exists():
+        env_db_fallback = os.environ.get("T1D_DB_PATH")
+        if env_db_fallback and Path(env_db_fallback).exists():
+            raw_path = env_db_fallback
+
     if "\0" in raw_path:
         raise HTTPException(
             status_code=400,
@@ -2671,6 +2676,10 @@ def list_databases() -> DatabaseListResponse:
     """
     default_db = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
     all_files: List[Path] = []
+    if default_db:
+        p_def = Path(default_db)
+        if p_def.exists():
+            all_files.append(p_def)
     for s_dir in (Path("."), Path("./data")):
         if s_dir.exists():
             all_files.extend(s_dir.glob("*.duckdb"))

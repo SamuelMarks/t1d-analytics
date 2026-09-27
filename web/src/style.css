@@ -1,6 +1,9 @@
 :root {
   --bg-dark: #1e1e2e;
   --bg-sidebar: #181825;
+  --bg-secondary: #242438;
+  --text-primary: #cdd6f4;
+  --text-secondary: #bac2de;
   --text-light: #cdd6f4;
   --text-muted: #bac2de;
   --accent: #1e4b85;
@@ -19,6 +22,9 @@
 body.light-mode {
   --bg-dark: #f0f2f5;
   --bg-sidebar: #ffffff;
+  --bg-secondary: #e4e6eb;
+  --text-primary: #1c1e21;
+  --text-secondary: #4b5563;
   --text-light: #1c1e21;
   --text-muted: #606770;
   --accent: #0056b3; /* Better contrast */
@@ -1107,31 +1113,29 @@ body.light-mode .hljs-deletion {
 
 @keyframes bannerSlideIn {
   from {
-    opacity: 0;
     transform: translateY(-8px);
   }
   to {
-    opacity: 1;
     transform: translateY(0);
   }
 }
 
 .system-status-banner.banner-danger {
-  background-color: rgba(239, 68, 68, 0.12);
-  border-color: rgba(239, 68, 68, 0.35);
-  color: var(--text-primary);
+  background-color: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: var(--text-light);
 }
 
 .system-status-banner.banner-warning {
-  background-color: rgba(245, 158, 11, 0.12);
-  border-color: rgba(245, 158, 11, 0.35);
-  color: var(--text-primary);
+  background-color: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: var(--text-light);
 }
 
 .system-status-banner.banner-info {
-  background-color: rgba(59, 130, 246, 0.12);
-  border-color: rgba(59, 130, 246, 0.35);
-  color: var(--text-primary);
+  background-color: rgba(59, 130, 246, 0.15);
+  border-color: rgba(59, 130, 246, 0.45);
+  color: var(--text-light);
 }
 
 .banner-content {
@@ -1157,14 +1161,19 @@ body.light-mode .hljs-deletion {
 .banner-title {
   font-size: 0.92rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-light);
 }
 
 .banner-desc {
   font-size: 0.85rem;
-  color: var(--text-secondary);
+  color: var(--text-light);
   line-height: 1.4;
   margin: 0;
+}
+
+.btn-sm {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
 }
 
 .banner-actions {
@@ -1172,6 +1181,17 @@ body.light-mode .hljs-deletion {
   gap: 0.5rem;
   margin-top: 0.4rem;
   flex-wrap: wrap;
+}
+
+.banner-actions .btn-primary {
+  background-color: var(--accent);
+  color: #ffffff;
+}
+
+.banner-actions .btn-secondary {
+  background-color: var(--bg-sidebar);
+  color: var(--text-light);
+  border: 1px solid var(--border);
 }
 
 .banner-drawer {
@@ -1219,6 +1239,40 @@ body.light-mode .hljs-deletion {
 .banner-dismiss:hover {
   color: var(--text-primary);
   background: var(--bg-hover);
+}
+
+/* CGM Badges */
+.cgm-badge {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  color: var(--text-light);
+  display: inline-block;
+}
+
+.cgm-badge-info {
+  background-color: rgba(52, 152, 219, 0.25);
+  border: 1px solid rgba(52, 152, 219, 0.4);
+}
+
+.cgm-badge-success {
+  background-color: rgba(46, 204, 113, 0.25);
+  border: 1px solid rgba(46, 204, 113, 0.4);
+}
+
+.cgm-badge-warning {
+  background-color: rgba(243, 156, 18, 0.25);
+  border: 1px solid rgba(243, 156, 18, 0.4);
+}
+
+.cgm-badge-danger {
+  background-color: rgba(231, 76, 60, 0.25);
+  border: 1px solid rgba(231, 76, 60, 0.4);
+}
+
+.cgm-badge-purple {
+  background-color: rgba(155, 89, 182, 0.25);
+  border: 1px solid rgba(155, 89, 182, 0.4);
 }
 
 /* Schema Explorer Diagnostic Card */

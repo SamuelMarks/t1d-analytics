@@ -2823,6 +2823,10 @@ describe("ChatUI", () => {
     );
 
     state.setCurrentDb("t1d.duckdb");
+    modalFullCsvBtn?.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      "/api/export/csv?table_name=patients",
+    );
     windowOpenSpy.mockRestore();
   });
 
@@ -4126,6 +4130,13 @@ describe("ChatUI", () => {
     expect(JSON.parse(emptyDbCall[1].body).db_path).toBeUndefined();
 
     state.setCurrentDb("t1d.duckdb");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: "Result with default db" }),
+    });
+    await ui["handleSendMessage"]("Query with default db", "plainmodel");
+    const defaultDbCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+    expect(JSON.parse(defaultDbCall[1].body).db_path).toBeUndefined();
 
     // 6. Modal table navigation and focus trap key events
     mockFetch.mockResolvedValueOnce({

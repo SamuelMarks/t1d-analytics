@@ -748,6 +748,22 @@ def test_list_databases_endpoint(tmp_path: typing.Any, monkeypatch: typing.Any) 
     assert "current_db" in data
     assert any(d["name"] == "custom.duckdb" for d in data["databases"])
 
+    # Third call with existing T1D_DB_PATH
+    monkeypatch.setenv("T1D_DB_PATH", str(db1))
+    resp3 = client.get("/api/databases")
+    assert resp3.status_code == 200
+    assert any(d["name"] == "custom.duckdb" for d in resp3.json()["databases"])
+
+    # Fourth call with non-existent T1D_DB_PATH
+    monkeypatch.setenv("T1D_DB_PATH", str(tmp_path / "absent.duckdb"))
+    resp4 = client.get("/api/databases")
+    assert resp4.status_code == 200
+
+    # Fifth call with empty T1D_DB_PATH
+    monkeypatch.setenv("T1D_DB_PATH", "")
+    resp5 = client.get("/api/databases")
+    assert resp5.status_code == 200
+
 
 def test_execute_sql_timeout(mock_db: str) -> None:
     """Test execute_sql timeout triggers ValueError with queryTimeout error code."""
@@ -893,9 +909,19 @@ def test_validate_db_path_env_var(monkeypatch: typing.Any, tmp_path: Path) -> No
     from t1d_analytics.api import validate_db_path
 
     env_db = tmp_path / "env_test.duckdb"
+    env_db.touch()
     monkeypatch.setenv("T1D_DB_PATH", str(env_db))
     resolved = validate_db_path()
     assert resolved == str(env_db.resolve())
+
+    # When raw_path is "t1d.duckdb" and doesn't exist, but T1D_DB_PATH exists, fallback
+    resolved_fallback = validate_db_path("t1d.duckdb")
+    assert resolved_fallback == str(env_db.resolve())
+
+    # When T1D_DB_PATH points to non-existent file, it doesn't fallback
+    monkeypatch.setenv("T1D_DB_PATH", str(tmp_path / "nonexistent.duckdb"))
+    resolved_no_fallback = validate_db_path("t1d.duckdb")
+    assert resolved_no_fallback == str(Path("t1d.duckdb").resolve())
 
 
 def test_chat_stream_invalid_db_path() -> None:

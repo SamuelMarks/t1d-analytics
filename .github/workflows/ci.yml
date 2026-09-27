@@ -115,6 +115,9 @@ jobs:
           echo "id,name,value" > tests/test_data/tiny.csv
           echo "1,Test A,100" >> tests/test_data/tiny.csv
           echo "2,Test B,200" >> tests/test_data/tiny.csv
+          echo "id,name,age" > tests/test_data/patients.csv
+          echo "1,Alice,30" >> tests/test_data/patients.csv
+          echo "2,Bob,40" >> tests/test_data/patients.csv
           t1d-analytics load -d tests/test_data --db ci_test.duckdb
 
       - name: Run Web E2E Full Stack Tests (Playwright)

@@ -1379,7 +1379,10 @@ export class ChatUI {
         model: m.model,
       }));
 
-    const dbPathPayload = this.state.currentDb || undefined;
+    const dbPathPayload =
+      this.state.currentDb && this.state.currentDb !== "t1d.duckdb"
+        ? this.state.currentDb
+        : undefined;
 
     const payload = {
       message: content,
@@ -2659,9 +2662,10 @@ export class ChatUI {
     }
     if (modalExportFullCsvBtn) {
       modalExportFullCsvBtn.onclick = () => {
-        const dbParam = this.state.currentDb
-          ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
-          : "";
+        const dbParam =
+          this.state.currentDb && this.state.currentDb !== "t1d.duckdb"
+            ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
+            : "";
         window.open(
           `/api/export/csv?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`,
         );
@@ -2669,9 +2673,10 @@ export class ChatUI {
     }
     if (modalExportExcelBtn) {
       modalExportExcelBtn.onclick = () => {
-        const dbParam = this.state.currentDb
-          ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
-          : "";
+        const dbParam =
+          this.state.currentDb && this.state.currentDb !== "t1d.duckdb"
+            ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
+            : "";
         window.open(
           `/api/export/excel?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`,
         );
@@ -2679,9 +2684,10 @@ export class ChatUI {
     }
     if (modalExportParquetBtn) {
       modalExportParquetBtn.onclick = () => {
-        const dbParam = this.state.currentDb
-          ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
-          : "";
+        const dbParam =
+          this.state.currentDb && this.state.currentDb !== "t1d.duckdb"
+            ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
+            : "";
         window.open(
           `/api/export/parquet?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`,
         );
