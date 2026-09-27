@@ -9,7 +9,7 @@
     "coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
-    "docs": "typedoc --out ../docs/web src/main.ts src/ui.ts src/state.ts src/chart.ts src/i18n.ts",
+    "docs": "typedoc --out ../docs/web src/main.ts src/ui.ts src/state.ts src/chart.ts src/i18n.ts src/formatters.ts",
     "test:e2e": "playwright test --config=playwright.config.ts",
     "test:e2e:full": "playwright test --config=playwright.full.config.ts",
     "test:e2e:all": "npm run test:e2e && npm run test:e2e:full"

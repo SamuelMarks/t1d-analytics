@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { ChatState } from "../src/state";
-import { ChatUI } from "../src/ui";
+import { ChatUI, trapModalFocus } from "../src/ui";
 
 describe("ChatUI", () => {
   let state: ChatState;
@@ -135,6 +135,8 @@ describe("ChatUI", () => {
     globalThis.fetch = mockFetch as typeof fetch;
 
     state = new ChatState();
+    i18next.changeLanguage("en");
+    document.documentElement.lang = "en";
     ui = new ChatUI(state);
   });
 
@@ -4185,5 +4187,176 @@ describe("ChatUI", () => {
     tableModal.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
     );
+  });
+
+  it("thoroughly tests trapModalFocus utility across all keyboard interaction branches", () => {
+    const modal = document.createElement("div");
+    const btn1 = document.createElement("button");
+    const btn2 = document.createElement("button");
+    const disabledBtn = document.createElement("button");
+    disabledBtn.setAttribute("disabled", "true");
+    modal.appendChild(btn1);
+    modal.appendChild(disabledBtn);
+    modal.appendChild(btn2);
+    document.body.appendChild(modal);
+
+    const closeSpy = vi.fn();
+
+    // 1. Escape key calls onClose
+    const escEvent = new KeyboardEvent("keydown", {
+      key: "Escape",
+      cancelable: true,
+    });
+    trapModalFocus(escEvent, modal, closeSpy);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(escEvent.defaultPrevented).toBe(true);
+
+    // 2. Non-Tab non-Escape key (e.g. Enter) does nothing
+    const enterEvent = new KeyboardEvent("keydown", { key: "Enter" });
+    trapModalFocus(enterEvent, modal, closeSpy);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+
+    // 3. Shift+Tab on first element wraps focus to last element
+    btn1.focus();
+    const shiftTabFirst = new KeyboardEvent("keydown", {
+      key: "Tab",
+      shiftKey: true,
+      cancelable: true,
+    });
+    trapModalFocus(shiftTabFirst, modal, closeSpy);
+    expect(shiftTabFirst.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(btn2);
+
+    // 4. Shift+Tab on non-first element does not prevent default
+    btn2.focus();
+    const shiftTabSecond = new KeyboardEvent("keydown", {
+      key: "Tab",
+      shiftKey: true,
+      cancelable: true,
+    });
+    trapModalFocus(shiftTabSecond, modal, closeSpy);
+    expect(shiftTabSecond.defaultPrevented).toBe(false);
+
+    // 5. Tab on last element wraps focus to first element
+    btn2.focus();
+    const tabLast = new KeyboardEvent("keydown", {
+      key: "Tab",
+      shiftKey: false,
+      cancelable: true,
+    });
+    trapModalFocus(tabLast, modal, closeSpy);
+    expect(tabLast.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(btn1);
+
+    // 6. Tab on non-last element does not prevent default
+    btn1.focus();
+    const tabFirst = new KeyboardEvent("keydown", {
+      key: "Tab",
+      shiftKey: false,
+      cancelable: true,
+    });
+    trapModalFocus(tabFirst, modal, closeSpy);
+    expect(tabFirst.defaultPrevented).toBe(false);
+
+    // 7. Modal with no focusable elements returns early without error
+    const emptyModal = document.createElement("div");
+    const tabEmpty = new KeyboardEvent("keydown", {
+      key: "Tab",
+      cancelable: true,
+    });
+    trapModalFocus(tabEmpty, emptyModal, closeSpy);
+    expect(tabEmpty.defaultPrevented).toBe(false);
+
+    modal.remove();
+  });
+
+  it("handles cohort modal Escape key dismissal and focus restoration", () => {
+    // Open when activeElement is document.body
+    document.body.focus();
+    ui.openCohortModal();
+    ui.closeCohortModal();
+
+    const trigger = document.getElementById(
+      "cohort-filter-btn",
+    ) as HTMLButtonElement;
+    trigger.focus();
+
+    ui.openCohortModal();
+    const modal = document.getElementById("cohort-modal") as HTMLElement;
+    expect(modal.classList.contains("hidden")).toBe(false);
+    expect(modal.getAttribute("aria-hidden")).toBeNull();
+
+    // Escape key inside cohort modal closes it and restores focus to trigger
+    const escEvent = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    modal.dispatchEvent(escEvent);
+
+    expect(modal.classList.contains("hidden")).toBe(true);
+    expect(modal.getAttribute("aria-hidden")).toBe("true");
+    expect(document.activeElement).toBe(trigger);
+
+    // Test focus restoration fallback when previousFocus element was removed from DOM
+    const tempTrigger = document.createElement("button");
+    document.body.appendChild(tempTrigger);
+    tempTrigger.focus();
+    ui.openCohortModal();
+    tempTrigger.remove();
+    ui.closeCohortModal();
+    expect(document.activeElement).toBe(trigger);
+
+    // Open cohort modal twice consecutively to cover existing listener removal branch
+    ui.openCohortModal();
+    ui.openCohortModal();
+    ui.closeCohortModal();
+    // Close again when onCohortModalKeyDown is null
+    ui.closeCohortModal();
+  });
+
+  it("handles provider modal Escape key dismissal and focus restoration", async () => {
+    // Open when activeElement is document.body
+    document.body.focus();
+    await ui.openProviderModal();
+    ui.closeProviderModal();
+
+    const trigger = document.getElementById(
+      "provider-settings-btn",
+    ) as HTMLButtonElement;
+    trigger.focus();
+
+    await ui.openProviderModal();
+    const modal = document.getElementById("provider-modal") as HTMLElement;
+    expect(modal.classList.contains("hidden")).toBe(false);
+    expect(modal.getAttribute("aria-hidden")).toBeNull();
+
+    // Escape key inside provider modal closes it and restores focus to trigger
+    const escEvent = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    modal.dispatchEvent(escEvent);
+
+    expect(modal.classList.contains("hidden")).toBe(true);
+    expect(modal.getAttribute("aria-hidden")).toBe("true");
+    expect(document.activeElement).toBe(trigger);
+
+    // Test focus restoration fallback when previousFocus element was removed from DOM
+    const tempTrigger = document.createElement("button");
+    document.body.appendChild(tempTrigger);
+    tempTrigger.focus();
+    await ui.openProviderModal();
+    tempTrigger.remove();
+    ui.closeProviderModal();
+    expect(document.activeElement).toBe(trigger);
+
+    // Open provider modal twice consecutively to cover existing listener removal branch
+    await ui.openProviderModal();
+    await ui.openProviderModal();
+    ui.closeProviderModal();
+    // Close again when onProviderModalKeyDown is null
+    ui.closeProviderModal();
   });
 });

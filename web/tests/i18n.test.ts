@@ -156,4 +156,50 @@ describe("i18n.ts", () => {
     setDocumentDir("en");
     expect(document.documentElement.dir).toBe("ltr");
   });
+
+  it("verifies translation key parity and namespaces across all supported languages", () => {
+    const langs = ["en", "ja", "ar", "he"];
+    for (const lang of langs) {
+      expect(i18next.t("provider.title", { lng: lang })).toBeTruthy();
+      expect(i18next.t("provider.description", { lng: lang })).toBeTruthy();
+      expect(i18next.t("provider.consent", { lng: lang })).toBeTruthy();
+      expect(i18next.t("provider.clear", { lng: lang })).toBeTruthy();
+      expect(i18next.t("provider.save", { lng: lang })).toBeTruthy();
+
+      expect(i18next.t("cohort.joinTable", { lng: lang })).toBeTruthy();
+      expect(i18next.t("cohort.joinType", { lng: lang })).toBeTruthy();
+      expect(i18next.t("cohort.joinOn", { lng: lang })).toBeTruthy();
+
+      expect(i18next.t("cgm.title", { lng: lang })).toBeTruthy();
+      expect(i18next.t("cgm.reportPdf", { lng: lang })).toBeTruthy();
+      expect(i18next.t("cgm.timeOfDay", { lng: lang })).toBeTruthy();
+      expect(i18next.t("cgm.glucoseMgDl", { lng: lang })).toBeTruthy();
+      expect(i18next.t("cgm.targetRange", { lng: lang })).toBeTruthy();
+
+      expect(i18next.t("table.searchPlaceholder", { lng: lang })).toBeTruthy();
+      expect(i18next.t("table.exportCsv", { lng: lang })).toBeTruthy();
+      expect(i18next.t("table.sortDefault", { lng: lang })).toBeTruthy();
+
+      expect(i18next.t("aria.messageReceived", { lng: lang })).toBeTruthy();
+      expect(i18next.t("ui.settingsSaved", { lng: lang })).toBeTruthy();
+      expect(i18next.t("ui.settingsCleared", { lng: lang })).toBeTruthy();
+    }
+  });
+
+  it("formats plural chat strings correctly according to language pluralization rules", () => {
+    expect(i18next.t("app.chatNumber", { count: 1, lng: "en" })).toBe(
+      "Chat #1",
+    );
+    expect(i18next.t("app.chatNumber", { count: 5, lng: "en" })).toBe(
+      "Chat #5",
+    );
+
+    expect(i18next.t("app.chatNumber", { count: 1, lng: "ar" })).toContain("1");
+    expect(i18next.t("app.chatNumber", { count: 2, lng: "ar" })).toContain("2");
+    expect(i18next.t("app.chatNumber", { count: 5, lng: "ar" })).toContain("5");
+
+    expect(i18next.t("app.chatNumber", { count: 1, lng: "he" })).toContain("1");
+    expect(i18next.t("app.chatNumber", { count: 2, lng: "he" })).toContain("2");
+    expect(i18next.t("app.chatNumber", { count: 5, lng: "he" })).toContain("5");
+  });
 });

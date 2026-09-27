@@ -39,11 +39,11 @@ warn_unused_ignores = false
 mypy_path = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=t1d_analytics --cov=scripts.run_tests --cov-branch --cov-report=term-missing --cov-report=html --cov-report=lcov --cov-fail-under=100"
+addopts = "--cov=t1d_analytics --cov=scripts.run_tests --cov=docs_src --cov-branch --cov-report=term-missing --cov-report=html --cov-report=lcov --cov-fail-under=100"
 pythonpath = ["src", "."]
 
 [tool.coverage.run]
-source = ["src/t1d_analytics", "scripts/run_tests.py"]
+source = ["src/t1d_analytics", "scripts/run_tests.py", "docs_src"]
 branch = true
 sigterm = true
 concurrency = ["multiprocessing", "thread"]

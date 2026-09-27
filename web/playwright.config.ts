@@ -1,3 +1,8 @@
+/**
+ * @file playwright.config.ts
+ * Standard Playwright end-to-end test suite configuration.
+ */
+
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({

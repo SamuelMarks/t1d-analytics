@@ -137,6 +137,43 @@ export function buildCohortSql(params: CohortFilterParams): string {
 }
 
 /**
+ * Traps keyboard focus within a modal dialog and handles the Escape key to close.
+ * @param {KeyboardEvent} e - The keyboard event.
+ * @param {HTMLElement} modal - The container element to trap focus within.
+ * @param {() => void} onClose - The callback function to invoke when Escape is pressed.
+ */
+export function trapModalFocus(
+  e: KeyboardEvent,
+  modal: HTMLElement,
+  onClose: () => void,
+): void {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    onClose();
+    return;
+  }
+  if (e.key !== "Tab") return;
+  const focusableElements = modal.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  );
+  if (focusableElements.length === 0) return;
+  const firstElement = focusableElements[0];
+  const lastElement = focusableElements[focusableElements.length - 1];
+
+  if (e.shiftKey) {
+    if (document.activeElement === firstElement) {
+      e.preventDefault();
+      lastElement.focus();
+    }
+  } else {
+    if (document.activeElement === lastElement) {
+      e.preventDefault();
+      firstElement.focus();
+    }
+  }
+}
+
+/**
  * UI controller class that binds the state to the DOM elements.
  */
 export class ChatUI {
@@ -206,6 +243,12 @@ export class ChatUI {
   private providerBadgeOpenAI: HTMLElement | null;
   private providerBadgeAnthropic: HTMLElement | null;
   private providerBadgeGoogle: HTMLElement | null;
+
+  // Modal accessibility focus tracking and listeners
+  private previousFocusCohort: HTMLElement | null = null;
+  private previousFocusProvider: HTMLElement | null = null;
+  private onCohortModalKeyDown: ((e: KeyboardEvent) => void) | null = null;
+  private onProviderModalKeyDown: ((e: KeyboardEvent) => void) | null = null;
 
   /**
    * Initializes the ChatUI.
@@ -1347,7 +1390,7 @@ export class ChatUI {
     loadingDiv.className = "message assistant loading";
     loadingDiv.setAttribute("role", "status");
     loadingDiv.setAttribute("aria-live", "polite");
-    loadingDiv.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div><div style="font-size: 0.85em; margin-top: 0.5rem; opacity: 0.7;">${i18next.t("ui.querying")}</div>`;
+    loadingDiv.innerHTML = `<div class="typing-indicator" aria-label="${i18next.t("ui.querying")}"><span></span><span></span><span></span><span class="sr-only">${i18next.t("ui.querying")}</span></div><div style="font-size: 0.85em; margin-top: 0.5rem; opacity: 0.7;">${i18next.t("ui.querying")}</div>`;
     this.messagesContainer.appendChild(loadingDiv);
     this.scrollToBottom();
 
@@ -1717,7 +1760,18 @@ export class ChatUI {
 
     this.handleCohortJoinTableChange();
     this.updateCohortSqlPreview();
+
+    const activeCohort = document.activeElement as HTMLElement | null;
+    this.previousFocusCohort =
+      activeCohort && activeCohort !== document.body
+        ? activeCohort
+        : this.cohortFilterBtn;
     this.cohortModal.classList.remove("hidden");
+    this.cohortModal.removeAttribute("aria-hidden");
+    this.onCohortModalKeyDown = (e: KeyboardEvent) => {
+      trapModalFocus(e, this.cohortModal!, () => this.closeCohortModal());
+    };
+    this.cohortModal.addEventListener("keydown", this.onCohortModalKeyDown);
     this.cohortMinAge?.focus();
   }
 
@@ -1727,7 +1781,22 @@ export class ChatUI {
   public closeCohortModal(): void {
     if (!this.cohortModal) return;
     this.cohortModal.classList.add("hidden");
-    this.cohortFilterBtn?.focus();
+    this.cohortModal.setAttribute("aria-hidden", "true");
+    if (this.onCohortModalKeyDown) {
+      this.cohortModal.removeEventListener(
+        "keydown",
+        this.onCohortModalKeyDown,
+      );
+      this.onCohortModalKeyDown = null;
+    }
+    if (
+      this.previousFocusCohort &&
+      document.body.contains(this.previousFocusCohort)
+    ) {
+      this.previousFocusCohort.focus();
+    } else {
+      this.cohortFilterBtn?.focus();
+    }
   }
 
   /**
@@ -1763,7 +1832,17 @@ export class ChatUI {
       this.updateModalBadgesFromLocal();
     }
 
+    const activeProvider = document.activeElement as HTMLElement | null;
+    this.previousFocusProvider =
+      activeProvider && activeProvider !== document.body
+        ? activeProvider
+        : this.providerSettingsBtn;
     this.providerModal.classList.remove("hidden");
+    this.providerModal.removeAttribute("aria-hidden");
+    this.onProviderModalKeyDown = (e: KeyboardEvent) => {
+      trapModalFocus(e, this.providerModal!, () => this.closeProviderModal());
+    };
+    this.providerModal.addEventListener("keydown", this.onProviderModalKeyDown);
     this.providerKeyOpenAI?.focus();
   }
 
@@ -1799,7 +1878,22 @@ export class ChatUI {
   public closeProviderModal(): void {
     if (!this.providerModal) return;
     this.providerModal.classList.add("hidden");
-    this.providerSettingsBtn?.focus();
+    this.providerModal.setAttribute("aria-hidden", "true");
+    if (this.onProviderModalKeyDown) {
+      this.providerModal.removeEventListener(
+        "keydown",
+        this.onProviderModalKeyDown,
+      );
+      this.onProviderModalKeyDown = null;
+    }
+    if (
+      this.previousFocusProvider &&
+      document.body.contains(this.previousFocusProvider)
+    ) {
+      this.previousFocusProvider.focus();
+    } else {
+      this.providerSettingsBtn?.focus();
+    }
   }
 
   /**
@@ -2716,30 +2810,7 @@ export class ChatUI {
 
     // Trap focus and handle Escape inside modal
     const onModalKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeModal();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const focusableElements = modal.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      );
-      if (focusableElements.length === 0) return;
-      const firstElement = focusableElements[0];
-      const lastElement = focusableElements[focusableElements.length - 1];
-
-      if (e.shiftKey) {
-        if (document.activeElement === firstElement) {
-          e.preventDefault();
-          lastElement.focus();
-        }
-      } else {
-        if (document.activeElement === lastElement) {
-          e.preventDefault();
-          firstElement.focus();
-        }
-      }
+      trapModalFocus(e, modal, closeModal);
     };
 
     modal.addEventListener("keydown", onModalKeyDown);

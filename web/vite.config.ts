@@ -1,3 +1,8 @@
+/**
+ * @file vite.config.ts
+ * Vite development and production build configuration.
+ */
+
 import { defineConfig } from "vite";
 import istanbul from "vite-plugin-istanbul";
 
@@ -24,8 +29,8 @@ export default defineConfig({
   },
   plugins: [
     istanbul({
-      include: "src/*",
-      exclude: ["node_modules", "test/"],
+      include: ["src/*", "*.ts"],
+      exclude: ["node_modules", "test/", "tests/"],
       extension: [".js", ".ts"],
       requireEnv: false,
     }),

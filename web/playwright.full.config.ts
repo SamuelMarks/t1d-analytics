@@ -1,3 +1,8 @@
+/**
+ * @file playwright.full.config.ts
+ * Full end-to-end matrix configuration with active backend instance.
+ */
+
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
@@ -22,8 +27,6 @@ export default defineConfig({
   ],
   webServer: [
     {
-      // Start the Python FastAPI backend server required for full E2E tests.
-      // Fallback to python3 if python is not available in the environment.
       command:
         "python -m uvicorn t1d_analytics.api:app --port 8000 || python3 -m uvicorn t1d_analytics.api:app --port 8000",
       url: "http://127.0.0.1:8000/api/models",

@@ -269,17 +269,58 @@ export function renderTIRBarSvg(metrics: TIRMetrics): SVGSVGElement {
   svg.setAttribute("width", "100%");
   svg.setAttribute("height", "70");
   svg.setAttribute("role", "img");
-  svg.setAttribute(
-    "aria-label",
-    `Time in Range Chart: In Range ${metrics.inRange}%, Low ${metrics.low}%, Very Low ${metrics.veryLow}%, High ${metrics.high}%, Very High ${metrics.veryHigh}%`,
+
+  const svgTitle = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "title",
   );
+  svgTitle.textContent = i18next.t(
+    "cgm.title",
+    "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
+  );
+  svg.appendChild(svgTitle);
+
+  const svgDesc = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "desc",
+  );
+  svgDesc.textContent = i18next.t("cgm.tirChartAria", {
+    inRange: metrics.inRange,
+    low: metrics.low,
+    veryLow: metrics.veryLow,
+    high: metrics.high,
+    veryHigh: metrics.veryHigh,
+    defaultValue: `Time in Range Chart: In Range ${metrics.inRange}%, Low ${metrics.low}%, Very Low ${metrics.veryLow}%, High ${metrics.high}%, Very High ${metrics.veryHigh}%`,
+  });
+  svg.appendChild(svgDesc);
+  svg.setAttribute("aria-label", svgDesc.textContent);
 
   const segments = [
-    { label: "Very Low (<54)", pct: metrics.veryLow, color: "#8b0000" },
-    { label: "Low (54-69)", pct: metrics.low, color: "#e74c3c" },
-    { label: "In Range (70-180)", pct: metrics.inRange, color: "#2ecc71" },
-    { label: "High (181-250)", pct: metrics.high, color: "#f39c12" },
-    { label: "Very High (>250)", pct: metrics.veryHigh, color: "#c0392b" },
+    {
+      label: i18next.t("cgm.veryLowLabel", "Very Low (<54)"),
+      pct: metrics.veryLow,
+      color: "#8b0000",
+    },
+    {
+      label: i18next.t("cgm.lowLabel", "Low (54-69)"),
+      pct: metrics.low,
+      color: "#e74c3c",
+    },
+    {
+      label: i18next.t("cgm.inRangeLabel", "In Range (70-180)"),
+      pct: metrics.inRange,
+      color: "#2ecc71",
+    },
+    {
+      label: i18next.t("cgm.highLabel", "High (181-250)"),
+      pct: metrics.high,
+      color: "#f39c12",
+    },
+    {
+      label: i18next.t("cgm.veryHighLabel", "Very High (>250)"),
+      pct: metrics.veryHigh,
+      color: "#c0392b",
+    },
   ];
 
   let currentX = 0;
@@ -329,7 +370,12 @@ export function renderTIRBarSvg(metrics: TIRMetrics): SVGSVGElement {
   desc.setAttribute("font-size", "11");
   desc.setAttribute("font-family", "system-ui, sans-serif");
   desc.setAttribute("fill", "#888888");
-  desc.textContent = `Mean: ${metrics.mean} mg/dL | Readings: ${metrics.count} | Target (70-180 mg/dL): ${metrics.inRange}%`;
+  desc.textContent = i18next.t("cgm.meanLabel", {
+    mean: metrics.mean,
+    readings: metrics.count,
+    inRange: metrics.inRange,
+    defaultValue: `Mean: ${metrics.mean} mg/dL | Readings: ${metrics.count} | Target (70-180 mg/dL): ${metrics.inRange}%`,
+  });
   svg.appendChild(desc);
 
   return svg;
@@ -349,7 +395,25 @@ export function renderHistogramSvg(values: number[]): SVGSVGElement {
   svg.setAttribute("width", "100%");
   svg.setAttribute("height", "120");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "Glucose Distribution Histogram");
+
+  const histTitle = i18next.t(
+    "cgm.histChartAria",
+    "Glucose Distribution Histogram",
+  );
+  const svgTitle = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "title",
+  );
+  svgTitle.textContent = histTitle;
+  svg.appendChild(svgTitle);
+
+  const svgDesc = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "desc",
+  );
+  svgDesc.textContent = histTitle;
+  svg.appendChild(svgDesc);
+  svg.setAttribute("aria-label", histTitle);
 
   if (valid.length === 0) return svg;
 
@@ -770,10 +834,28 @@ export function renderAGPSvg(agp: AGPData): SVGSVGElement {
   svg.setAttribute("width", "100%");
   svg.setAttribute("height", "230");
   svg.setAttribute("role", "img");
-  svg.setAttribute(
-    "aria-label",
-    `24-Hour Ambulatory Glucose Profile (AGP) Curve: median glucose across 24 hours with 5th to 95th percentile ranges and 70-180 mg/dL target band (${agp.totalReadings} readings across ${agp.totalDays} days).`,
+
+  const svgTitle = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "title",
   );
+  svgTitle.textContent = i18next.t(
+    "cgm.agpCurveTitle",
+    "24-Hour Ambulatory Glucose Profile (Median & Percentiles)",
+  );
+  svg.appendChild(svgTitle);
+
+  const svgDesc = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "desc",
+  );
+  svgDesc.textContent = i18next.t("cgm.agpSummaryAria", {
+    days: agp.totalDays,
+    readings: agp.totalReadings,
+    defaultValue: `24-Hour Ambulatory Glucose Profile (AGP) Curve: median glucose across 24 hours with 5th to 95th percentile ranges and 70-180 mg/dL target band (${agp.totalReadings} readings across ${agp.totalDays} days).`,
+  });
+  svg.appendChild(svgDesc);
+  svg.setAttribute("aria-label", svgDesc.textContent);
 
   const minG = 40;
   const maxG = 350;

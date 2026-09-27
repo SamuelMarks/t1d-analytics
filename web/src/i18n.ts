@@ -12,6 +12,8 @@ export const enTranslations = {
     title: "t1d-analytics",
     play: "Play",
     chatNumber: "Chat #{{count}}",
+    chatNumber_one: "Chat #{{count}}",
+    chatNumber_other: "Chat #{{count}}",
     temporaryChat: "Temporary chat",
     copyOf: "{{title}} (Copy)",
     newChat: "+ New Chat",
@@ -61,6 +63,8 @@ export const enTranslations = {
     refreshQuery: "Refresh Query",
     databaseSwitched: "Database switched to {{db}}",
     sessionsSynced: "Chats synced with server",
+    settingsSaved: "Provider settings saved",
+    settingsCleared: "Provider keys cleared",
   },
   aria: {
     sidebar: "Sidebar",
@@ -93,10 +97,14 @@ export const enTranslations = {
     codeBlock: "Code block",
     chatInputHelp: "Press Enter to send, Shift+Enter for a new line",
     languageSelector: "Select application language",
+    messageReceived: "Message received",
   },
   cohort: {
     title: "Visual Cohort Query Builder",
-    table: "Target Table:",
+    table: "Primary Table:",
+    joinTable: "Secondary Table (JOIN):",
+    joinType: "Join Type:",
+    joinOn: "Join Condition (ON):",
     minAge: "Min Age:",
     maxAge: "Max Age:",
     gender: "Gender:",
@@ -106,6 +114,25 @@ export const enTranslations = {
     sqlPreview: "Generated DuckDB SQL:",
     insertChat: "Insert into Chat",
     execute: "Run Cohort Query",
+  },
+  provider: {
+    title: "Cloud LLM Providers & API Keys",
+    description:
+      "Configure external cloud LLM providers (OpenAI, Anthropic, Google). Keys are stored locally in your browser.",
+    consent: "Save keys in browser localStorage",
+    clear: "Clear Stored Keys",
+    save: "Save Settings",
+  },
+  table: {
+    searchPlaceholder: "Search table rows...",
+    exportCsv: "Export CSV",
+    exportJson: "Export JSON",
+    fullCsv: "Full CSV",
+    fullExcel: "Full Excel",
+    fullParquet: "Full Parquet",
+    sortDefault: "(Default)",
+    sortAsc: "ASC",
+    sortDesc: "DESC",
   },
   backend: {
     sqlExecution: "SQL execution error: {{error}}",
@@ -185,6 +212,22 @@ export const enTranslations = {
     days30: "30 Days",
     days90: "90 Days",
     daysAll: "All Available Data",
+    timeOfDay: "Time of Day (Hour)",
+    glucoseMgDl: "Glucose (mg/dL)",
+    targetRange: "Target Range (70-180 mg/dL)",
+    agpCurveTitle: "24-Hour Ambulatory Glucose Profile (Median & Percentiles)",
+    agpSummaryAria:
+      "24-Hour Ambulatory Glucose Profile (AGP) Curve: median glucose across 24 hours with 5th to 95th percentile ranges and 70-180 mg/dL target band ({{readings}} readings across {{days}} days).",
+    tirChartAria:
+      "Time in Range Chart: In Range {{inRange}}%, Low {{low}}%, Very Low {{veryLow}}%, High {{high}}%, Very High {{veryHigh}}%",
+    histChartAria: "Glucose Distribution Histogram",
+    veryLowLabel: "Very Low (<54)",
+    lowLabel: "Low (54-69)",
+    inRangeLabel: "In Range (70-180)",
+    highLabel: "High (181-250)",
+    veryHighLabel: "Very High (>250)",
+    meanLabel:
+      "Mean: {{mean}} mg/dL | Readings: {{readings}} | Target (70-180 mg/dL): {{inRange}}%",
   },
 };
 
@@ -194,7 +237,9 @@ export const enTranslations = {
 export const jaTranslations = {
   app: {
     title: "t1d-analytics",
+    play: "実行",
     chatNumber: "チャット #{{count}}",
+    chatNumber_other: "チャット #{{count}}",
     temporaryChat: "一時的なチャット",
     copyOf: "{{title}} (コピー)",
     newChat: "+ 新しいチャット",
@@ -240,8 +285,12 @@ export const jaTranslations = {
       hba1cDemographics: "[SQL] 人口統計別のHbA1c",
       nlpFirst5: "[NLP] 最初の5人の患者を表示",
     },
+    copyQuery: "クエリをコピー",
+    refreshQuery: "クエリを更新",
     databaseSwitched: "データベースが {{db}} に切り替わりました",
     sessionsSynced: "チャットがサーバーと同期されました",
+    settingsSaved: "プロバイダー設定が保存されました",
+    settingsCleared: "プロバイダーキーがクリアされました",
   },
   aria: {
     sidebar: "サイドバー",
@@ -265,6 +314,7 @@ export const jaTranslations = {
     viewTableData: "テーブルデータを表示",
     playQuery: "クエリを実行",
     copyQuery: "クエリをコピー",
+    refreshQuery: "クエリを更新",
     editChatTitle: "チャットタイトルを編集",
     duplicateChat: "チャットを複製",
     deleteChat: "チャットを削除",
@@ -273,10 +323,14 @@ export const jaTranslations = {
     codeBlock: "コードブロック",
     chatInputHelp: "Enterで送信、Shift+Enterで改行",
     languageSelector: "アプリケーション言語を選択",
+    messageReceived: "メッセージを受信しました",
   },
   cohort: {
     title: "コホートクエリビルダー",
-    table: "対象テーブル:",
+    table: "プライマリテーブル:",
+    joinTable: "セカンダリテーブル (JOIN):",
+    joinType: "結合タイプ:",
+    joinOn: "結合条件 (ON):",
     minAge: "最小年齢:",
     maxAge: "最大年齢:",
     gender: "性別:",
@@ -286,6 +340,25 @@ export const jaTranslations = {
     sqlPreview: "生成されたDuckDB SQL:",
     insertChat: "チャットに挿入",
     execute: "コホートクエリを実行",
+  },
+  provider: {
+    title: "クラウドLLMプロバイダーとAPIキー",
+    description:
+      "外部クラウドLLMプロバイダー（OpenAI、Anthropic、Google）を設定します。キーはブラウザにローカル保存されます。",
+    consent: "ブラウザのlocalStorageにキーを保存する",
+    clear: "保存されたキーをクリア",
+    save: "設定を保存",
+  },
+  table: {
+    searchPlaceholder: "テーブル行を検索...",
+    exportCsv: "CSVエクスポート",
+    exportJson: "JSONエクスポート",
+    fullCsv: "全行CSV",
+    fullExcel: "全行Excel",
+    fullParquet: "全行Parquet",
+    sortDefault: "(デフォルト)",
+    sortAsc: "昇順",
+    sortDesc: "降順",
   },
   backend: {
     sqlExecution: "SQL実行エラー: {{error}}",
@@ -348,6 +421,39 @@ export const jaTranslations = {
     emptyDbPrompt:
       "データベースにテーブルが読み込まれていません。't1d-analytics load' を使用してデータをインポートしてください。",
   },
+  cgm: {
+    title: "📊 CGM分析（外来血糖プロファイル＆TIR）",
+    reportPdf: "🖨️ 臨床AGPレポート（PDF）",
+    wearValid:
+      "✓ センサー装着率: {{pct}}% ({{days}}日間、{{readings}}測定) - 有効 (>=70%)",
+    wearCaution: "⚠️ センサー装着率: {{pct}}% ({{days}}日間) - 注意 (<70%装着)",
+    gmi: "GMI: {{gmi}}% (平均: {{mean}} mg/dL)",
+    cv: "CV: {{cv}}% (目標 ≤36% | SD: {{sd}} mg/dL)",
+    lbgiHbgi: "LBGI: {{lbgi}} | HBGI: {{hbgi}}",
+    dayNight: "昼間: {{day}}% | 夜間: {{night}}%",
+    obsWindow: "観察期間:",
+    days7: "7日間",
+    days14: "14日間（標準）",
+    days30: "30日間",
+    days90: "90日間",
+    daysAll: "すべての利用可能なデータ",
+    timeOfDay: "時刻 (時)",
+    glucoseMgDl: "血糖値 (mg/dL)",
+    targetRange: "目標範囲 (70-180 mg/dL)",
+    agpCurveTitle: "24時間外来血糖プロファイル（中央値およびパーセンタイル）",
+    agpSummaryAria:
+      "24時間外来血糖プロファイル（AGP）曲線: 24時間の中央値血糖、第5〜第95パーセンタイル範囲、70-180 mg/dL目標範囲（{{days}}日間にわたる{{readings}}件の測定値）。",
+    tirChartAria:
+      "Time in Range チャート: 目標範囲内 {{inRange}}%、低血糖 {{low}}%、超低血糖 {{veryLow}}%、高血糖 {{high}}%、超高血糖 {{veryHigh}}%",
+    histChartAria: "血糖値分布ヒストグラム",
+    veryLowLabel: "超低血糖 (<54)",
+    lowLabel: "低血糖 (54-69)",
+    inRangeLabel: "目標範囲内 (70-180)",
+    highLabel: "高血糖 (181-250)",
+    veryHighLabel: "超高血糖 (>250)",
+    meanLabel:
+      "平均: {{mean}} mg/dL | 測定数: {{readings}} | 目標 (70-180 mg/dL): {{inRange}}%",
+  },
 };
 
 /**
@@ -356,7 +462,14 @@ export const jaTranslations = {
 export const arTranslations = {
   app: {
     title: "t1d-analytics",
+    play: "تشغيل",
     chatNumber: "الدردشة #{{count}}",
+    chatNumber_zero: "لا توجد محادثات",
+    chatNumber_one: "محادثة واحدة ({{count}})",
+    chatNumber_two: "محادثتان ({{count}})",
+    chatNumber_few: "{{count}} محادثات",
+    chatNumber_many: "{{count}} محادثة",
+    chatNumber_other: "{{count}} محادثة",
     temporaryChat: "دردشة مؤقتة",
     copyOf: "{{title}} (نسخة)",
     newChat: "+ دردشة جديدة",
@@ -402,8 +515,12 @@ export const arTranslations = {
       hba1cDemographics: "[SQL] نسبة السكر التراكمي حسب التركيبة السكانية",
       nlpFirst5: "[NLP] عرض أول 5 مرضى",
     },
+    copyQuery: "نسخ الاستعلام",
+    refreshQuery: "تحديث الاستعلام",
     databaseSwitched: "تم تبديل قاعدة البيانات إلى {{db}}",
     sessionsSynced: "تمت مزامنة الدردشات مع الخادم",
+    settingsSaved: "تم حفظ إعدادات الموفر",
+    settingsCleared: "تم مسح مفاتيح الموفر",
   },
   aria: {
     sidebar: "الشريط الجانبي",
@@ -427,6 +544,7 @@ export const arTranslations = {
     viewTableData: "عرض بيانات الجدول",
     playQuery: "تشغيل الاستعلام",
     copyQuery: "نسخ الاستعلام",
+    refreshQuery: "تحديث الاستعلام",
     editChatTitle: "تعديل عنوان الدردشة",
     duplicateChat: "تكرار الدردشة",
     deleteChat: "حذف الدردشة",
@@ -435,10 +553,14 @@ export const arTranslations = {
     codeBlock: "كتلة التعليمات البرمجية",
     chatInputHelp: "اضغط على Enter للإرسال، Shift+Enter لسطر جديد",
     languageSelector: "تحديد لغة التطبيق",
+    messageReceived: "تم استلام الرسالة",
   },
   cohort: {
     title: "منشئ استعلامات المجموعات",
-    table: "الجدول المستهدف:",
+    table: "الجدول الأساسي:",
+    joinTable: "الجدول الثانوي (JOIN):",
+    joinType: "نوع الربط:",
+    joinOn: "شرط الربط (ON):",
     minAge: "الحد الأدنى للعمر:",
     maxAge: "الحد الأقصى للعمر:",
     gender: "الجنس:",
@@ -448,6 +570,25 @@ export const arTranslations = {
     sqlPreview: "DuckDB SQL الذي تم إنشاؤه:",
     insertChat: "إدراج في الدردشة",
     execute: "تشغيل استعلام المجموعة",
+  },
+  provider: {
+    title: "موفرو خدمة LLM السحابية ومفاتيح API",
+    description:
+      "تكوين موفري LLM السحابيين الخارجيين (OpenAI, Anthropic, Google). يتم تخزين المفاتيح محليًا في متصفحك.",
+    consent: "حفظ المفاتيح في localStorage بالمتصفح",
+    clear: "مسح المفاتيح المخزنة",
+    save: "حفظ الإعدادات",
+  },
+  table: {
+    searchPlaceholder: "البحث في صفوف الجدول...",
+    exportCsv: "تصدير CSV",
+    exportJson: "تصدير JSON",
+    fullCsv: "CSV كامل",
+    fullExcel: "Excel كامل",
+    fullParquet: "Parquet كامل",
+    sortDefault: "(افتراضي)",
+    sortAsc: "تصاعدي",
+    sortDesc: "تنازلي",
   },
   backend: {
     sqlExecution: "خطأ في تنفيذ SQL: {{error}}",
@@ -510,6 +651,41 @@ export const arTranslations = {
     emptyDbPrompt:
       "لا توجد جداول محملة في قاعدة البيانات. استخدم 't1d-analytics load' لاستيراد البيانات.",
   },
+  cgm: {
+    title: "📊 تحليلات CGM (مخطط الجلوكوز المتنقل وTIR)",
+    reportPdf: "🖨️ تقرير AGP السريري (PDF)",
+    wearValid:
+      "✓ ارتداء المستشعر: {{pct}}% ({{days}} يوم، {{readings}} قراءة) - صالح (>=70%)",
+    wearCaution:
+      "⚠️ ارتداء المستشعر: {{pct}}% ({{days}} يوم) - تحذير (<70% ارتداء)",
+    gmi: "GMI: {{gmi}}% (المتوسط: {{mean}} ملغ/ديسيلتر)",
+    cv: "CV: {{cv}}% (الهدف ≤36% | الانحراف المعياري: {{sd}} ملغ/ديسيلتر)",
+    lbgiHbgi: "LBGI: {{lbgi}} | HBGI: {{hbgi}}",
+    dayNight: "نهاراً: {{day}}% | ليلاً: {{night}}%",
+    obsWindow: "نافذة الملاحظة:",
+    days7: "7 أيام",
+    days14: "14 يوم (قياسي)",
+    days30: "30 يوم",
+    days90: "90 يوم",
+    daysAll: "جميع البيانات المتاحة",
+    timeOfDay: "الوقت من اليوم (ساعة)",
+    glucoseMgDl: "الجلوكوز (ملغ/ديسيلتر)",
+    targetRange: "النطاق المستهدف (70-180 ملغ/ديسيلتر)",
+    agpCurveTitle:
+      "مخطط الجلوكوز المتنقل على مدار 24 ساعة (الوسيط والنسب المئوية)",
+    agpSummaryAria:
+      "منحنى ملف تعريف الجلوكوز الإسعافي (AGP) على مدار 24 ساعة: متوسط الجلوكوز على مدار 24 ساعة مع نطاقات النسبة المئوية من 5 إلى 95 ونطاق مستهدف من 70-180 ملغ/ديسيلتر ({{readings}} قراءة عبر {{days}} يومًا).",
+    tirChartAria:
+      "مخطط الوقت في النطاق: في النطاق {{inRange}}%، منخفض {{low}}%، منخفض جدًا {{veryLow}}%، مرتفع {{high}}%، مرتفع جدًا {{veryHigh}}%",
+    histChartAria: "مدرج تكراري لتوزيع الجلوكوز",
+    veryLowLabel: "منخفض جداً (<54)",
+    lowLabel: "منخفض (54-69)",
+    inRangeLabel: "في النطاق (70-180)",
+    highLabel: "مرتفع (181-250)",
+    veryHighLabel: "مرتفع جداً (>250)",
+    meanLabel:
+      "المتوسط: {{mean}} ملغ/ديسيلتر | القراءات: {{readings}} | الهدف (70-180 ملغ/ديسيلتر): {{inRange}}%",
+  },
 };
 
 /**
@@ -518,7 +694,12 @@ export const arTranslations = {
 export const heTranslations = {
   app: {
     title: "t1d-analytics",
+    play: "הפעל",
     chatNumber: "צ'אט #{{count}}",
+    chatNumber_one: "צ'אט #{{count}}",
+    chatNumber_two: "2 צ'אטים",
+    chatNumber_many: "{{count}} צ'אטים",
+    chatNumber_other: "{{count}} צ'אטים",
     temporaryChat: "צ'אט זמני",
     copyOf: "{{title}} (עותק)",
     newChat: "+ צ'אט חדש",
@@ -564,8 +745,12 @@ export const heTranslations = {
       hba1cDemographics: "[SQL] HbA1c לפי דמוגרפיה",
       nlpFirst5: "[NLP] הצג את 5 המטופלים הראשונים",
     },
+    copyQuery: "העתק שאילתה",
+    refreshQuery: "רענן שאילתה",
     databaseSwitched: "מסד הנתונים הוחלף ל-{{db}}",
     sessionsSynced: "הצ'אטים סונכרנו עם השרת",
+    settingsSaved: "הגדרות הספק נשמרו",
+    settingsCleared: "מפתחות הספק נוקו",
   },
   aria: {
     sidebar: "סרגל צד",
@@ -589,6 +774,7 @@ export const heTranslations = {
     viewTableData: "הצג נתוני טבלה",
     playQuery: "הפעל שאילתה",
     copyQuery: "העתק שאילתה",
+    refreshQuery: "רענן שאילתה",
     editChatTitle: "ערוך כותרת צ'אט",
     duplicateChat: "שכפל צ'אט",
     deleteChat: "מחק צ'אט",
@@ -597,10 +783,14 @@ export const heTranslations = {
     codeBlock: "בלוק קוד",
     chatInputHelp: "לחץ Enter לשליחה, Shift+Enter לשורה חדשה",
     languageSelector: "בחר שפת יישום",
+    messageReceived: "הודעה התקבלה",
   },
   cohort: {
     title: "בונה שאילתות קוהורט",
-    table: "טבלת יעד:",
+    table: "טבלה ראשית:",
+    joinTable: "טבלה משנית (JOIN):",
+    joinType: "סוג הצטרפות:",
+    joinOn: "תנאי הצטרפות (ON):",
     minAge: "גיל מינימלי:",
     maxAge: "גיל מקסימלי:",
     gender: "מגדר:",
@@ -610,6 +800,25 @@ export const heTranslations = {
     sqlPreview: "DuckDB SQL שנוצר:",
     insertChat: "הכנס לצ'אט",
     execute: "הפעל שאילתת קוהורט",
+  },
+  provider: {
+    title: "ספקי LLM בענן ומפתחות API",
+    description:
+      "הגדר ספקי LLM חיצוניים בענן (OpenAI, Anthropic, Google). המפתחות נשמרים מקומית בדפדפן שלך.",
+    consent: "שמור מפתחות ב-localStorage של הדפדפן",
+    clear: "נקה מפתחות שמורים",
+    save: "שמור הגדרות",
+  },
+  table: {
+    searchPlaceholder: "חפש בשורות הטבלה...",
+    exportCsv: "ייצוא CSV",
+    exportJson: "ייצוא JSON",
+    fullCsv: "CSV מלא",
+    fullExcel: "Excel מלא",
+    fullParquet: "Parquet מלא",
+    sortDefault: "(ברירת מחדל)",
+    sortAsc: "עולה",
+    sortDesc: "יורד",
   },
   backend: {
     sqlExecution: "שגיאת ביצוע SQL: {{error}}",
@@ -672,8 +881,46 @@ export const heTranslations = {
     emptyDbPrompt:
       "אין טבלאות במסד הנתונים. השתמש ב-'t1d-analytics load' לייבוא נתונים.",
   },
+  cgm: {
+    title: "📊 ניתוח CGM (פרופיל גלוקוז אמבולטורי ו-TIR)",
+    reportPdf: "🖨️ דוח AGP קליני (PDF)",
+    wearValid:
+      "✓ שימוש בחיישן: {{pct}}% ({{days}} ימים, {{readings}} קריאות) - תקין (>=70%)",
+    wearCaution:
+      "⚠️ שימוש בחיישן: {{pct}}% ({{days}} ימים) - זהירות (<70% שימוש)",
+    gmi: 'GMI: {{gmi}}% (ממוצע: {{mean}} מ"ג/דצ"ל)',
+    cv: 'CV: {{cv}}% (יעד ≤36% | סטיית תקן: {{sd}} מ"ג/דצ"ל)',
+    lbgiHbgi: "LBGI: {{lbgi}} | HBGI: {{hbgi}}",
+    dayNight: "יום: {{day}}% | לילה: {{night}}%",
+    obsWindow: "חלון תצפית:",
+    days7: "7 ימים",
+    days14: "14 ימים (סטנדרטי)",
+    days30: "30 ימים",
+    days90: "90 ימים",
+    daysAll: "כל הנתונים הזמינים",
+    timeOfDay: "שעה ביום",
+    glucoseMgDl: 'גלוקוז (מ"ג/דצ"ל)',
+    targetRange: 'טווח יעד (70-180 מ"ג/דצ"ל)',
+    agpCurveTitle: "פרופיל גלוקוז אמבולטורי 24 שעות (חציון ואחוזונים)",
+    agpSummaryAria:
+      'עקומת פרופיל גלוקוז אמבולטורי (AGP) של 24 שעות: חציון גלוקוז על פני 24 שעות עם טווחי אחוזון 5 עד 95 ורצועת יעד של 70-180 מ"ג/דצ"ל ({{readings}} קריאות לאורך {{days}} ימים).',
+    tirChartAria:
+      "תרשים זמן בטווח: בטווח {{inRange}}%, נמוך {{low}}%, נמוך מאוד {{veryLow}}%, גבוה {{high}}%, גבוה מאוד {{veryHigh}}%",
+    histChartAria: "היסטוגרמת התפלגות גלוקוז",
+    veryLowLabel: "נמוך מאוד (<54)",
+    lowLabel: "נמוך (54-69)",
+    inRangeLabel: "בטווח (70-180)",
+    highLabel: "גבוה (181-250)",
+    veryHighLabel: "גבוה מאוד (>250)",
+    meanLabel:
+      'ממוצע: {{mean}} מ"ג/דצ"ל | קריאות: {{readings}} | יעד (70-180 מ"ג/דצ"ל): {{inRange}}%',
+  },
 };
 
+/**
+ * Determines initial application language based on storage and navigator settings.
+ * @returns {string} The resolved ISO 639-1 language code.
+ */
 export function getInitialLang(): string {
   const savedLang =
     typeof localStorage !== "undefined"
@@ -709,7 +956,12 @@ await i18next.init({
 });
 
 document.documentElement.lang = initialLang;
-export function setDocumentDir(lang: string) {
+
+/**
+ * Sets document direction attribute to 'rtl' or 'ltr' based on language code.
+ * @param {string} lang The language code to check.
+ */
+export function setDocumentDir(lang: string): void {
   document.documentElement.dir = ["ar", "he"].includes(lang) ? "rtl" : "ltr";
 }
 setDocumentDir(initialLang);
@@ -756,7 +1008,7 @@ export async function setLanguage(lang: string): Promise<void> {
   localStorage.setItem("app-lang", lang);
   await i18next.changeLanguage(lang);
   document.documentElement.lang = lang;
-  document.documentElement.dir = ["ar", "he"].includes(lang) ? "rtl" : "ltr";
+  setDocumentDir(lang);
   translateDocument();
 }
 

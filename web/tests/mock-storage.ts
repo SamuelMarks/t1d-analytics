@@ -1,3 +1,17 @@
+if (typeof document === "undefined") {
+  const mockDoc = {
+    documentElement: { lang: "en", dir: "ltr" },
+    querySelectorAll: () => [],
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  Object.defineProperty(globalThis, "document", {
+    value: mockDoc,
+    writable: true,
+    configurable: true,
+  });
+}
+
 export const localStorageMock = (function () {
   let store: Record<string, string> = {};
   return {
@@ -22,8 +36,10 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
-Object.defineProperty(window, "localStorage", {
-  value: localStorageMock,
-  writable: true,
-  configurable: true,
-});
+if (typeof window !== "undefined") {
+  Object.defineProperty(window, "localStorage", {
+    value: localStorageMock,
+    writable: true,
+    configurable: true,
+  });
+}

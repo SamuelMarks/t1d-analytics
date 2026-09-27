@@ -1,3 +1,8 @@
+/**
+ * @file vitest.config.ts
+ * Vitest configuration and code coverage settings.
+ */
+
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
@@ -18,11 +23,18 @@ export default defineConfig({
     ],
     coverage: {
       provider: "istanbul",
+      all: true,
       reporter: ["text", "html", "lcov", "json"],
-      exclude: [
+      include: [
+        "src/**/*.ts",
+        "vite.config.ts",
         "vitest.config.ts",
         "playwright.config.ts",
         "playwright.full.config.ts",
+      ],
+      exclude: [
+        "docs/**",
+        "coverage/**",
         "tests/**",
         "tests-e2e/**",
         "tests-e2e-full/**",

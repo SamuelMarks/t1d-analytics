@@ -407,4 +407,35 @@ test.describe("App Workflows E2E", () => {
     await streamToggle.click();
     await expect(streamToggle).not.toHaveClass(/active/);
   });
+
+  /**
+   * Tests accessibility: Escape key dismissal and focus trapping for cohort and provider modals.
+   */
+  test("Accessibility: modal Escape key dismissal and focus management", async ({
+    page,
+  }) => {
+    // Open cohort modal
+    await page.click("#cohort-filter-btn");
+    const cohortModal = page.locator("#cohort-modal");
+    await expect(cohortModal).toBeVisible();
+    await expect(cohortModal).not.toHaveAttribute("aria-hidden", "true");
+
+    // Dismiss with Escape key
+    await page.keyboard.press("Escape");
+    await expect(cohortModal).not.toBeVisible();
+    await expect(cohortModal).toHaveAttribute("aria-hidden", "true");
+    await expect(page.locator("#cohort-filter-btn")).toBeFocused();
+
+    // Open provider modal
+    await page.click("#provider-settings-btn");
+    const providerModal = page.locator("#provider-modal");
+    await expect(providerModal).toBeVisible();
+    await expect(providerModal).not.toHaveAttribute("aria-hidden", "true");
+
+    // Dismiss with Escape key
+    await page.keyboard.press("Escape");
+    await expect(providerModal).not.toBeVisible();
+    await expect(providerModal).toHaveAttribute("aria-hidden", "true");
+    await expect(page.locator("#provider-settings-btn")).toBeFocused();
+  });
 });

@@ -365,7 +365,9 @@
                 id="modal-table-search"
                 class="table-search-input"
                 placeholder="Search table rows..."
+                data-i18n-placeholder="table.searchPlaceholder"
                 aria-label="Search table rows"
+                data-i18n-aria-label="table.searchPlaceholder"
               />
             </div>
             <div class="table-sort-controls">
@@ -375,7 +377,9 @@
                 class="table-sort-select"
                 aria-label="Sort by column"
               >
-                <option value="">(Default)</option>
+                <option value="" data-i18n="table.sortDefault">
+                  (Default)
+                </option>
               </select>
               <button
                 type="button"
@@ -383,6 +387,7 @@
                 class="btn-secondary sort-order-btn"
                 aria-label="Toggle sort order"
                 title="Toggle sort order"
+                data-i18n="table.sortAsc"
               >
                 ASC
               </button>
@@ -425,9 +430,10 @@
           <button
             id="modal-export-csv-btn"
             class="btn-secondary"
-            style="margin-left: auto"
+            style="margin-inline-start: auto"
             disabled
             aria-label="Export table page to CSV"
+            data-i18n="table.exportCsv"
           >
             Export CSV
           </button>
@@ -436,6 +442,7 @@
             class="btn-secondary"
             disabled
             aria-label="Export table page to JSON"
+            data-i18n="table.exportJson"
           >
             Export JSON
           </button>
@@ -444,6 +451,7 @@
             class="btn-secondary"
             disabled
             aria-label="Export entire table to CSV via API"
+            data-i18n="table.fullCsv"
           >
             Full CSV
           </button>
@@ -452,6 +460,7 @@
             class="btn-secondary"
             disabled
             aria-label="Export entire table to Excel via API"
+            data-i18n="table.fullExcel"
           >
             Full Excel
           </button>
@@ -460,6 +469,7 @@
             class="btn-secondary"
             disabled
             aria-label="Export entire table to Parquet via API"
+            data-i18n="table.fullParquet"
           >
             Full Parquet
           </button>
@@ -473,6 +483,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="cohort-modal-title"
+      aria-hidden="true"
     >
       <div class="modal-content cohort-modal-content">
         <div class="modal-header">
@@ -483,6 +494,7 @@
             id="close-cohort-modal-btn"
             class="icon-btn"
             aria-label="Close modal"
+            data-i18n-aria-label="aria.closeModal"
           >
             ✕
           </button>
@@ -631,6 +643,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="provider-modal-title"
+      aria-hidden="true"
     >
       <div class="modal-content provider-modal-content">
         <div class="modal-header">
@@ -641,6 +654,7 @@
             id="close-provider-modal-btn"
             class="icon-btn"
             aria-label="Close modal"
+            data-i18n-aria-label="aria.closeModal"
           >
             ✕
           </button>
