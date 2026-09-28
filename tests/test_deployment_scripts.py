@@ -202,10 +202,34 @@ def test_test_sh_cloud_credentials_verification(tmp_path: Path) -> None:
         in res_live_fail.stderr
     )
 
+    # Prepare an isolated PATH environment without cloud CLIs (az, gcloud, aws)
+    # to avoid host tools installed in standard system directories like /usr/bin.
+    isolated_bin = tmp_path / "isolated_bin"
+    isolated_bin.mkdir()
+    for tool_name in [
+        "date",
+        "dirname",
+        "basename",
+        "sh",
+        "echo",
+        "pwd",
+        "cat",
+        "grep",
+        "[",
+        "test",
+    ]:
+        tool_src = shutil.which(tool_name)
+        if tool_src:
+            dest = isolated_bin / tool_name
+            try:
+                dest.symlink_to(tool_src)
+            except OSError:
+                shutil.copy2(tool_src, dest)
+
     # az missing with --live-cloud
     (bin_dir / "az").unlink()
     env_clean = {
-        "PATH": f"{bin_dir}:/bin:/usr/bin",
+        "PATH": str(isolated_bin),
         "CLOUD_PROVIDER": "azure",
         "LIBSCRIPT_CLI": str(fake_cli),
     }
