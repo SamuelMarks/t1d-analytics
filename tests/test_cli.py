@@ -875,6 +875,7 @@ def test_train_subcommand_advanced_flags(
         main()
 
     out = capsys.readouterr().out
+    print(f"OUT_DIR contents: {list(out_dir.glob('**/*'))}")
     assert "Initiating training runner with backend 'remote-tpu-maxtext'..." in out
     assert "Split validation passed: 0 prompt overlap detected." in out
     manifest_file = out_dir / "training_manifest.json"
@@ -974,37 +975,44 @@ def test_train_subcommand_hyperparameters_and_validation(
     mock_generate.return_value = [("Prompt", "SELECT 1", "SELECT 2")]
     out_dir = tmp_path / "hp_out"
 
-    # Successful run with custom hyperparameters and dry-run
-    with patch(
-        "sys.argv",
-        [
-            "t1d-analytics",
-            "train",
-            "--db",
-            str(db_file),
-            "--output-dir",
-            str(out_dir),
-            "--samples-per-table",
-            "1",
-            "--learning-rate",
-            "1e-4",
-            "--batch-size",
-            "8",
-            "--num-epochs",
-            "2",
-            "--warmup-steps",
-            "20",
-            "--weight-decay",
-            "0.05",
-            "--max-seq-length",
-            "1024",
-            "--checkpoint-interval",
-            "200",
-            "--eval-steps",
-            "50",
-            "--dry-run",
-            "--execute-training",
-        ],
+    mock_runner = MagicMock()
+    mock_runner.run_training.return_value = {"status": "success"}
+    with (
+        patch(
+            "t1d_analytics.training_runner.get_training_runner",
+            return_value=mock_runner,
+        ),
+        patch(
+            "sys.argv",
+            [
+                "t1d-analytics",
+                "train",
+                "--db",
+                str(db_file),
+                "--output-dir",
+                str(out_dir),
+                "--samples-per-table",
+                "1",
+                "--learning-rate",
+                "1e-4",
+                "--batch-size",
+                "8",
+                "--num-epochs",
+                "2",
+                "--warmup-steps",
+                "20",
+                "--weight-decay",
+                "0.05",
+                "--max-seq-length",
+                "1024",
+                "--checkpoint-interval",
+                "200",
+                "--eval-steps",
+                "50",
+                "--dry-run",
+                "--execute-training",
+            ],
+        ),
     ):
         main()
 
@@ -1130,7 +1138,26 @@ def test_train_subcommand_tpu_execution(
     mock_generate.return_value = [("Prompt", "SELECT 1", "SELECT 2")]
     out_dir = tmp_path / "tpu_cli_out"
 
-    with patch.dict(os.environ, {"T1D_MOCK_TPU": "1"}):
+    async def mock_poll(*args: Any, **kwargs: Any) -> str:
+        return "SUCCESS"
+
+    with (
+        patch("t1d_analytics.training_runner.sync_dataset_to_gcs"),
+        patch(
+            "t1d_analytics.training_runner.subprocess.run",
+            return_value=__import__("subprocess").CompletedProcess(
+                args=[], returncode=0, stdout='{"state": "READY"}', stderr=""
+            ),
+        ),
+        patch.dict(
+            os.environ,
+            {
+                "T1D_MOCK_TPU": "1",
+                "GCP_PROJECT_ID": "p",
+                "T1D_EXECUTE_TPU_DISPATCH": "1",
+            },
+        ),
+    ):
         with patch(
             "sys.argv",
             [
@@ -1158,6 +1185,7 @@ def test_train_subcommand_tpu_execution(
             main()
 
     out = capsys.readouterr().out
+    print(f"OUT_DIR contents: {list(out_dir.glob('**/*'))}")
     assert "Initiating training runner with backend 'remote-tpu-maxtext'..." in out
     assert (out_dir / "checkpoints" / "maxtext_config.yml").exists()
     assert (out_dir / "training_results.json").exists()

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from t1d_analytics.i18n import get_translator
-from t1d_analytics.models import MockEnvironmentController
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +67,6 @@ def check_gemma_sql_installed() -> bool:
         bool: True if gemma-4-sql CLI or Python module is discoverable, False otherwise.
 
     """
-    if MockEnvironmentController.is_gemma_sql_mocked():
-        return True
     if shutil.which("gemma-4-sql") is not None:
         return True
     return importlib.util.find_spec("gemma_4_sql") is not None
@@ -88,9 +85,6 @@ def get_gemma_sql_binary() -> str:
         RuntimeError: If gemma-4-sql is not installed or discoverable.
 
     """
-    if MockEnvironmentController.is_gemma_sql_mocked():
-        return "gemma-4-sql"
-
     bin_path = shutil.which("gemma-4-sql")
     if bin_path is not None:
         return bin_path
@@ -165,14 +159,6 @@ def run_gemma_sql_etl(
     if extra_args:
         cmd.extend(extra_args)
 
-    if MockEnvironmentController.is_gemma_sql_mocked():
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout=f"[MOCK] Executed gemma-4-sql etl {stage_lower} for {duckdb_table}\n",
-            stderr="",
-        )
-
     logger.info("Executing gemma-4-sql ETL: %s", " ".join(cmd))
     try:
         proc = subprocess.run(
@@ -242,14 +228,6 @@ def run_gemma_sql_train(
 
     if extra_args:
         cmd.extend(extra_args)
-
-    if MockEnvironmentController.is_gemma_sql_mocked():
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout=f"[MOCK] Executed gemma-4-sql {stage_lower} with config {config_path}\n",
-            stderr="",
-        )
 
     logger.info("Executing gemma-4-sql training: %s", " ".join(cmd))
     try:

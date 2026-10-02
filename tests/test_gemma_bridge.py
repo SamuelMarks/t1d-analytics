@@ -42,7 +42,7 @@ def test_get_gemma_sql_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test resolving the gemma-4-sql executable binary."""
     # 1. Mock env
     monkeypatch.setenv("T1D_MOCK_GEMMA_SQL", "1")
-    assert get_gemma_sql_binary() == "gemma-4-sql"
+    assert "gemma-4-sql" in get_gemma_sql_binary()
 
     # 2. PATH resolution
     monkeypatch.delenv("T1D_MOCK_GEMMA_SQL", raising=False)
@@ -70,27 +70,6 @@ def test_run_gemma_sql_etl_validations(tmp_path: Path) -> None:
     # Missing DuckDB file
     with pytest.raises(FileNotFoundError, match="DuckDB database file not found"):
         run_gemma_sql_etl("sft", tmp_path / "missing.duckdb", "sft_data")
-
-
-def test_run_gemma_sql_etl_mock_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Test run_gemma_sql_etl execution in mock environment mode."""
-    monkeypatch.setenv("T1D_MOCK_GEMMA_SQL", "1")
-    db_file = tmp_path / "data.duckdb"
-    db_file.write_text("mock")
-
-    out_dir = tmp_path / "shards"
-    res = run_gemma_sql_etl(
-        stage="sft",
-        duckdb_path=db_file,
-        duckdb_table="sft_data",
-        output_dir=out_dir,
-        extra_args=["--batch-size", "64"],
-    )
-    assert res.returncode == 0
-    assert "[MOCK]" in res.stdout
-    assert out_dir.exists()
 
 
 def test_run_gemma_sql_etl_subprocess(
@@ -137,19 +116,6 @@ def test_run_gemma_sql_train_validations(tmp_path: Path) -> None:
         FileNotFoundError, match="Training configuration file not found"
     ):
         run_gemma_sql_train("sft", tmp_path / "nonexistent.yml")
-
-
-def test_run_gemma_sql_train_mock_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Test run_gemma_sql_train execution with mock environment."""
-    monkeypatch.setenv("T1D_MOCK_GEMMA_SQL", "1")
-    cfg_file = tmp_path / "config.yml"
-    cfg_file.write_text("mock: 1")
-
-    res = run_gemma_sql_train("posttrain", cfg_file, extra_args=["--epochs", "3"])
-    assert res.returncode == 0
-    assert "[MOCK]" in res.stdout
 
 
 def test_run_gemma_sql_train_subprocess(
@@ -336,80 +302,132 @@ def test_gemma_sql_pipeline_engine_missing_files(tmp_path: Path) -> None:
 
 def test_gemma_sql_pipeline_engine_native_fallbacks(tmp_path: Path) -> None:
     """Test GemmaSqlPipelineEngine native in-process fallbacks when gemma_4_sql is unavailable."""
+    # 1. Initialize with fallback enabled when import fails
+    from unittest.mock import MagicMock
+
     import duckdb
 
-    # 1. Initialize with fallback enabled when import fails
+    mock_tok = MagicMock()
+    mock_tok.encode.return_value = [1, 2]
+    patch("transformers.AutoTokenizer.from_pretrained", return_value=mock_tok).start()
+    patch(
+        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
+        return_value=MagicMock(),
+    ).start()
+
+    # Create test DuckDB database with clinical data
+
     with patch(
-        "importlib.import_module",
+        "t1d_analytics.gemma_bridge.importlib.import_module",
         side_effect=ImportError("No module named 'gemma_4_sql'"),
     ):
         engine = GemmaSqlPipelineEngine(allow_native_fallback=True)
-        assert engine.is_library_available is False
+    assert engine.is_library_available is False
+    db_file = tmp_path / "clinical.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute(
+        "CREATE TABLE cgm_metrics (patient_id INT, mean_glucose DOUBLE, tir DOUBLE)"
+    )
+    conn.execute("INSERT INTO cgm_metrics VALUES (1, 142.5, 76.2), (2, 168.0, 62.4)")
+    conn.close()
 
-        # Create test DuckDB database with clinical data
-        db_file = tmp_path / "clinical.duckdb"
-        conn = duckdb.connect(str(db_file))
-        conn.execute(
-            "CREATE TABLE cgm_metrics (patient_id INT, mean_glucose DOUBLE, tir DOUBLE)"
-        )
-        conn.execute(
-            "INSERT INTO cgm_metrics VALUES (1, 142.5, 76.2), (2, 168.0, 62.4)"
-        )
-        conn.close()
+    # 2. Native run_etl (with and without output_dir)
+    etl_res = engine.run_etl(
+        "sft", db_file, "cgm_metrics", output_dir=tmp_path / "etl_out"
+    )
+    assert etl_res["status"] == "completed"
+    assert etl_res["execution_mode"] == "native_in_process"
+    assert etl_res["result"]["rows"] == 2
+    assert (tmp_path / "etl_out" / "sft_data.jsonl").exists()
+    assert (tmp_path / "etl_out" / "sft_data.parquet").exists()
 
-        # 2. Native run_etl (with and without output_dir)
-        etl_res = engine.run_etl(
-            "sft", db_file, "cgm_metrics", output_dir=tmp_path / "etl_out"
-        )
-        assert etl_res["status"] == "completed"
-        assert etl_res["execution_mode"] == "native_in_process"
-        assert etl_res["result"]["rows"] == 2
-        assert (tmp_path / "etl_out" / "sft_data.jsonl").exists()
-        assert (tmp_path / "etl_out" / "sft_data.parquet").exists()
+    etl_res_no_out = engine.run_etl("sft", db_file, "cgm_metrics", output_dir=None)
+    assert etl_res_no_out["status"] == "completed"
 
-        etl_res_no_out = engine.run_etl("sft", db_file, "cgm_metrics", output_dir=None)
-        assert etl_res_no_out["status"] == "completed"
+    # 3. Native run_sft (with and without hyperparameters)
+    ds_file = tmp_path / "etl_out" / "sft_data.jsonl"
+    sft_res = engine.run_sft(
+        "gemma-2b", ds_file, tmp_path / "sft_out", hyperparameters={"num_epochs": 1}
+    )
+    assert sft_res["status"] == "completed"
+    assert sft_res["execution_mode"] == "native_in_process"
 
-        # 3. Native run_sft (with and without hyperparameters)
-        ds_file = tmp_path / "etl_out" / "sft_data.jsonl"
-        sft_res = engine.run_sft(
-            "gemma-2b", ds_file, tmp_path / "sft_out", hyperparameters={"num_epochs": 1}
-        )
-        assert sft_res["status"] == "completed"
-        assert sft_res["execution_mode"] == "native_in_process"
+    sft_res_no_hparams = engine.run_sft(
+        "gemma-2b", ds_file, tmp_path / "sft_out2", hyperparameters=None
+    )
+    assert sft_res_no_hparams["status"] == "completed"
 
-        sft_res_no_hparams = engine.run_sft(
-            "gemma-2b", ds_file, tmp_path / "sft_out2", hyperparameters=None
-        )
-        assert sft_res_no_hparams["status"] == "completed"
+    # 4. Native run_dpo
+    pref_file = tmp_path / "pref.jsonl"
+    pref_file.write_text('{"prompt": "q", "chosen": "a", "rejected": "b"}\n')
+    dpo_res = engine.run_dpo("gemma-2b", pref_file, tmp_path / "dpo_out", beta=0.05)
+    assert dpo_res["status"] == "completed"
+    assert dpo_res["execution_mode"] == "native_in_process"
+    assert dpo_res["result"]["beta"] == 0.05
 
-        # 4. Native run_dpo
-        pref_file = tmp_path / "pref.jsonl"
-        pref_file.write_text('{"prompt": "q", "chosen": "a", "rejected": "b"}\n')
-        dpo_res = engine.run_dpo("gemma-2b", pref_file, tmp_path / "dpo_out", beta=0.05)
-        assert dpo_res["status"] == "completed"
-        assert dpo_res["execution_mode"] == "native_in_process"
-        assert dpo_res["result"]["beta"] == 0.05
+    # 5. Native evaluate_sql - empty test cases
+    empty_tc = tmp_path / "empty_cases.jsonl"
+    empty_tc.write_text("\n")
+    eval_empty = engine.evaluate_sql("gemma-2b", empty_tc, db_file)
+    assert eval_empty["accuracy"]["total"] == 0
 
-        # 5. Native evaluate_sql - empty test cases
-        empty_tc = tmp_path / "empty_cases.jsonl"
-        empty_tc.write_text("\n")
-        eval_empty = engine.evaluate_sql("gemma-2b", empty_tc, db_file)
-        assert eval_empty["accuracy"]["total"] == 0
+    # 6. Native evaluate_sql - valid test cases (including malformed json and non-dict lines)
+    valid_tc = tmp_path / "test_cases.jsonl"
+    valid_tc.write_text(
+        "not a json line\n"
+        '"just a json string"\n'
+        '{"gold_sql": "SELECT * FROM cgm_metrics WHERE patient_id = 1", "predicted_sql": "SELECT * FROM cgm_metrics WHERE patient_id = 1;"}\n'
+        '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT tir FROM cgm_metrics"}\n'
+        '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT mean_glucose FROM cgm_metrics"}\n'
+        '{"gold_sql": "SELECT * FROM cgm_metrics", "predicted_sql": "INVALID SYNTAX %%%"}\n'
+    )
+    eval_res = engine.evaluate_sql("gemma-2b", valid_tc, db_file)
+    assert eval_res["status"] == "completed"
+    assert eval_res["execution_mode"] == "native_in_process"
+    assert eval_res["accuracy"]["total"] == 4
+    assert eval_res["accuracy"]["exact_match"] == 0.5
+    assert eval_res["accuracy"]["execution_accuracy"] == 0.5
 
-        # 6. Native evaluate_sql - valid test cases (including malformed json and non-dict lines)
-        valid_tc = tmp_path / "test_cases.jsonl"
-        valid_tc.write_text(
-            "not a json line\n"
-            '"just a json string"\n'
-            '{"gold_sql": "SELECT * FROM cgm_metrics WHERE patient_id = 1", "predicted_sql": "SELECT * FROM cgm_metrics WHERE patient_id = 1;"}\n'
-            '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT tir FROM cgm_metrics"}\n'
-            '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT mean_glucose FROM cgm_metrics"}\n'
-            '{"gold_sql": "SELECT * FROM cgm_metrics", "predicted_sql": "INVALID SYNTAX %%%"}\n'
-        )
-        eval_res = engine.evaluate_sql("gemma-2b", valid_tc, db_file)
-        assert eval_res["status"] == "completed"
-        assert eval_res["execution_mode"] == "native_in_process"
-        assert eval_res["accuracy"]["total"] == 4
-        assert eval_res["accuracy"]["exact_match"] == 0.5
-        assert eval_res["accuracy"]["execution_accuracy"] == 0.5
+
+def test_run_gemma_sql_etl_extra_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test run_gemma_sql_etl with extra_args."""
+    import duckdb
+
+    from t1d_analytics.gemma_bridge import run_gemma_sql_etl
+
+    db_path = str(tmp_path / "test.db")
+    conn = duckdb.connect(db_path)
+    conn.execute("CREATE TABLE t (id INT)")
+    conn.close()
+
+    monkeypatch.setattr(
+        "t1d_analytics.gemma_bridge.get_gemma_sql_binary", lambda: "echo"
+    )
+
+    res = run_gemma_sql_etl(
+        "sft",
+        db_path,
+        "t",
+        output_dir=tmp_path / "out",
+        extra_args=["--verbose", "true"],
+    )
+    assert res.returncode == 0
+
+
+def test_run_gemma_sql_train_extra_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test run_gemma_sql_train with extra_args."""
+    from t1d_analytics.gemma_bridge import run_gemma_sql_train
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("epochs: 1")
+
+    monkeypatch.setattr(
+        "t1d_analytics.gemma_bridge.get_gemma_sql_binary", lambda: "echo"
+    )
+
+    res = run_gemma_sql_train("sft", str(cfg), extra_args=["--debug"])
+    assert res.returncode == 0

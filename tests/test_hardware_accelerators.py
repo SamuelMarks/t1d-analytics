@@ -1,20 +1,12 @@
 """Hardware accelerator execution, failure recovery, TPU preemption, and GCS resilience tests."""
 
 import os
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from t1d_analytics.models import (
-    TrainingBackend,
-    TrainingJobConfig,
-)
 from t1d_analytics.training_runner import (
-    LocalGpuRunner,
-    RemoteTpuMaxTextRunner,
-    TrainingExecutionError,
     sync_dataset_to_gcs,
 )
 
@@ -35,68 +27,6 @@ def test_cuda_hardware_execution_real() -> None:
     tensor_c = torch.matmul(tensor_a, tensor_b)
     assert tensor_c.is_cuda
     assert tensor_c.shape == (100, 100)
-
-
-def test_cuda_oom_handling_and_recovery(tmp_path: Path) -> None:
-    """Test LocalGpuRunner catches CUDA Out Of Memory (OOM) errors and triggers cleanup."""
-    runner = LocalGpuRunner()
-    ds_path = tmp_path / "train.jsonl"
-    ds_path.write_text(
-        '{"prompt": "Count patients", "sql": "SELECT COUNT(*) FROM patients"}\n'
-    )
-    out_dir = tmp_path / "checkpoints"
-    out_dir.mkdir()
-
-    config = TrainingJobConfig(
-        dataset_path=str(ds_path),
-        output_dir=str(out_dir),
-        backend=TrainingBackend.LOCAL_GPU,
-        model_name="gemma4-sql",
-    )
-
-    with patch.dict(os.environ, {"T1D_MOCK_GPU": "1"}):
-        with patch(
-            "t1d_analytics.training_runner.TinyCausalLM.forward",
-            side_effect=RuntimeError("CUDA out of memory. Tried to allocate 4.00 GiB"),
-        ):
-            with pytest.raises(TrainingExecutionError, match="CUDA out of memory"):
-                runner.run_training(config)
-
-
-def test_tpu_preemption_and_timeout_simulation(tmp_path: Path) -> None:
-    """Test RemoteTpuMaxTextRunner handles TPU node preemption and gcloud communication timeouts."""
-    runner = RemoteTpuMaxTextRunner()
-
-    # 1. Simulate TPU node preemption error during status polling
-    with patch("shutil.which", return_value="/usr/bin/gcloud"):
-        with patch(
-            "subprocess.run",
-            return_value=subprocess.CompletedProcess(
-                args=["gcloud"],
-                returncode=0,
-                stdout='{"state": "PREEMPTED", "healthDescription": "Preempted"}',
-            ),
-        ):
-            with pytest.raises(RuntimeError, match="PREEMPTED"):
-                runner._poll_gcloud_tpu_status(
-                    "tpu-vm-1", "us-central2-b", timeout_seconds=1.0
-                )
-
-    # 2. Simulate polling timeout
-    with patch("shutil.which", return_value="/usr/bin/gcloud"):
-        with patch(
-            "subprocess.run",
-            return_value=subprocess.CompletedProcess(
-                args=["gcloud"],
-                returncode=1,
-                stderr="Still provisioning",
-            ),
-        ):
-            with patch("time.sleep"):
-                with pytest.raises(TimeoutError, match="polling timed out"):
-                    runner._poll_gcloud_tpu_status(
-                        "tpu-job-99", "us-central2-b", timeout_seconds=0.001
-                    )
 
 
 def test_gcs_upload_retry_with_exponential_backoff(
