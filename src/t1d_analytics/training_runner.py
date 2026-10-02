@@ -89,7 +89,8 @@ class BaseTrainingRunner(ABC):
             try:
                 with open(dataset_path, "r", encoding="utf-8") as f:
                     return sum(1 for line in f if line.strip())
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to count jsonl samples: {e}")
                 return 0
         elif dataset_path.suffix == ".parquet":
             try:
@@ -100,7 +101,8 @@ class BaseTrainingRunner(ABC):
                     f"SELECT COUNT(*) FROM read_parquet('{escaped}')"
                 ).fetchone()
                 return int(cnt[0]) if cnt else 0
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to count parquet samples: {e}")
                 return 0
         return 0
 
@@ -175,8 +177,10 @@ def prepare_torch_dataset(
                                 or ""
                             )
                             records.append((prompt, target))
-                    except Exception:
-                        continue
+                    except json.JSONDecodeError as e:
+                        logger.debug(f"Skipping malformed json line: {e}")
+                    except Exception as e:
+                        logger.debug(f"Unexpected error parsing json record: {e}")
         except Exception as e:
             raise ValueError(f"Failed to read JSONL dataset: {e}") from e
 
@@ -278,9 +282,9 @@ try:
     import torch.nn as nn
 
     _BaseModule = nn.Module
-except ImportError:  # pragma: no cover
+except ImportError:
     torch = None  # type: ignore[assignment]
-    _BaseModule = object  # type: ignore[misc,assignment]
+    _BaseModule = object  # type: ignore[assignment, misc]
 
 
 class BaseCausalLMFactory(ABC):
@@ -389,8 +393,7 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
         )
 
         model_kwargs: Dict[str, Any] = {}
-        if torch_dtype is not None:  # pragma: no cover
-            model_kwargs["torch_dtype"] = torch_dtype
+        model_kwargs["torch_dtype"] = torch_dtype
         if bnb_config is not None:
             model_kwargs["quantization_config"] = bnb_config
 
@@ -407,10 +410,9 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
         if bnb_config is None:
             try:
                 to_fn = getattr(model, "to", None)
-                if callable(to_fn) and torch is not None:  # pragma: no cover
-                    to_fn(torch.device(device))
-            except Exception:  # pragma: no cover
-                pass
+                to_fn(torch.device(device))  # type: ignore[misc]
+            except Exception as e:
+                logger.debug(f"Failed to move model to {device}: {e}")
 
         if use_lora:
             try:
@@ -551,7 +553,7 @@ class LocalCpuRunner(BaseTrainingRunner):
                                 model.parameters(), max_norm=max_norm
                             )
                             optimizer.step()
-                            if scheduler is not None:  # pragma: no cover
+                            if scheduler is not None:
                                 scheduler.step()
                             optimizer.zero_grad()
 
@@ -633,8 +635,8 @@ def resolve_device_telemetry(device: str) -> Tuple[str, float]:
                 dev_name = str(torch.cuda.get_device_name(idx))
                 _, total_vram = torch.cuda.mem_get_info(idx)
                 return dev_name, round(total_vram / (1024 * 1024), 2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to gather CUDA telemetry: {e}")
         return "NVIDIA CUDA Device", 0.0
 
     if device == "mps":
@@ -650,8 +652,8 @@ def resolve_device_telemetry(device: str) -> Tuple[str, float]:
             )
             if res.returncode == 0 and res.stdout.strip():
                 dev_name = f"Apple Silicon ({res.stdout.strip()})"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to gather MPS telemetry: {e}")
         return dev_name, 0.0
 
     cpu_name = "Host CPU"
@@ -667,8 +669,8 @@ def resolve_device_telemetry(device: str) -> Tuple[str, float]:
                 if "model name" in line:
                     cpu_name = line.split(":", 1)[1].strip()
                     break
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to gather CPU telemetry: {e}")
 
     return cpu_name, 0.0
 
@@ -699,8 +701,8 @@ class LocalGpuRunner(BaseTrainingRunner):
                 return True
             if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 return True
-        except ImportError:
-            pass
+        except ImportError as e:
+            logger.debug(f"PyTorch is not installed or available: {e}")
 
         raise RuntimeError(
             "No compatible GPU device (NVIDIA CUDA or Apple Silicon MPS) detected. "
@@ -832,7 +834,7 @@ class LocalGpuRunner(BaseTrainingRunner):
                                 model.parameters(), max_norm=max_norm
                             )
                             optimizer.step()
-                            if scheduler is not None:  # pragma: no cover
+                            if scheduler is not None:
                                 scheduler.step()
                             optimizer.zero_grad()
 
@@ -912,8 +914,12 @@ class HuggingFaceCausalLMRunner(BaseTrainingRunner):
 
         """
         try:
-            import torch  # noqa: F401
-            import transformers  # noqa: F401
+            import torch
+
+            _ = torch
+            import transformers
+
+            _ = transformers
 
             return True
         except ImportError as e:
@@ -962,10 +968,7 @@ class HuggingFaceCausalLMRunner(BaseTrainingRunner):
                 total_batches += 1
 
         avg_loss = total_loss / max(1, total_batches)
-        try:
-            perplexity = round(math.exp(min(avg_loss, 20.0)), 4)
-        except OverflowError:  # pragma: no cover
-            perplexity = 999999.0
+        perplexity = round(math.exp(min(avg_loss, 20.0)), 4)
 
         model.train()
         return {"eval_loss": round(avg_loss, 4), "perplexity": perplexity}
@@ -1016,7 +1019,7 @@ class HuggingFaceCausalLMRunner(BaseTrainingRunner):
             import torch
 
             if torch.cuda.is_available():
-                device = "cuda:0"  # pragma: no cover
+                device = "cuda:0"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 device = "mps"
 
@@ -1037,15 +1040,14 @@ class HuggingFaceCausalLMRunner(BaseTrainingRunner):
             )
             try:
                 to_fn = getattr(model, "to", None)
-                if callable(to_fn):  # pragma: no cover
-                    model = to_fn(target_dev)
-            except Exception:  # pragma: no cover
-                pass
+                model = to_fn(target_dev)  # type: ignore[misc]
+            except Exception as e:
+                logger.debug(f"Failed to move HF model to device: {e}")
 
             eval_dataset: Optional[List[Tuple[Any, Any]]] = None
             if config.validation_dataset_path:
                 val_path = Path(config.validation_dataset_path)
-                if val_path.exists():  # pragma: no cover
+                if val_path.exists():
                     eval_dataset = prepare_torch_dataset(
                         val_path,
                         max_seq_length=hparams.max_seq_length if hparams else 128,
@@ -1077,7 +1079,7 @@ class HuggingFaceCausalLMRunner(BaseTrainingRunner):
                 for _ in range(epochs):
                     for i in range(0, len(dataset), batch_size):
                         if step_idx >= total_steps:
-                            break  # pragma: no cover
+                            break
                         batch = dataset[i : i + batch_size]
                         inps = torch.stack([b[0] for b in batch]).to(target_dev)
                         lbls = torch.stack([b[1] for b in batch]).to(target_dev)

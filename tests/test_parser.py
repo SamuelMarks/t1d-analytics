@@ -268,7 +268,9 @@ def test_extract_postback_event() -> None:
         "<a href=\"javascript:__doPostBack('ctl00$Grid','Select$0')\">Export</a>",
         "html.parser",
     )
-    res1 = extract_postback_event(soup1.find("a"))  # type: ignore[arg-type]
+    a_tag = soup1.find("a")
+    assert isinstance(a_tag, Tag)
+    res1 = extract_postback_event(a_tag)
     assert res1 == ("ctl00$Grid", "Select$0")
 
     # 2. From onclick attribute
@@ -276,7 +278,9 @@ def test_extract_postback_event() -> None:
         '<button onclick="__doPostBack(&quot;btnExport&quot;, &quot;arg1&quot;)">Click</button>',
         "html.parser",
     )
-    res2 = extract_postback_event(soup2.find("button"))  # type: ignore[arg-type]
+    btn_tag = soup2.find("button")
+    assert isinstance(btn_tag, Tag)
+    res2 = extract_postback_event(btn_tag)
     assert res2 == ("btnExport", "arg1")
 
     # 3. From data-postback attribute
@@ -284,7 +288,9 @@ def test_extract_postback_event() -> None:
         "<span data-postback=\"__doPostBack('ctlTarget','cmdArg')\">Row</span>",
         "html.parser",
     )
-    res3 = extract_postback_event(soup3.find("span"))  # type: ignore[arg-type]
+    span_tag = soup3.find("span")
+    assert isinstance(span_tag, Tag)
+    res3 = extract_postback_event(span_tag)
     assert res3 == ("ctlTarget", "cmdArg")
 
     # 4. From nested child anchor
@@ -292,7 +298,9 @@ def test_extract_postback_event() -> None:
         "<td><a href=\"javascript:__doPostBack('nested$ctl','arg$2')\">Nested</a></td>",
         "html.parser",
     )
-    res4 = extract_postback_event(soup4.find("td"))  # type: ignore[arg-type]
+    td_tag = soup4.find("td")
+    assert isinstance(td_tag, Tag)
+    res4 = extract_postback_event(td_tag)
     assert res4 == ("nested$ctl", "arg$2")
 
     # 5. No postback present and child with no target attributes
@@ -300,7 +308,9 @@ def test_extract_postback_event() -> None:
         '<div><input type="text" name="txt" /><a href="https://example.com">Normal</a></div>',
         "html.parser",
     )
-    res5 = extract_postback_event(soup5.find("div"))  # type: ignore[arg-type]
+    div_tag = soup5.find("div")
+    assert isinstance(div_tag, Tag)
+    res5 = extract_postback_event(div_tag)
     assert res5 is None
 
     # 6. Child with data-postback
@@ -308,7 +318,9 @@ def test_extract_postback_event() -> None:
         '<td><button data-postback="__doPostBack(&#39;btn1&#39;,&#39;arg1&#39;)">Btn</button></td>',
         "html.parser",
     )
-    res6 = extract_postback_event(soup6.find("td"))  # type: ignore[arg-type]
+    td_tag2 = soup6.find("td")
+    assert isinstance(td_tag2, Tag)
+    res6 = extract_postback_event(td_tag2)
     assert res6 == ("btn1", "arg1")
 
 
@@ -354,3 +366,27 @@ def test_parse_datasets_with_postback() -> None:
     assert gen_datasets[1].protocol == "Study B"
     assert gen_datasets[1].dataset_url is None
     assert gen_datasets[1].postback_target is None
+
+
+def test_extract_device_info_non_tag() -> None:
+    """Test extracting device info with non-tag children."""
+    from bs4 import BeautifulSoup, NavigableString
+
+    from t1d_analytics.parser import parse_datasets
+
+    html = """
+    <table class="grid">
+        <tr>
+            <th>Protocol</th>
+        </tr>
+        <tr>just some text inside tr without wrapping in td? no, tr containing a NavigableString child</tr>
+    </table>
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    # inject a navigable string directly into the tr list
+    table = soup.find("table")
+    assert table is not None
+    table.append(NavigableString("some text"))
+
+    res = parse_datasets(html)
+    assert res == []

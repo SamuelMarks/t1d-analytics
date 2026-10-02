@@ -176,9 +176,6 @@ def parse_datasets(html: str, base_url: Optional[str] = None) -> List[DatasetInf
 
     datasets = []
     for row in table.find_all("tr"):
-        if not isinstance(row, Tag):  # pragma: no cover
-            continue
-
         row_classes = row.get("class") or []
         if "headerstyle" in row_classes or row.find("td", class_="GroupHeaderStyle"):
             continue

@@ -1,16 +1,10 @@
 """Concurrent multi-tenant API, session mutation, and thread safety tests."""
 
 import concurrent.futures
-import sys
 import threading
-import types
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
-
-if "any_llm" not in sys.modules:
-    sys.modules["any_llm"] = types.ModuleType("any_llm")
-    setattr(sys.modules["any_llm"], "AnyLLM", MagicMock())
 
 import duckdb
 from fastapi.testclient import TestClient
@@ -57,8 +51,7 @@ def test_concurrent_chat_api_key_isolation(tmp_path: Path) -> None:
                     "x-provider-api-key": secret_key,
                 },
             )
-            if resp.status_code != 200:
-                return False
+            assert resp.status_code == 200
             data = resp.json()
             sql_query = data.get("sqlQuery") or data.get("content") or ""
             with lock:
@@ -91,16 +84,14 @@ def test_concurrent_session_mutations(tmp_path: Path) -> None:
                 "messages": [{"role": "user", "content": f"Message from {thread_idx}"}],
             },
         )
-        if post_resp.status_code != 200:
-            return False
+        assert post_resp.status_code == 200
 
         # 2. Read back individual session
         get_resp = client.get(
             f"/api/sessions/{session_id}",
             params={"db_path": str(db_file)},
         )
-        if get_resp.status_code != 200:
-            return False
+        assert get_resp.status_code == 200
         session_data = get_resp.json()
         return bool(session_data["title"] == f"Chat Title {thread_idx}")
 

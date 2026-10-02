@@ -9,7 +9,7 @@ repos:
     hooks:
       - id: prettier
         name: prettier
-        entry: npx --prefix web prettier --write .
+        entry: web/node_modules/.bin/prettier --write
         language: system
         types_or: [javascript, ts, css, html, json, markdown]
         pass_filenames: true

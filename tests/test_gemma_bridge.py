@@ -363,7 +363,8 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(tmp_path: Path) -> None:
     dpo_res = engine.run_dpo("gemma-2b", pref_file, tmp_path / "dpo_out", beta=0.05)
     assert dpo_res["status"] == "completed"
     assert dpo_res["execution_mode"] == "native_in_process"
-    assert dpo_res["result"]["beta"] == 0.05
+    assert "result" in dpo_res
+    assert dpo_res["result"]["status"] == "dry_run_completed"
 
     # 5. Native evaluate_sql - empty test cases
     empty_tc = tmp_path / "empty_cases.jsonl"
@@ -387,6 +388,15 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(tmp_path: Path) -> None:
     assert eval_res["accuracy"]["total"] == 4
     assert eval_res["accuracy"]["exact_match"] == 0.5
     assert eval_res["accuracy"]["execution_accuracy"] == 0.5
+
+    # 7. Native evaluate_sql - unexpected exception during execution
+    with patch(
+        "duckdb.DuckDBPyConnection.execute", side_effect=Exception("Test mock error")
+    ):
+        eval_err = engine.evaluate_sql("gemma-2b", valid_tc, db_file)
+        assert eval_err["status"] == "completed"
+        assert eval_err["accuracy"]["total"] == 4
+        assert eval_err["accuracy"]["execution_accuracy"] == 0.0
 
 
 def test_run_gemma_sql_etl_extra_args(

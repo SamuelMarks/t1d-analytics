@@ -543,16 +543,11 @@ def validate_db_path(
     is_allowed = False
     for allowed_dir in allowed_dirs:
         resolved_allowed = allowed_dir.resolve()
-        try:
-            if resolved_path == resolved_allowed or resolved_path.is_relative_to(
-                resolved_allowed
-            ):
-                is_allowed = True
-                break
-        except AttributeError:  # pragma: no cover
-            if str(resolved_path).startswith(str(resolved_allowed)):
-                is_allowed = True
-                break
+        if resolved_path == resolved_allowed or resolved_path.is_relative_to(
+            resolved_allowed
+        ):
+            is_allowed = True
+            break
 
     if not is_allowed:
         raise HTTPException(
@@ -1093,7 +1088,7 @@ def stream_llm_tokens(
         str: Streamed token chunks.
 
     """
-    from any_llm import AnyLLM  # type: ignore
+    from any_llm import AnyLLM
 
     resolved_provider = provider or "ollama"
     actual_model = model_name
@@ -2759,7 +2754,8 @@ def submit_training_job(
         dry_run=job_req.dry_run,
     )
     job_id = global_training_job_manager.submit_job(config)
-    return {"job_id": job_id, "status": "pending"}
+    job = global_training_job_manager.get_job(job_id)
+    return job if job else {"job_id": job_id, "status": "pending"}
 
 
 @app.get("/api/training/jobs")
@@ -2838,17 +2834,22 @@ def cancel_training_job(job_id: str, req: Request) -> Dict[str, Any]:
             status_code=404,
             detail={"error_code": "backend.jobNotFound", "params": {"job_id": job_id}},
         )
-    return {"job_id": job_id, "status": "cancelled"}
+    job = global_training_job_manager.get_job(job_id)
+    return job if job else {"job_id": job_id, "status": "cancelled"}
 
 
-if os.environ.get("DEBUG"):  # pragma: no cover
-    dist_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "web", "dist"
-    )
-    if os.path.exists(dist_path):
-        logger.info(f"DEBUG mode enabled. Serving static frontend from {dist_path}")
-        app.mount("/", StaticFiles(directory=dist_path, html=True), name="static")
-    else:
-        logger.warning(
-            f"DEBUG mode enabled but static dist folder not found at {dist_path}"
+def _setup_debug() -> None:
+    if os.environ.get("DEBUG"):
+        dist_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "web", "dist"
         )
+        if os.path.exists(dist_path):
+            logger.info(f"DEBUG mode enabled. Serving static frontend from {dist_path}")
+            app.mount("/", StaticFiles(directory=dist_path, html=True), name="static")
+        else:
+            logger.warning(
+                f"DEBUG mode enabled but static dist folder not found at {dist_path}"
+            )
+
+
+_setup_debug()

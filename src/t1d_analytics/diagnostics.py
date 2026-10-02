@@ -489,7 +489,9 @@ def check_provider_health(
     prov_key = provider.lower().strip()
 
     try:
-        import any_llm  # type: ignore[import-not-found]  # noqa: F401
+        import any_llm
+
+        _ = any_llm
 
         sdk_installed = True
     except ImportError:

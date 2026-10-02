@@ -551,15 +551,32 @@ class GemmaSqlPipelineEngine:
                 "result": res,
             }
 
+        # Native In-Process DPO Fallback
+        from t1d_analytics.models import (
+            TrainingBackend,
+            TrainingHyperparameters,
+            TrainingJobConfig,
+        )
+        from t1d_analytics.training_runner import get_training_runner
+
+        runner = get_training_runner(TrainingBackend.LOCAL_CPU)
+        train_cfg = TrainingJobConfig(
+            model_name=model_name,
+            backend=TrainingBackend.LOCAL_CPU,
+            dataset_path=str(ds_p.resolve()),
+            output_dir=str(out_p.resolve()),
+            use_tiny_model=True,
+            dry_run=True,
+            hyperparameters=TrainingHyperparameters(
+                learning_rate=1e-6,
+                num_epochs=1,
+            ),
+        )
+        res_runner = runner.run_training(train_cfg)
         return {
             "status": "completed",
             "execution_mode": "native_in_process",
-            "result": {
-                "model": model_name,
-                "preference_dataset": str(ds_p.resolve()),
-                "output_dir": str(out_p.resolve()),
-                "beta": beta,
-            },
+            "result": res_runner,
         }
 
     def evaluate_sql(
@@ -628,8 +645,8 @@ class GemmaSqlPipelineEngine:
                     obj = json.loads(line)
                     if isinstance(obj, dict):
                         cases.append(obj)
-                except Exception:
-                    continue
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Invalid JSON in test cases: {e}")
 
         if not cases:
             return {
@@ -668,8 +685,10 @@ class GemmaSqlPipelineEngine:
                     pred_res = conn.execute(pred_sql).fetchall()
                     if gold_res == pred_res:
                         exec_matches += 1
-                except Exception:
-                    pass
+                except duckdb.Error as e:
+                    logger.debug(f"Execution failed during evaluation: {e}")
+                except Exception as e:
+                    logger.debug(f"Unexpected error during evaluation: {e}")
         finally:
             conn.close()
 

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 import duckdb
 
 if TYPE_CHECKING:
-    import pandas as pd  # type: ignore[import-untyped]
+    import pandas as pd
 
 from t1d_analytics.diagnostics import DatabaseStatusCode, check_database_health
 from t1d_analytics.i18n import get_translator
@@ -196,7 +196,7 @@ def _read_clinical_dataframe(data_file: Path) -> "pd.DataFrame":
     df: Optional[pd.DataFrame] = None
     if suffix in (".sas7bdat", ".xpt"):
         try:
-            import pyreadstat  # type: ignore[import-untyped]
+            import pyreadstat
 
             if suffix == ".sas7bdat":
                 df, _ = pyreadstat.read_sas7bdat(str(data_file))
@@ -833,7 +833,7 @@ def handle_natural_language(
     """
     _ = get_translator()
     try:
-        from any_llm import AnyLLM  # type: ignore[import-not-found]
+        from any_llm import AnyLLM
     except ImportError:
         print(_("Error: any-llm-sdk[ollama] is not installed. Please install it."))
         return

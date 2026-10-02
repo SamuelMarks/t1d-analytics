@@ -1000,8 +1000,20 @@ def handle_watch(args: argparse.Namespace) -> None:
                         (del_f,),
                     )
                     conn.close()
-                except Exception:
-                    pass
+                except duckdb.Error as e:
+                    import sys
+
+                    print(
+                        f"Warning: Failed to update manifest after deletion: {e}",
+                        file=sys.stderr,
+                    )
+                except Exception as e:
+                    import sys
+
+                    print(
+                        f"Warning: Unexpected error updating manifest: {e}",
+                        file=sys.stderr,
+                    )
 
         changed = False
         for f in current_files:
@@ -1299,5 +1311,5 @@ def handle_bridge_gemma_sql(args: argparse.Namespace) -> None:
         print("gemma-4-sql training completed successfully.")
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     main()

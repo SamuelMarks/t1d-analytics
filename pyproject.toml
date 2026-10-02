@@ -38,6 +38,17 @@ disallow_untyped_defs = true
 warn_unused_ignores = false
 mypy_path = ["src"]
 
+[[tool.mypy.overrides]]
+module = [
+    "any_llm",
+    "pandas",
+    "pyreadstat",
+    "torch",
+    "transformers",
+    "peft"
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 addopts = "--cov=t1d_analytics --cov=scripts.run_tests --cov=docs_src --cov-branch --cov-report=term-missing --cov-report=html --cov-report=lcov --cov-fail-under=100"
 pythonpath = ["src", "."]

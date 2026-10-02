@@ -1,15 +1,9 @@
 """Tests for the training_data module."""
 
 import json
-import sys
-import types
 from pathlib import Path
 from typing import Generator
 from unittest.mock import MagicMock, patch
-
-if "any_llm" not in sys.modules:
-    sys.modules["any_llm"] = types.ModuleType("any_llm")
-    setattr(sys.modules["any_llm"], "AnyLLM", MagicMock())
 
 import duckdb
 import pytest
@@ -546,6 +540,45 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
     mocker.patch("t1d_analytics.api.generate_sql_from_nl", side_effect=mock_gen)
     res = evaluate_text_to_sql(str(db_file), test_cases)
     assert res["execution_accuracy"] == 50.0
+
+
+def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> None:
+    """Test generic Exception blocks in training_data.py."""
+    import duckdb
+
+    from t1d_analytics.training_data import (
+        TrainingDataGenerator,
+        _parse_llm_json_array,
+        evaluate_text_to_sql,
+    )
+
+    # 1. _parse_llm_json_array exceptions
+    with patch("json.loads", side_effect=Exception("Generic Mock JSON Error")):
+        assert _parse_llm_json_array('["a"]') is None
+        assert _parse_llm_json_array('text before ["a"]') is None
+
+    # 2. _is_valid_sql exceptions
+    db_file = tmp_path / "test.duckdb"
+    conn = duckdb.connect(str(db_file))
+    gen = TrainingDataGenerator(conn, "gemma4")
+    with patch(
+        "duckdb.DuckDBPyConnection.execute",
+        side_effect=Exception("Generic Mock DuckDB Error"),
+    ):
+        assert gen._is_valid_sql("SELECT 1") is False
+    conn.close()
+
+    # 3. evaluate_text_to_sql exceptions
+    test_cases = [{"prompt": "q", "gold_sql": "SELECT 1"}]
+    with patch("t1d_analytics.api.generate_sql_from_nl", return_value=("", "SELECT 2")):
+        # Mock conn.execute to throw Exception for both gold and pred
+        with patch(
+            "duckdb.DuckDBPyConnection.execute",
+            side_effect=Exception("Generic Execute Error"),
+        ):
+            res = evaluate_text_to_sql(str(db_file), test_cases)
+            assert res["execution_accuracy"] == 0.0
+            assert res["syntax_failure_rate"] > 0
 
 
 def test_make_hashable() -> None:

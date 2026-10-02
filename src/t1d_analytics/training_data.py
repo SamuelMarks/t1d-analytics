@@ -78,14 +78,18 @@ def _parse_llm_json_array(content_str: str) -> Optional[list[object]]:
         data = json.loads(cleaned)
         if isinstance(data, list):
             return data
-    except Exception:
-        pass
+    except json.JSONDecodeError as e:
+        logger.debug(f"Failed to decode exact JSON list: {e}")
+    except Exception as e:
+        logger.debug(f"Unexpected error decoding exact JSON list: {e}")
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if match:
         try:
             return list(json.loads(match.group(0)))
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            logger.debug(f"Failed to decode extracted JSON list: {e}")
+        except Exception as e:
+            logger.debug(f"Unexpected error decoding extracted JSON list: {e}")
     return None
 
 
@@ -113,7 +117,9 @@ def validate_provider_readiness(provider: str) -> None:
     prov = provider.lower()
     if prov != "ollama":
         try:
-            import any_llm  # type: ignore[import-not-found]  # noqa: F401
+            import any_llm
+
+            _ = any_llm
         except ImportError:
             raise RuntimeError(
                 f"Provider '{provider}' requires any-llm-sdk. Install with: pip install any-llm-sdk[{provider}]"
@@ -210,7 +216,11 @@ class TrainingDataGenerator:
         try:
             self.conn.execute(f"EXPLAIN {sql_query}")
             return True
-        except Exception:
+        except duckdb.Error as e:
+            logger.debug(f"SQL validation failed: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"Unexpected error in SQL validation: {e}")
             return False
 
     def _generate_pairs(
@@ -270,7 +280,8 @@ class TrainingDataGenerator:
             from any_llm import AnyLLM
 
             llm_instance = AnyLLM.create(self.provider)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to create AnyLLM instance: {e}")
             use_any_llm = False
 
         if self.provider != "ollama" and (not use_any_llm or llm_instance is None):
@@ -514,7 +525,8 @@ def evaluate_text_to_sql(
 
         try:
             _, pred_sql = generate_sql_from_nl(db_path, question, model_name=model)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"SQL generation failed for question '{question}': {e}")
             pred_sql = ""
 
         em = (
@@ -529,14 +541,25 @@ def evaluate_text_to_sql(
         syntax_err = False
         try:
             pred_rows = conn.execute(pred_sql).fetchall() if pred_sql else None
-        except Exception:
+        except duckdb.Error as e:
+            logger.debug(f"Execution error for predicted SQL '{pred_sql}': {e}")
+            pred_rows = None
+            syntax_err = True
+            syntax_error_count += 1
+        except Exception as e:
+            logger.debug(f"Unexpected error for predicted SQL '{pred_sql}': {e}")
             pred_rows = None
             syntax_err = True
             syntax_error_count += 1
 
+        gold_rows = None
         try:
             gold_rows = conn.execute(gold_sql).fetchall() if gold_sql else None
-        except Exception:
+        except duckdb.Error as e:
+            logger.debug(f"Execution error for gold SQL '{gold_sql}': {e}")
+            gold_rows = None
+        except Exception as e:
+            logger.debug(f"Unexpected error for gold SQL '{gold_sql}': {e}")
             gold_rows = None
 
         if pred_rows is not None and gold_rows is not None:
