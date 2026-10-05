@@ -2604,6 +2604,7 @@ def test_debug_static_mount() -> None:
         patch.dict(os.environ, {"DEBUG": "1"}),
         patch("t1d_analytics.api.app.mount") as mock_mount,
         patch("t1d_analytics.api.logger.info") as mock_info,
+        patch("t1d_analytics.api.StaticFiles"),
         patch("os.path.exists", return_value=True),
     ):
         t1d_analytics.api._setup_debug()

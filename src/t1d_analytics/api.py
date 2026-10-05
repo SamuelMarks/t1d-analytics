@@ -2839,6 +2839,18 @@ def cancel_training_job(job_id: str, req: Request) -> Dict[str, Any]:
 
 
 def _setup_debug() -> None:
+    """
+    Configure debug static file serving if enabled.
+
+    When the DEBUG environment variable is set, this function mounts
+    the frontend static files (from the web/dist directory) at the root
+    path. Useful for local development and testing.
+
+    Returns
+    -------
+        None
+
+    """
     if os.environ.get("DEBUG"):
         dist_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "web", "dist"
