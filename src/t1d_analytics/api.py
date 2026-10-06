@@ -773,6 +773,7 @@ def execute_sql(
     lock = threading.Lock()
 
     def safe_interrupt() -> None:
+        """Interrupts the DuckDB connection safely from another thread."""
         with lock:
             if not is_closed and conn is not None:  # pragma: no branch
                 conn.interrupt()
