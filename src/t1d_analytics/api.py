@@ -769,10 +769,18 @@ def execute_sql(
 
     logger.info(f"Executing SQL query against database at {db_path}:\n{query}")
     conn = None
+    is_closed = False
+    lock = threading.Lock()
+
+    def safe_interrupt() -> None:
+        with lock:
+            if not is_closed and conn is not None:  # pragma: no branch
+                conn.interrupt()
+
     try:
         conn = duckdb.connect(db_path, read_only=True)
         conn.execute("SET enable_external_access = false")
-        timer = threading.Timer(timeout_seconds, conn.interrupt)
+        timer = threading.Timer(timeout_seconds, safe_interrupt)
         timer.start()
         try:
             result = conn.execute(query)
@@ -814,8 +822,10 @@ def execute_sql(
             json.dumps({"error_code": err_code, "params": {"error": err_msg}})
         )
     finally:
-        if conn is not None:
-            conn.close()
+        with lock:
+            is_closed = True
+            if conn is not None:
+                conn.close()
 
 
 def _get_sessions_db_conn(
