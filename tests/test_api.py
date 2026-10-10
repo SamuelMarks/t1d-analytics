@@ -776,6 +776,27 @@ def test_execute_sql_timeout(mock_db: str) -> None:
             execute_sql(mock_db, "SELECT 1", timeout_seconds=0.001)
 
 
+def test_execute_sql_timer_safe_interrupt_branch(mock_db: str) -> None:
+    """Test the timer callback when connection is already closed to cover false branch."""
+    import threading
+
+    timer_callback = None
+    original_timer = threading.Timer
+
+    def mock_timer(*args: typing.Any, **kwargs: typing.Any) -> threading.Timer:
+        nonlocal timer_callback
+        timer_callback = args[1]
+        return original_timer(*args, **kwargs)
+
+    with patch("threading.Timer", side_effect=mock_timer):
+        # Successful query
+        execute_sql(mock_db, "SELECT 1")
+
+    # Run the callback AFTER the query has successfully finished and closed the connection
+    if timer_callback:
+        timer_callback()
+
+
 def test_chat_stream_empty_message() -> None:
     """Test /api/chat/stream returns error event on empty message."""
     resp = client.post("/api/chat/stream", json={"message": "", "model": "sql"})

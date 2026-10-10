@@ -727,9 +727,9 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
         ):
             with patch(
                 "t1d_analytics.analytics.load_data_to_duckdb",
-                side_effect=lambda *a, **k: sample_file2.unlink()
-                if sample_file2.exists()
-                else None,
+                side_effect=lambda *a, **k: (
+                    sample_file2.unlink() if sample_file2.exists() else None
+                ),
             ):
                 main()
 
@@ -753,9 +753,9 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
         ):
             with patch(
                 "t1d_analytics.analytics.load_data_to_duckdb",
-                side_effect=lambda *a, **k: sample_file3.unlink()
-                if sample_file3.exists()
-                else None,
+                side_effect=lambda *a, **k: (
+                    sample_file3.unlink() if sample_file3.exists() else None
+                ),
             ):
                 main()
 
