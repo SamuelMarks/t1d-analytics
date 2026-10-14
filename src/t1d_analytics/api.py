@@ -1,7 +1,5 @@
 """FastAPI application for the T1D Analytics web interface."""
 
-import datetime
-import decimal
 import io
 import json
 import logging
@@ -11,7 +9,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import uuid
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -23,7 +20,6 @@ from typing import (
     Iterator,
     List,
     Optional,
-    Union,
 )
 
 import duckdb
@@ -31,21 +27,115 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
 from t1d_analytics.analytics import (
     extract_sql_from_response,
     get_database_schema,
     profile_table,
 )
+from t1d_analytics.api_schemas import (
+    ApiError as ApiError,
+)
+from t1d_analytics.api_schemas import (
+    ChatMessageModel as ChatMessageModel,
+)
+from t1d_analytics.api_schemas import (
+    ChatRequest as ChatRequest,
+)
+from t1d_analytics.api_schemas import (
+    ChatResponse as ChatResponse,
+)
+from t1d_analytics.api_schemas import (
+    ColumnInfo as ColumnInfo,
+)
+from t1d_analytics.api_schemas import (
+    CreateSessionRequest as CreateSessionRequest,
+)
+from t1d_analytics.api_schemas import (
+    DatabaseItem as DatabaseItem,
+)
+from t1d_analytics.api_schemas import (
+    DatabaseListResponse as DatabaseListResponse,
+)
+from t1d_analytics.api_schemas import (
+    ExecuteSqlRequest as ExecuteSqlRequest,
+)
+from t1d_analytics.api_schemas import (
+    ExecuteSqlResponse as ExecuteSqlResponse,
+)
+from t1d_analytics.api_schemas import (
+    ModelInfo as ModelInfo,
+)
+from t1d_analytics.api_schemas import (
+    ModelsResponse as ModelsResponse,
+)
+from t1d_analytics.api_schemas import (
+    ProvidersStatusResponse as ProvidersStatusResponse,
+)
+from t1d_analytics.api_schemas import (
+    ProviderStatus as ProviderStatus,
+)
+from t1d_analytics.api_schemas import (
+    SchemaResponse as SchemaResponse,
+)
+from t1d_analytics.api_schemas import (
+    SessionListResponse as SessionListResponse,
+)
+from t1d_analytics.api_schemas import (
+    SessionModel as SessionModel,
+)
+from t1d_analytics.api_schemas import (
+    TableDataResponse as TableDataResponse,
+)
+from t1d_analytics.api_schemas import (
+    TableInfo as TableInfo,
+)
+from t1d_analytics.api_schemas import (
+    TrainingJobRequest as TrainingJobRequest,
+)
+from t1d_analytics.db_security import (
+    discover_workspace_databases,
+)
+from t1d_analytics.db_security import (
+    validate_db_path as _shared_validate_db_path,
+)
 from t1d_analytics.diagnostics import (
     check_database_health,
     get_system_health,
     log_startup_diagnostics,
 )
+from t1d_analytics.errors import (
+    DatabaseNotFoundError,
+    LlmTranslationError,
+    MissingSdkError,
+    ProviderNotConfiguredError,
+    SchemaReadError,
+    SqlExecutionError,
+    T1DError,
+)
 from t1d_analytics.i18n import get_translator
-
-SqlValue = Union[str, int, float, bool, None]
+from t1d_analytics.llm_client import (
+    CLOUD_MODEL_CATALOG,
+    PROVIDER_ENV_KEYS,
+    build_clinical_sql_prompt,
+    get_effective_api_key,
+    normalize_ollama_host,
+    resolve_provider_and_model,
+)
+from t1d_analytics.llm_client import (
+    extract_stream_delta as _shared_extract_stream_delta,
+)
+from t1d_analytics.llm_client import (
+    is_provider_configured as _shared_is_provider_configured,
+)
+from t1d_analytics.session_store import SessionStore, open_sessions_db_conn
+from t1d_analytics.sql_utils import (
+    SqlValue,
+    sanitize_spreadsheet_cell,
+)
+from t1d_analytics.sql_utils import (
+    sanitize_sql_value as _shared_sanitize_sql_value,
+)
 
 _sessions_lock = threading.Lock()
 
@@ -63,21 +153,7 @@ def sanitize_sql_value(val: Any) -> SqlValue:
         A JSON-compliant and Pydantic-compatible SqlValue.
 
     """
-    if val is None:
-        return None
-    if isinstance(val, (datetime.date, datetime.datetime, datetime.time)):
-        return val.isoformat()
-    if isinstance(val, decimal.Decimal):
-        return float(val)
-    if isinstance(val, uuid.UUID):
-        return str(val)
-    if isinstance(val, float):
-        if math.isnan(val) or math.isinf(val):
-            return None
-        return val
-    if isinstance(val, (int, bool, str)):
-        return val
-    return str(val)
+    return _shared_sanitize_sql_value(val)
 
 
 # Rate Limiting & Auth State
@@ -464,6 +540,27 @@ async def auth_and_rate_limit_middleware(request: Request, call_next: Any) -> An
     return await call_next(request)
 
 
+@app.exception_handler(T1DError)
+async def t1d_error_exception_handler(request: Request, exc: T1DError) -> JSONResponse:
+    """
+    Handle structured T1DError domain exceptions and return a JSONResponse.
+
+    Args:
+    ----
+        request: The incoming FastAPI HTTP request.
+        exc: The raised T1DError instance.
+
+    Returns:
+    -------
+        JSONResponse with the domain error's status_code and structured detail dictionary.
+
+    """
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.to_dict()},
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle unhandled exceptions globally and return localized error message."""
@@ -494,9 +591,7 @@ def validate_db_path(
     Args:
     ----
         db_path: The requested database file path, or None for default.
-        allowed_dirs: Optional list of allowed directory roots. Defaults to
-            the workspace root, its subdirectories, configured T1D_DB_PATH
-            parent directory, and system temp directories.
+        allowed_dirs: Optional list of allowed directory roots.
 
     Returns:
     -------
@@ -507,210 +602,10 @@ def validate_db_path(
         HTTPException: If the path traverses outside allowed boundaries or contains null bytes.
 
     """
-    raw_path = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
-    if raw_path == "t1d.duckdb" and not Path(raw_path).exists():
-        env_db_fallback = os.environ.get("T1D_DB_PATH")
-        if env_db_fallback and Path(env_db_fallback).exists():
-            raw_path = env_db_fallback
-
-    if "\0" in raw_path:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error_code": "backend.invalidDatabasePath",
-                "params": {"path": raw_path},
-            },
-        )
-
-    resolved_path = Path(raw_path).resolve()
-
-    if allowed_dirs is None:
-        import tempfile
-
-        cwd = Path.cwd().resolve()
-        sys_tmp = Path(tempfile.gettempdir()).resolve()
-        allowed_dirs = [
-            cwd,
-            sys_tmp,
-            Path("/tmp").resolve(),
-            Path("/private/tmp").resolve(),
-            Path("/var/tmp").resolve(),
-        ]
-        env_db = os.environ.get("T1D_DB_PATH")
-        if env_db:
-            allowed_dirs.append(Path(env_db).resolve().parent)
-
-    is_allowed = False
-    for allowed_dir in allowed_dirs:
-        resolved_allowed = allowed_dir.resolve()
-        if resolved_path == resolved_allowed or resolved_path.is_relative_to(
-            resolved_allowed
-        ):
-            is_allowed = True
-            break
-
-    if not is_allowed:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error_code": "backend.invalidDatabasePath",
-                "params": {"path": str(raw_path)},
-            },
-        )
-
-    return str(resolved_path)
+    return _shared_validate_db_path(db_path=db_path, allowed_dirs=allowed_dirs)
 
 
-class ApiError(BaseModel):
-    """Structured API error format."""
-
-    error_code: str
-    params: Dict[str, Any] = {}
-
-
-class ChatMessageModel(BaseModel):
-    """A single message in a conversation session."""
-
-    role: str
-    content: str
-    sqlQuery: Optional[str] = None
-    sqlResult: Optional[List[Dict[str, SqlValue]]] = None
-    error: Optional[ApiError] = None
-    model: Optional[str] = None
-
-
-class ChatRequest(BaseModel):
-    """
-    Request model for the chat and streaming chat endpoints.
-
-    Attributes
-    ----------
-        message: User prompt or query string.
-        model: Model identifier name.
-        provider: Optional provider name override ('ollama', 'openai', 'anthropic', 'google').
-        api_key: Optional client-supplied API key for external cloud providers.
-        db_path: Optional path to the DuckDB database.
-        session_id: Optional ID of the active chat session.
-        history: Optional list of prior conversation messages.
-
-    """
-
-    message: str
-    model: str = "gemma4"
-    provider: Optional[str] = None
-    api_key: Optional[str] = None
-    db_path: Optional[str] = None
-    session_id: Optional[str] = None
-    history: Optional[List[ChatMessageModel]] = None
-
-
-class ChatResponse(BaseModel):
-    """Response model for the chat endpoint."""
-
-    content: str
-    sqlResult: Optional[List[Dict[str, SqlValue]]] = None
-    sqlQuery: Optional[str] = None
-    error: Optional[ApiError] = None
-
-
-class SessionModel(BaseModel):
-    """A chat conversation session."""
-
-    session_id: str
-    title: str
-    created_at: str
-    updated_at: str
-    messages: List[ChatMessageModel] = []
-
-
-class CreateSessionRequest(BaseModel):
-    """Payload to create or update a chat conversation session."""
-
-    session_id: Optional[str] = None
-    title: Optional[str] = None
-    messages: List[ChatMessageModel] = []
-
-
-class SessionListResponse(BaseModel):
-    """Response model containing a list of chat sessions."""
-
-    sessions: List[SessionModel]
-
-
-class ModelInfo(BaseModel):
-    """
-    Model information.
-
-    Attributes
-    ----------
-        name: Model identifier name.
-        size: Optional size in bytes for local models.
-        provider: Provider identifier ('ollama', 'openai', 'anthropic', 'google').
-        configured: Whether credentials or host configurations exist in the environment.
-        requires_key: Whether external authentication is required.
-        available: Whether the model is currently active and usable.
-        reachable: Whether the upstream provider host is responsive.
-        error_code: Optional diagnostic error code if unavailable ('PROVIDER_OFFLINE', 'MISSING_API_KEY').
-
-    """
-
-    name: str
-    size: Optional[int] = None
-    provider: str = "ollama"
-    configured: bool = True
-    requires_key: bool = False
-    available: bool = True
-    reachable: bool = True
-    error_code: Optional[str] = None
-
-
-class ModelsResponse(BaseModel):
-    """Response model for the models endpoint."""
-
-    models: List[ModelInfo]
-
-
-class ProviderStatus(BaseModel):
-    """
-    Connection health and credential status for an LLM provider.
-
-    Attributes
-    ----------
-        provider: Provider identifier name.
-        configured: Whether API credentials are present in the environment.
-        healthy: Whether provider connection is reachable/healthy.
-        details: Optional diagnostic details or error message.
-        reachable: Whether provider endpoint responded successfully to health check.
-        error_code: Diagnostic status code ('PROVIDER_ONLINE', 'PROVIDER_OFFLINE', 'MISSING_API_KEY').
-
-    """
-
-    provider: str
-    configured: bool
-    healthy: bool
-    details: Optional[str] = None
-    reachable: bool = True
-    error_code: Optional[str] = None
-
-
-class ProvidersStatusResponse(BaseModel):
-    """
-    Response model for provider statuses.
-
-    Attributes
-    ----------
-        providers: List of provider status objects.
-
-    """
-
-    providers: List[ProviderStatus]
-
-
-CLOUD_PROVIDER_MODELS: Dict[str, List[str]] = {
-    "openai": ["openai/gpt-4o", "openai/gpt-4o-mini"],
-    "anthropic": ["anthropic/claude-3-5-sonnet", "anthropic/claude-3-5-haiku"],
-    "google": ["google/gemini-1.5-pro", "google/gemini-1.5-flash"],
-}
+CLOUD_PROVIDER_MODELS: Dict[str, List[str]] = CLOUD_MODEL_CATALOG
 
 
 def is_provider_configured(provider: str) -> bool:
@@ -726,18 +621,7 @@ def is_provider_configured(provider: str) -> bool:
         bool: True if configured, False otherwise.
 
     """
-    prov = provider.lower()
-    if prov == "ollama":
-        return True
-    if prov == "openai":
-        return bool(os.environ.get("OPENAI_API_KEY"))
-    if prov == "anthropic":
-        return bool(os.environ.get("ANTHROPIC_API_KEY"))
-    if prov in ("google", "gemini"):
-        return bool(
-            os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        )
-    return False
+    return _shared_is_provider_configured(provider)
 
 
 def execute_sql(
@@ -800,14 +684,10 @@ def execute_sql(
         return output
     except duckdb.InterruptException as ie:
         logger.error(f"SQL execution timed out: {ie}")
-        raise ValueError(
-            json.dumps(
-                {
-                    "error_code": "backend.queryTimeout",
-                    "params": {"error": "Query execution timed out."},
-                }
-            )
-        )
+        raise SqlExecutionError(
+            error_code="backend.queryTimeout",
+            params={"error": "Query execution timed out."},
+        ) from ie
     except Exception as e:
         logger.error(f"SQL execution error: {e}")
         err_msg = str(e)
@@ -816,12 +696,8 @@ def execute_sql(
             or "cannot open" in err_msg.lower()
             or "no such file" in err_msg.lower()
         ):
-            err_code = "backend.dbNotFound"
-        else:
-            err_code = "backend.sqlExecution"
-        raise ValueError(
-            json.dumps({"error_code": err_code, "params": {"error": err_msg}})
-        )
+            raise DatabaseNotFoundError(params={"error": err_msg}) from e
+        raise SqlExecutionError(params={"error": err_msg}) from e
     finally:
         with lock:
             is_closed = True
@@ -844,40 +720,7 @@ def _get_sessions_db_conn(
         duckdb.DuckDBPyConnection: Database connection.
 
     """
-    if db_path is None:
-        env_db = os.environ.get("T1D_SESSIONS_DB")
-        if env_db:
-            db_path = env_db
-        else:
-            sessions_dir = Path("./data")
-            sessions_dir.mkdir(parents=True, exist_ok=True)
-            db_path = str((sessions_dir / "sessions.duckdb").resolve())
-    max_retries = 5
-    conn: Optional[duckdb.DuckDBPyConnection] = None
-    for attempt in range(max_retries - 1):
-        try:
-            conn = duckdb.connect(db_path, read_only=False)
-            break
-        except duckdb.IOException as e:
-            if "lock" in str(e).lower():
-                time.sleep(0.05 * (attempt + 1))
-            else:
-                raise
-    else:
-        conn = duckdb.connect(db_path, read_only=False)
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chat_sessions (
-            session_id VARCHAR PRIMARY KEY,
-            title VARCHAR,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            messages_json VARCHAR
-        )
-        """
-    )
-    return conn
+    return open_sessions_db_conn(db_path=db_path)
 
 
 @contextmanager
@@ -905,6 +748,12 @@ def get_sessions_conn(
         yield conn
     finally:
         conn.close()
+
+
+_session_store = SessionStore(
+    conn_factory=get_sessions_conn,
+    lock=_sessions_lock,
+)
 
 
 def _build_sql_prompt(
@@ -936,43 +785,12 @@ def _build_sql_prompt(
             turns.append(f"{role}: {content}{sql_info}")
         history_context = "Prior Conversation History:\n" + "\n".join(turns) + "\n\n"
 
-    return f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
-
-{schema}
-
-Context & Rules for T1D Analytics:
-1. Terminology & Aliases:
-   - "Lows" / "Hypoglycemia": Look for Time Below Range (TBR, <70 or <54 mg/dL), `pct_time_under_70`, `hypo`.
-   - "Highs" / "Hyperglycemia": Look for Time Above Range (TAR, >180 or >250 mg/dL), `pct_time_over_180`, `hyper`.
-   - "In-range" / "TIR": Look for Time in Range (70-180 mg/dL), `pct_time_in_range_70_180`, `tir`, `cgm_in_range`.
-   - "A1C" / "HbA1c": Look for glycated hemoglobin, `a1c`, `hba1c`.
-   - "Variability": Look for Coefficient of Variation (`cv`), Standard Deviation (`sd`).
-   - "Average sugar": Look for Mean Glucose, `mean_cgm`, Glucose Management Indicator (`gmi`).
-   - "Adverse Events": "DKA" (Diabetic Ketoacidosis), "SH" (Severe Hypoglycemia).
-   - Demographics: "Duration" (years with diabetes), "Age", "BMI", "Gender/Sex", "Weight".
-   - Treatment: "Pump" (CSII), "Injections/Shots" (MDI), "Loop" (AID/Closed-Loop), "Insulin" (TDD, Basal, Bolus).
-   - Study Timepoints: "Baseline" (visit 0 or baseline flag), "End of trial/Follow-up" (max visit month).
-2. SQL Generation Rules for Multi-Trial Data:
-   - Trial Names: Acronyms (DCLP3, DCLP5, Pedap, etc.) usually correspond directly to table names.
-   - Aggregating Combined Trials: To calculate metrics for multiple trials "together", "combined", or "overall", you MUST use a CTE with `UNION ALL` to combine raw rows from all requested tables *before* applying aggregate functions like `AVG()`.
-   - Comparing Individual Trials: To calculate metrics for multiple trials "individually" or "each", use `UNION ALL` with an identifying literal string column (e.g., `SELECT 'DCLP3' as trial, AVG(...) ... UNION ALL SELECT 'DCLP5'...`).
-   - Aligning UNION Columns: Clinical trial tables often have different schemas. When using `UNION ALL`, you MUST explicitly `SELECT` and alias only the specific columns needed (e.g. `age`, `tir`) to ensure they align perfectly in number, order, and type across all blocks. NEVER use `SELECT *` with `UNION ALL`.
-   - Linking Data: If questions span patient demographics and CGM outcomes, use `JOIN` on the patient/subject ID columns (e.g., `pt_id`, `subject_id`).
-3. Formatting & Logic:
-   - Handle colloquial/informal language intuitively (e.g., "betwixt" -> `BETWEEN`, "kids/pediatric" -> `age < 18`, "adults" -> `age >= 18`).
-   - Account for string vs. numeric data types; use `CAST(col AS FLOAT)` if computing averages on textual columns that contain numbers.
-   - Ignore NULL values appropriately when calculating averages or sums.
-4. Strict Schema Enforcement:
-   - CRITICAL: You must ONLY use the exact table names and column names provided in the schema above.
-   - Do NOT invent, guess, or hallucinate table names (e.g., do not use "Visit1" or "demographics" if they are not in the schema).
-   - If a requested concept (like "demographics") is not a table, find the relevant columns within the existing tables (e.g., `visits` or `patients`).
-
-Write a SQL query that answers the user's request.
-You may provide an explanation of your thought process before or after the query.
-Ensure the SQL query is enclosed in a markdown code block (e.g. ```sql ... ```).
-The query should be a valid DuckDB SQL SELECT statement.
-
-{history_context}User request: {nl_query}"""
+    return build_clinical_sql_prompt(
+        schema=schema,
+        nl_query=nl_query,
+        history_context=history_context,
+        require_markdown_fence=True,
+    )
 
 
 def _extract_sql_from_response(full_response: str) -> str:
@@ -1007,75 +825,7 @@ def extract_stream_delta(chunk: Any, provider: str = "ollama") -> str:
         str: Extracted token content string, or empty string.
 
     """
-    if isinstance(chunk, str):
-        return chunk
-    if isinstance(chunk, dict):
-        for choice in chunk.get("choices") or []:
-            if isinstance(choice, dict):
-                delta = choice.get("delta")
-                if isinstance(delta, dict) and delta.get("content"):
-                    return str(delta["content"])
-                if choice.get("text"):
-                    return str(choice["text"])
-        msg = chunk.get("message")
-        if isinstance(msg, dict) and msg.get("content"):
-            return str(msg["content"])
-        if chunk.get("response"):
-            return str(chunk["response"])
-        if chunk.get("text"):
-            return str(chunk["text"])
-        return ""
-
-    prov = provider.lower()
-    if prov in ("google", "gemini"):
-        for cand in getattr(chunk, "candidates", None) or []:
-            content = getattr(cand, "content", None)
-            for part in getattr(content, "parts", None) or []:
-                text_val = getattr(part, "text", None)
-                if isinstance(text_val, str) and text_val:
-                    return text_val
-        text_attr = getattr(chunk, "text", None)
-        if isinstance(text_attr, str) and text_attr:
-            return text_attr
-        return ""
-
-    if prov == "anthropic":
-        delta_obj = getattr(chunk, "delta", None)
-        if delta_obj is not None:
-            text_val = getattr(delta_obj, "text", None) or getattr(
-                delta_obj, "content", None
-            )
-            if isinstance(text_val, str) and text_val:
-                return text_val
-        for c in getattr(chunk, "choices", None) or []:
-            c_delta = getattr(c, "delta", None)
-            text_val = getattr(c_delta, "text", None)
-            if isinstance(text_val, str) and text_val:
-                return text_val
-        return ""
-
-    for c in getattr(chunk, "choices", None) or []:
-        c_delta = getattr(c, "delta", None)
-        if c_delta is not None:
-            text_val = getattr(c_delta, "content", None) or getattr(
-                c_delta, "text", None
-            )
-            if isinstance(text_val, str) and text_val:
-                return text_val
-        c_msg = getattr(c, "message", None)
-        if c_msg is not None:
-            text_val = getattr(c_msg, "content", None)
-            if isinstance(text_val, str) and text_val:
-                return text_val
-        text_val = getattr(c, "text", None)
-        if isinstance(text_val, str) and text_val:
-            return text_val
-
-    direct_text = getattr(chunk, "text", None)
-    if isinstance(direct_text, str) and direct_text:
-        return direct_text
-
-    return ""
+    return _shared_extract_stream_delta(chunk, provider=provider)
 
 
 def stream_llm_tokens(
@@ -1101,30 +851,13 @@ def stream_llm_tokens(
     """
     from any_llm import AnyLLM
 
-    resolved_provider = provider or "ollama"
-    actual_model = model_name
-    if "/" in model_name and not provider:
-        resolved_provider, actual_model = model_name.split("/", 1)
+    resolved_provider, actual_model = resolve_provider_and_model(model_name, provider)
+    effective_api_key = get_effective_api_key(resolved_provider, api_key)
 
-    env_keys = {
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "google": "GEMINI_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-    }
-    effective_api_key = api_key
-    if not effective_api_key and resolved_provider.lower() in env_keys:
-        effective_api_key = os.environ.get(env_keys[resolved_provider.lower()])
-
-    if resolved_provider.lower() in env_keys and not effective_api_key:
-        env_var = env_keys[resolved_provider.lower()]
-        raise RuntimeError(
-            json.dumps(
-                {
-                    "error_code": "backend.missingApiKey",
-                    "params": {"provider": resolved_provider, "env_var": env_var},
-                }
-            )
+    if resolved_provider.lower() in PROVIDER_ENV_KEYS and not effective_api_key:
+        env_var = PROVIDER_ENV_KEYS[resolved_provider.lower()]
+        raise ProviderNotConfiguredError(
+            params={"provider": resolved_provider, "env_var": env_var},
         )
 
     llm_kwargs: Dict[str, Any] = {}
@@ -1188,46 +921,25 @@ def generate_sql_from_nl(
         ValueError: If reading schema fails.
 
     """
-    resolved_provider = provider or "ollama"
-    actual_model = model_name
-    if "/" in model_name and not provider:
-        resolved_provider, actual_model = model_name.split("/", 1)
+    resolved_provider, actual_model = resolve_provider_and_model(model_name, provider)
 
     logger.info(
         f"Translating natural language to SQL: '{nl_query}' using provider '{resolved_provider}' and model '{actual_model}'"
     )
     try:
         from any_llm import AnyLLM
-    except ImportError:
+    except ImportError as e:
         logger.error(f"any-llm-sdk[{resolved_provider}] is not installed.")
-        raise RuntimeError(
-            json.dumps(
-                {
-                    "error_code": "backend.missingSdk",
-                    "params": {"error": f"any-llm-sdk[{resolved_provider}]"},
-                }
-            )
-        )
+        raise MissingSdkError(
+            params={"error": f"any-llm-sdk[{resolved_provider}]"},
+        ) from e
 
-    env_keys = {
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "google": "GEMINI_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-    }
-    effective_api_key = api_key
-    if not effective_api_key and resolved_provider.lower() in env_keys:
-        effective_api_key = os.environ.get(env_keys[resolved_provider.lower()])
+    effective_api_key = get_effective_api_key(resolved_provider, api_key)
 
-    if resolved_provider.lower() in env_keys and not effective_api_key:
-        env_var = env_keys[resolved_provider.lower()]
-        raise RuntimeError(
-            json.dumps(
-                {
-                    "error_code": "backend.missingApiKey",
-                    "params": {"provider": resolved_provider, "env_var": env_var},
-                }
-            )
+    if resolved_provider.lower() in PROVIDER_ENV_KEYS and not effective_api_key:
+        env_var = PROVIDER_ENV_KEYS[resolved_provider.lower()]
+        raise ProviderNotConfiguredError(
+            params={"provider": resolved_provider, "env_var": env_var},
         )
 
     try:
@@ -1243,12 +955,8 @@ def generate_sql_from_nl(
             or "cannot open" in err_msg.lower()
             or "no such file" in err_msg.lower()
         ):
-            err_code = "backend.dbNotFound"
-        else:
-            err_code = "backend.readSchemaFailed"
-        raise ValueError(
-            json.dumps({"error_code": err_code, "params": {"error": err_msg}})
-        )
+            raise DatabaseNotFoundError(params={"error": err_msg}) from e
+        raise SchemaReadError(params={"error": err_msg}) from e
 
     prompt = _build_sql_prompt(schema, nl_query, history=history)
 
@@ -1269,14 +977,7 @@ def generate_sql_from_nl(
         return full_response, sql_query
     except Exception as e:
         logger.error(f"LLM translation error: {e}")
-        raise RuntimeError(
-            json.dumps(
-                {
-                    "error_code": "backend.llmTranslationError",
-                    "params": {"error": str(e)},
-                }
-            )
-        )
+        raise LlmTranslationError(params={"error": str(e)}) from e
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -1521,29 +1222,7 @@ def list_sessions(db_path: Optional[str] = None) -> SessionListResponse:
         SessionListResponse: List of stored conversation sessions sorted by updated_at.
 
     """
-    with _sessions_lock:
-        with get_sessions_conn(db_path) as conn:
-            rows = conn.execute(
-                "SELECT session_id, title, strftime(created_at, '%Y-%m-%d %H:%M:%S'), strftime(updated_at, '%Y-%m-%d %H:%M:%S'), messages_json FROM chat_sessions ORDER BY updated_at DESC"
-            ).fetchall()
-
-    sessions: List[SessionModel] = []
-    for r in rows:
-        try:
-            msgs_raw = json.loads(r[4])
-            msgs = [ChatMessageModel(**m) for m in msgs_raw]
-        except Exception:
-            msgs = []
-        sessions.append(
-            SessionModel(
-                session_id=r[0],
-                title=r[1],
-                created_at=str(r[2]),
-                updated_at=str(r[3]),
-                messages=msgs,
-            )
-        )
-    return SessionListResponse(sessions=sessions)
+    return _session_store.list_sessions(db_path=db_path)
 
 
 @app.post("/api/sessions", response_model=SessionModel)
@@ -1563,45 +1242,7 @@ def save_session(
         SessionModel: The saved conversation session.
 
     """
-    session_id = request.session_id or f"session-{uuid.uuid4()}"
-    title = request.title
-    if not title:
-        if request.messages:
-            title = request.messages[0].content[:40]
-        else:
-            title = "New Chat"
-
-    messages_json = json.dumps([m.model_dump() for m in request.messages])
-    with _sessions_lock:
-        with get_sessions_conn(db_path) as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM chat_sessions WHERE session_id = ?", [session_id]
-            ).fetchone()
-            if exists:
-                conn.execute(
-                    "UPDATE chat_sessions SET title = ?, updated_at = now(), messages_json = ? WHERE session_id = ?",
-                    [title, messages_json, session_id],
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO chat_sessions VALUES (?, ?, now(), now(), ?)",
-                    [session_id, title, messages_json],
-                )
-            row = conn.execute(
-                "SELECT strftime(created_at, '%Y-%m-%d %H:%M:%S'), strftime(updated_at, '%Y-%m-%d %H:%M:%S') FROM chat_sessions WHERE session_id = ?",
-                [session_id],
-            ).fetchone()
-
-    created_at = str(row[0]) if row else ""
-    updated_at = str(row[1]) if row else ""
-
-    return SessionModel(
-        session_id=session_id,
-        title=title,
-        created_at=created_at,
-        updated_at=updated_at,
-        messages=request.messages,
-    )
+    return _session_store.upsert_session(request=request, db_path=db_path)
 
 
 @app.get("/api/sessions/{session_id}", response_model=SessionModel)
@@ -1623,28 +1264,7 @@ def get_session(session_id: str, db_path: Optional[str] = None) -> SessionModel:
         HTTPException: 404 if session not found.
 
     """
-    with _sessions_lock:
-        with get_sessions_conn(db_path) as conn:
-            row = conn.execute(
-                "SELECT session_id, title, strftime(created_at, '%Y-%m-%d %H:%M:%S'), strftime(updated_at, '%Y-%m-%d %H:%M:%S'), messages_json FROM chat_sessions WHERE session_id = ?",
-                [session_id],
-            ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    try:
-        msgs_raw = json.loads(row[4])
-        msgs = [ChatMessageModel(**m) for m in msgs_raw]
-    except Exception:
-        msgs = []
-
-    return SessionModel(
-        session_id=row[0],
-        title=row[1],
-        created_at=str(row[2]),
-        updated_at=str(row[3]),
-        messages=msgs,
-    )
+    return _session_store.get_session(session_id=session_id, db_path=db_path)
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -1666,29 +1286,7 @@ def delete_session(session_id: str, db_path: Optional[str] = None) -> Dict[str, 
         HTTPException: 404 if session not found.
 
     """
-    with _sessions_lock:
-        with get_sessions_conn(db_path) as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM chat_sessions WHERE session_id = ?", [session_id]
-            ).fetchone()
-            if not exists:
-                raise HTTPException(status_code=404, detail="Session not found")
-            conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", [session_id])
-    return {"status": "deleted", "session_id": session_id}
-
-
-class ExecuteSqlRequest(BaseModel):
-    """Request model for the execute SQL endpoint."""
-
-    query: str
-    db_path: Optional[str] = None
-
-
-class ExecuteSqlResponse(BaseModel):
-    """Response model for the execute SQL endpoint."""
-
-    sqlResult: Optional[List[Dict[str, SqlValue]]] = None
-    error: Optional[ApiError] = None
+    return _session_store.delete_session(session_id=session_id, db_path=db_path)
 
 
 def parse_error(e: Exception) -> ApiError:
@@ -1704,11 +1302,9 @@ def parse_error(e: Exception) -> ApiError:
         ApiError: The resulting ApiError object.
 
     """
-    try:
-        data = json.loads(str(e))
-        return ApiError(**data)
-    except Exception:
-        return ApiError(error_code="backend.errorUnexpected", params={"error": str(e)})
+    if isinstance(e, T1DError):
+        return ApiError(error_code=e.error_code, params=e.params)
+    return ApiError(error_code="backend.errorUnexpected", params={"error": str(e)})
 
 
 @app.post("/api/execute-sql", response_model=ExecuteSqlResponse)
@@ -1746,15 +1342,6 @@ def execute_sql_endpoint(
     except Exception as e:
         logger.exception("Unexpected error during sql execution request.")
         return ExecuteSqlResponse(error=parse_error(e))
-
-
-class TableDataResponse(BaseModel):
-    """Response model for table data."""
-
-    rows: List[Dict[str, SqlValue]]
-    total_count: int = 0
-    page: int = 1
-    total_pages: int = 1
 
 
 @app.get("/api/table/{table_name}", response_model=TableDataResponse)
@@ -2038,33 +1625,7 @@ def export_excel(table_name: str, db_path: Optional[str] = None) -> StreamingRes
                     if not batch:
                         break
                     for r in batch:
-                        formatted_row: List[Any] = []
-                        for val in r:
-                            if val is None:
-                                formatted_row.append(None)
-                            elif isinstance(val, (int, float, bool)):
-                                formatted_row.append(val)
-                            else:
-                                s_val = str(val)
-                                if s_val and s_val[0] in (
-                                    "=",
-                                    "+",
-                                    "-",
-                                    "@",
-                                    "\t",
-                                    "\r",
-                                ):
-                                    is_numeric = False
-                                    if s_val[0] in ("+", "-"):
-                                        try:
-                                            float(s_val)
-                                            is_numeric = True
-                                        except ValueError:
-                                            is_numeric = False
-                                    if not is_numeric:
-                                        s_val = f"'{s_val}"
-                                formatted_row.append(s_val)
-                        ws.append(formatted_row)
+                        ws.append([sanitize_spreadsheet_cell(val) for val in r])
 
                 output = io.BytesIO()
                 wb.save(output)
@@ -2424,27 +1985,6 @@ def export_json(
         )
 
 
-class ColumnInfo(BaseModel):
-    """Information about a column in a table."""
-
-    name: str
-    type: str
-
-
-class TableInfo(BaseModel):
-    """Information about a table and its columns."""
-
-    name: str
-    columns: List[ColumnInfo]
-
-
-class SchemaResponse(BaseModel):
-    """Response model for database schema."""
-
-    tables: List[TableInfo]
-    database: Optional[Dict[str, Any]] = None
-
-
 @app.get("/api/status")
 @app.get("/api/health")
 def get_status(request: Request, db_path: Optional[str] = None) -> Dict[str, Any]:
@@ -2525,9 +2065,7 @@ def get_providers_status() -> ProvidersStatusResponse:
     # 1. Ollama
     ollama_healthy = False
     ollama_details = "Ollama service unavailable"
-    ollama_base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    if not ollama_base.startswith("http://") and not ollama_base.startswith("https://"):
-        ollama_base = f"http://{ollama_base}"
+    ollama_base = normalize_ollama_host(default_host="http://localhost:11434")
     try:
         req = urllib.request.Request(f"{ollama_base}/api/tags")
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -2610,9 +2148,7 @@ def list_models(include_cloud: bool = True) -> ModelsResponse:
         ModelsResponse: List of available local and cloud models.
 
     """
-    base_url = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
-    if not base_url.startswith("http://") and not base_url.startswith("https://"):
-        base_url = f"http://{base_url}"
+    base_url = normalize_ollama_host()
 
     models: List[ModelInfo] = []
     try:
@@ -2655,21 +2191,6 @@ def list_models(include_cloud: bool = True) -> ModelsResponse:
     return ModelsResponse(models=models)
 
 
-class DatabaseItem(BaseModel):
-    """Information about an available DuckDB database file."""
-
-    name: str
-    path: str
-    size_bytes: int
-
-
-class DatabaseListResponse(BaseModel):
-    """Response model for the databases listing endpoint."""
-
-    databases: List[DatabaseItem]
-    current_db: str
-
-
 @app.get("/api/databases", response_model=DatabaseListResponse)
 def list_databases() -> DatabaseListResponse:
     """
@@ -2680,41 +2201,7 @@ def list_databases() -> DatabaseListResponse:
         DatabaseListResponse containing list of found databases and current default.
 
     """
-    default_db = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
-    all_files: List[Path] = []
-    if default_db:
-        p_def = Path(default_db)
-        if p_def.exists():
-            all_files.append(p_def)
-    for s_dir in (Path("."), Path("./data")):
-        if s_dir.exists():
-            all_files.extend(s_dir.glob("*.duckdb"))
-
-    found_dbs: List[DatabaseItem] = []
-    seen_paths = set()
-    for p in all_files:
-        resolved = str(p.resolve())
-        if resolved not in seen_paths:
-            seen_paths.add(resolved)
-            found_dbs.append(
-                DatabaseItem(
-                    name=p.name,
-                    path=str(p),
-                    size_bytes=p.stat().st_size if p.exists() else 0,
-                )
-            )
-
-    return DatabaseListResponse(databases=found_dbs, current_db=default_db)
-
-
-class TrainingJobRequest(BaseModel):
-    """Request model for submitting an asynchronous background training job."""
-
-    dataset_path: str
-    output_dir: str
-    backend: str = "cpu"
-    model_name: str = "gemma4-sql"
-    dry_run: bool = False
+    return discover_workspace_databases()
 
 
 @app.post("/api/training/jobs")

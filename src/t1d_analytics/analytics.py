@@ -3,7 +3,6 @@
 import csv
 import hashlib
 import json
-import os
 import re
 import tarfile
 import zipfile
@@ -17,6 +16,20 @@ if TYPE_CHECKING:
 
 from t1d_analytics.diagnostics import DatabaseStatusCode, check_database_health
 from t1d_analytics.i18n import get_translator
+from t1d_analytics.llm_client import (
+    build_clinical_sql_prompt,
+    normalize_ollama_host,
+)
+from t1d_analytics.sql_utils import (
+    extract_sql_from_response as _shared_extract_sql_from_response,
+)
+from t1d_analytics.sql_utils import (
+    is_read_only_sql_query,
+    sanitize_spreadsheet_cell,
+)
+from t1d_analytics.sql_utils import (
+    is_sql_query as _shared_is_sql_query,
+)
 
 
 def compute_file_hash(path: Path) -> str:
@@ -666,104 +679,7 @@ def is_sql_query(query: str, conn: Optional[duckdb.DuckDBPyConnection] = None) -
         True if the query appears to be a SQL statement, False if natural language.
 
     """
-    # Strip SQL comments (-- ... and /* ... */) and whitespace
-    cleaned = re.sub(r"--[^\n]*\n?", " ", query)
-    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL).strip()
-    if not cleaned:
-        return False
-
-    unwrapped = cleaned
-    while unwrapped.startswith("(") and unwrapped.endswith(")"):
-        unwrapped = unwrapped[1:-1].strip()
-
-    if not unwrapped:
-        return False
-
-    first_word = unwrapped.split()[0].lower().rstrip(";").strip()
-    sql_keywords = (
-        "select",
-        "with",
-        "describe",
-        "pragma",
-        "explain",
-        "summarize",
-        "call",
-        "values",
-        "from",
-        "table",
-        "show",
-        "create",
-        "drop",
-        "alter",
-        "insert",
-        "update",
-        "delete",
-        "copy",
-        "attach",
-        "detach",
-        "begin",
-        "commit",
-        "rollback",
-        "checkpoint",
-    )
-    if first_word not in sql_keywords:
-        return False
-
-    if first_word == "show":
-        words = unwrapped.lower().split()
-        nl_indicators = {
-            "me",
-            "the",
-            "a",
-            "an",
-            "us",
-            "our",
-            "all",
-            "how",
-            "what",
-            "where",
-            "which",
-            "any",
-            "patients",
-            "trials",
-            "datasets",
-        }
-        if len(words) > 1 and words[1] in nl_indicators:
-            return False
-
-    temp_conn = conn or duckdb.connect(":memory:")
-    try:
-        if type(temp_conn).__name__ == "DuckDBPyConnection" and hasattr(
-            temp_conn, "extract_statements"
-        ):
-            stmts = temp_conn.extract_statements(unwrapped)
-            return len(stmts) > 0
-
-        # Safe fallback without side-effects on connection
-        if first_word in (
-            "checkpoint",
-            "attach",
-            "detach",
-            "call",
-            "pragma",
-            "create",
-            "drop",
-            "alter",
-            "insert",
-            "update",
-            "delete",
-        ):
-            return True
-
-        temp_conn.execute(f"EXPLAIN {unwrapped}")
-        return True
-    except duckdb.ParserException:
-        return False
-    except Exception:
-        return True
-    finally:
-        if conn is None:
-            temp_conn.close()
+    return _shared_is_sql_query(query, conn=conn)
 
 
 def extract_sql_from_response(full_response: str) -> str:
@@ -779,39 +695,7 @@ def extract_sql_from_response(full_response: str) -> str:
         str: Extracted SQL query string.
 
     """
-    if not isinstance(full_response, str):
-        full_response = str(full_response)
-
-    blocks = re.findall(
-        r"```(?:[a-zA-Z0-9_-]+[ \t]*\n)?(.*?)\n?```",
-        full_response,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if blocks:
-        sql_candidate = blocks[-1].strip()
-        for block in reversed(blocks):
-            clean = block.strip()
-            if clean.lower().startswith(
-                (
-                    "select",
-                    "with",
-                    "show",
-                    "describe",
-                    "pragma",
-                    "summarize",
-                    "explain",
-                )
-            ):
-                sql_candidate = clean
-                break
-        return str(sql_candidate)
-
-    sql_query = full_response
-    if sql_query.lower().startswith("sql\n"):
-        sql_query = sql_query[4:]
-    elif sql_query.lower().startswith("duckdb\n"):
-        sql_query = sql_query[7:]
-    return sql_query.replace("```", "").strip()
+    return _shared_extract_sql_from_response(full_response)
 
 
 def handle_natural_language(
@@ -854,52 +738,14 @@ def handle_natural_language(
 
     print(_("Thinking..."))
     schema = get_database_schema(conn)
-
-    prompt = f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
-
-{schema}
-
-Context & Rules for T1D Analytics:
-1. Terminology & Aliases:
-   - "Lows" / "Hypoglycemia": Look for Time Below Range (TBR, <70 or <54 mg/dL), `pct_time_under_70`, `hypo`.
-   - "Highs" / "Hyperglycemia": Look for Time Above Range (TAR, >180 or >250 mg/dL), `pct_time_over_180`, `hyper`.
-   - "In-range" / "TIR": Look for Time in Range (70-180 mg/dL), `pct_time_in_range_70_180`, `tir`, `cgm_in_range`.
-   - "A1C" / "HbA1c": Look for glycated hemoglobin, `a1c`, `hba1c`.
-   - "Variability": Look for Coefficient of Variation (`cv`), Standard Deviation (`sd`).
-   - "Average sugar": Look for Mean Glucose, `mean_cgm`, Glucose Management Indicator (`gmi`).
-   - "Adverse Events": "DKA" (Diabetic Ketoacidosis), "SH" (Severe Hypoglycemia).
-   - Demographics: "Duration" (years with diabetes), "Age", "BMI", "Gender/Sex", "Weight".
-   - Treatment: "Pump" (CSII), "Injections/Shots" (MDI), "Loop" (AID/Closed-Loop), "Insulin" (TDD, Basal, Bolus).
-   - Study Timepoints: "Baseline" (visit 0 or baseline flag), "End of trial/Follow-up" (max visit month).
-2. SQL Generation Rules for Multi-Trial Data:
-   - Trial Names: Acronyms (DCLP3, DCLP5, Pedap, etc.) usually correspond directly to table names.
-   - Aggregating Combined Trials: To calculate metrics for multiple trials "together", "combined", or "overall", you MUST use a CTE with `UNION ALL` to combine raw rows from all requested tables *before* applying aggregate functions like `AVG()`.
-   - Comparing Individual Trials: To calculate metrics for multiple trials "individually" or "each", use `UNION ALL` with an identifying literal string column (e.g., `SELECT 'DCLP3' as trial, AVG(...) ... UNION ALL SELECT 'DCLP5'...`).
-   - Aligning UNION Columns: Clinical trial tables often have different schemas. When using `UNION ALL`, you MUST explicitly `SELECT` and alias only the specific columns needed (e.g. `age`, `tir`) to ensure they align perfectly in number, order, and type across all blocks. NEVER use `SELECT *` with `UNION ALL`.
-   - Linking Data: If questions span patient demographics and CGM outcomes, use `JOIN` on the patient/subject ID columns (e.g., `pt_id`, `subject_id`).
-3. Formatting & Logic:
-   - Handle colloquial/informal language intuitively (e.g., "betwixt" -> `BETWEEN`, "kids/pediatric" -> `age < 18`, "adults" -> `age >= 18`).
-   - Account for string vs. numeric data types; use `CAST(col AS FLOAT)` if computing averages on textual columns that contain numbers.
-   - Ignore NULL values appropriately when calculating averages or sums.
-4. Strict Schema Enforcement:
-   - CRITICAL: You must ONLY use the exact table names and column names provided in the schema above.
-   - Do NOT invent, guess, or hallucinate table names (e.g., do not use "Visit1" or "demographics" if they are not in the schema).
-   - If a requested concept (like "demographics") is not a table, find the relevant columns within the existing tables (e.g., `visits` or `patients`).
-
-Write a SQL query that answers the user's request. 
-You may provide an explanation of your thought process as SQL comments (`--`) before the query.
-Return ONLY the raw SQL query, with no markdown formatting and no code blocks.
-The query should be a valid DuckDB SQL SELECT statement.
-
-User request: {query}
-"""
+    prompt = build_clinical_sql_prompt(
+        schema=schema,
+        nl_query=query,
+        require_markdown_fence=False,
+    )
     try:
         if prov == "ollama":
-            api_base = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
-            if not api_base.startswith("http://") and not api_base.startswith(
-                "https://"
-            ):
-                api_base = f"http://{api_base}"
+            normalize_ollama_host()
 
         llm = AnyLLM.create(prov)
         response = llm.completion(
@@ -911,6 +757,8 @@ User request: {query}
         sql_query = extract_sql_from_response(full_response)
 
         print(_("Generated SQL: \n{}\n", sql_query))
+        if not is_read_only_sql_query(sql_query):
+            raise ValueError(f"Generated query is not read-only: {sql_query}")
         print(_("Executing...\n"))
 
         result = conn.sql(sql_query)
@@ -1203,26 +1051,7 @@ def export_table(
                 if not batch:
                     break
                 for row in batch:
-                    formatted_row: List[Any] = []
-                    for val in row:
-                        if val is None:
-                            formatted_row.append(None)
-                        elif isinstance(val, (int, float, bool)):
-                            formatted_row.append(val)
-                        else:
-                            s_val = str(val)
-                            if s_val and s_val[0] in ("=", "+", "-", "@", "\t", "\r"):
-                                is_numeric = False
-                                if s_val[0] in ("+", "-"):
-                                    try:
-                                        float(s_val)
-                                        is_numeric = True
-                                    except ValueError:
-                                        is_numeric = False
-                                if not is_numeric:
-                                    s_val = f"'{s_val}"
-                            formatted_row.append(s_val)
-                    ws.append(formatted_row)
+                    ws.append([sanitize_spreadsheet_cell(val) for val in row])
 
             wb.save(str(target_path))
     finally:

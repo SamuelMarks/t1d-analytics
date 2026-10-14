@@ -13,6 +13,17 @@ from typing import Any, Optional
 
 import duckdb
 
+from t1d_analytics.llm_client import (
+    PROVIDER_ENV_KEYS,
+    normalize_ollama_host,
+)
+from t1d_analytics.sql_utils import (
+    extract_table_schemas,
+)
+from t1d_analytics.sql_utils import (
+    normalize_sql as _shared_normalize_sql,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,8 +40,7 @@ def normalize_sql(sql: str) -> str:
         str: Normalized query string.
 
     """
-    sql = sql.strip().rstrip(";")
-    return re.sub(r"\s+", " ", sql).strip().lower()
+    return _shared_normalize_sql(sql)
 
 
 def _make_hashable(val: Any) -> Any:
@@ -93,12 +103,7 @@ def _parse_llm_json_array(content_str: str) -> Optional[list[object]]:
     return None
 
 
-PROVIDER_KEY_ENV_VARS: dict[str, str] = {
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GEMINI_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-}
+PROVIDER_KEY_ENV_VARS: dict[str, str] = PROVIDER_ENV_KEYS
 
 
 def validate_provider_readiness(provider: str) -> None:
@@ -176,29 +181,7 @@ class TrainingDataGenerator:
             A dictionary mapping table names to their textual schema descriptions.
 
         """
-        schema: dict[str, str] = {}
-        tables = self.conn.execute("SHOW TABLES").fetchall()
-        ignored_names = {"chat_sessions"}
-        ignored_prefixes = ("_t1d_", "pretrain_", "sft_", "dpo_")
-        for row in tables:
-            table_name = row[0]
-            lower_name = table_name.lower()
-            if (
-                table_name.startswith("_t1d_")
-                or lower_name in ignored_names
-                or lower_name in ("pretrain", "sft", "dpo")
-                or lower_name.startswith(ignored_prefixes)
-            ):
-                continue
-
-            columns = self.conn.execute(f'DESCRIBE "{table_name}"').fetchall()
-            schema_desc = f"Table: {table_name}\nColumns:\n"
-            for col in columns:
-                col_name = col[0]
-                col_type = col[1]
-                schema_desc += f"- {col_name} ({col_type})\n"
-            schema[table_name] = schema_desc
-        return schema
+        return extract_table_schemas(self.conn, exclude_training_tables=True)
 
     def _is_valid_sql(self, sql_query: str) -> bool:
         """
@@ -269,9 +252,7 @@ class TrainingDataGenerator:
             except Exception as e:
                 logger.warning(f"Could not load checkpoint from {checkpoint_path}: {e}")
 
-        base_url = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
-        if not base_url.startswith("http://") and not base_url.startswith("https://"):
-            base_url = f"http://{base_url}"
+        base_url = normalize_ollama_host()
         api_url = f"{base_url}/api/generate"
 
         use_any_llm = True

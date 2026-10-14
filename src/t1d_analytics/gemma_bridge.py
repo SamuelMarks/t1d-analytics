@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from t1d_analytics.i18n import get_translator
+from t1d_analytics.sql_utils import normalize_sql
 
 logger = logging.getLogger(__name__)
 
@@ -677,7 +678,7 @@ class GemmaSqlPipelineEngine:
                     or gold_sql
                 ).strip()
 
-                if gold_sql.rstrip(";").lower() == pred_sql.rstrip(";").lower():
+                if normalize_sql(gold_sql) == normalize_sql(pred_sql):
                     exact_matches += 1
 
                 try:

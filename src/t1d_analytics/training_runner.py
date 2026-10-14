@@ -1,20 +1,26 @@
 """Modular training execution runners and hardware orchestration for T1D Analytics."""
 
 import asyncio
-import datetime
 import json
 import logging
 import math
 import os
 import shutil
 import subprocess
-import threading
 import time
-import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import torch
+
+from t1d_analytics.errors import TrainingError
+from t1d_analytics.job_manager import (
+    TrainingJobManager as _SharedTrainingJobManager,
+)
+from t1d_analytics.job_manager import (
+    TrainingJobState,
+)
 from t1d_analytics.models import (
     MaxTextConfig,
     TrainingBackend,
@@ -24,11 +30,11 @@ from t1d_analytics.models import (
 logger = logging.getLogger(__name__)
 
 
-class TrainingExecutionError(RuntimeError):
+class TrainingExecutionError(TrainingError, RuntimeError):
     """Raised when model training execution encounters fatal errors or fails to converge."""
 
 
-class InsufficientDataError(ValueError):
+class InsufficientDataError(TrainingError, ValueError):
     """Raised when training dataset contains no usable samples or pairs."""
 
 
@@ -277,16 +283,6 @@ def prepare_torch_dataset(
     return tokenized_pairs
 
 
-try:
-    import torch
-    import torch.nn as nn
-
-    _BaseModule = nn.Module
-except ImportError:
-    torch = None  # type: ignore[assignment]
-    _BaseModule = object  # type: ignore[assignment, misc]
-
-
 class BaseCausalLMFactory(ABC):
     """Abstract factory interface for creating causal language models."""
 
@@ -444,7 +440,130 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
         return model
 
 
-class LocalCpuRunner(BaseTrainingRunner):
+class BaseTorchCausalLMRunner(BaseTrainingRunner):
+    """Shared base class for PyTorch causal LM training runners on CPU and GPU."""
+
+    def _run_torch_optimizer_loop(
+        self,
+        model: Any,
+        dataset: List[Tuple[Any, Any]],
+        epochs: int,
+        batch_size: int,
+        total_steps: int,
+        lr: float,
+        weight_decay: float,
+        accum_steps: int,
+        max_norm: float,
+        target_dev: Optional[Any] = None,
+        mixed_precision: str = "fp32",
+        ignore_index: Optional[int] = None,
+    ) -> Tuple[List[float], float]:
+        """
+        Execute the shared PyTorch AdamW + CosineAnnealingLR training loop.
+
+        Args:
+        ----
+            model: PyTorch causal LM model instance.
+            dataset: Tokenized list of (input_ids, labels) tensor pairs.
+            epochs: Number of training epochs.
+            batch_size: Per-step batch size.
+            total_steps: Total optimization steps across all epochs.
+            lr: Learning rate.
+            weight_decay: AdamW weight decay coefficient.
+            accum_steps: Gradient accumulation steps.
+            max_norm: Maximum gradient norm for clipping.
+            target_dev: Optional torch.device to move batch tensors onto.
+            mixed_precision: Precision mode ('fp32' or 'fp16').
+            ignore_index: Optional label index to ignore in CrossEntropyLoss.
+
+        Returns:
+        -------
+            Tuple[List[float], float]: (loss_history, final_loss).
+
+        """
+        import torch
+
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay,
+        )
+        loss_fn = (
+            torch.nn.CrossEntropyLoss(ignore_index=ignore_index)
+            if ignore_index is not None
+            else torch.nn.CrossEntropyLoss()
+        )
+        sched_cls = getattr(torch.optim.lr_scheduler, "CosineAnnealingLR", None)
+        scheduler = (
+            sched_cls(optimizer, T_max=max(1, total_steps))
+            if callable(sched_cls)
+            else None
+        )
+
+        loss_history: List[float] = []
+        step_idx = 0
+        if hasattr(model, "train"):
+            model.train()
+
+        for _ in range(epochs):
+            for i in range(0, len(dataset), batch_size):
+                if step_idx >= total_steps:
+                    break
+                batch = dataset[i : i + batch_size]
+                inps = torch.stack([b[0] for b in batch])
+                lbls = torch.stack([b[1] for b in batch])
+                if target_dev is not None:
+                    inps = inps.to(target_dev)
+                    lbls = lbls.to(target_dev)
+
+                if mixed_precision == "fp16" and hasattr(torch, "autocast"):
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        outputs = model(inps)
+                        logits = getattr(outputs, "logits", outputs)
+                        loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
+                else:
+                    outputs = model(inps)
+                    logits = getattr(outputs, "logits", outputs)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
+
+                loss = loss / accum_steps
+                loss.backward()
+
+                if (step_idx + 1) % accum_steps == 0 or (step_idx + 1) == total_steps:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=max_norm
+                    )
+                    optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                    optimizer.zero_grad()
+
+                loss_history.append(round(float(loss.item() * accum_steps), 4))
+                step_idx += 1
+
+        final_loss = loss_history[-1] if loss_history else 0.0
+        return loss_history, final_loss
+
+    def _save_model_checkpoint(self, model: Any, ckpt_dir: Path) -> None:
+        """
+        Save model weights to a checkpoint directory using save_pretrained or torch.save.
+
+        Args:
+        ----
+            model: Trained PyTorch or Hugging Face model.
+            ckpt_dir: Destination checkpoint directory.
+
+        """
+        import torch
+
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        if hasattr(model, "save_pretrained"):
+            model.save_pretrained(str(ckpt_dir))
+        else:
+            torch.save(model.state_dict(), ckpt_dir / "model.pt")
+
+
+class LocalCpuRunner(BaseTorchCausalLMRunner):
     """Training runner executing on host CPU using PyTorch or local execution engine."""
 
     def validate_environment(self) -> bool:
@@ -501,6 +620,7 @@ class LocalCpuRunner(BaseTrainingRunner):
         try:
             import torch
 
+            _ = torch
             dataset = prepare_torch_dataset(
                 ds_path,
                 tokenizer_name=config.model_name,
@@ -519,54 +639,18 @@ class LocalCpuRunner(BaseTrainingRunner):
                 loss_history = [0.0] * total_steps
                 final_loss = 0.0
             else:
-                optimizer = torch.optim.AdamW(
-                    model.parameters(),
+                loss_history, final_loss = self._run_torch_optimizer_loop(
+                    model=model,
+                    dataset=dataset,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    total_steps=total_steps,
                     lr=lr,
                     weight_decay=hparams.weight_decay if hparams else 0.01,
+                    accum_steps=accum_steps,
+                    max_norm=max_norm,
                 )
-                loss_fn = torch.nn.CrossEntropyLoss()
-                sched_cls = getattr(torch.optim.lr_scheduler, "CosineAnnealingLR", None)
-                scheduler = (
-                    sched_cls(optimizer, T_max=max(1, total_steps))
-                    if callable(sched_cls)
-                    else None
-                )
-
-                step_idx = 0
-                for _ in range(epochs):
-                    for i in range(0, len(dataset), batch_size):
-                        if step_idx >= total_steps:
-                            break
-                        batch = dataset[i : i + batch_size]
-                        inps = torch.stack([b[0] for b in batch])
-                        lbls = torch.stack([b[1] for b in batch])
-                        outputs = model(inps)
-                        logits = getattr(outputs, "logits", outputs)
-                        loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
-                        loss = loss / accum_steps
-                        loss.backward()
-
-                        if (step_idx + 1) % accum_steps == 0 or (
-                            step_idx + 1
-                        ) == total_steps:
-                            torch.nn.utils.clip_grad_norm_(
-                                model.parameters(), max_norm=max_norm
-                            )
-                            optimizer.step()
-                            if scheduler is not None:
-                                scheduler.step()
-                            optimizer.zero_grad()
-
-                        loss_history.append(round(float(loss.item() * accum_steps), 4))
-                        step_idx += 1
-                final_loss = loss_history[-1] if loss_history else 0.0
-
-                ckpt_dir = out_path / "checkpoint-final"
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-                if hasattr(model, "save_pretrained"):
-                    model.save_pretrained(str(ckpt_dir))
-                else:
-                    torch.save(model.state_dict(), ckpt_dir / "model.pt")
+                self._save_model_checkpoint(model, out_path / "checkpoint-final")
         except Exception as e:
             raise TrainingExecutionError(f"CPU training execution failed: {e}") from e
 
@@ -675,7 +759,7 @@ def resolve_device_telemetry(device: str) -> Tuple[str, float]:
     return cpu_name, 0.0
 
 
-class LocalGpuRunner(BaseTrainingRunner):
+class LocalGpuRunner(BaseTorchCausalLMRunner):
     """Training runner executing on local GPU (CUDA / Apple MPS)."""
 
     def validate_environment(self) -> bool:
@@ -776,78 +860,28 @@ class LocalGpuRunner(BaseTrainingRunner):
                 use_lora=config.use_lora,
             )
 
+            target_dev = torch.device(device) if hasattr(torch, "device") else "cpu"
             if config.dry_run:
                 inp, _ = dataset[0]
-                target_dev = torch.device(device) if hasattr(torch, "device") else "cpu"
                 outputs = model(inp.unsqueeze(0).to(target_dev))
                 _ = getattr(outputs, "logits", outputs)
                 loss_history = [0.0] * total_steps
                 final_loss = 0.0
             else:
-                optimizer = torch.optim.AdamW(
-                    model.parameters(),
+                loss_history, final_loss = self._run_torch_optimizer_loop(
+                    model=model,
+                    dataset=dataset,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    total_steps=total_steps,
                     lr=lr,
                     weight_decay=hparams.weight_decay if hparams else 0.01,
+                    accum_steps=accum_steps,
+                    max_norm=max_norm,
+                    target_dev=target_dev,
+                    mixed_precision=mixed_precision,
                 )
-                loss_fn = torch.nn.CrossEntropyLoss()
-                sched_cls = getattr(torch.optim.lr_scheduler, "CosineAnnealingLR", None)
-                scheduler = (
-                    sched_cls(optimizer, T_max=max(1, total_steps))
-                    if callable(sched_cls)
-                    else None
-                )
-
-                step_idx = 0
-                target_dev = torch.device(device) if hasattr(torch, "device") else "cpu"
-
-                for _ in range(epochs):
-                    for i in range(0, len(dataset), batch_size):
-                        if step_idx >= total_steps:
-                            break
-                        batch = dataset[i : i + batch_size]
-                        inps = torch.stack([b[0] for b in batch]).to(target_dev)
-                        lbls = torch.stack([b[1] for b in batch]).to(target_dev)
-
-                        if mixed_precision == "fp16" and hasattr(torch, "autocast"):
-                            with torch.autocast(
-                                device_type="cuda", dtype=torch.float16
-                            ):
-                                outputs = model(inps)
-                                logits = getattr(outputs, "logits", outputs)
-                                loss = loss_fn(
-                                    logits.view(-1, logits.size(-1)), lbls.view(-1)
-                                )
-                        else:
-                            outputs = model(inps)
-                            logits = getattr(outputs, "logits", outputs)
-                            loss = loss_fn(
-                                logits.view(-1, logits.size(-1)), lbls.view(-1)
-                            )
-
-                        loss = loss / accum_steps
-                        loss.backward()
-
-                        if (step_idx + 1) % accum_steps == 0 or (
-                            step_idx + 1
-                        ) == total_steps:
-                            torch.nn.utils.clip_grad_norm_(
-                                model.parameters(), max_norm=max_norm
-                            )
-                            optimizer.step()
-                            if scheduler is not None:
-                                scheduler.step()
-                            optimizer.zero_grad()
-
-                        loss_history.append(round(float(loss.item() * accum_steps), 4))
-                        step_idx += 1
-                final_loss = loss_history[-1] if loss_history else 0.0
-
-                ckpt_dir = out_path / "checkpoint-gpu-final"
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-                if hasattr(model, "save_pretrained"):
-                    model.save_pretrained(str(ckpt_dir))
-                else:
-                    torch.save(model.state_dict(), ckpt_dir / "model.pt")
+                self._save_model_checkpoint(model, out_path / "checkpoint-gpu-final")
         except Exception as e:
             raise TrainingExecutionError(f"GPU training execution failed: {e}") from e
 
@@ -897,7 +931,7 @@ class LocalGpuRunner(BaseTrainingRunner):
         }
 
 
-class HuggingFaceCausalLMRunner(BaseTrainingRunner):
+class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
     """Training runner executing on CPU/GPU using Hugging Face transformers and PEFT."""
 
     def validate_environment(self) -> bool:
@@ -1061,62 +1095,24 @@ class HuggingFaceCausalLMRunner(BaseTrainingRunner):
                 loss_history = [0.0] * total_steps
                 final_loss = 0.0
             else:
-                optimizer = torch.optim.AdamW(
-                    model.parameters(),
+                loss_history, final_loss = self._run_torch_optimizer_loop(
+                    model=model,
+                    dataset=dataset,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    total_steps=total_steps,
                     lr=lr,
                     weight_decay=hparams.weight_decay if hparams else 0.01,
+                    accum_steps=accum_steps,
+                    max_norm=max_norm,
+                    target_dev=target_dev,
+                    ignore_index=-100,
                 )
-                loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
-                sched_cls = getattr(torch.optim.lr_scheduler, "CosineAnnealingLR", None)
-                scheduler = (
-                    sched_cls(optimizer, T_max=max(1, total_steps))
-                    if callable(sched_cls)
-                    else None
-                )
-
-                step_idx = 0
-                model.train()
-                for _ in range(epochs):
-                    for i in range(0, len(dataset), batch_size):
-                        if step_idx >= total_steps:
-                            break
-                        batch = dataset[i : i + batch_size]
-                        inps = torch.stack([b[0] for b in batch]).to(target_dev)
-                        lbls = torch.stack([b[1] for b in batch]).to(target_dev)
-
-                        outputs = model(inps)
-                        logits = getattr(outputs, "logits", outputs)
-                        loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
-                        loss = loss / accum_steps
-                        loss.backward()
-
-                        if (step_idx + 1) % accum_steps == 0 or (
-                            step_idx + 1
-                        ) == total_steps:
-                            torch.nn.utils.clip_grad_norm_(
-                                model.parameters(), max_norm=max_norm
-                            )
-                            optimizer.step()
-                            if scheduler is not None:
-                                scheduler.step()
-                            optimizer.zero_grad()
-
-                        loss_history.append(round(float(loss.item() * accum_steps), 4))
-                        step_idx += 1
-
-                final_loss = loss_history[-1] if loss_history else 0.0
-
                 if eval_dataset:
                     eval_metrics = self._evaluate(
                         model, eval_dataset, target_dev, batch_size=batch_size
                     )
-
-                ckpt_dir = out_path / "checkpoint-hf-final"
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-                if hasattr(model, "save_pretrained"):
-                    model.save_pretrained(str(ckpt_dir))
-                else:
-                    torch.save(model.state_dict(), ckpt_dir / "model.pt")
+                self._save_model_checkpoint(model, out_path / "checkpoint-hf-final")
 
         except Exception as e:
             raise TrainingExecutionError(
@@ -1923,131 +1919,34 @@ class Gemma4SqlRunner(BaseTrainingRunner):
         }
 
 
-class TrainingJobManager:
+__all__ = [
+    "BaseCausalLMFactory",
+    "BaseTorchCausalLMRunner",
+    "BaseTrainingRunner",
+    "Gemma4SqlRunner",
+    "HuggingFaceCausalLMFactory",
+    "HuggingFaceCausalLMRunner",
+    "InsufficientDataError",
+    "LocalCpuRunner",
+    "LocalGpuRunner",
+    "RemoteTpuMaxTextRunner",
+    "TrainingExecutionError",
+    "TrainingJobManager",
+    "TrainingJobState",
+    "get_training_runner",
+    "global_training_job_manager",
+    "prepare_torch_dataset",
+    "resolve_device_telemetry",
+    "sync_dataset_to_gcs",
+]
+
+
+class TrainingJobManager(_SharedTrainingJobManager):
     """Thread-safe asynchronous background manager for training jobs."""
 
     def __init__(self) -> None:
-        """Initialize the job manager with thread locks and registry collections."""
-        self._lock = threading.Lock()
-        self._jobs: Dict[str, Dict[str, Any]] = {}
-        self._cancel_flags: Dict[str, threading.Event] = {}
-
-    def submit_job(self, config: TrainingJobConfig) -> str:
-        """
-        Submit a new training job to run in a background daemon thread.
-
-        Args:
-        ----
-            config: TrainingJobConfig defining dataset, model, hyperparameters, and backend.
-
-        Returns:
-        -------
-            str: Unique job ID string.
-
-        """
-        job_id = f"job-{uuid.uuid4().hex[:12]}"
-        cancel_event = threading.Event()
-        with self._lock:
-            self._jobs[job_id] = {
-                "job_id": job_id,
-                "status": "pending",
-                "backend": config.backend.value,
-                "model_name": config.model_name,
-                "dataset_path": config.dataset_path,
-                "output_dir": config.output_dir,
-                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "started_at": None,
-                "completed_at": None,
-                "metrics": {},
-                "error": None,
-            }
-            self._cancel_flags[job_id] = cancel_event
-
-        def _worker() -> None:
-            """Execute training runner asynchronously within background thread."""
-            with self._lock:
-                self._jobs[job_id]["status"] = "running"
-                self._jobs[job_id]["started_at"] = datetime.datetime.now(
-                    datetime.timezone.utc
-                ).isoformat()
-
-            runner = get_training_runner(config.backend)
-            try:
-                if cancel_event.is_set():
-                    with self._lock:
-                        self._jobs[job_id]["status"] = "cancelled"
-                    return
-
-                res = runner.run_training(config)
-                with self._lock:
-                    if cancel_event.is_set():
-                        self._jobs[job_id]["status"] = "cancelled"
-                    else:
-                        self._jobs[job_id]["status"] = "completed"
-                        self._jobs[job_id]["metrics"] = res
-            except Exception as e:
-                with self._lock:
-                    self._jobs[job_id]["status"] = "failed"
-                    self._jobs[job_id]["error"] = str(e)
-            finally:
-                with self._lock:
-                    self._jobs[job_id]["completed_at"] = datetime.datetime.now(
-                        datetime.timezone.utc
-                    ).isoformat()
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        return job_id
-
-    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve current status and metrics of a training job.
-
-        Args:
-        ----
-            job_id: The job ID string.
-
-        Returns:
-        -------
-            Optional[Dict[str, Any]]: Job details dictionary or None if not found.
-
-        """
-        with self._lock:
-            job = self._jobs.get(job_id)
-            return dict(job) if job else None
-
-    def list_jobs(self) -> List[Dict[str, Any]]:
-        """
-        List all tracked training jobs.
-
-        Returns
-        -------
-            List[Dict[str, Any]]: List of all job information dictionaries.
-
-        """
-        with self._lock:
-            return [dict(j) for j in self._jobs.values()]
-
-    def cancel_job(self, job_id: str) -> bool:
-        """
-        Request cancellation of a running or pending training job.
-
-        Args:
-        ----
-            job_id: The job ID to cancel.
-
-        Returns:
-        -------
-            bool: True if job was found and cancellation was signaled, False otherwise.
-
-        """
-        with self._lock:
-            if job_id not in self._jobs:
-                return False
-            self._cancel_flags[job_id].set()
-            if self._jobs[job_id]["status"] in ("pending", "running"):
-                self._jobs[job_id]["status"] = "cancelled"
-            return True
+        """Initialize the job manager bound to get_training_runner."""
+        super().__init__(runner_resolver=lambda backend: get_training_runner(backend))
 
 
 global_training_job_manager = TrainingJobManager()

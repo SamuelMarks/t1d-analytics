@@ -3,7 +3,6 @@
 import io
 import os
 import sys
-import types
 import typing
 import zipfile
 from pathlib import Path
@@ -19,20 +18,6 @@ from t1d_analytics.analytics import (
     load_data_to_duckdb,
     run_query_repl,
 )
-
-if "any_llm" not in sys.modules:
-    sys.modules["any_llm"] = types.ModuleType("any_llm")
-    setattr(sys.modules["any_llm"], "AnyLLM", MagicMock())
-
-
-def test_any_llm_mock_branch() -> None:
-    """Test the branch where any_llm is already in sys.modules."""
-    from importlib import reload
-
-    import tests.test_analytics
-
-    assert "any_llm" in sys.modules
-    reload(tests.test_analytics)
 
 
 def test_extract_zips(tmp_path: Path) -> None:
@@ -197,8 +182,6 @@ def test_handle_natural_language_error(
 
 def test_handle_natural_language_no_module(capsys: pytest.CaptureFixture[str]) -> None:
     """Test natural language when any-llm is missing."""
-    import sys
-
     # Temporarily remove any_llm from modules to test ImportError
     original_module = sys.modules.get("any_llm")
     sys.modules["any_llm"] = None  # type: ignore[assignment]
@@ -414,16 +397,13 @@ def test_get_database_schema_fetch_error() -> None:
         """Mock execute function."""
         if query.startswith("SHOW TABLES"):
             return show_tables_mock
-        elif query.startswith("DESCRIBE"):
+        if query.startswith("DESCRIBE"):
             return describe_mock
-        elif query.startswith("SELECT * FROM"):
-            return select_mock
-        return MagicMock()
+        return select_mock
 
     mock_conn.execute.side_effect = mock_execute
 
     schema = get_database_schema(mock_conn)
-    mock_conn.execute("OTHER QUERY")
 
     assert "Table: test_tab" in schema
     assert "(could not fetch)" in schema
@@ -504,19 +484,26 @@ def test_load_data_no_matches_file(tmp_path: Path, mocker: typing.Any) -> None:
 
 
 def test_handle_natural_language_no_result(mocker: typing.Any) -> None:
-    """Test handle_natural_language when query returns no result."""
+    """Test handle_natural_language when query returns no result or non-read-only SQL."""
     from t1d_analytics.analytics import handle_natural_language
 
-    # Mock any-llm
     mock_llm = mocker.MagicMock()
-    mock_llm.return_value.generate.return_value = "```sql\nSELECT 1;\n```"
+    mock_choice = mocker.MagicMock()
+    mock_choice.message.content = "```sql\nSELECT 1;\n```"
+    mock_llm.create.return_value.completion.return_value.choices = [mock_choice]
     mocker.patch.dict("sys.modules", {"any_llm": mocker.MagicMock(AnyLLM=mock_llm)})
 
     conn = mocker.MagicMock()
     conn.sql.return_value = None  # No result
 
     handle_natural_language(conn, "test")
-    conn.sql.assert_called_once()
+    conn.sql.assert_called_once_with("SELECT 1;")
+
+    # Verify non-read-only SQL is rejected before execution
+    conn.sql.reset_mock()
+    mock_choice.message.content = "DROP TABLE patients;"
+    handle_natural_language(conn, "drop everything")
+    conn.sql.assert_not_called()
 
 
 def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
@@ -847,6 +834,7 @@ def test_load_data_to_duckdb_semicolon_fallback(
 
     # Force csv.Sniffer to raise an exception to trigger the fallback
     def mock_sniff(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        """Raise csv.Error to simulate Sniffer failure."""
         raise csv.Error("Sniffer failed")
 
     monkeypatch.setattr(csv.Sniffer, "sniff", mock_sniff)

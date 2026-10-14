@@ -69,6 +69,7 @@ def test_gcs_upload_retry_with_exponential_backoff(
     call_count = 0
 
     def mock_upload(filename: str) -> None:
+        """Simulate transient 503 failure on first two upload attempts."""
         nonlocal call_count
         call_count += 1
         if call_count < 3:

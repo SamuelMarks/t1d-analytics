@@ -26,6 +26,7 @@ def test_concurrent_chat_api_key_isolation(tmp_path: Path) -> None:
     lock = threading.Lock()
 
     def mock_create(provider: str, **kwargs: Any) -> MagicMock:
+        """Create a mock AnyLLM instance that echoes the supplied API key."""
         api_key = kwargs.get("api_key", "")
         mock_instance = MagicMock()
         mock_choice = MagicMock()
@@ -38,6 +39,7 @@ def test_concurrent_chat_api_key_isolation(tmp_path: Path) -> None:
     with patch("any_llm.AnyLLM.create", side_effect=mock_create):
 
         def worker(thread_idx: int) -> bool:
+            """Execute a tenant chat request and verify key isolation."""
             secret_key = f"tenant_secret_key_{thread_idx:04d}"
             resp = client.post(
                 "/api/chat",
@@ -73,6 +75,7 @@ def test_concurrent_session_mutations(tmp_path: Path) -> None:
     db_file = tmp_path / "sessions_concurrent.duckdb"
 
     def session_worker(thread_idx: int) -> bool:
+        """Create and read back a tenant chat session."""
         session_id = f"session-tenant-{thread_idx}"
         # 1. Create or update session
         post_resp = client.post(
@@ -124,6 +127,7 @@ def test_concurrent_session_deletion_race(tmp_path: Path) -> None:
         )
 
     def delete_worker(target_id: str) -> int:
+        """Send a DELETE request for the given session ID."""
         resp = client.delete(
             f"/api/sessions/{target_id}",
             params={"db_path": str(db_file)},

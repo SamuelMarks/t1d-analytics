@@ -367,6 +367,7 @@ def test_write_to_db_with_stratified_split_ratios(
     gen.write_to_db(pairs, split_ratios=(0.8, 0.1, 0.1))
 
     def get_count(query: str) -> int:
+        """Execute count query and return integer result."""
         row = mock_db.execute(query).fetchone()
         assert row is not None
         return int(row[0])
@@ -419,6 +420,7 @@ def test_evaluate_text_to_sql_benchmark(tmp_path: Path, mocker: MagicMock) -> No
     ]
 
     def mock_generate(db_p: str, q: str, model_name: str) -> tuple[str, str]:
+        """Return mock SQL query or raise error based on prompt."""
         if "Get all users" in q:
             return "resp1", "SELECT * FROM users"
         elif "Average age" in q:
@@ -529,6 +531,7 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
     ]
 
     def mock_gen(db_p: str, q: str, model_name: str) -> tuple[str, str]:
+        """Return ordered or unordered SQL for benchmark test."""
         if "Unordered Mismatch" in q:
             return "ok", "SELECT val FROM tbl WHERE val = 10"
         elif "Ordered Mismatch" in q:

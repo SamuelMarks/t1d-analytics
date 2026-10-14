@@ -226,6 +226,48 @@ export interface SystemStatus {
 }
 
 /**
+ * Safely reads a string item from browser localStorage.
+ * @param {string} key - The storage key to read.
+ * @returns {string | null} The stored string value, or null if unavailable or throwing.
+ */
+export function safeStorageGet(key: string): string | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    return localStorage.getItem(key);
+  } catch (e) {
+    console.warn(`Could not read '${key}' from localStorage`, e);
+    return null;
+  }
+}
+
+/**
+ * Safely writes a string item to browser localStorage.
+ * @param {string} key - The storage key to write.
+ * @param {string} value - The string value to persist.
+ */
+export function safeStorageSet(key: string, value: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(key, value);
+  } catch (e) {
+    console.warn(`Could not save '${key}' to localStorage`, e);
+  }
+}
+
+/**
+ * Safely removes an item from browser localStorage.
+ * @param {string} key - The storage key to remove.
+ */
+export function safeStorageRemove(key: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.removeItem(key);
+  } catch (e) {
+    console.warn(`Could not remove '${key}' from localStorage`, e);
+  }
+}
+
+/**
  * State manager for the Chat Application.
  */
 export class ChatState {
@@ -269,47 +311,40 @@ export class ChatState {
    * Saves the current state to localStorage.
    */
   public saveToLocalStorage(): void {
-    try {
-      if (typeof localStorage === "undefined") return;
-      const data = {
-        chats: this.chats,
-        activeChatId: this.activeChatId,
-        chatCounter: this.chatCounter,
-        currentDb: this.currentDb,
-        availableDbs: this.availableDbs,
-        serverSyncEnabled: this.serverSyncEnabled,
-        streamingMode: this.streamingMode,
-        deletedChatIds: Array.from(this.deletedChatIds),
-      };
-      localStorage.setItem("t1d_analytics_chats", JSON.stringify(data));
-    } catch (e) {
-      console.warn("Could not save to localStorage", e);
-    }
+    const data = {
+      chats: this.chats,
+      activeChatId: this.activeChatId,
+      chatCounter: this.chatCounter,
+      currentDb: this.currentDb,
+      availableDbs: this.availableDbs,
+      serverSyncEnabled: this.serverSyncEnabled,
+      streamingMode: this.streamingMode,
+      deletedChatIds: Array.from(this.deletedChatIds),
+    };
+    safeStorageSet("t1d_analytics_chats", JSON.stringify(data));
   }
 
   /**
    * Loads state from localStorage.
    */
   private loadFromLocalStorage(): void {
+    const data = safeStorageGet("t1d_analytics_chats");
+    if (!data) return;
     try {
-      if (typeof localStorage === "undefined") return;
-      const data = localStorage.getItem("t1d_analytics_chats");
-      if (data) {
-        const parsed = JSON.parse(data);
-        this.chats = parsed.chats || [];
-        this.activeChatId = parsed.activeChatId || null;
-        this.chatCounter = parsed.chatCounter || 1;
-        if (parsed.currentDb) this.currentDb = parsed.currentDb;
-        if (parsed.availableDbs) this.availableDbs = parsed.availableDbs;
-        if (typeof parsed.serverSyncEnabled === "boolean") {
-          this.serverSyncEnabled = parsed.serverSyncEnabled;
-        }
-        if (typeof parsed.streamingMode === "boolean") {
-          this.streamingMode = parsed.streamingMode;
-        }
-        if (Array.isArray(parsed.deletedChatIds)) {
-          this.deletedChatIds = new Set(parsed.deletedChatIds);
-        }
+      const parsed = JSON.parse(data);
+      this.chats = parsed.chats || [];
+      this.activeChatId = parsed.activeChatId || null;
+      this.chatCounter = parsed.chatCounter || 1;
+      if (parsed.currentDb) this.currentDb = parsed.currentDb;
+      if (parsed.availableDbs) this.availableDbs = parsed.availableDbs;
+      if (typeof parsed.serverSyncEnabled === "boolean") {
+        this.serverSyncEnabled = parsed.serverSyncEnabled;
+      }
+      if (typeof parsed.streamingMode === "boolean") {
+        this.streamingMode = parsed.streamingMode;
+      }
+      if (Array.isArray(parsed.deletedChatIds)) {
+        this.deletedChatIds = new Set(parsed.deletedChatIds);
       }
     } catch (e) {
       console.warn("Could not load from localStorage", e);
@@ -632,11 +667,7 @@ export class ChatState {
    * @returns {string | null} The API key if stored, otherwise null.
    */
   getApiKey(provider: string): string | null {
-    try {
-      return localStorage.getItem(`t1d_api_key_${provider.toLowerCase()}`);
-    } catch {
-      return null;
-    }
+    return safeStorageGet(`t1d_api_key_${provider.toLowerCase()}`);
   }
 
   /**
@@ -645,11 +676,7 @@ export class ChatState {
    * @param {string} key The API key to store.
    */
   setApiKey(provider: string, key: string): void {
-    try {
-      localStorage.setItem(`t1d_api_key_${provider.toLowerCase()}`, key.trim());
-    } catch (e) {
-      console.warn("Could not save API key to localStorage", e);
-    }
+    safeStorageSet(`t1d_api_key_${provider.toLowerCase()}`, key.trim());
   }
 
   /**
@@ -657,11 +684,7 @@ export class ChatState {
    * @param {string} provider The provider identifier.
    */
   removeApiKey(provider: string): void {
-    try {
-      localStorage.removeItem(`t1d_api_key_${provider.toLowerCase()}`);
-    } catch (e) {
-      console.warn("Could not remove API key from localStorage", e);
-    }
+    safeStorageRemove(`t1d_api_key_${provider.toLowerCase()}`);
   }
 
   /**

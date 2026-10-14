@@ -7,8 +7,6 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_SH_PATH = REPO_ROOT / "test.sh"
@@ -493,52 +491,24 @@ def test_test_cmd_static_validation() -> None:
     assert "npm test" in content
 
 
-def test_test_cmd_execution_with_wine() -> None:
-    """Test test.cmd execution under wine cmd if wine is available."""
-    # We patch subprocess.run to always simulate a successful run, and ignore HAS_WINE check
-    with patch("subprocess.run") as mock_run:
-        # Mock run should return different things based on the args
-        def run_side_effect(*args: Any, **kwargs: Any) -> MagicMock:
-            flag = args[0][4] if len(args[0]) > 4 else ""
-            if flag in ("--help", "-h"):
-                return MagicMock(
-                    stdout="Usage: test.cmd\n  --unit-mock\n  --live-cloud",
-                    returncode=0,
-                )
-            elif flag in ("--mock-cloud", "--unit-mock", "--dry-run"):
-                return MagicMock(
-                    stdout="Running in Mock Cloud mode\nDeployment test successful\nDeprovisioning complete.",
-                    returncode=0,
-                )
-            return MagicMock(stdout="", returncode=0)
+def test_test_cmd_control_flow_and_arguments() -> None:
+    """Verify that test.cmd handles help flags, mock-cloud flags, and error exit codes."""
+    cmd_path = REPO_ROOT / "test.cmd"
+    content = cmd_path.read_text(encoding="utf-8")
 
-        mock_run.side_effect = run_side_effect
+    # Verify CLI flag parsing branches in test.cmd
+    for flag in (
+        "--help",
+        "-h",
+        "--mock-cloud",
+        "--unit-mock",
+        "--dry-run",
+        "--live-cloud",
+    ):
+        assert flag in content, f"Expected CLI flag '{flag}' in test.cmd"
 
-        # 1. Test --help and -h
-        for flag in ["--help", "-h"]:
-            res_help = subprocess.run(
-                [WINE_BINARY, "cmd", "/c", "test.cmd", flag],
-                cwd=str(REPO_ROOT),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            assert "Usage: test.cmd" in res_help.stdout
-        assert "--unit-mock" in res_help.stdout
-        assert "--live-cloud" in res_help.stdout
-
-        # 2. Test mock cloud modes
-        for flag in ["--mock-cloud", "--unit-mock", "--dry-run"]:
-            res_mock = subprocess.run(
-                [WINE_BINARY, "cmd", "/c", "test.cmd", flag],
-                cwd=str(REPO_ROOT),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            assert "Running in Mock Cloud mode" in res_mock.stdout
-            assert "Deployment test successful" in res_mock.stdout
-            assert "Deprovisioning complete." in res_mock.stdout
-
-        # 3. Dummy call to hit fallback
-        subprocess.run([WINE_BINARY, "cmd", "/c", "test.cmd", "other"])
+    assert "Usage: %0" in content
+    assert "Running in Mock Cloud mode" in content
+    assert "Deprovisioning complete." in content
+    assert "exit /b 0" in content
+    assert "exit /b 1" in content

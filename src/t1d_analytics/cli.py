@@ -1,14 +1,33 @@
 """Command Line Interface for the T1D Analytics Suite."""
 
 import argparse
+import datetime
+import importlib
+import json
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional, cast
 
-from t1d_analytics.downloader import process_datasets
+import duckdb
+
+from t1d_analytics import (
+    analytics,
+    diagnostics,
+    gemma_bridge,
+    training_data,
+    training_runner,
+)
+from t1d_analytics.downloader import parse_headers_file, process_datasets
 from t1d_analytics.i18n import get_translator
+from t1d_analytics.models import (
+    MaxTextConfig,
+    TpuAcceleratorType,
+    TrainingBackend,
+    TrainingHyperparameters,
+    TrainingJobConfig,
+)
 from t1d_analytics.parser import fetch_html, parse_datasets
 
 
@@ -570,8 +589,6 @@ def load_auth_plugin(plugin_spec: str) -> Callable[[], str]:
         ValueError: If format is invalid or target function cannot be found or invoked.
 
     """
-    import importlib
-
     if ":" not in plugin_spec:
         raise ValueError(
             f"Invalid auth plugin specifier '{plugin_spec}'. Expected 'module:function'."
@@ -619,7 +636,6 @@ def handle_download(args: argparse.Namespace) -> None:
         return
 
     print(_("Starting downloads to {}...", args.output))
-    from t1d_analytics.downloader import parse_headers_file
 
     auth: Optional[tuple[str, str]] = None
     if getattr(args, "user", None) and getattr(args, "password", None):
@@ -663,9 +679,7 @@ def handle_extract(args: argparse.Namespace) -> None:
         args: Command-line arguments.
 
     """
-    from t1d_analytics.analytics import extract_zips
-
-    extract_zips(args.data_dir)
+    analytics.extract_zips(args.data_dir)
 
 
 def handle_load(args: argparse.Namespace) -> None:
@@ -677,9 +691,7 @@ def handle_load(args: argparse.Namespace) -> None:
         args: Arguments.
 
     """
-    from t1d_analytics.analytics import load_data_to_duckdb
-
-    load_data_to_duckdb(
+    analytics.load_data_to_duckdb(
         args.data_dir,
         args.db,
         prefix_subdirs=getattr(args, "prefix_subdirs", False),
@@ -697,9 +709,7 @@ def handle_manifest(args: argparse.Namespace) -> None:
         args: Arguments containing db path.
 
     """
-    from t1d_analytics.analytics import get_ingestion_manifest
-
-    records = get_ingestion_manifest(args.db)
+    records = analytics.get_ingestion_manifest(args.db)
     if not records:
         print("No ingestion manifest records found.")
         return
@@ -723,10 +733,8 @@ def handle_query(args: argparse.Namespace) -> None:
         args: Arguments containing db, model, and optional provider.
 
     """
-    from t1d_analytics.analytics import run_query_repl
-
     provider = getattr(args, "provider", "ollama")
-    run_query_repl(args.db, model=args.model, provider=provider)
+    analytics.run_query_repl(args.db, model=args.model, provider=provider)
 
 
 def handle_generate_training_data(args: argparse.Namespace) -> None:
@@ -742,10 +750,6 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
         args: Command-line arguments containing db, num_pairs, model, provider, and split_ratios.
 
     """
-    import duckdb
-
-    from t1d_analytics.training_data import TrainingDataGenerator
-
     _ = get_translator()
 
     print(_("Connecting to DuckDB at {}...", args.db))
@@ -759,7 +763,7 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
             provider,
         )
     )
-    generator = TrainingDataGenerator(conn, args.model, provider=provider)
+    generator = training_data.TrainingDataGenerator(conn, args.model, provider=provider)
 
     ratios = None
     if getattr(args, "split_ratios", None):
@@ -792,10 +796,6 @@ def handle_evaluate(args: argparse.Namespace) -> None:
         args: Command-line arguments containing db, test_set, model, and output.
 
     """
-    import json
-
-    from t1d_analytics.training_data import evaluate_text_to_sql
-
     test_file = Path(args.test_set)
     if not test_file.exists():
         print(f"Test set file {test_file} does not exist.")
@@ -811,7 +811,7 @@ def handle_evaluate(args: argparse.Namespace) -> None:
             if line:
                 test_data.append(json.loads(line))
 
-    metrics = evaluate_text_to_sql(args.db, test_data, model=args.model)
+    metrics = training_data.evaluate_text_to_sql(args.db, test_data, model=args.model)
     print(metrics["markdown_report"])
 
     if getattr(args, "output", None):
@@ -833,14 +833,10 @@ def handle_export_training_data(args: argparse.Namespace) -> None:
         args: Command-line arguments containing db, table, format, and output-file.
 
     """
-    import duckdb
-
-    from t1d_analytics.training_data import TrainingDataGenerator
-
     _ = get_translator()
     print(_("Connecting to DuckDB at {}...", args.db))
     conn = duckdb.connect(args.db, read_only=True)
-    generator = TrainingDataGenerator(conn)
+    generator = training_data.TrainingDataGenerator(conn)
 
     print(_("Exporting table '{}' to {}...", args.table, args.output_file))
     if args.format == "jsonl":
@@ -861,12 +857,10 @@ def handle_export(args: argparse.Namespace) -> None:
         args: Command-line arguments containing db, table, format, and output_file.
 
     """
-    from t1d_analytics.analytics import export_table
-
     _ = get_translator()
     print(_("Connecting to DuckDB at {}...", args.db))
     print(_("Exporting table '{}' to {}...", args.table, args.output_file))
-    export_table(
+    analytics.export_table(
         db_path=args.db,
         table_name=args.table,
         output_path=args.output_file,
@@ -884,9 +878,7 @@ def handle_doctor(args: argparse.Namespace) -> None:
         args: Arguments containing db path.
 
     """
-    from t1d_analytics.diagnostics import get_system_health
-
-    health = get_system_health(db_path=args.db)
+    health = diagnostics.get_system_health(db_path=args.db)
     db = health.database
     ollama = health.ollama
 
@@ -933,9 +925,7 @@ def handle_profile(args: argparse.Namespace) -> None:
         args: Arguments containing db path and table name.
 
     """
-    from t1d_analytics.analytics import profile_table
-
-    report = profile_table(args.db, args.table)
+    report = analytics.profile_table(args.db, args.table)
     print("=" * 60)
     print(f"Table Profile: {report['table_name']}")
     print(f"Total Rows: {report['total_rows']} | Columns: {report['column_count']}")
@@ -960,10 +950,6 @@ def handle_watch(args: argparse.Namespace) -> None:
         args: Arguments containing data_dir, db, interval, iterations, and prefix_subdirs.
 
     """
-    import duckdb
-
-    from t1d_analytics.analytics import compute_file_hash, load_data_to_duckdb
-
     data_path = Path(args.data_dir)
     print(
         f"Watching directory '{data_path}' for changes (interval: {args.interval}s)..."
@@ -1001,15 +987,11 @@ def handle_watch(args: argparse.Namespace) -> None:
                     )
                     conn.close()
                 except duckdb.Error as e:
-                    import sys
-
                     print(
                         f"Warning: Failed to update manifest after deletion: {e}",
                         file=sys.stderr,
                     )
                 except Exception as e:
-                    import sys
-
                     print(
                         f"Warning: Unexpected error updating manifest: {e}",
                         file=sys.stderr,
@@ -1018,14 +1000,14 @@ def handle_watch(args: argparse.Namespace) -> None:
         changed = False
         for f in current_files:
             f_str = str(f.resolve())
-            h = compute_file_hash(f)
+            h = analytics.compute_file_hash(f)
             if seen_hashes.get(f_str) != h:
                 seen_hashes[f_str] = h
                 changed = True
 
         if changed:
             print(f"Detected file changes or new files in '{data_path}'. Ingesting...")
-            load_data_to_duckdb(
+            analytics.load_data_to_duckdb(
                 str(data_path),
                 args.db,
                 prefix_subdirs=getattr(args, "prefix_subdirs", False),
@@ -1046,17 +1028,6 @@ def handle_train(args: argparse.Namespace) -> None:
         args: Arguments containing db, output_dir, samples_per_table, provider, model, export_formats, and optional flags.
 
     """
-    import json
-
-    import duckdb
-
-    from t1d_analytics.models import (
-        TrainingBackend,
-        TrainingHyperparameters,
-        TrainingJobConfig,
-    )
-    from t1d_analytics.training_data import TrainingDataGenerator
-
     print("=" * 60)
     print("T1D Synthetic Training Orchestrator")
     print(f"Database: {args.db}")
@@ -1065,7 +1036,7 @@ def handle_train(args: argparse.Namespace) -> None:
     print("=" * 60)
 
     conn = duckdb.connect(args.db)
-    generator = TrainingDataGenerator(
+    generator = training_data.TrainingDataGenerator(
         conn,
         model=args.model,
         provider=args.provider,
@@ -1120,7 +1091,6 @@ def handle_train(args: argparse.Namespace) -> None:
         shutil.copyfile(out_dir / "sft_data.parquet", out_dir / "training_data.parquet")
 
     manifest_file = out_dir / "training_manifest.json"
-    import datetime
 
     manifest_file.write_text(
         json.dumps(
@@ -1215,8 +1185,6 @@ def handle_train(args: argparse.Namespace) -> None:
         backend_val = getattr(args, "backend", "local-cpu")
         maxtext_cfg = None
         if backend_val == "remote-tpu-maxtext":
-            from t1d_analytics.models import MaxTextConfig, TpuAcceleratorType
-
             maxtext_cfg = MaxTextConfig(
                 project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp"),
                 zone=getattr(args, "tpu_zone", "us-central2-b"),
@@ -1249,9 +1217,7 @@ def handle_train(args: argparse.Namespace) -> None:
             quantization=getattr(args, "quantization", None),
         )
         print(f"Initiating training runner with backend '{config.backend.value}'...")
-        from t1d_analytics.training_runner import get_training_runner
-
-        runner = get_training_runner(config.backend)
+        runner = training_runner.get_training_runner(config.backend)
         runner.validate_environment()
         res = runner.run_training(config)
         results_file = out_dir / "training_results.json"
@@ -1274,14 +1240,8 @@ def handle_bridge_gemma_sql(args: argparse.Namespace) -> None:
         args: Command-line arguments containing action, stage, db, table, output_dir, and config.
 
     """
-    from t1d_analytics.gemma_bridge import (
-        check_gemma_sql_installed,
-        run_gemma_sql_etl,
-        run_gemma_sql_train,
-    )
-
     if args.action == "check":
-        installed = check_gemma_sql_installed()
+        installed = gemma_bridge.check_gemma_sql_installed()
         print(f"gemma-4-sql installed: {installed}")
         if not installed:
             print("Action: Install via 'pip install -e /path/to/gemma-4-sql[all]'.")
@@ -1289,7 +1249,7 @@ def handle_bridge_gemma_sql(args: argparse.Namespace) -> None:
         print(
             f"Running gemma-4-sql ETL for stage '{args.stage}' from {args.db}:{args.table}..."
         )
-        res = run_gemma_sql_etl(
+        res = gemma_bridge.run_gemma_sql_etl(
             stage=args.stage,
             duckdb_path=args.db,
             duckdb_table=args.table,
@@ -1303,7 +1263,7 @@ def handle_bridge_gemma_sql(args: argparse.Namespace) -> None:
         print(
             f"Running gemma-4-sql training for stage '{args.stage}' with config '{args.config}'..."
         )
-        res = run_gemma_sql_train(
+        res = gemma_bridge.run_gemma_sql_train(
             stage=args.stage,
             config_path=args.config,
         )

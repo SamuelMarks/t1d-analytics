@@ -6,17 +6,22 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
-.. automodule:: t1d_analytics.analytics
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 .. automodule:: t1d_analytics.api
    :members:
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.api_schemas
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.cli
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.db_security
    :members:
    :undoc-members:
    :show-inheritance:
@@ -31,7 +36,27 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.errors
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.gemma_bridge
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.i18n
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.job_manager
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.llm_client
    :members:
    :undoc-members:
    :show-inheritance:
@@ -42,6 +67,16 @@ t1d_analytics
    :show-inheritance:
 
 .. automodule:: t1d_analytics.parser
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.session_store
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.sql_utils
    :members:
    :undoc-members:
    :show-inheritance:

@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Union
 import duckdb
 
 from t1d_analytics.i18n import get_translator
+from t1d_analytics.llm_client import normalize_ollama_host
 
 logger = logging.getLogger(__name__)
 
@@ -406,9 +407,7 @@ def check_ollama_health(
 
     """
     _ = get_translator(lang)
-    host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
-    if not host.startswith(("http://", "https://")):
-        host = f"http://{host}"
+    host = normalize_ollama_host()
 
     if ollama_url is None:
         ollama_url = f"{host}/api/tags"

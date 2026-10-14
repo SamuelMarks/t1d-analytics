@@ -9,7 +9,6 @@ from typing import Any
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
-import scripts.run_tests as srt
 from scripts.run_tests import main, run_cmd
 
 
@@ -438,40 +437,42 @@ def test_main_badge_colors_red_and_interrogate_no_match() -> None:
 
 
 def test_module_dunder_main() -> None:
-    """Test execution when __name__ == __main__."""
-    with open(srt.__file__) as f:
-        content = f.read()
+    """Test execution when scripts.run_tests is invoked as __main__ via runpy."""
+    import io
+    import runpy
 
-    # Replace the main() body with pass to prevent it from doing anything
-    import re
-
-    def preserve_newlines(match: re.Match[str]) -> str:
-        text = match.group(0)
-        newlines = text.count("\n")
-        return "def main() -> None:\n    pass" + ("\n" * (newlines - 1))
-
-    content = re.sub(
-        r"def main\(\) -> None:.*?(?=^if __name__ ==)",
-        preserve_newlines,
-        content,
-        flags=re.MULTILINE | re.DOTALL,
+    readme_data = (
+        "![Test Coverage](https://img.shields.io/badge/coverage-50.0%25-red)\n"
+        "![Docstring Coverage](https://img.shields.io/badge/docs-100%25-brightgreen)\n"
     )
+    lcov_content = "SF:file1.py\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
 
-    # We must patch sys.argv so it doesn't fail parsing args
-    from unittest.mock import patch
+    def subprocess_run(cmd: Any, *args: Any, **kwargs: Any) -> MagicMock:
+        """Mock subprocess.run returning 100% coverage stdout."""
+        res = MagicMock()
+        res.returncode = 0
+        res.stdout = "TOTAL: 100.0%"
+        return res
 
-    with patch("sys.argv", ["run_tests.py"]):
-        code_obj = compile(content, srt.__file__, "exec")
-        exec(code_obj, {"__name__": "__main__"})
+    def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        """Mock file open returning fixture streams based on filename."""
+        filename = str(file)
+        if mode == "w":
+            return mock_open().return_value
+        if "coverage.json" in filename:
+            return io.StringIO('{"totals": {"percent_covered": 100}}')
+        if "README.md" in filename:
+            return io.StringIO(readme_data)
+        if "lcov" in filename:
+            return io.StringIO(lcov_content)
+        return mock_open().return_value
 
-
-def test_run_tests_main_block_coverage_final() -> None:
-    """Test the final main block coverage."""
-    with open("scripts/run_tests.py") as f:
-        code = f.read()
-    code = code.replace("    main()", "    pass")
-    namespace = {"__name__": "__main__", "__file__": "scripts/run_tests.py"}
-    try:
-        exec(code, namespace)
-    except SystemExit:
-        pass
+    with (
+        patch("sys.argv", ["run_tests.py"]),
+        patch("os.makedirs"),
+        patch("subprocess.Popen", return_value=MagicMock()),
+        patch("urllib.request.urlopen", return_value=MagicMock()),
+        patch("subprocess.run", side_effect=subprocess_run),
+        patch("builtins.open", side_effect=custom_open),
+    ):
+        runpy.run_module("scripts.run_tests", run_name="__main__")

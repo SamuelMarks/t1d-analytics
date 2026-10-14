@@ -44,6 +44,7 @@ def safe_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
     original_run = subprocess.run
 
     def safe_run(*args: Any, **kwargs: Any) -> Any:
+        """Intercept gcloud, xpk, and gsutil commands with mock success."""
         cmd = args[0] if args else kwargs.get("args", [])
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
 
@@ -62,22 +63,22 @@ def mock_huggingface_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock tokenizer."""
 
     class MockTokenizer:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self.pad_token_id = 0
+        """Lightweight mock tokenizer for tests."""
 
-        def __call__(self, *args: Any, **kwargs: Any) -> Any:
-            return self
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            """Initialize pad_token_id."""
+            self.pad_token_id = 0
 
         def encode(
             self, text: str, add_special_tokens: bool = False, **kwargs: Any
         ) -> Any:
+            """Encode text characters into integer IDs."""
             return [ord(c) % 50 for c in text] if text else []
 
         @classmethod
         def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+            """Return a MockTokenizer instance."""
             return cls()
-
-    MockTokenizer()()
 
     monkeypatch.setattr(
         transformers.AutoTokenizer, "from_pretrained", MockTokenizer.from_pretrained
@@ -92,12 +93,19 @@ def mock_huggingface_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     from t1d_analytics.training_runner import HuggingFaceCausalLMFactory
 
     class MockModel(torch.nn.Module):
+        """Lightweight mock causal LM module."""
+
         def __init__(self) -> None:
+            """Initialize mock linear layer."""
             super().__init__()
             self.linear = torch.nn.Linear(10, 10)
 
         def forward(self, input_ids: Any, **kwargs: Any) -> Any:
+            """Return mock output with logits."""
+
             class Output:
+                """Mock forward output container."""
+
                 logits = torch.randn(
                     input_ids.shape[0],
                     input_ids.shape[1],
@@ -109,6 +117,7 @@ def mock_huggingface_factory(monkeypatch: pytest.MonkeyPatch) -> None:
             return Output()
 
         def save_pretrained(self, path: Any) -> None:
+            """No-op save_pretrained."""
             pass
 
     def mock_create_model(
@@ -118,8 +127,7 @@ def mock_huggingface_factory(monkeypatch: pytest.MonkeyPatch) -> None:
         quantization: Optional[str] = None,
         use_lora: bool = False,
     ) -> Any:
-        if "invalid" in model_name:
-            raise RuntimeError(f"Failed to load Hugging Face model '{model_name}'")
+        """Return a MockModel instance."""
         return MockModel()
 
     monkeypatch.setattr(HuggingFaceCausalLMFactory, "create_model", mock_create_model)
@@ -128,15 +136,7 @@ def mock_huggingface_factory(monkeypatch: pytest.MonkeyPatch) -> None:
 _real_torch_device = torch.device
 
 
-class _MockTorchDeviceType(type):
-    """Metaclass for torch.device mock to preserve isinstance checks in PyTorch accelerator utils."""
-
-    def __instancecheck__(cls, instance: object) -> bool:
-        """Verify instance is a real torch.device instance."""
-        return isinstance(instance, _real_torch_device)
-
-
-class MockTorchDevice(metaclass=_MockTorchDeviceType):
+class MockTorchDevice:
     """Mock class redirecting torch.device instantiation to CPU while retaining type identity."""
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Any:
@@ -377,15 +377,6 @@ def test_remote_tpu_maxtext_runner(tmp_path: Path) -> None:
 
 
 def test_sync_dataset_to_gcs(tmp_path: Path) -> None:
-    """Test function."""
-    import sys
-    from unittest.mock import MagicMock
-
-    mock_blob = MagicMock()
-    mock_blob.name = "test/model.ckpt"
-    mock_gcs = MagicMock()
-    mock_gcs.Client.return_value.list_blobs.return_value = [mock_blob]
-    sys.modules["google.cloud.storage"] = mock_gcs
     """Test sync_dataset_to_gcs upload, validation, and error branches."""
     local_file = tmp_path / "data.parquet"
     local_file.write_text("test")
@@ -400,26 +391,36 @@ def test_sync_dataset_to_gcs(tmp_path: Path) -> None:
 
     # Missing google-cloud-storage library
     with patch.dict(os.environ, {"T1D_MOCK_GCS": ""}):
-        with patch.dict("sys.modules", {"google.cloud.storage": None}):
+        with patch.dict(
+            "sys.modules",
+            {"google": None, "google.cloud": None, "google.cloud.storage": None},
+        ):
             with pytest.raises(
                 RuntimeError,
                 match="google-cloud-storage",
             ):
                 sync_dataset_to_gcs(local_file, "gs://my-bucket")
 
-    # Mock GCS upload
-    with patch.dict(os.environ, {"T1D_MOCK_GCS": "1"}):
-        uri = sync_dataset_to_gcs(local_file, "gs://my-bucket/")
-        assert uri == "gs://my-bucket/data.parquet"
-
     # Native library upload success
     mock_gcs = MagicMock()
     mock_client = MagicMock()
     mock_gcs.Client.return_value = mock_client
-    with patch.dict(os.environ, {"T1D_MOCK_GCS": ""}):
-        with patch.dict("sys.modules", {"google.cloud.storage": mock_gcs}):
-            uri = sync_dataset_to_gcs(local_file, "gs://my-bucket")
-            assert uri == "gs://my-bucket/data.parquet"
+    mock_google = MagicMock()
+    mock_cloud = MagicMock()
+    mock_google.cloud = mock_cloud
+    mock_cloud.storage = mock_gcs
+    with patch.dict(
+        "sys.modules",
+        {
+            "google": mock_google,
+            "google.cloud": mock_cloud,
+            "google.cloud.storage": mock_gcs,
+        },
+    ):
+        uri = sync_dataset_to_gcs(local_file, "gs://my-bucket/")
+        assert uri == "gs://my-bucket/data.parquet"
+        uri2 = sync_dataset_to_gcs(local_file, "gs://my-bucket")
+        assert uri2 == "gs://my-bucket/data.parquet"
 
     # Native library upload failure with retry exhaustion
     mock_err_gcs = MagicMock()
@@ -428,13 +429,19 @@ def test_sync_dataset_to_gcs(tmp_path: Path) -> None:
     mock_err_blob.upload_from_filename.side_effect = RuntimeError("Network timeout")
     mock_err_client.bucket.return_value.blob.return_value = mock_err_blob
     mock_err_gcs.Client.return_value = mock_err_client
-    with patch.dict(os.environ, {"T1D_MOCK_GCS": ""}):
-        with patch.dict("sys.modules", {"google.cloud.storage": mock_err_gcs}):
-            with pytest.raises(
-                RuntimeError,
-                match="GCS upload failed after 3 attempts.*Network timeout",
-            ):
-                sync_dataset_to_gcs(local_file, "gs://my-bucket", max_retries=3)
+    with (
+        patch.dict(
+            "sys.modules",
+            {
+                "google": mock_google,
+                "google.cloud": mock_cloud,
+                "google.cloud.storage": mock_err_gcs,
+            },
+        ),
+        patch("time.sleep"),
+    ):
+        with pytest.raises(RuntimeError, match="GCS upload failed after 2 attempts"):
+            sync_dataset_to_gcs(local_file, "gs://my-bucket", max_retries=2)
 
 
 def test_get_training_runner() -> None:
@@ -1321,6 +1328,7 @@ def test_remote_tpu_poll_workload_status_branches() -> None:
 
         # No XPK binary, gcloud binary available -> delegates to _poll_gcloud_tpu_status
         def mock_gcloud_only(cmd: str) -> Optional[str]:
+            """Return gcloud path only when cmd is gcloud."""
             return "/usr/bin/gcloud" if cmd == "gcloud" else None
 
         with patch("shutil.which", side_effect=mock_gcloud_only):
@@ -1763,6 +1771,7 @@ def test_tpu_workload_reclamation() -> None:
 
     # Subprocess without xpk, with gcloud -> delegates to _reclaim_gcloud_tpu_workload
     def mock_gcloud_reclaim(cmd: str) -> Optional[str]:
+        """Return gcloud path only when cmd is gcloud."""
         return "/usr/bin/gcloud" if cmd == "gcloud" else None
 
     with patch.dict(os.environ, {"T1D_MOCK_TPU": ""}):
@@ -2006,6 +2015,7 @@ def test_poll_and_reclaim_workload_delegation_without_xpk() -> None:
     max_cfg = MaxTextConfig(project_id="p1", zone="us-central2-b")
 
     def mock_which(cmd: str) -> Optional[str]:
+        """Return None for xpk and /usr/bin/gcloud otherwise."""
         if cmd == "xpk":
             return None
         return "/usr/bin/gcloud"
@@ -2364,6 +2374,7 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
     event_release = threading.Event()
 
     def slow_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Signal start and wait for release event."""
         event_start.set()
         event_release.wait(timeout=2.0)
         return {"status": "done"}
@@ -2388,6 +2399,7 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
     orig_get_runner = training_runner.get_training_runner
 
     def cancel_on_get_runner(backend: Any) -> Any:
+        """Set all cancel flags before returning training runner."""
         for f in mgr3._cancel_flags.values():
             f.set()
         return orig_get_runner(backend)
@@ -2509,12 +2521,19 @@ def test_runner_eval_and_scheduler(tmp_path: Path) -> None:
     runner = LocalCpuRunner()
 
     class MockModel(torch.nn.Module):
+        """Mock model for scheduler evaluation tests."""
+
         def __init__(self) -> None:
+            """Initialize linear layer."""
             super().__init__()
             self.linear = torch.nn.Linear(10, 10)
 
         def forward(self, x: Any, **kwargs: Any) -> Any:
+            """Return mock logits."""
+
             class Out:
+                """Output container."""
+
                 logits = torch.randn(
                     x.size(0), x.size(1), 10, device=x.device, requires_grad=True
                 )
@@ -2522,6 +2541,7 @@ def test_runner_eval_and_scheduler(tmp_path: Path) -> None:
             return Out()
 
         def save_pretrained(self, path: Any) -> None:
+            """No-op save_pretrained."""
             pass
 
     mock_model = MockModel()
@@ -2615,12 +2635,19 @@ def test_runners_full_coverage(tmp_path: Path) -> None:
     runner = HuggingFaceCausalLMRunner()
 
     class MockModel_1(torch.nn.Module):
+        """Mock model 1 for HuggingFace runner test."""
+
         def __init__(self) -> None:
+            """Initialize linear layer."""
             super().__init__()
             self.linear = torch.nn.Linear(10, 10)
 
         def forward(self, x: Any, **kwargs: Any) -> Any:
+            """Return mock logits."""
+
             class Out:
+                """Output container."""
+
                 logits = torch.randn(
                     x.size(0), x.size(1), 10, device=x.device, requires_grad=True
                 )
@@ -2628,6 +2655,7 @@ def test_runners_full_coverage(tmp_path: Path) -> None:
             return Out()
 
         def save_pretrained(self, path: Any) -> None:
+            """No-op save_pretrained."""
             pass
 
     mock_model = MockModel_1()
@@ -2684,12 +2712,19 @@ def test_runners_full_coverage(tmp_path: Path) -> None:
     runner_cpu = LocalCpuRunner()
 
     class MockModel_2(torch.nn.Module):
+        """Mock model 2 for LocalCpuRunner test."""
+
         def __init__(self) -> None:
+            """Initialize linear layer."""
             super().__init__()
             self.linear = torch.nn.Linear(10, 10)
 
         def forward(self, x: Any, **kwargs: Any) -> Any:
+            """Return mock logits."""
+
             class Out:
+                """Output container."""
+
                 logits = torch.randn(
                     x.size(0), x.size(1), 10, device=x.device, requires_grad=True
                 )
@@ -2697,6 +2732,7 @@ def test_runners_full_coverage(tmp_path: Path) -> None:
             return Out()
 
         def save_pretrained(self, path: Any) -> None:
+            """No-op save_pretrained."""
             pass
 
     mock_model_2 = MockModel_2()
@@ -2718,12 +2754,19 @@ def test_runners_full_coverage(tmp_path: Path) -> None:
     runner_gpu = LocalGpuRunner()
 
     class MockModel_3(torch.nn.Module):
+        """Mock model 3 for LocalGpuRunner test."""
+
         def __init__(self) -> None:
+            """Initialize linear layer."""
             super().__init__()
             self.linear = torch.nn.Linear(10, 10)
 
         def forward(self, x: Any, **kwargs: Any) -> Any:
+            """Return mock logits."""
+
             class Out:
+                """Output container."""
+
                 logits = torch.randn(
                     x.size(0), x.size(1), 10, device=x.device, requires_grad=True
                 )
@@ -2731,6 +2774,7 @@ def test_runners_full_coverage(tmp_path: Path) -> None:
             return Out()
 
         def save_pretrained(self, path: Any) -> None:
+            """No-op save_pretrained."""
             pass
 
     mock_model_3 = MockModel_3()
@@ -2770,12 +2814,19 @@ def test_training_runner_edge_coverage(tmp_path: Path) -> None:
     )
 
     class MockModel_4(torch.nn.Module):
+        """Mock model 4 without save_pretrained."""
+
         def __init__(self) -> None:
+            """Initialize linear layer."""
             super().__init__()
             self.linear = torch.nn.Linear(10, 10)
 
         def forward(self, x: Any, **kwargs: Any) -> Any:
+            """Return mock logits."""
+
             class Out:
+                """Output container."""
+
                 logits = torch.randn(
                     x.size(0), x.size(1), 10, device=x.device, requires_grad=True
                 )
@@ -2811,8 +2862,14 @@ def test_training_runner_edge_coverage(tmp_path: Path) -> None:
     runner_hf = get_training_runner(TrainingBackend.HUGGINGFACE)
 
     class ModelNoTo:
+        """Callable model lacking .to() method."""
+
         def __call__(self, x: Any) -> Any:
+            """Return mock output."""
+
             class Out:
+                """Output container."""
+
                 logits = torch.randn(1, 1, 10)
 
             return Out()
@@ -2828,370 +2885,71 @@ def test_training_runner_edge_coverage(tmp_path: Path) -> None:
             runner_hf.run_training(config)
 
 
-def test_brute_force_coverage(tmp_path: Path) -> None:
-    """Test function."""
-    import torch
-
-    from t1d_analytics.models import TrainingBackend, TrainingJobConfig
-    from t1d_analytics.training_runner import (
-        HuggingFaceCausalLMRunner,
-        LocalCpuRunner,
-    )
-
-    # 392->394: bnb_config is not None
-    # 410->415: to_fn exception
-    # 1042-1043: to_fn missing
-    # 1048->1055: validation dataset missing or empty
-    # 967-968, 1019: LocalCpuRunner eval missing
-
+def test_huggingface_runner_validation_path_and_model_no_train(tmp_path: Path) -> None:
+    """Test HuggingFaceCausalLMRunner when validation path is missing and model lacks .train()."""
     ds = tmp_path / "train.jsonl"
     ds.write_text('{"prompt": "q", "completion": "a"}\n')
 
+    runner = HuggingFaceCausalLMRunner()
     config = TrainingJobConfig(
         model_name="mock",
         backend=TrainingBackend.HUGGINGFACE,
         dataset_path=str(ds),
-        output_dir=str(tmp_path / "out_hf"),
-        dry_run=False,
+        validation_dataset_path=str(tmp_path / "missing_val.jsonl"),
+        output_dir=str(tmp_path / "out_hf_val"),
+        dry_run=True,
     )
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.device", MockTorchDevice),
+    ):
+        res_dry = runner.run_training(config)
+    assert res_dry["status"] == "dry_run_completed"
+    assert res_dry["eval_metrics"] == {}
 
-    class ModelNoTo(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.linear = torch.nn.Linear(10, 10)
+    class MinimalCallableModel:
+        """Callable model without .train() or .save_pretrained()."""
 
-        def forward(self, x: Any, **kwargs: Any) -> Any:
+        def parameters(self) -> Any:
+            """Return single mock parameter."""
+            return [torch.nn.Parameter(torch.randn(2, 2))]
+
+        def state_dict(self) -> dict[str, Any]:
+            """Return mock state_dict."""
+            return {"w": torch.zeros(1)}
+
+        def __call__(self, x: Any) -> Any:
+            """Return mock logits."""
+
             class Out:
+                """Output container."""
+
                 logits = torch.randn(
                     x.size(0), x.size(1), 10, device=x.device, requires_grad=True
                 )
 
             return Out()
 
-        def save_pretrained(self, path: Any) -> None:
-            pass
-
-    runner_hf = HuggingFaceCausalLMRunner()
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=ModelNoTo(),
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[(torch.tensor([[1]]), torch.tensor([[1]]))],
-            ):
-                runner_hf.run_training(config)
-
-    runner_cpu = LocalCpuRunner()
-    config.backend = TrainingBackend.LOCAL_CPU
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=ModelNoTo(),
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[(torch.tensor([[1]]), torch.tensor([[1]]))],
-            ):
-                runner_cpu.run_training(config)
-
-
-def test_mock_fixture_coverage(
-    mock_huggingface_factory: None, mock_huggingface_tokenizer: None
-) -> None:
-    """Test to cover branches inside the mock objects used in this test file."""
-    # 2. HuggingFaceCausalLMFactory create_model invalid branch
-    from t1d_analytics.training_runner import HuggingFaceCausalLMFactory
-
-    factory = HuggingFaceCausalLMFactory()
-    try:
-        # It's mocked in the fixture, so we just call the mocked one
-        factory.create_model("invalid")
-    except RuntimeError:
-        pass
-
-    # 3. MockTorchDevice __instancecheck__
-    isinstance("dummy", MockTorchDevice)
-
-
-def test_training_runner_no_torch() -> None:
-    """Test training runner execution when torch is not available."""
-    import sys
-    from unittest.mock import patch
-
-    with open(os.path.abspath("src/t1d_analytics/training_runner.py")) as f:
-        code = f.read()
-    namespace: dict[str, Any] = {
-        "__name__": "__main__",
-        "__file__": os.path.abspath("src/t1d_analytics/training_runner.py"),
-    }
-    with patch.dict(sys.modules, {"torch": None, "transformers": None}):
-        exec(
-            compile(
-                code, os.path.abspath("src/t1d_analytics/training_runner.py"), "exec"
-            ),
-            namespace,
-        )
-
-
-def test_training_runner_cuda_and_exceptions(tmp_path: Any) -> None:
-    """Test training runner execution with cuda and exceptions."""
-    import sys
-    from typing import Any
-    from unittest.mock import MagicMock, patch
-
-    with open(os.path.abspath("src/t1d_analytics/training_runner.py")) as f:
-        code = f.read()
-
-    mock_torch = MagicMock()
-    mock_torch.cuda.is_available.return_value = True
-    mock_torch.device.return_value = "cuda:0"
-
-    mock_model = MagicMock()
-
-    def mock_to(*args: Any, **kwargs: Any) -> Any:
-        raise Exception("Force to_fn exception")
-
-    mock_model.to = mock_to
-    mock_hf = MagicMock()
-    mock_hf.from_pretrained.return_value = mock_model
-
-    namespace: dict[str, Any] = {
-        "__name__": "__main__",
-        "__file__": os.path.abspath("src/t1d_analytics/training_runner.py"),
-    }
+    config_run = TrainingJobConfig(
+        model_name="mock",
+        backend=TrainingBackend.HUGGINGFACE,
+        dataset_path=str(ds),
+        validation_dataset_path=str(tmp_path / "missing_val.jsonl"),
+        output_dir=str(tmp_path / "out_hf_minimal"),
+        dry_run=False,
+    )
     with (
-        patch.dict(
-            sys.modules,
-            {
-                "torch": mock_torch,
-                "transformers": MagicMock(
-                    AutoModelForCausalLM=mock_hf, AutoTokenizer=MagicMock()
-                ),
-            },
-        ),
-        patch("pathlib.Path.exists", return_value=True),
-    ):
-        exec(
-            compile(
-                code, os.path.abspath("src/t1d_analytics/training_runner.py"), "exec"
-            ),
-            namespace,
-        )
-
-        namespace["prepare_torch_dataset"] = MagicMock(
-            return_value=[(MagicMock(), MagicMock())]
-        )
-        try:
-            namespace["HuggingFaceCausalLMRunner"]()._evaluate(
-                mock_model, str(tmp_path), 4
-            )
-        except Exception:
-            pass
-        mock_model.to = MagicMock()
-        try:
-            namespace["HuggingFaceCausalLMRunner"]()._evaluate(
-                mock_model, str(tmp_path), 4
-            )
-        except Exception:
-            pass
-
-        runner = namespace["HuggingFaceCausalLMRunner"]()
-        namespace["HuggingFaceCausalLMRunner"]._count_dataset_samples = MagicMock(
-            return_value=100
-        )
-        try:
-            runner.run_training(
-                namespace["TrainingJobConfig"](
-                    dataset_path=str(tmp_path),
-                    model_name="dummy",
-                    backend=namespace["TrainingBackend"].HUGGINGFACE,
-                )
-            )
-        except Exception:
-            pass
-        mock_model.to = mock_to
-        namespace["HuggingFaceCausalLMRunner"]._count_dataset_samples = MagicMock(
-            return_value=100
-        )
-        try:
-            runner.run_training(
-                namespace["TrainingJobConfig"](
-                    dataset_path=str(tmp_path),
-                    model_name="dummy",
-                    backend=namespace["TrainingBackend"].HUGGINGFACE,
-                )
-            )
-        except Exception:
-            pass
-
-
-def test_training_runner_cuda_branches(tmp_path: Any) -> None:
-    """Test training runner cuda branches."""
-    from typing import Any
-    from unittest.mock import MagicMock, patch
-
-    import t1d_analytics.training_runner as tr
-
-    mock_torch = MagicMock()
-    mock_torch.cuda.is_available.return_value = True
-    mock_torch.device.return_value = "cuda:0"
-
-    mock_model = MagicMock()
-
-    def mock_to(*args: Any, **kwargs: Any) -> Any:
-        raise Exception("Force exception")
-
-    mock_model.to = mock_to
-    mock_hf = MagicMock()
-    mock_hf.from_pretrained.return_value = mock_model
-
-    with (
-        patch("t1d_analytics.training_runner.torch", mock_torch, create=True),
         patch(
-            "transformers.AutoModelForCausalLM.from_pretrained", return_value=mock_model
+            "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
+            return_value=MinimalCallableModel(),
         ),
         patch(
             "t1d_analytics.training_runner.prepare_torch_dataset",
-            return_value=[(MagicMock(), MagicMock())],
-        ),
-        patch("pathlib.Path.exists", return_value=True),
-    ):
-        factory = tr.HuggingFaceCausalLMFactory()
-        try:
-            factory.create_model("dummy", device="cuda:0")
-        except Exception:
-            pass
-
-        mock_model.to = "not_callable"
-        try:
-            factory.create_model("dummy", device="cuda:0")
-        except Exception:
-            pass
-
-        runner = tr.HuggingFaceCausalLMRunner()
-        with patch.object(runner, "_count_dataset_samples", return_value=100):
-            try:
-                runner.run_training(
-                    TrainingJobConfig(
-                        dataset_path=str(tmp_path),
-                        model_name="dummy",
-                        backend=TrainingBackend.HUGGINGFACE,
-                        validation_dataset_path=str(tmp_path),
-                    )
-                )
-            except Exception:
-                pass
-
-            mock_model.to = mock_to
-            try:
-                runner.run_training(
-                    TrainingJobConfig(
-                        dataset_path=str(tmp_path),
-                        model_name="dummy",
-                        backend=TrainingBackend.HUGGINGFACE,
-                        validation_dataset_path=str(tmp_path),
-                    )
-                )
-            except Exception:
-                pass
-
-            with patch("pathlib.Path.exists", return_value=False):
-                try:
-                    runner.run_training(
-                        TrainingJobConfig(
-                            dataset_path=str(tmp_path),
-                            model_name="dummy",
-                            backend=TrainingBackend.HUGGINGFACE,
-                            validation_dataset_path=str(tmp_path),
-                        )
-                    )
-                except Exception as e:
-                    print("EXCEPTION IN EXISTS FALSE:", repr(e))
-                    pass
-
-
-def test_training_runner_cov_dry_run(tmp_path: Any) -> None:
-    """Test training runner dry run coverage."""
-    from unittest.mock import MagicMock, patch
-
-    import t1d_analytics.training_runner as tr
-
-    mock_model = MagicMock()
-    mock_hf = MagicMock()
-    mock_hf.from_pretrained.return_value = mock_model
-    mock_torch = MagicMock()
-    mock_torch.cuda.is_available.return_value = True
-    mock_torch.device.return_value = "cuda:0"
-
-    with (
-        patch("t1d_analytics.training_runner.torch", mock_torch, create=True),
-        patch(
-            "transformers.AutoModelForCausalLM.from_pretrained", return_value=mock_model
-        ),
-        patch("transformers.AutoTokenizer.from_pretrained", return_value=MagicMock()),
-        patch(
-            "t1d_analytics.training_runner.prepare_torch_dataset",
-            return_value=[(MagicMock(), MagicMock())],
-        ),
-        patch("pathlib.Path.exists", return_value=True),
-    ):
-        runner = tr.HuggingFaceCausalLMRunner()
-        with patch.object(runner, "_count_dataset_samples", return_value=100):
-            try:
-                runner.run_training(
-                    TrainingJobConfig(
-                        dataset_path=str(tmp_path),
-                        model_name="dummy",
-                        backend=TrainingBackend.HUGGINGFACE,
-                        validation_dataset_path=None,
-                        dry_run=True,
-                    )
-                )
-            except Exception:
-                pass
-
-
-def test_training_runner_cov_exists_false(tmp_path: Any) -> None:
-    """Test training runner false coverage."""
-    from unittest.mock import MagicMock, patch
-
-    import t1d_analytics.training_runner as tr
-
-    mock_model = MagicMock()
-    mock_hf = MagicMock()
-    mock_hf.from_pretrained.return_value = mock_model
-    mock_torch = MagicMock()
-    mock_torch.cuda.is_available.return_value = True
-    mock_torch.device.return_value = "cuda:0"
-
-    with (
-        patch("t1d_analytics.training_runner.torch", mock_torch, create=True),
-        patch(
-            "transformers.AutoModelForCausalLM.from_pretrained", return_value=mock_model
-        ),
-        patch("transformers.AutoTokenizer.from_pretrained", return_value=MagicMock()),
-        patch(
-            "t1d_analytics.training_runner.prepare_torch_dataset",
-            return_value=[(MagicMock(), MagicMock())],
+            return_value=[(torch.tensor([1, 2]), torch.tensor([1, 2]))],
         ),
     ):
-        # No patch for Path.exists! Let the real filesystem handle it!
-        # tmp_path exists (ds_path). "does_not_exist_validation" does not exist (val_path).
-        runner = tr.HuggingFaceCausalLMRunner()
-        with patch.object(runner, "_count_dataset_samples", return_value=100):
-            try:
-                runner.run_training(
-                    TrainingJobConfig(
-                        dataset_path=str(tmp_path),
-                        model_name="dummy",
-                        backend=TrainingBackend.HUGGINGFACE,
-                        validation_dataset_path=str(
-                            tmp_path / "does_not_exist_validation"
-                        ),
-                        dry_run=True,
-                    )
-                )
-            except Exception:
-                pass
+        res_run = runner.run_training(config_run)
+        assert res_run["status"] == "completed"
+        assert (
+            tmp_path / "out_hf_minimal" / "checkpoint-hf-final" / "model.pt"
+        ).exists()

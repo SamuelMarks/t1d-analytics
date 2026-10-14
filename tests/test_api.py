@@ -784,6 +784,7 @@ def test_execute_sql_timer_safe_interrupt_branch(mock_db: str) -> None:
     original_timer = threading.Timer
 
     def mock_timer(*args: typing.Any, **kwargs: typing.Any) -> threading.Timer:
+        """Capture timer callback and return a real threading.Timer."""
         nonlocal timer_callback
         timer_callback = args[1]
         return original_timer(*args, **kwargs)
@@ -1093,6 +1094,7 @@ def test_stream_llm_tokens_branches(mock_create: MagicMock) -> None:
     mock_resp.choices[0].message.content = "fallback words stream"
 
     def fail_streaming(**kwargs: typing.Any) -> typing.Any:
+        """Raise error when stream=True, else return mock_resp."""
         if kwargs.get("stream"):
             raise RuntimeError("Streaming not supported")
         return mock_resp
@@ -1229,6 +1231,7 @@ def test_concurrency_and_lock_contention(mock_db: str) -> None:
     import concurrent.futures
 
     def make_sql_request(idx: int) -> int:
+        """Send a concurrent SQL execution request."""
         res = client.post(
             "/api/execute-sql",
             json={
@@ -1239,6 +1242,7 @@ def test_concurrency_and_lock_contention(mock_db: str) -> None:
         return res.status_code
 
     def make_chat_sql_request(idx: int) -> int:
+        """Send a concurrent chat SQL execution request."""
         res = client.post(
             "/api/chat",
             json={
@@ -1367,6 +1371,7 @@ def test_sessions_concurrent_access_and_locking() -> None:
     import concurrent.futures
 
     def do_session_op(idx: int) -> int:
+        """Execute a session create, list, or delete operation."""
         if idx % 3 == 0:
             res = client.post(
                 "/api/sessions",
@@ -1539,6 +1544,7 @@ def test_sessions_db_lock_retry(tmp_path: Path, mocker: typing.Any) -> None:
     def mock_connect(
         *args: typing.Any, **kwargs: typing.Any
     ) -> duckdb.DuckDBPyConnection:
+        """Raise lock IOException twice before returning real_conn."""
         if len(attempts) < 2:
             attempts.append(1)
             raise duckdb.IOException("Could not set lock on file")
@@ -1963,6 +1969,7 @@ def test_rate_limiter_backends_and_retry_after(
     limiter_mem.reset()
 
     def send_req() -> bool:
+        """Check rate limit allowance for concurrent_ip."""
         return limiter_mem.is_allowed(concurrent_ip, limit=10, window_seconds=60.0)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -2176,6 +2183,7 @@ def test_stream_llm_tokens_native_and_fallback() -> None:
     mock_llm_err = MagicMock()
 
     def fail_streaming(**kwargs: typing.Any) -> typing.Any:
+        """Raise RuntimeError when stream=True, else return single response block."""
         if kwargs.get("stream"):
             raise RuntimeError("Streaming not supported")
         resp = MagicMock()
@@ -2440,10 +2448,14 @@ def test_get_table_data_zero_columns(tmp_path: Path) -> None:
     orig_connect = duckdb.connect
 
     class MockConn:
+        """Mock DuckDB connection that returns empty table_info."""
+
         def __init__(self, real_conn: Any) -> None:
+            """Store real connection."""
             self._real = real_conn
 
         def execute(self, query: str, params: Any = None) -> Any:
+            """Return empty metadata on PRAGMA table_info/DESCRIBE."""
             if "PRAGMA table_info" in query or "DESCRIBE" in query:
                 mock_res = MagicMock()
                 mock_res.fetchall.return_value = []
@@ -2454,9 +2466,11 @@ def test_get_table_data_zero_columns(tmp_path: Path) -> None:
             return self._real.execute(query)
 
         def close(self) -> None:
+            """Close underlying real connection."""
             self._real.close()
 
     def mock_conn_factory(path: str, **kwargs: Any) -> Any:
+        """Create a MockConn wrapping a real DuckDB connection."""
         real = orig_connect(path, **kwargs)
         return MockConn(real)
 

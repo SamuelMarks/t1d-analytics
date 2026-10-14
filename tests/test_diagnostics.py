@@ -338,6 +338,7 @@ def test_check_ollama_health_host_env(monkeypatch: pytest.MonkeyPatch) -> None:
     requested_urls = []
 
     def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+        """Record requested URL and return mock models JSON."""
         requested_urls.append(req.full_url)
         return io.BytesIO(b'{"models": [{"name": "gemma4:latest"}]}')
 
@@ -398,7 +399,10 @@ def test_check_database_health_integrity_fail(tmp_path: Path) -> None:
     conn.close()
 
     class FakeConn:
+        """Fake DuckDB connection that fails on duckdb_tables inspection."""
+
         def execute(self, sql: str) -> typing.Any:
+            """Raise corruption error on duckdb_tables query."""
             if "duckdb_tables" in sql:
                 raise Exception("Corrupt block detected")
             res = MagicMock()
@@ -406,6 +410,7 @@ def test_check_database_health_integrity_fail(tmp_path: Path) -> None:
             return res
 
         def close(self) -> None:
+            """Close fake connection."""
             pass
 
     with patch("duckdb.connect", return_value=FakeConn()):
@@ -421,6 +426,7 @@ def test_check_ollama_health_with_version(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
     def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+        """Return version JSON or models JSON based on endpoint."""
         if "/api/version" in req.full_url:
             return io.BytesIO(b'{"version": "0.1.28"}')
         return io.BytesIO(b'{"models": [{"name": "gemma4:latest"}]}')
@@ -441,6 +447,7 @@ def test_check_ollama_health_version_error(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
     def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+        """Raise URLError on /api/version and return models on /api/tags."""
         if "/api/version" in req.full_url:
             raise urllib.error.URLError("Not found")
         return io.BytesIO(b'{"models": [{"name": "gemma4:latest"}]}')

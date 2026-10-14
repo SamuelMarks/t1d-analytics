@@ -372,6 +372,7 @@ def test_download_file_range_resumption(tmp_path: Path, requests_mock: Mock) -> 
     tmp_path_file.write_bytes(b"first_half_")
 
     def matcher(request: requests.PreparedRequest) -> bool:
+        """Verify Range header matches expected byte offset."""
         return request.headers.get("Range") == "bytes=11-"
 
     requests_mock.get(
@@ -420,6 +421,7 @@ def test_download_file_socket_dropout_cleanup(
     mock_resp.raise_for_status.return_value = None
 
     def fail_chunks(chunk_size: int = 8192) -> typing.Iterator[bytes]:
+        """Yield initial chunk then raise ConnectionResetError."""
         yield b"initial_chunk"
         raise ConnectionResetError("Socket reset by peer")
 
@@ -446,6 +448,7 @@ def test_download_file_progress_callback_and_terminal(
     progress_updates: list[tuple[int, Optional[int]]] = []
 
     def on_progress(downloaded: int, total: Optional[int]) -> None:
+        """Record download progress tuple."""
         progress_updates.append((downloaded, total))
 
     requests_mock.get(

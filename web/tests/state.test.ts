@@ -191,11 +191,18 @@ describe("ChatState", () => {
 
     const newState = new ChatState();
     newState.createChat();
+    newState.removeApiKey("openai");
 
     Object.defineProperty(global, "localStorage", {
       value: originalLocalStorage,
       configurable: true,
     });
+  });
+
+  it("handles corrupted JSON in t1d_analytics_chats gracefully", () => {
+    localStorage.setItem("t1d_analytics_chats", "{invalid-json");
+    const brokenState = new ChatState();
+    expect(brokenState.chats).toEqual([]);
   });
   it("handles loading partial state from localStorage", () => {
     localStorage.setItem("t1d_analytics_chats", JSON.stringify({}));

@@ -27,6 +27,7 @@ def test_concurrent_duckdb_reads(tmp_path: Path) -> None:
     conn.close()
 
     def run_read(thread_id: int) -> int:
+        """Execute a concurrent read query."""
         query = f"SELECT count(*) FROM records WHERE id >= {thread_id}"
         res = execute_sql(db_path, query)
         return len(res)
@@ -53,6 +54,7 @@ def test_concurrent_api_session_writes(tmp_path: Path) -> None:
     db_path = str(tmp_path / "sessions_concurrent.duckdb")
 
     def create_session(idx: int) -> int:
+        """Create a chat session via POST /api/sessions."""
         resp = client.post(
             f"/api/sessions?db_path={db_path}",
             json={
@@ -134,6 +136,7 @@ def test_multiprocess_duckdb_writes(tmp_path: Path) -> None:
     calls = []
 
     def mock_connect(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        """Raise lock IOException on first call then delegate to duckdb.connect."""
         calls.append(1)
         if len(calls) == 1:
             raise duckdb.IOException("database is locked")
@@ -144,6 +147,7 @@ def test_multiprocess_duckdb_writes(tmp_path: Path) -> None:
 
     # 3. Cover backoff exhaust / non-lock error
     def mock_connect_fail(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        """Raise non-lock IOException."""
         raise duckdb.IOException("unknown error")
 
     with patch("duckdb.connect", side_effect=mock_connect_fail):
@@ -166,6 +170,7 @@ def test_multiprocess_duckdb_writes(tmp_path: Path) -> None:
     assert count == workers + 2
 
     def mock_connect_lock_always(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        """Raise lock IOException unconditionally."""
         raise duckdb.IOException("database is locked")
 
     with patch("duckdb.connect", side_effect=mock_connect_lock_always):

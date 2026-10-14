@@ -676,6 +676,7 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     orig_load = analytics.load_data_to_duckdb
 
     def side_effect_load(*args: Any, **kwargs: Any) -> None:
+        """Unlink sample_file and delegate to original load_data_to_duckdb."""
         sample_file.unlink()
         orig_load(*args, **kwargs)
 
@@ -1522,15 +1523,3 @@ def test_cli_main_block() -> None:
             runpy.run_module("t1d_analytics.cli", run_name="__main__")
         except SystemExit as e:
             assert e.code == 0
-
-
-def test_cli_main_block_coverage() -> None:
-    """Test the __main__ block coverage by patching main."""
-    with open("src/t1d_analytics/cli.py") as f:
-        code = f.read()
-    code = code.replace("    main()", "    pass")
-    namespace = {"__name__": "__main__", "__file__": "src/t1d_analytics/cli.py"}
-    try:
-        exec(code, namespace)
-    except SystemExit:
-        pass

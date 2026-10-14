@@ -3934,15 +3934,6 @@ describe("ChatUI", () => {
     expect(joinOnInput.value).toBe(
       '"sensors".patient_id = "unknown_table".patient_id',
     );
-
-    // Also trigger resolveTableJoin fallback when cohortJoinOnInput is null
-    (ui as any).cohortJoinOnInput = null;
-    (uiWithoutDot as any).cohortJoinOnInput = null;
-    joinTableSelect.value = "unknown_table";
-    ui.handleCohortJoinTableChange();
-    uiWithoutDot.handleCohortJoinTableChange();
-    (ui as any).cohortJoinOnInput = joinOnInput;
-    (uiWithoutDot as any).cohortJoinOnInput = joinOnInput;
     tableSelect.value = "patients";
 
     // Test getCohortSql fallback when cohortJoinTypeSelect.value is empty
@@ -3956,25 +3947,95 @@ describe("ChatUI", () => {
     joinTableSelect.dispatchEvent(new Event("change"));
     expect(joinOnInput.value).toBe("");
 
-    // Test null branches for cohortJoinOnInput, cohortJoinTypeSelect, cohortSqlPreview
-    const origOnInput = (ui as any).cohortJoinOnInput;
-    const origTypeSelect = (ui as any).cohortJoinTypeSelect;
-    const origPreview = (ui as any).cohortSqlPreview;
-    (ui as any).cohortJoinOnInput = null;
-    (ui as any).cohortJoinTypeSelect = null;
-    (ui as any).cohortSqlPreview = null;
+    // Test resilience when optional cohort & provider DOM elements are absent at instantiation
+    const removedNodes: Array<{
+      el: HTMLElement;
+      parent: HTMLElement;
+      next: ChildNode | null;
+    }> = [];
+    for (const id of [
+      "cohort-join-type",
+      "cohort-sql-preview",
+      "provider-key-openai",
+      "provider-key-anthropic",
+      "provider-key-google",
+      "provider-store-consent",
+      "provider-modal",
+    ]) {
+      const el = document.getElementById(id);
+      if (el && el.parentElement) {
+        removedNodes.push({
+          el,
+          parent: el.parentElement,
+          next: el.nextSibling,
+        });
+        el.remove();
+      }
+    }
+    const minimalUi = new ChatUI(state);
+    await new Promise((r) => setTimeout(r, 0));
+    tableSelect.innerHTML = `<option value="patients">patients</option><option value="sensors">sensors</option>`;
+    joinTableSelect.innerHTML = `<option value="patients">patients</option><option value="cgms">cgms</option><option value="visits">visits</option><option value="unknown_table">unknown_table</option>`;
+    tableSelect.value = "patients";
     joinTableSelect.value = "cgms";
-    (ui as any).cohortJoinTableSelect = joinTableSelect;
-    ui.handleCohortJoinTableChange();
-    joinTableSelect.value = "unknown_table";
-    ui.handleCohortJoinTableChange();
-    joinTableSelect.value = "patients";
-    ui.handleCohortJoinTableChange();
-    ui.updateCohortSqlPreview();
-    (ui as any).cohortJoinOnInput = origOnInput;
-    (ui as any).cohortJoinTypeSelect = origTypeSelect;
-    (ui as any).cohortSqlPreview = origPreview;
+    minimalUi.handleCohortJoinTableChange();
+    minimalUi.updateCohortSqlPreview();
+    await expect(minimalUi.openProviderModal()).resolves.toBeUndefined();
+    expect(() => minimalUi.closeProviderModal()).not.toThrow();
+    await minimalUi.saveProviderSettings();
+    await minimalUi.clearProviderSettings();
+    for (const item of removedNodes.reverse()) {
+      item.parent.insertBefore(item.el, item.next);
+    }
 
+    // Also test when cohort-join-on is absent
+    const joinOnParent = joinOnInput.parentElement!;
+    const joinOnNext = joinOnInput.nextSibling;
+    joinOnInput.remove();
+    const noJoinOnUi = new ChatUI(state);
+    await new Promise((r) => setTimeout(r, 0));
+    tableSelect.innerHTML = `<option value="patients">patients</option>`;
+    joinTableSelect.innerHTML = `<option value="patients">patients</option><option value="cgms">cgms</option>`;
+    tableSelect.value = "patients";
+    joinTableSelect.value = "patients";
+    noJoinOnUi.handleCohortJoinTableChange();
+    joinTableSelect.value = "cgms";
+    noJoinOnUi.handleCohortJoinTableChange();
+    joinOnParent.insertBefore(joinOnInput, joinOnNext);
+
+    // Also test openProviderModal when providerModal exists but key inputs are absent
+    const removedKeyNodes: Array<{
+      el: HTMLElement;
+      parent: HTMLElement;
+      next: ChildNode | null;
+    }> = [];
+    for (const id of [
+      "provider-key-openai",
+      "provider-key-anthropic",
+      "provider-key-google",
+      "provider-store-consent",
+    ]) {
+      const el = document.getElementById(id);
+      if (el && el.parentElement) {
+        removedKeyNodes.push({
+          el,
+          parent: el.parentElement,
+          next: el.nextSibling,
+        });
+        el.remove();
+      }
+    }
+    const modalWithoutInputsUi = new ChatUI(state);
+    await new Promise((r) => setTimeout(r, 0));
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await modalWithoutInputsUi.openProviderModal();
+    for (const item of removedKeyNodes.reverse()) {
+      item.parent.insertBefore(item.el, item.next);
+    }
+
+    tableSelect.innerHTML = `<option value="patients">patients</option>`;
+    tableSelect.value = "patients";
+    joinTableSelect.innerHTML = `<option value="visits">visits</option>`;
     joinTableSelect.value = "visits";
     joinTypeSelect.value = "LEFT JOIN";
     joinOnInput.value = '"patients".patient_id = "visits".patient_id';
@@ -4017,8 +4078,7 @@ describe("ChatUI", () => {
     expect(preview.textContent).toContain("tir <= 70");
     expect(preview.textContent).toContain("hba1c >= 6.5");
 
-    // 4. Provider modal null checks, saving anthropic and google keys, and local badge fallbacks
-    // Re-create provider modal DOM to test providerKeyAnthropic & providerKeyGoogle saving
+    // 4. Provider modal saving anthropic and google keys and local badge fallbacks
     const keyAnthropic = document.getElementById(
       "provider-key-anthropic",
     ) as HTMLInputElement;
@@ -4041,30 +4101,6 @@ describe("ChatUI", () => {
     // openProviderModal when fetch throws (catch branch)
     mockFetch.mockRejectedValueOnce(new Error("Network disconnect"));
     await ui.openProviderModal();
-
-    // Test null input branches in openProviderModal, saveProviderSettings, clearProviderSettings
-    const origOpenAI = (ui as any).providerKeyOpenAI;
-    const origAnthropic = (ui as any).providerKeyAnthropic;
-    const origGoogle = (ui as any).providerKeyGoogle;
-    const origConsent = (ui as any).providerStoreConsent;
-    (ui as any).providerKeyOpenAI = null;
-    (ui as any).providerKeyAnthropic = null;
-    (ui as any).providerKeyGoogle = null;
-    (ui as any).providerStoreConsent = null;
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-    await ui.openProviderModal();
-    await ui.saveProviderSettings();
-    await ui.clearProviderSettings();
-    (ui as any).providerKeyOpenAI = origOpenAI;
-    (ui as any).providerKeyAnthropic = origAnthropic;
-    (ui as any).providerKeyGoogle = origGoogle;
-    (ui as any).providerStoreConsent = origConsent;
-
-    // openProviderModal / closeProviderModal when providerModal is missing
-    (ui as any).providerModal = null;
-    await expect(ui.openProviderModal()).resolves.toBeUndefined();
-    expect(() => ui.closeProviderModal()).not.toThrow();
-    (ui as any).providerModal = document.getElementById("provider-modal");
 
     // 5. handleSendMessage with provider and apiKey request headers
     state.createChat();
