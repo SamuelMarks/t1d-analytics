@@ -217,20 +217,11 @@ def test_test_sh_cloud_credentials_verification(tmp_path: Path) -> None:
         "grep",
         "[",
         "test",
-        "fake_missing_tool",
     ]:
         tool_src = shutil.which(tool_name)
-        if tool_src:
-            dest = isolated_bin / tool_name
-            try:
-                if tool_name == "echo":
-                    raise OSError("Mock OSError")
-                dest.symlink_to(tool_src)
-            except OSError:
-                try:
-                    shutil.copy2(tool_src, dest)
-                except PermissionError:
-                    pass
+        assert tool_src is not None
+        dest = isolated_bin / tool_name
+        dest.symlink_to(tool_src)
 
     # az missing with --live-cloud
     (bin_dir / "az").unlink()

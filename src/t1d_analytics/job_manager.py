@@ -1,6 +1,7 @@
 """Thread-safe asynchronous background manager for training jobs."""
 
 import datetime
+import inspect
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -129,7 +130,11 @@ class TrainingJobManager:
                         self._jobs[job_id].status = "cancelled"
                     return
 
-                res = runner.run_training(config)
+                sig = inspect.signature(runner.run_training)
+                if "cancel_event" in sig.parameters:
+                    res = runner.run_training(config, cancel_event=cancel_event)
+                else:
+                    res = runner.run_training(config)
                 with self._lock:
                     if cancel_event.is_set():
                         self._jobs[job_id].status = "cancelled"

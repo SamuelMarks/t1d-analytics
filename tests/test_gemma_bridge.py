@@ -357,14 +357,34 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(tmp_path: Path) -> None:
     )
     assert sft_res_no_hparams["status"] == "completed"
 
-    # 4. Native run_dpo
+    # 4. Native run_dpo (including empty lines, malformed JSON, non-dict JSON, and empty rejected_sql)
     pref_file = tmp_path / "pref.jsonl"
-    pref_file.write_text('{"prompt": "q", "chosen": "a", "rejected": "b"}\n')
+    pref_file.write_text(
+        "\n"
+        "not-json\n"
+        "[1, 2, 3]\n"
+        '{"prompt": "q1", "chosen_sql": "SELECT COUNT(*) FROM p", "rejected_sql": "SELECT * FROM p WHERE 1=0"}\n'
+        '{"prompt": "q2", "chosen": "SELECT id FROM p", "rejected": ""}\n'
+        '{"prompt": "q3", "chosen": ""}\n'
+    )
     dpo_res = engine.run_dpo("gemma-2b", pref_file, tmp_path / "dpo_out", beta=0.05)
     assert dpo_res["status"] == "completed"
     assert dpo_res["execution_mode"] == "native_in_process"
     assert "result" in dpo_res
     assert dpo_res["result"]["status"] == "dry_run_completed"
+    assert dpo_res["result"]["dpo_pairs"] == 2
+    assert dpo_res["result"]["dpo_loss"] > 0.0
+    assert dpo_res["result"]["reward_margin"] > 0.0
+
+    # Also test DPO when no valid chosen_sql pairs exist in file
+    pref_empty = tmp_path / "pref_empty.jsonl"
+    pref_empty.write_text('{"prompt": "p", "chosen_sql": ""}\n')
+    dpo_zero_res = engine.run_dpo(
+        "gemma-2b", pref_empty, tmp_path / "dpo_zero_out", beta=0.1
+    )
+    assert dpo_zero_res["result"]["dpo_pairs"] == 0
+    assert dpo_zero_res["result"]["dpo_loss"] == 0.0
+    assert dpo_zero_res["result"]["reward_margin"] == 0.0
 
     # 5. Native evaluate_sql - empty test cases
     empty_tc = tmp_path / "empty_cases.jsonl"

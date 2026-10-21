@@ -897,31 +897,27 @@ def test_chat_stream_nl_translation_error(mock_stream: MagicMock, mock_db: str) 
 
 def test_validate_db_path_null_byte() -> None:
     """Test validate_db_path rejects null byte injection."""
-    from fastapi import HTTPException
-
     from t1d_analytics.api import validate_db_path
+    from t1d_analytics.errors import InvalidDatabasePathError
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(InvalidDatabasePathError) as exc_info:
         validate_db_path("test\0.duckdb")
     assert exc_info.value.status_code == 400
-    assert isinstance(exc_info.value.detail, dict)
-    assert exc_info.value.detail["error_code"] == "backend.invalidDatabasePath"
+    assert exc_info.value.error_code == "backend.invalidDatabasePath"
 
 
 def test_validate_db_path_traversal() -> None:
     """Test validate_db_path rejects paths outside allowed directory containment."""
     from pathlib import Path
 
-    from fastapi import HTTPException
-
     from t1d_analytics.api import validate_db_path
+    from t1d_analytics.errors import InvalidDatabasePathError
 
     allowed = [Path("/mock/allowed/dir")]
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(InvalidDatabasePathError) as exc_info:
         validate_db_path("/etc/passwd", allowed_dirs=allowed)
     assert exc_info.value.status_code == 400
-    assert isinstance(exc_info.value.detail, dict)
-    assert exc_info.value.detail["error_code"] == "backend.invalidDatabasePath"
+    assert exc_info.value.error_code == "backend.invalidDatabasePath"
 
 
 def test_validate_db_path_env_var(monkeypatch: typing.Any, tmp_path: Path) -> None:
@@ -945,19 +941,59 @@ def test_validate_db_path_env_var(monkeypatch: typing.Any, tmp_path: Path) -> No
 
 
 def test_chat_stream_invalid_db_path() -> None:
-    """Test /api/chat/stream handles invalid db_path."""
-    from unittest.mock import patch
+    """Test /api/chat and /api/chat/stream handle invalid db_path."""
+    resp_chat = client.post(
+        "/api/chat",
+        json={"message": "SELECT 1", "model": "sql", "db_path": "../../evil.duckdb"},
+    )
+    assert resp_chat.status_code == 400
+    assert resp_chat.json()["detail"]["error_code"] == "backend.invalidDatabasePath"
 
-    with patch("t1d_analytics.api.validate_db_path") as mock_val:
-        from fastapi import HTTPException
+    resp = client.post(
+        "/api/chat/stream",
+        json={"message": "hello", "db_path": "../../evil.duckdb"},
+    )
+    assert resp.status_code == 200
+    assert "backend.invalidDatabasePath" in resp.text
 
-        mock_val.side_effect = HTTPException(status_code=400)
+
+def test_server_auth_header_not_leaked_to_llm_provider(
+    monkeypatch: pytest.MonkeyPatch, mock_db: str
+) -> None:
+    """Verify server x-api-key header is used only for server auth and never forwarded as an LLM provider API key."""
+    monkeypatch.setenv("T1D_API_KEY", "server-auth-secret-token")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with patch("t1d_analytics.api.generate_sql_from_nl") as mock_gen:
+        mock_gen.return_value = ("Here is the query", "SELECT 1")
         resp = client.post(
-            "/api/chat/stream",
-            json={"message": "hello", "db_path": "../../evil.duckdb"},
+            "/api/chat",
+            headers={"x-api-key": "server-auth-secret-token"},
+            json={
+                "message": "Count patients",
+                "model": "openai/gpt-4o",
+                "db_path": mock_db,
+            },
         )
         assert resp.status_code == 200
-        assert "backend.invalidDatabasePath" in resp.text
+        _, kwargs = mock_gen.call_args
+        assert kwargs.get("api_key") is None
+
+        resp_with_prov = client.post(
+            "/api/chat",
+            headers={
+                "x-api-key": "server-auth-secret-token",
+                "x-provider-api-key": "sk-explicit-provider-key",
+            },
+            json={
+                "message": "Count patients",
+                "model": "openai/gpt-4o",
+                "db_path": mock_db,
+            },
+        )
+        assert resp_with_prov.status_code == 200
+        _, kwargs_prov = mock_gen.call_args
+        assert kwargs_prov.get("api_key") == "sk-explicit-provider-key"
 
 
 def test_get_table_data_negative_pagination(mock_db: str) -> None:
@@ -1409,7 +1445,8 @@ def test_delete_session_not_found() -> None:
     """Test delete_session returns 404 for non-existent session ID."""
     resp = client.delete("/api/sessions/non-existent-session-xyz")
     assert resp.status_code == 404
-    assert resp.json()["detail"] == "Session not found"
+    detail = resp.json()["detail"]
+    assert detail["error_code"] == "backend.sessionNotFound"
 
 
 def test_get_table_profile_endpoint(mock_db: str, mocker: typing.Any) -> None:
@@ -1536,10 +1573,11 @@ def test_sessions_db_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 def test_sessions_db_lock_retry(tmp_path: Path, mocker: typing.Any) -> None:
     """Test _get_sessions_db_conn retries upon IOException lock contention."""
-    from t1d_analytics.api import _get_sessions_db_conn
+    from t1d_analytics.session_store import open_sessions_db_conn
 
     real_conn = duckdb.connect(str(tmp_path / "retry.duckdb"))
     attempts: list[int] = []
+    sleep_delays: list[float] = []
 
     def mock_connect(
         *args: typing.Any, **kwargs: typing.Any
@@ -1551,21 +1589,28 @@ def test_sessions_db_lock_retry(tmp_path: Path, mocker: typing.Any) -> None:
         return real_conn
 
     mocker.patch("duckdb.connect", side_effect=mock_connect)
-    conn = _get_sessions_db_conn(str(tmp_path / "retry.duckdb"))
+    conn = open_sessions_db_conn(
+        str(tmp_path / "retry.duckdb"),
+        sleep_fn=lambda d: sleep_delays.append(d),
+    )
     conn.close()
     assert len(attempts) == 2
+    assert len(sleep_delays) == 2
 
 
 def test_sessions_db_lock_failure(tmp_path: Path, mocker: typing.Any) -> None:
     """Test _get_sessions_db_conn raises if lock cannot be acquired after retries."""
-    from t1d_analytics.api import _get_sessions_db_conn
+    from t1d_analytics.session_store import open_sessions_db_conn
 
     mocker.patch(
         "duckdb.connect",
         side_effect=duckdb.IOException("Fatal lock error"),
     )
     with pytest.raises(duckdb.IOException):
-        _get_sessions_db_conn(str(tmp_path / "fail.duckdb"))
+        open_sessions_db_conn(
+            str(tmp_path / "fail.duckdb"),
+            sleep_fn=lambda _: None,
+        )
 
 
 def test_sessions_db_non_lock_error(tmp_path: Path, mocker: typing.Any) -> None:
@@ -1914,20 +1959,25 @@ def test_rate_limiter_backends_and_retry_after(
 
     from fastapi import HTTPException
 
+    # 1. MemoryRateLimiter retry-after, bucket eviction, and reset
     from t1d_analytics.api import (
+        RATE_LIMIT_STORE,
         DuckDbRateLimiter,
         MemoryRateLimiter,
         enforce_rate_limit,
         get_rate_limiter,
     )
 
-    # 1. MemoryRateLimiter retry-after and reset
     mem_limiter = MemoryRateLimiter()
     mem_limiter.reset()
     assert mem_limiter.get_retry_after("10.0.0.1", window_seconds=60.0) == 1
     assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is True
     assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is False
     assert mem_limiter.get_retry_after("10.0.0.1", window_seconds=60.0) >= 1
+    # Verify expired buckets are evicted when new requests arrive
+    RATE_LIMIT_STORE["stale.ip.1"] = [0.0]
+    assert mem_limiter.is_allowed("10.0.0.2", limit=5, window_seconds=60.0) is True
+    assert "stale.ip.1" not in RATE_LIMIT_STORE
     mem_limiter.reset()
     assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is True
 

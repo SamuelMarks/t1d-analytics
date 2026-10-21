@@ -285,7 +285,7 @@ describe("CGM Charting Module", () => {
     expect(select).not.toBeNull();
     if (select && select.onchange) {
       select.value = "30";
-      select.onchange(new Event("change") as any);
+      select.onchange.call(select, new Event("change"));
       expect(parent.querySelector(".cgm-analytics-card")).not.toBeNull();
     }
 
@@ -295,7 +295,7 @@ describe("CGM Charting Module", () => {
       ".agp-window-select",
     ) as HTMLSelectElement | null;
     if (unattachedSelect && unattachedSelect.onchange) {
-      unattachedSelect.onchange(new Event("change") as any);
+      unattachedSelect.onchange.call(unattachedSelect, new Event("change"));
     }
 
     // Test filterObservationWindow with days <= 0 and with default days argument
@@ -331,6 +331,7 @@ describe("CGM Charting Module", () => {
       intervals: [
         {
           minuteOfDay: 0,
+          timeLabel: "00:00",
           count: 1,
           p50: 100,
           p25: 90,
@@ -343,7 +344,7 @@ describe("CGM Charting Module", () => {
       totalDays: 1,
       totalReadings: 1,
     };
-    const singleSvg = renderAGPSvg(singleIntervalAgp as any);
+    const singleSvg = renderAGPSvg(singleIntervalAgp);
     expect(singleSvg.querySelectorAll("polygon").length).toBe(0);
 
     // 4. renderTIRBarSvg with narrow segment (width < 35)

@@ -4,19 +4,37 @@ from fastapi import Request
 
 from t1d_analytics.api import parse_error, t1d_error_exception_handler
 from t1d_analytics.errors import (
+    DatabaseError,
+    DatabaseLockedError,
     DatabaseNotFoundError,
     DownloadError,
+    EmptyQueryError,
+    HardwareUnavailableError,
+    InsufficientDataError,
+    InvalidColumnNameError,
+    InvalidDatabasePathError,
     InvalidIdentifierError,
+    InvalidTableNameError,
+    LlmAuthenticationError,
+    LlmConnectionError,
+    LlmProviderError,
+    LlmQuotaExceededError,
+    LlmRateLimitError,
     LlmTranslationError,
+    MissingApiKeyError,
     MissingSdkError,
+    MultipleStatementsError,
     PathAccessDeniedError,
     ProviderNotConfiguredError,
     ReadOnlyViolationError,
     SchemaReadError,
+    SessionNotFoundError,
     SqlExecutionError,
     T1DError,
     TableNotFoundError,
     TrainingError,
+    TrainingExecutionError,
+    TrainingJobNotFoundError,
 )
 
 
@@ -103,10 +121,44 @@ def test_domain_error_subclasses() -> None:
     assert path_err.error_code == "backend.accessDenied"
     assert path_err.status_code == 403
 
+    db_path_err = InvalidDatabasePathError(params={"path": "../../etc/passwd"})
+    assert isinstance(db_path_err, (T1DError, ValueError))
+    assert db_path_err.error_code == "backend.invalidDatabasePath"
+    assert db_path_err.status_code == 400
+
+    sess_err = SessionNotFoundError(
+        "Session not found", params={"session_id": "sess-1"}
+    )
+    assert isinstance(sess_err, (T1DError, KeyError))
+    assert sess_err.error_code == "backend.sessionNotFound"
+    assert sess_err.status_code == 404
+
+    job_err = TrainingJobNotFoundError(params={"job_id": "job-1"})
+    assert isinstance(job_err, (T1DError, KeyError))
+    assert job_err.error_code == "backend.jobNotFound"
+    assert job_err.status_code == 404
+
     train_err = TrainingError("Training failed")
     assert isinstance(train_err, (T1DError, RuntimeError))
     assert train_err.error_code == "backend.trainingFailed"
     assert train_err.status_code == 500
+
+    db_base_err = DatabaseError("DB error")
+    assert db_base_err.status_code == 500
+    assert DatabaseLockedError("Locked").status_code == 503
+    assert InvalidTableNameError("Bad table").status_code == 400
+    assert InvalidColumnNameError("Bad col").status_code == 400
+    assert EmptyQueryError("Empty").status_code == 400
+    assert MultipleStatementsError("Multi").status_code == 400
+    assert LlmProviderError("Provider err").status_code == 502
+    assert MissingApiKeyError("Missing key").status_code == 400
+    assert LlmRateLimitError("Rate limit").status_code == 429
+    assert LlmAuthenticationError("Auth failed").status_code == 401
+    assert LlmQuotaExceededError("Quota").status_code == 402
+    assert LlmConnectionError("Conn").status_code == 502
+    assert InsufficientDataError("Too few rows").status_code == 400
+    assert HardwareUnavailableError("No TPU").status_code == 503
+    assert TrainingExecutionError("Exec failed").status_code == 500
 
     dl_err = DownloadError("SHA-256 mismatch")
     assert isinstance(dl_err, (T1DError, RuntimeError))

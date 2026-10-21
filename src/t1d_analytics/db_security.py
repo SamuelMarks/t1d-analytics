@@ -5,9 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import HTTPException
-
 from t1d_analytics.api_schemas import DatabaseItem, DatabaseListResponse
+from t1d_analytics.errors import InvalidDatabasePathError
 
 
 def get_allowed_db_roots() -> List[Path]:
@@ -52,7 +51,7 @@ def validate_db_path(
 
     Raises:
     ------
-        HTTPException: If the path traverses outside allowed boundaries or contains null bytes.
+        InvalidDatabasePathError: If the path traverses outside allowed boundaries or contains null bytes.
 
     """
     raw_path = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
@@ -62,12 +61,8 @@ def validate_db_path(
             raw_path = env_db_fallback
 
     if "\0" in raw_path:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error_code": "backend.invalidDatabasePath",
-                "params": {"path": raw_path},
-            },
+        raise InvalidDatabasePathError(
+            params={"path": raw_path},
         )
 
     resolved_path = Path(raw_path).resolve()
@@ -85,12 +80,8 @@ def validate_db_path(
             break
 
     if not is_allowed:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error_code": "backend.invalidDatabasePath",
-                "params": {"path": str(raw_path)},
-            },
+        raise InvalidDatabasePathError(
+            params={"path": str(raw_path)},
         )
 
     return str(resolved_path)

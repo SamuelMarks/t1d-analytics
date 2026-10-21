@@ -729,3 +729,5 @@ def test_generate_pairs_checkpointing_and_custom_template(
         assert len(pairs_write_err) == 1
 
     conn.close()
+    with TrainingDataGenerator(duckdb.connect(":memory:"), "ollama/gemma4") as ctx_gen:
+        assert ctx_gen.model == "gemma4"

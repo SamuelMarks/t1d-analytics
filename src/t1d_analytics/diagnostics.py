@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Union
 import duckdb
 
 from t1d_analytics.i18n import get_translator
-from t1d_analytics.llm_client import normalize_ollama_host
+from t1d_analytics.llm_client import PROVIDER_ENV_KEYS, normalize_ollama_host
 
 logger = logging.getLogger(__name__)
 
@@ -497,9 +497,8 @@ def check_provider_health(
         sdk_installed = False
 
     key_env_vars: dict[str, list[str]] = {
-        "openai": ["OPENAI_API_KEY"],
-        "anthropic": ["ANTHROPIC_API_KEY"],
-        "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        k: ([v, "GOOGLE_API_KEY"] if k == "google" else [v])
+        for k, v in PROVIDER_ENV_KEYS.items()
     }
 
     env_vars = key_env_vars.get(prov_key, [f"{prov_key.upper()}_API_KEY"])

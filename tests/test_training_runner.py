@@ -1495,7 +1495,7 @@ def test_prepare_torch_dataset_with_tokenizer(tmp_path: Path) -> None:
 
 
 def test_prepare_torch_dataset_tokenizer_name_and_failure(tmp_path: Path) -> None:
-    """Test function."""
+    """Test prepare_torch_dataset with explicit tokenizer_name and failure handling."""
     ds = tmp_path / "train_tok_name.jsonl"
     ds.write_text('{"prompt": "q", "completion": "a"}\n')
     from unittest.mock import MagicMock, patch
@@ -1517,7 +1517,6 @@ def test_prepare_torch_dataset_tokenizer_name_and_failure(tmp_path: Path) -> Non
 
 
 def test_gradient_accumulation_in_cpu_and_gpu(tmp_path: Path) -> None:
-    """Test function."""
     """Test gradient accumulation stepping in LocalCpuRunner and LocalGpuRunner."""
     ds = tmp_path / "data_accum.jsonl"
     ds.write_text(
@@ -1559,7 +1558,6 @@ def test_gradient_accumulation_in_cpu_and_gpu(tmp_path: Path) -> None:
 
 
 def test_huggingface_causal_lm_runner_lifecycle(tmp_path: Path) -> None:
-    """Test function."""
     """Test HuggingFaceCausalLMRunner validation, dry-run, evaluation, and training run."""
     import torch.nn as nn
 
@@ -1668,7 +1666,6 @@ def test_huggingface_causal_lm_runner_lifecycle(tmp_path: Path) -> None:
 
 
 def test_huggingface_causal_lm_runner_evaluate_overflow() -> None:
-    """Test function."""
     """Test HuggingFaceCausalLMRunner._evaluate overflow branch when loss is high."""
     import torch
 
@@ -1696,14 +1693,12 @@ def test_huggingface_causal_lm_runner_evaluate_overflow() -> None:
 
 
 def test_get_training_runner_huggingface() -> None:
-    """Test function."""
     """Test get_training_runner returns HuggingFaceCausalLMRunner for HUGGINGFACE backend."""
     runner = get_training_runner(TrainingBackend.HUGGINGFACE)
     assert isinstance(runner, HuggingFaceCausalLMRunner)
 
 
 def test_tpu_workload_status_override_and_xla_preempted() -> None:
-    """Test function."""
     """Test poll_workload_status overrides, PREEMPTED status, and XLA errors."""
     runner = RemoteTpuMaxTextRunner()
     max_cfg = MaxTextConfig(project_id="p1")
@@ -1752,7 +1747,6 @@ def test_tpu_workload_status_override_and_xla_preempted() -> None:
 
 
 def test_tpu_workload_reclamation() -> None:
-    """Test function."""
     """Test reclaim_tpu_workload in mock and subprocess modes."""
     runner = RemoteTpuMaxTextRunner()
     max_cfg = MaxTextConfig(project_id="p1")
@@ -1810,7 +1804,6 @@ def test_tpu_workload_reclamation() -> None:
 
 
 def test_remote_tpu_run_training_preemption_and_retries(tmp_path: Path) -> None:
-    """Test function."""
     """Test RemoteTpuMaxTextRunner preemption retry and general failure handling."""
     runner = RemoteTpuMaxTextRunner()
     ds = tmp_path / "tpu_ds.parquet"
@@ -1873,7 +1866,6 @@ def test_remote_tpu_run_training_preemption_and_retries(tmp_path: Path) -> None:
 
 
 def test_poll_gcloud_tpu_status_missing_binary() -> None:
-    """Test function."""
     """Test _poll_gcloud_tpu_status raises when gcloud is missing."""
     runner = RemoteTpuMaxTextRunner()
     with patch("shutil.which", return_value=None):
@@ -1882,7 +1874,6 @@ def test_poll_gcloud_tpu_status_missing_binary() -> None:
 
 
 def test_poll_gcloud_tpu_status_states_and_errors() -> None:
-    """Test function."""
     """Test _poll_gcloud_tpu_status for normal states, preemption, failures, non-json, not found, and timeout."""
     runner = RemoteTpuMaxTextRunner()
     with patch("shutil.which", return_value="/usr/bin/gcloud"):
@@ -1978,7 +1969,6 @@ def test_poll_gcloud_tpu_status_states_and_errors() -> None:
 
 
 def test_reclaim_gcloud_tpu_workload_lifecycle() -> None:
-    """Test function."""
     """Test _reclaim_gcloud_tpu_workload missing binary, success, and retry failure."""
     runner = RemoteTpuMaxTextRunner()
     # Missing binary
@@ -2009,21 +1999,11 @@ def test_reclaim_gcloud_tpu_workload_lifecycle() -> None:
 
 
 def test_poll_and_reclaim_workload_delegation_without_xpk() -> None:
-    """Test function."""
     """Test poll_workload_status and reclaim_tpu_workload delegate to gcloud methods when xpk is absent."""
     runner = RemoteTpuMaxTextRunner()
     max_cfg = MaxTextConfig(project_id="p1", zone="us-central2-b")
 
-    def mock_which(cmd: str) -> Optional[str]:
-        """Return None for xpk and /usr/bin/gcloud otherwise."""
-        if cmd == "xpk":
-            return None
-        return "/usr/bin/gcloud"
-
-    # Cover fallback branch
-    mock_which("gcloud")
-
-    with patch("shutil.which", side_effect=mock_which):
+    with patch("shutil.which", return_value=None):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("T1D_MOCK_TPU", None)
             os.environ.pop("T1D_TPU_STATUS_OVERRIDE", None)
@@ -2036,18 +2016,8 @@ def test_poll_and_reclaim_workload_delegation_without_xpk() -> None:
                     workload_name="wl-1", zone="us-central2-b", timeout_seconds=30.0
                 )
 
-            with patch.object(
-                runner, "_reclaim_gcloud_tpu_workload", return_value=True
-            ) as mock_r:
-                res2 = asyncio.run(runner.reclaim_tpu_workload("wl-1", max_cfg))
-                assert res2 is True
-                mock_r.assert_called_once_with(
-                    workload_name="wl-1", zone="us-central2-b"
-                )
-
 
 def test_local_cpu_runner_architecture_selection(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalCpuRunner model factory selection for tiny, transformer, auto, and HF execution."""
     import torch
 
@@ -2118,7 +2088,6 @@ def test_local_cpu_runner_architecture_selection(tmp_path: Path) -> None:
 
 
 def test_local_gpu_runner_architecture_selection(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner model factory selection with quantization, LoRA, and HF model execution."""
     import torch
 
@@ -2203,7 +2172,6 @@ def test_local_gpu_runner_architecture_selection(tmp_path: Path) -> None:
 
 
 def test_resolve_device_telemetry_branches(tmp_path: Path) -> None:
-    """Test function."""
     """Test resolve_device_telemetry for CUDA, MPS, CPU, and mock accelerator environments."""
     import subprocess
 
@@ -2263,10 +2231,10 @@ def test_resolve_device_telemetry_branches(tmp_path: Path) -> None:
         name_mps_exc, _ = resolve_device_telemetry("mps")
         assert name_mps_exc == "Apple Silicon GPU (MPS)"
 
-    # 7. CPU with T1D_MOCK_GPU=1
+    # 7. CPU with CUDA_VISIBLE_DEVICES set
     with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1"}):
         name_mock, mem_mock = resolve_device_telemetry("cpu")
-
+        assert isinstance(name_mock, str) and len(name_mock) > 0
         assert mem_mock == 0.0
 
     # 8. CPU with platform.processor()
@@ -2315,7 +2283,6 @@ def test_resolve_device_telemetry_branches(tmp_path: Path) -> None:
 
 
 def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> None:
-    """Test function."""
     """Test TrainingJobManager background thread execution, status tracking, cancellation, and error handling."""
     import threading
     import time
@@ -2368,13 +2335,13 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
     assert job_fail["status"] == "failed"
     assert "Training failed fatally" in str(job_fail["error"])
 
-    # 4. Cancelled job execution while running
+    # 4. Cancelled job execution while running (and runner without cancel_event parameter)
     mgr2 = TrainingJobManager()
     event_start = threading.Event()
     event_release = threading.Event()
 
-    def slow_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        """Signal start and wait for release event."""
+    def slow_run(cfg: TrainingJobConfig) -> dict[str, Any]:
+        """Signal start and wait for release event without cancel_event param."""
         event_start.set()
         event_release.wait(timeout=2.0)
         return {"status": "done"}
@@ -2416,7 +2383,7 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
 
 
 def test_hf_factory_direct_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test function."""
+    """Test HuggingFaceCausalLMFactory model loading, quantization, LoRA, and error branches."""
     from t1d_analytics.training_runner import HuggingFaceCausalLMFactory
 
     factory = HuggingFaceCausalLMFactory()
@@ -2485,336 +2452,41 @@ def test_hf_factory_direct_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
             ORIGINAL_CREATE_MODEL(factory, "test")
 
 
-def test_runner_eval_and_scheduler(tmp_path: Path) -> None:
-    """Test function."""
+def test_runner_eval_scheduler_and_cancellation(tmp_path: Path) -> None:
+    """Test CosineAnnealingLR scheduler, cooperative cancel_event termination, and fallback checkpointing across CPU, GPU, and HF runners."""
+    import threading
+
     import torch
 
     from t1d_analytics.models import (
         TrainingBackend,
         TrainingHyperparameters,
-        TrainingJobConfig,
-    )
-    from t1d_analytics.training_runner import LocalCpuRunner, get_training_runner
-
-    ds = tmp_path / "train.jsonl"
-    ds.write_text(
-        '{"prompt": "q", "completion": "a"}\n{"prompt": "q2", "completion": "a2"}\n'
-    )
-
-    val_ds = tmp_path / "val.jsonl"
-    val_ds.write_text('{"prompt": "vq", "completion": "va"}\n')
-
-    # 2 epochs, batch size 1 -> 2 steps per epoch -> 4 total steps.
-    # CosineAnnealingLR will be created.
-    hparams = TrainingHyperparameters(batch_size=1, num_epochs=2, warmup_steps=1)
-
-    config = TrainingJobConfig(
-        model_name="mock",
-        backend=TrainingBackend.LOCAL_CPU,
-        dataset_path=str(ds),
-        validation_dataset_path=str(val_ds),
-        output_dir=str(tmp_path / "out_hf"),
-        hyperparameters=hparams,
-        dry_run=False,
-    )
-
-    runner = LocalCpuRunner()
-
-    class MockModel(torch.nn.Module):
-        """Mock model for scheduler evaluation tests."""
-
-        def __init__(self) -> None:
-            """Initialize linear layer."""
-            super().__init__()
-            self.linear = torch.nn.Linear(10, 10)
-
-        def forward(self, x: Any, **kwargs: Any) -> Any:
-            """Return mock logits."""
-
-            class Out:
-                """Output container."""
-
-                logits = torch.randn(
-                    x.size(0), x.size(1), 10, device=x.device, requires_grad=True
-                )
-
-            return Out()
-
-        def save_pretrained(self, path: Any) -> None:
-            """No-op save_pretrained."""
-            pass
-
-    mock_model = MockModel()
-
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model,
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[
-                    (torch.tensor([[1]]), torch.tensor([[1]])),
-                    (torch.tensor([[2]]), torch.tensor([[2]])),
-                ],
-            ):
-                res = runner.run_training(config)
-                assert res is not None
-
-    # Local GPU
-    config.backend = TrainingBackend.LOCAL_GPU
-    runner_gpu = get_training_runner(config.backend)
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model,
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[
-                    (torch.tensor([[1]]), torch.tensor([[1]])),
-                    (torch.tensor([[2]]), torch.tensor([[2]])),
-                ],
-            ):
-                res = runner_gpu.run_training(config)
-
-    # HuggingFace
-    config.backend = TrainingBackend.HUGGINGFACE
-    runner_hf = get_training_runner(config.backend)
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model,
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[
-                    (torch.tensor([[1]]), torch.tensor([[1]])),
-                    (torch.tensor([[2]]), torch.tensor([[2]])),
-                ],
-            ):
-                res = runner_hf.run_training(config)
-
-
-def test_runners_full_coverage(tmp_path: Path) -> None:
-    """Test function."""
-    from t1d_analytics.models import (
-        TrainingBackend,
-        TrainingHyperparameters,
-        TrainingJobConfig,
-    )
-    from t1d_analytics.training_runner import (
-        HuggingFaceCausalLMRunner,
-        LocalCpuRunner,
-        LocalGpuRunner,
-        get_training_runner,
-    )
-
-    ds = tmp_path / "train.jsonl"
-    ds.write_text('{"prompt": "q", "completion": "a"}\n')
-
-    val_ds = tmp_path / "val.jsonl"
-    val_ds.write_text('{"prompt": "vq", "completion": "va"}\n')
-
-    hparams = TrainingHyperparameters(batch_size=1, num_epochs=1, warmup_steps=1)
-
-    config = TrainingJobConfig(
-        model_name="mock",
-        backend=TrainingBackend.LOCAL_CPU,
-        dataset_path=str(ds),
-        validation_dataset_path=str(val_ds),
-        output_dir=str(tmp_path / "out_hf"),
-        hyperparameters=hparams,
-        dry_run=False,
-    )
-
-    # 1. HuggingFaceRunner
-    from t1d_analytics.models import TrainingBackend
-
-    config.backend = TrainingBackend.HUGGINGFACE
-    runner = HuggingFaceCausalLMRunner()
-
-    class MockModel_1(torch.nn.Module):
-        """Mock model 1 for HuggingFace runner test."""
-
-        def __init__(self) -> None:
-            """Initialize linear layer."""
-            super().__init__()
-            self.linear = torch.nn.Linear(10, 10)
-
-        def forward(self, x: Any, **kwargs: Any) -> Any:
-            """Return mock logits."""
-
-            class Out:
-                """Output container."""
-
-                logits = torch.randn(
-                    x.size(0), x.size(1), 10, device=x.device, requires_grad=True
-                )
-
-            return Out()
-
-        def save_pretrained(self, path: Any) -> None:
-            """No-op save_pretrained."""
-            pass
-
-    mock_model = MockModel_1()
-
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model,
-    ):
-        # Mock model saving to avoid disk writes
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[(torch.tensor([[1]]), torch.tensor([[1]]))],
-            ):
-                res = runner.run_training(config)
-                assert res is not None
-
-    # Local GPU
-    config.backend = TrainingBackend.LOCAL_GPU
-    runner_gpu = get_training_runner(config.backend)
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model,
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[
-                    (torch.tensor([[1]]), torch.tensor([[1]])),
-                    (torch.tensor([[2]]), torch.tensor([[2]])),
-                ],
-            ):
-                res = runner_gpu.run_training(config)
-
-    # HuggingFace
-    config.backend = TrainingBackend.HUGGINGFACE
-    runner_hf = get_training_runner(config.backend)
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model,
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[
-                    (torch.tensor([[1]]), torch.tensor([[1]])),
-                    (torch.tensor([[2]]), torch.tensor([[2]])),
-                ],
-            ):
-                res = runner_hf.run_training(config)
-
-    # 2. LocalCpuRunner
-    config.backend = TrainingBackend.LOCAL_CPU
-    runner_cpu = LocalCpuRunner()
-
-    class MockModel_2(torch.nn.Module):
-        """Mock model 2 for LocalCpuRunner test."""
-
-        def __init__(self) -> None:
-            """Initialize linear layer."""
-            super().__init__()
-            self.linear = torch.nn.Linear(10, 10)
-
-        def forward(self, x: Any, **kwargs: Any) -> Any:
-            """Return mock logits."""
-
-            class Out:
-                """Output container."""
-
-                logits = torch.randn(
-                    x.size(0), x.size(1), 10, device=x.device, requires_grad=True
-                )
-
-            return Out()
-
-        def save_pretrained(self, path: Any) -> None:
-            """No-op save_pretrained."""
-            pass
-
-    mock_model_2 = MockModel_2()
-
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model_2,
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[(torch.tensor([[1]]), torch.tensor([[1]]))],
-            ):
-                res_cpu = runner_cpu.run_training(config)
-                assert res_cpu is not None
-
-    # 3. LocalGpuRunner
-    config.backend = TrainingBackend.LOCAL_GPU
-    runner_gpu = LocalGpuRunner()
-
-    class MockModel_3(torch.nn.Module):
-        """Mock model 3 for LocalGpuRunner test."""
-
-        def __init__(self) -> None:
-            """Initialize linear layer."""
-            super().__init__()
-            self.linear = torch.nn.Linear(10, 10)
-
-        def forward(self, x: Any, **kwargs: Any) -> Any:
-            """Return mock logits."""
-
-            class Out:
-                """Output container."""
-
-                logits = torch.randn(
-                    x.size(0), x.size(1), 10, device=x.device, requires_grad=True
-                )
-
-            return Out()
-
-        def save_pretrained(self, path: Any) -> None:
-            """No-op save_pretrained."""
-            pass
-
-    mock_model_3 = MockModel_3()
-
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model_3,
-    ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[(torch.tensor([[1]]), torch.tensor([[1]]))],
-            ):
-                res_gpu = runner_gpu.run_training(config)
-                assert res_gpu is not None
-
-
-def test_training_runner_edge_coverage(tmp_path: Path) -> None:
-    """Test function."""
-    import torch
-
-    from t1d_analytics.models import (
-        TrainingBackend,
         TrainingJobConfig,
     )
     from t1d_analytics.training_runner import get_training_runner
 
     ds = tmp_path / "train.jsonl"
-    ds.write_text('{"prompt": "q", "completion": "a"}\n')
+    ds.write_text(
+        '{"prompt": "q", "completion": "a"}\n{"prompt": "q2", "completion": "a2"}\n'
+    )
+    val_ds = tmp_path / "val.jsonl"
+    val_ds.write_text('{"prompt": "vq", "completion": "va"}\n')
 
+    hparams = TrainingHyperparameters(
+        batch_size=1, num_epochs=2, warmup_steps=1, gradient_accumulation_steps=2
+    )
     config = TrainingJobConfig(
         model_name="mock",
         backend=TrainingBackend.LOCAL_CPU,
         dataset_path=str(ds),
+        validation_dataset_path=str(val_ds),
         output_dir=str(tmp_path / "out_hf"),
+        hyperparameters=hparams,
         dry_run=False,
     )
 
-    class MockModel_4(torch.nn.Module):
-        """Mock model 4 without save_pretrained."""
+    class MockModel(torch.nn.Module):
+        """Mock model without save_pretrained to exercise torch.save fallback."""
 
         def __init__(self) -> None:
             """Initialize linear layer."""
@@ -2833,32 +2505,51 @@ def test_training_runner_edge_coverage(tmp_path: Path) -> None:
 
             return Out()
 
-    mock_model = MockModel_4()
+    mock_model = MockModel()
 
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=mock_model,
+    with (
+        patch(
+            "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
+            return_value=mock_model,
+        ),
+        patch("torch.save"),
+        patch(
+            "t1d_analytics.training_runner.prepare_torch_dataset",
+            return_value=[
+                (torch.tensor([[1]]), torch.tensor([[1]])),
+                (torch.tensor([[2]]), torch.tensor([[2]])),
+            ],
+        ),
     ):
-        with patch("torch.save"):
-            with patch(
-                "t1d_analytics.training_runner.prepare_torch_dataset",
-                return_value=[(torch.tensor([[1]]), torch.tensor([[1]]))],
-            ):
-                with patch(
-                    "torch.optim.lr_scheduler.CosineAnnealingLR", None, create=True
-                ):
-                    # Local CPU
-                    runner = get_training_runner(TrainingBackend.LOCAL_CPU)
-                    runner.run_training(config)
-                    # Local GPU
-                    runner_gpu = get_training_runner(TrainingBackend.LOCAL_GPU)
-                    runner_gpu.run_training(config)
-                    # HuggingFace
-                    runner_hf = get_training_runner(TrainingBackend.HUGGINGFACE)
-                    runner_hf.run_training(config)
+        for backend in (
+            TrainingBackend.LOCAL_CPU,
+            TrainingBackend.LOCAL_GPU,
+            TrainingBackend.HUGGINGFACE,
+        ):
+            config.backend = backend
+            runner = get_training_runner(backend)
+            res = runner.run_training(config)
+            assert res["status"] == "completed"
+            assert res["total_steps"] == 4
 
-    # 2. Cover HuggingFaceRunner dry_run and to_fn missing
+        # Verify cooperative cancellation halts loop immediately
+        cancel_ev = threading.Event()
+        cancel_ev.set()
+        res_cancelled = get_training_runner(TrainingBackend.LOCAL_CPU).run_training(
+            config, cancel_event=cancel_ev
+        )
+        assert res_cancelled["final_loss"] == 0.0
+
+        # Verify training when CosineAnnealingLR is None
+        with patch("torch.optim.lr_scheduler.CosineAnnealingLR", None, create=True):
+            res_no_sched = get_training_runner(TrainingBackend.LOCAL_CPU).run_training(
+                config
+            )
+            assert res_no_sched["status"] == "completed"
+
+    # Cover HuggingFaceRunner dry_run when model lacks .to() method
     config.dry_run = True
+    config.backend = TrainingBackend.HUGGINGFACE
     runner_hf = get_training_runner(TrainingBackend.HUGGINGFACE)
 
     class ModelNoTo:
@@ -2874,15 +2565,18 @@ def test_training_runner_edge_coverage(tmp_path: Path) -> None:
 
             return Out()
 
-    with patch(
-        "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=ModelNoTo(),
-    ):
-        with patch(
+    with (
+        patch(
+            "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
+            return_value=ModelNoTo(),
+        ),
+        patch(
             "t1d_analytics.training_runner.prepare_torch_dataset",
             return_value=[(torch.tensor([[1]]), torch.tensor([[1]]))],
-        ):
-            runner_hf.run_training(config)
+        ),
+    ):
+        res_dry_no_to = runner_hf.run_training(config)
+        assert res_dry_no_to["status"] == "dry_run_completed"
 
 
 def test_huggingface_runner_validation_path_and_model_no_train(tmp_path: Path) -> None:

@@ -160,6 +160,45 @@ def parse_headers_file(file_path: Path) -> dict[str, str]:
     return headers
 
 
+def _verify_and_finalize_download(
+    tmp_path: Path,
+    dest_path: Path,
+    filename: str,
+    expected_sha256: Optional[str] = None,
+) -> None:
+    """
+    Verify optional SHA-256 digest of a temporary download file and atomically move to destination.
+
+    Args:
+    ----
+        tmp_path: Temporary file path written during download.
+        dest_path: Final destination path for the downloaded file.
+        filename: Display filename for error reporting.
+        expected_sha256: Optional expected SHA-256 hex digest.
+
+    Raises:
+    ------
+        ValueError: If the computed SHA-256 digest does not match expected_sha256.
+
+    """
+    if expected_sha256:
+        hasher = hashlib.sha256()
+        with open(tmp_path, "rb") as f:
+            while True:
+                block = f.read(65536)
+                if not block:
+                    break
+                hasher.update(block)
+        digest = hasher.hexdigest()
+        if digest.lower() != expected_sha256.lower():
+            tmp_path.unlink(missing_ok=True)
+            raise ValueError(
+                f"SHA-256 mismatch for {filename}: expected {expected_sha256}, got {digest}"
+            )
+
+    tmp_path.replace(dest_path)
+
+
 def download_file(
     url: str,
     dest_dir: Path,
@@ -350,22 +389,9 @@ def download_file(
                     sys.stdout.write("\n")
                     sys.stdout.flush()
 
-                if expected_sha256:
-                    hasher = hashlib.sha256()
-                    with open(tmp_path, "rb") as f:
-                        while True:
-                            block = f.read(65536)
-                            if not block:
-                                break
-                            hasher.update(block)
-                    digest = hasher.hexdigest()
-                    if digest.lower() != expected_sha256.lower():
-                        tmp_path.unlink(missing_ok=True)
-                        raise ValueError(
-                            f"SHA-256 mismatch for {filename}: expected {expected_sha256}, got {digest}"
-                        )
-
-                tmp_path.replace(dest_path)
+                _verify_and_finalize_download(
+                    tmp_path, dest_path, filename, expected_sha256
+                )
             finally:
                 response.close()
         except Exception as e:
@@ -464,22 +490,7 @@ def download_aspnet_postback_file(
                     if progress_callback:
                         progress_callback(downloaded, total_size)
 
-        if expected_sha256:
-            hasher = hashlib.sha256()
-            with open(tmp_path, "rb") as f:
-                while True:
-                    b = f.read(65536)
-                    if not b:
-                        break
-                    hasher.update(b)
-            digest = hasher.hexdigest()
-            if digest.lower() != expected_sha256.lower():
-                tmp_path.unlink(missing_ok=True)
-                raise ValueError(
-                    f"SHA-256 mismatch for {filename}: expected {expected_sha256}, got {digest}"
-                )
-
-        tmp_path.replace(dest_path)
+        _verify_and_finalize_download(tmp_path, dest_path, filename, expected_sha256)
         return dest_path
     finally:
         resp.close()

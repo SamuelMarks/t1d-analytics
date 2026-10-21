@@ -46,6 +46,7 @@ export class ChatUI {
   private dbSelect: HTMLSelectElement | null;
   private syncSessionsBtn: HTMLButtonElement | null;
   private streamingToggleBtn: HTMLButtonElement | null;
+  /** Whether real-time SSE token streaming is enabled in the UI. */
   public streamingEnabled: boolean = false;
   private langSelect: HTMLSelectElement;
   private openSidebarBtn: HTMLButtonElement;
@@ -94,9 +95,6 @@ export class ChatUI {
   private providerStoreConsent: HTMLInputElement | null;
   private providerSaveBtn: HTMLButtonElement | null;
   private providerClearBtn: HTMLButtonElement | null;
-  private providerBadgeOpenAI: HTMLElement | null;
-  private providerBadgeAnthropic: HTMLElement | null;
-  private providerBadgeGoogle: HTMLElement | null;
 
   // Modal accessibility focus tracking and listeners
   private previousFocusCohort: HTMLElement | null = null;
@@ -249,11 +247,6 @@ export class ChatUI {
     this.providerClearBtn = document.getElementById(
       "provider-clear-btn",
     ) as HTMLButtonElement | null;
-    this.providerBadgeOpenAI = document.getElementById("provider-badge-openai");
-    this.providerBadgeAnthropic = document.getElementById(
-      "provider-badge-anthropic",
-    );
-    this.providerBadgeGoogle = document.getElementById("provider-badge-google");
 
     this.streamingToggleBtn = document.getElementById(
       "streaming-toggle-btn",

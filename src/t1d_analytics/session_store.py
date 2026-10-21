@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Callable, ContextManager, Dict, Iterator, List, Optional
 
 import duckdb
-from fastapi import HTTPException
 
 from t1d_analytics.api_schemas import (
     ChatMessageModel,
@@ -18,10 +17,12 @@ from t1d_analytics.api_schemas import (
     SessionListResponse,
     SessionModel,
 )
+from t1d_analytics.errors import SessionNotFoundError
 
 
 def open_sessions_db_conn(
     db_path: Optional[str] = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> duckdb.DuckDBPyConnection:
     """
     Open connection to persistent chat sessions database and ensure schema exists.
@@ -29,6 +30,7 @@ def open_sessions_db_conn(
     Args:
     ----
         db_path: Optional path to the database file.
+        sleep_fn: Injectable sleep function for lock retry backoff.
 
     Returns:
     -------
@@ -51,7 +53,7 @@ def open_sessions_db_conn(
             break
         except duckdb.IOException as e:
             if "lock" in str(e).lower():
-                time.sleep(0.05 * (attempt + 1))
+                sleep_fn(0.05 * (attempt + 1))
             else:
                 raise
     else:
@@ -233,7 +235,7 @@ class SessionStore:
 
         Raises:
         ------
-            HTTPException: 404 if session is not found.
+            SessionNotFoundError: If session is not found.
 
         """
         with self._lock:
@@ -243,7 +245,9 @@ class SessionStore:
                     [session_id],
                 ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="Session not found")
+            raise SessionNotFoundError(
+                "Session not found", params={"session_id": session_id}
+            )
 
         return SessionModel(
             session_id=row[0],
@@ -270,7 +274,7 @@ class SessionStore:
 
         Raises:
         ------
-            HTTPException: 404 if session is not found.
+            SessionNotFoundError: If session is not found.
 
         """
         with self._lock:
@@ -279,7 +283,9 @@ class SessionStore:
                     "SELECT 1 FROM chat_sessions WHERE session_id = ?", [session_id]
                 ).fetchone()
                 if not exists:
-                    raise HTTPException(status_code=404, detail="Session not found")
+                    raise SessionNotFoundError(
+                        "Session not found", params={"session_id": session_id}
+                    )
                 conn.execute(
                     "DELETE FROM chat_sessions WHERE session_id = ?", [session_id]
                 )

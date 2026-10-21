@@ -853,7 +853,7 @@ describe("ChatUI", () => {
   });
 
   it("handles failed schema load", async () => {
-    mockFetch.mockImplementation(async (url) => {
+    mockFetch.mockImplementation(async (url: string | URL | Request) => {
       if (url === "/api/schema") {
         throw new Error("Network Error");
       }
@@ -885,7 +885,7 @@ describe("ChatUI", () => {
     header?.remove();
     explorer?.prepend(toggleBtn as Node);
 
-    const ui2 = new ChatUI(state);
+    new ChatUI(state);
     const newToggleBtn = document.getElementById("toggle-schema-btn");
     newToggleBtn?.dispatchEvent(new MouseEvent("click"));
     expect(explorer?.classList.contains("collapsed")).toBe(true);
@@ -1099,7 +1099,7 @@ describe("ChatUI", () => {
       ok: true,
       json: () => Promise.resolve({ rows: [{ id: 1 }] }),
     });
-    const ui2 = new ChatUI(state);
+    new ChatUI(state);
     await new Promise((resolve) => setTimeout(resolve, 10)); // let parallel init fetches resolve
 
     const viewBtn = document.querySelector(".table-view-btn");
@@ -1268,41 +1268,29 @@ describe("ChatUI", () => {
   });
 
   it("restores focus to chat input when previous focus is removed from DOM", async () => {
+    const chatInput = document.getElementById(
+      "chat-input",
+    ) as HTMLTextAreaElement;
+    chatInput.disabled = false;
+
     const dummyBtn = document.createElement("button");
     dummyBtn.id = "dummy-btn";
     document.body.appendChild(dummyBtn);
     dummyBtn.focus();
 
-    // Simulate setting previousFocus in openTableModal
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ rows: [] }),
     });
-    const ui2 = new ChatUI(state);
-    await ui2["openTableModal"]("test_table");
+    await ui["openTableModal"]("test_table");
 
-    // Remove element
+    // Remove element so document.body.contains(previousFocus) is false
     document.body.removeChild(dummyBtn);
 
-    // To properly simulate, trigger the actual closeModal closure defined in openTableModal.
-    // That closure expects e.target === modal or a closeBtn click.
-    // If we click close-modal-btn, JSDOM sets focus to close-modal-btn first, which messes up document.activeElement check.
-    // Instead we can blur close-modal-btn immediately if needed, OR we can call the overlay click which doesn't focus any button.
     const modal = document.getElementById("table-modal");
-    if (modal) {
-      modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    }
-
-    // JSDOM has some quirks with activeElement. Let's just manually blur whatever might be focused first.
-    if (document.activeElement && document.activeElement.tagName !== "BODY") {
-      (document.activeElement as HTMLElement).blur();
-    }
-
-    if (modal) {
-      modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    }
-
-    // If it STILL doesn't work, we'll just mock document.body.contains to return false and call closeModal manually.
+    modal?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(modal?.getAttribute("aria-hidden")).toBe("true");
+    expect(document.activeElement).toBe(chatInput);
   });
 
   it("handles missing DOM elements", async () => {
@@ -1514,7 +1502,7 @@ describe("ChatUI", () => {
   });
 
   it("syncHighlight is called on chatInput input event", () => {
-    const ui = new ChatUI(state);
+    new ChatUI(state);
     const input = document.getElementById("chat-input") as HTMLTextAreaElement;
     input.value = "test\nlines";
     input.dispatchEvent(new Event("input"));
@@ -1547,7 +1535,7 @@ describe("ChatUI", () => {
       },
     });
 
-    const ui = new ChatUI(state);
+    new ChatUI(state);
 
     const copyBtn = document.querySelector(
       ".copy-sql-btn",
@@ -1592,7 +1580,7 @@ describe("ChatUI", () => {
 
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    const ui = new ChatUI(state);
+    new ChatUI(state);
 
     const copyBtn = document.querySelector(
       ".copy-sql-btn",
@@ -1623,10 +1611,10 @@ describe("ChatUI", () => {
         },
       ],
     };
-    state.chats = [chat as any];
+    state.chats = [chat];
     state.activeChatId = "chat-3";
 
-    const ui = new ChatUI(state);
+    new ChatUI(state);
 
     // marked parses it to a <pre><code> block
     const msgBlock = document.querySelector(".message.assistant");
@@ -2459,15 +2447,15 @@ describe("ChatUI", () => {
   it("handles missing banner DOM elements safely", () => {
     const originalBanner = ui["systemStatusBanner"];
     const originalChip = ui["systemStatusChip"];
-    (ui as any)["systemStatusBanner"] = null;
-    (ui as any)["systemStatusChip"] = null;
+    ui["systemStatusBanner"] = null;
+    ui["systemStatusChip"] = null;
 
     ui.showBanner("warning", "Test", "Desc");
     ui.hideBanner();
     ui.updateStatusChip("healthy", "Test");
 
-    (ui as any)["systemStatusBanner"] = originalBanner;
-    (ui as any)["systemStatusChip"] = originalChip;
+    ui["systemStatusBanner"] = originalBanner;
+    ui["systemStatusChip"] = originalChip;
   });
 
   it("handles clipboard failure gracefully in copy-cmd-btn", async () => {
@@ -2540,17 +2528,17 @@ describe("ChatUI", () => {
     const origTitle = ui["bannerTitle"];
     const origDesc = ui["bannerDesc"];
     const origBtn = ui["bannerRetryBtn"];
-    (ui as any)["bannerIcon"] = null;
-    (ui as any)["bannerTitle"] = null;
-    (ui as any)["bannerDesc"] = null;
-    (ui as any)["bannerRetryBtn"] = null;
+    ui["bannerIcon"] = null;
+    ui["bannerTitle"] = null;
+    ui["bannerDesc"] = null;
+    ui["bannerRetryBtn"] = null;
 
     ui.showBanner("info", "Title", "Desc", "ℹ️", false);
 
-    (ui as any)["bannerIcon"] = origIcon;
-    (ui as any)["bannerTitle"] = origTitle;
-    (ui as any)["bannerDesc"] = origDesc;
-    (ui as any)["bannerRetryBtn"] = origBtn;
+    ui["bannerIcon"] = origIcon;
+    ui["bannerTitle"] = origTitle;
+    ui["bannerDesc"] = origDesc;
+    ui["bannerRetryBtn"] = origBtn;
   });
 
   it("disables chat input and updates placeholder when backend is offline", () => {
@@ -2599,14 +2587,14 @@ describe("ChatUI", () => {
 
   it("updates status chip when statusChipText is null", () => {
     const orig = ui["statusChipText"];
-    (ui as any)["statusChipText"] = null;
+    ui["statusChipText"] = null;
     ui.updateStatusChip("healthy", "Operational");
-    (ui as any)["statusChipText"] = orig;
+    ui["statusChipText"] = orig;
   });
 
   it("handles checkSystemStatus when bannerRetryBtn is null", async () => {
     const orig = ui["bannerRetryBtn"];
-    (ui as any)["bannerRetryBtn"] = null;
+    ui["bannerRetryBtn"] = null;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () =>
@@ -2617,7 +2605,7 @@ describe("ChatUI", () => {
         }),
     });
     await ui.checkSystemStatus(true);
-    (ui as any)["bannerRetryBtn"] = orig;
+    ui["bannerRetryBtn"] = orig;
   });
 
   it("handles loadSchema when database fields are null or empty", async () => {
@@ -2641,7 +2629,7 @@ describe("ChatUI", () => {
     expect(state.systemStatus.dbStatusCode).toBe("unknown");
   });
 
-  it("exports rows to CSV and handles edge cases", () => {
+  it("exports rows to CSV and handles edge cases", async () => {
     let capturedBlob: Blob | null = null;
     const createObjectURL = vi.fn().mockImplementation((blob: Blob) => {
       capturedBlob = blob;
@@ -2687,6 +2675,17 @@ describe("ChatUI", () => {
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-csv");
     expect(capturedBlob).not.toBeNull();
+    const csvText = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsText(capturedBlob!);
+    });
+    expect(csvText).toContain('Alice ""Wonderland""');
+    expect(csvText).toContain("'=1+1");
+    expect(csvText).toContain("'@SUM");
+    expect(csvText).toContain("'+CMD");
+    expect(csvText).toContain("'-CALC");
+    expect(csvText).toContain('"+12.5","-42"');
   });
 
   it("exports rows to JSON and handles edge cases", () => {
@@ -2893,7 +2892,7 @@ describe("ChatUI", () => {
     expect(modal.getAttribute("aria-modal")).toBeNull();
   });
 
-  it("exports CSV with BOM, CRLF, quotes, and handles object properties", () => {
+  it("exports CSV with BOM, CRLF, quotes, and handles object properties", async () => {
     let capturedBlob: Blob | null = null;
     const originalCreateObjectURL = URL.createObjectURL;
     URL.createObjectURL = vi.fn((blob: Blob) => {
@@ -2909,6 +2908,15 @@ describe("ChatUI", () => {
     ui.exportRowsToCsv(rows, "test_export.csv");
 
     expect(capturedBlob).not.toBeNull();
+    const csvContent = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsText(capturedBlob!);
+    });
+    expect(csvContent).toContain("\r\n");
+    expect(csvContent).toContain('"Alice ""Wonderland"""');
+    expect(csvContent).toContain('"Bob\nSmith"');
+    expect(csvContent).toContain('"{""note"":""ok""}"');
     expect(URL.createObjectURL).toHaveBeenCalled();
     URL.createObjectURL = originalCreateObjectURL;
   });
@@ -3450,13 +3458,13 @@ describe("ChatUI", () => {
     expect(select.options[0].value).toBe("clinical_cohort_table");
 
     // Also test when cohortTableSelect and cohortJoinTableSelect are null
-    const origTableSelect = (ui as any).cohortTableSelect;
-    const origJoinSelect = (ui as any).cohortJoinTableSelect;
-    (ui as any).cohortTableSelect = null;
-    (ui as any).cohortJoinTableSelect = null;
+    const origTableSelect = ui["cohortTableSelect"];
+    const origJoinSelect = ui["cohortJoinTableSelect"];
+    ui["cohortTableSelect"] = null;
+    ui["cohortJoinTableSelect"] = null;
     ui.openCohortModal();
-    (ui as any).cohortTableSelect = origTableSelect;
-    (ui as any).cohortJoinTableSelect = origJoinSelect;
+    ui["cohortTableSelect"] = origTableSelect;
+    ui["cohortJoinTableSelect"] = origJoinSelect;
 
     ui.closeCohortModal();
     header.remove();
@@ -3498,22 +3506,27 @@ describe("ChatUI", () => {
     await flushPromises();
 
     // Second turn
-    let secondRequestBody: any = null;
-    mockFetch.mockImplementationOnce(async (_url: string, opts: any) => {
-      secondRequestBody = JSON.parse(opts.body);
-      return {
-        ok: true,
-        json: async () => ({ content: "Second answer", sqlResult: [] }),
-      };
-    });
+    let secondRequestBody: { history: Array<{ content: string }> } | null =
+      null;
+    mockFetch.mockImplementationOnce(
+      async (_url: string, opts: { body: string }) => {
+        secondRequestBody = JSON.parse(opts.body) as {
+          history: Array<{ content: string }>;
+        };
+        return {
+          ok: true,
+          json: async () => ({ content: "Second answer", sqlResult: [] }),
+        };
+      },
+    );
 
     chatInput.value = "Second query";
     sendBtn.click();
     await flushPromises();
 
     expect(secondRequestBody).not.toBeNull();
-    expect(secondRequestBody.history.length).toBeGreaterThan(0);
-    expect(secondRequestBody.history[0].content).toBe("First query");
+    expect(secondRequestBody!.history.length).toBeGreaterThan(0);
+    expect(secondRequestBody!.history[0].content).toBe("First query");
   });
 
   it("covers remaining ui branch edge cases", async () => {
@@ -3540,7 +3553,7 @@ describe("ChatUI", () => {
     const dbSelect = document.createElement("select");
     dbSelect.id = "db-select";
     document.body.appendChild(dbSelect);
-    (uiWithDb as any).dbSelect = dbSelect;
+    uiWithDb["dbSelect"] = dbSelect;
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
     await uiWithDb.fetchDatabases();
 
@@ -3553,20 +3566,20 @@ describe("ChatUI", () => {
     await ui.syncAllChatsWithServer();
 
     // 4. openCohortModal fallback tables when no schema headers exist
-    const origCohortTableSelect = (ui as any).cohortTableSelect;
-    const origCohortModal = (ui as any).cohortModal;
+    const origCohortTableSelect = ui["cohortTableSelect"];
+    const origCohortModal = ui["cohortModal"];
     const cohortModal = document.createElement("div");
     cohortModal.id = "cohort-modal-temp";
     const cohortTableSelect = document.createElement("select");
     cohortTableSelect.id = "cohort-table-select-temp";
     document.body.appendChild(cohortModal);
     document.body.appendChild(cohortTableSelect);
-    (ui as any).cohortModal = cohortModal;
-    (ui as any).cohortTableSelect = cohortTableSelect;
+    ui["cohortModal"] = cohortModal;
+    ui["cohortTableSelect"] = cohortTableSelect;
     ui.openCohortModal();
     expect(cohortTableSelect.options.length).toBe(3); // demographics, cgm_data, patients
-    (ui as any).cohortTableSelect = origCohortTableSelect;
-    (ui as any).cohortModal = origCohortModal;
+    ui["cohortTableSelect"] = origCohortTableSelect;
+    ui["cohortModal"] = origCohortModal;
     cohortModal.remove();
     cohortTableSelect.remove();
 
@@ -3586,7 +3599,7 @@ describe("ChatUI", () => {
     state.createChat();
     state.addMessageToActiveChat({
       role: "assistant",
-      content: null as any,
+      content: null as unknown as string,
     });
     ui["renderMessages"]();
   });
@@ -4194,9 +4207,6 @@ describe("ChatUI", () => {
     );
 
     // Dispatch Tab keydown when focusable elements exist and focus is at the last element
-    const closeBtn = document.getElementById(
-      "close-modal-btn",
-    ) as HTMLButtonElement;
     const exportJsonBtn = document.getElementById(
       "modal-export-json-btn",
     ) as HTMLButtonElement;

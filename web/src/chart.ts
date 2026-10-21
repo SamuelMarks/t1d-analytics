@@ -69,14 +69,51 @@ const SPECIFIC_GLUCOSE_COLUMNS = [
 const GENERIC_VALUE_COLUMNS = ["value", "val"];
 
 /**
+ * Detected CGM glucose and timestamp column names.
+ */
+export interface DetectedCgmColumns {
+  /** Detected glucose column identifier, if present. */
+  glucoseCol?: string;
+  /** Detected timestamp column identifier, if present. */
+  timeCol?: string;
+}
+
+/**
+ * Day (06:00-22:00) and Night (22:00-06:00) Time-in-Range metrics split.
+ */
+export interface DayNightTIRMetrics {
+  /** Daytime TIR metrics (06:00-22:00). */
+  day: TIRMetrics;
+  /** Nighttime TIR metrics (22:00-06:00). */
+  night: TIRMetrics;
+}
+
+/**
+ * Active CGM sensor wear time metrics.
+ */
+export interface ActiveWearMetrics {
+  /** Number of distinct calendar days with sensor readings. */
+  activeDays: number;
+  /** Total number of valid sensor readings. */
+  totalReadings: number;
+  /** Expected number of readings across the observation window. */
+  expectedReadings: number;
+  /** Percentage of expected sensor wear achieved (0-100). */
+  wearPercentage: number;
+  /** Whether active wear meets the >=70% clinical validity threshold. */
+  isValidWear: boolean;
+  /** Total calendar days spanned by the observation window. */
+  calendarDays?: number;
+}
+
+/**
  * Detect whether a tabular dataset has continuous glucose monitoring columns.
  * @param {Array<Record<string, unknown>>} rows - The dataset rows.
- * @returns {{ glucoseCol?: string; timeCol?: string }} Detected column identifiers.
+ * @returns {DetectedCgmColumns} Detected column identifiers.
  */
-export function detectCgmColumns(rows: Array<Record<string, unknown>>): {
-  glucoseCol?: string;
-  timeCol?: string;
-} {
+export function detectCgmColumns(
+  rows: Array<Record<string, unknown>>,
+): DetectedCgmColumns {
   if (!rows || rows.length === 0) return {};
   const sample = rows[0];
   const keys = Object.keys(sample);
@@ -221,13 +258,13 @@ export function calculateTIR(values: number[]): TIRMetrics {
  * @param {Array<Record<string, unknown>>} rows - The dataset rows.
  * @param {string} timeCol - Column name representing timestamp.
  * @param {string} glucoseCol - Column name representing glucose.
- * @returns {{ day: TIRMetrics; night: TIRMetrics }} Day and night metrics.
+ * @returns {DayNightTIRMetrics} Day and night metrics.
  */
 export function calculateDayNightTIR(
   rows: Array<Record<string, unknown>>,
   timeCol: string,
   glucoseCol: string,
-): { day: TIRMetrics; night: TIRMetrics } {
+): DayNightTIRMetrics {
   const dayValues: number[] = [];
   const nightValues: number[] = [];
 
@@ -868,21 +905,14 @@ export function renderAGPSvg(agp: AGPData): SVGSVGElement {
  * @param {string} timeCol - Column name representing timestamp.
  * @param {number} [expectedReadingsPerDay=288] - Expected readings per 24 hours.
  * @param {number} [monitoringDays] - Optional explicit duration of the monitoring/observation window in days.
- * @returns {{ activeDays: number; totalReadings: number; expectedReadings: number; wearPercentage: number; isValidWear: boolean; calendarDays?: number }} Active wear metrics.
+ * @returns {ActiveWearMetrics} Active wear metrics.
  */
 export function calculateActiveWear(
   rows: Array<Record<string, unknown>>,
   timeCol: string,
   expectedReadingsPerDay: number = 288,
   monitoringDays?: number,
-): {
-  activeDays: number;
-  totalReadings: number;
-  expectedReadings: number;
-  wearPercentage: number;
-  isValidWear: boolean;
-  calendarDays?: number;
-} {
+): ActiveWearMetrics {
   const days = new Set<string>();
   let totalReadings = 0;
   let minTime = Infinity;

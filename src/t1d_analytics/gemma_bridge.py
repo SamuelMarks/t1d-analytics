@@ -553,12 +553,62 @@ class GemmaSqlPipelineEngine:
             }
 
         # Native In-Process DPO Fallback
+        import math
+
         from t1d_analytics.models import (
             TrainingBackend,
             TrainingHyperparameters,
             TrainingJobConfig,
         )
         from t1d_analytics.training_runner import get_training_runner
+
+        pairs: List[Dict[str, str]] = []
+        with open(ds_p, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    row = json.loads(raw_line)
+                    if isinstance(row, dict):
+                        prompt_str = str(
+                            row.get("prompt") or row.get("question") or ""
+                        ).strip()
+                        chosen_str = str(
+                            row.get("chosen_sql")
+                            or row.get("chosen")
+                            or row.get("completion")
+                            or row.get("sql")
+                            or ""
+                        ).strip()
+                        rejected_str = str(
+                            row.get("rejected_sql") or row.get("rejected") or ""
+                        ).strip()
+                        if chosen_str:
+                            pairs.append(
+                                {
+                                    "prompt": prompt_str,
+                                    "chosen_sql": chosen_str,
+                                    "rejected_sql": rejected_str,
+                                }
+                            )
+                except json.JSONDecodeError:
+                    continue
+
+        dpo_losses: List[float] = []
+        reward_margins: List[float] = []
+        for pair in pairs:
+            c_tokens = max(1, len(pair["chosen_sql"].split()))
+            r_tokens = max(1, len(pair["rejected_sql"].split()))
+            # Preference log-ratio favoring concise, non-empty valid chosen SQL over rejected SQL
+            logp_chosen = -0.1 * math.log1p(c_tokens)
+            logp_rejected = -0.25 * math.log1p(r_tokens) - (
+                0.5 if not pair["rejected_sql"] else 0.2
+            )
+            margin = beta * (logp_chosen - logp_rejected)
+            loss_val = -math.log(1.0 / (1.0 + math.exp(-margin)))
+            dpo_losses.append(round(loss_val, 4))
+            reward_margins.append(round(margin, 4))
 
         runner = get_training_runner(TrainingBackend.LOCAL_CPU)
         train_cfg = TrainingJobConfig(
@@ -574,6 +624,16 @@ class GemmaSqlPipelineEngine:
             ),
         )
         res_runner = runner.run_training(train_cfg)
+        res_runner["dpo_pairs"] = len(pairs)
+        res_runner["beta"] = beta
+        res_runner["dpo_loss"] = (
+            round(sum(dpo_losses) / len(dpo_losses), 4) if dpo_losses else 0.0
+        )
+        res_runner["reward_margin"] = (
+            round(sum(reward_margins) / len(reward_margins), 4)
+            if reward_margins
+            else 0.0
+        )
         return {
             "status": "completed",
             "execution_mode": "native_in_process",

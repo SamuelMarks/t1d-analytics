@@ -172,6 +172,35 @@ class TrainingDataGenerator:
             self.model = model
         validate_provider_readiness(self.provider)
 
+    def __enter__(self) -> "TrainingDataGenerator":
+        """
+        Enter the runtime context related to this generator.
+
+        Returns
+        -------
+            TrainingDataGenerator: The generator instance itself.
+
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[Any],
+    ) -> None:
+        """
+        Exit the runtime context and close the underlying DuckDB connection.
+
+        Args:
+        ----
+            exc_type: Exception type if raised inside the context block.
+            exc_val: Exception instance if raised inside the context block.
+            exc_tb: Exception traceback if raised inside the context block.
+
+        """
+        self.conn.close()
+
     def _extract_schema(self) -> dict[str, str]:
         """
         Extract the database schema using SHOW TABLES and DESCRIBE.

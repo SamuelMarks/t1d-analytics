@@ -5,9 +5,16 @@
 import i18next from "i18next";
 
 /**
+ * Nested dictionary type for i18next locale translation resources.
+ */
+export type TranslationResourceMap = {
+  [key: string]: string | TranslationResourceMap;
+};
+
+/**
  * English translation resources.
  */
-export const enTranslations = {
+export const enTranslations: TranslationResourceMap = {
   app: {
     title: "t1d-analytics",
     play: "Play",
@@ -234,7 +241,7 @@ export const enTranslations = {
 /**
  * Japanese translation resources.
  */
-export const jaTranslations = {
+export const jaTranslations: TranslationResourceMap = {
   app: {
     title: "t1d-analytics",
     play: "実行",
@@ -459,7 +466,7 @@ export const jaTranslations = {
 /**
  * Arabic translation resources.
  */
-export const arTranslations = {
+export const arTranslations: TranslationResourceMap = {
   app: {
     title: "t1d-analytics",
     play: "تشغيل",
@@ -691,7 +698,7 @@ export const arTranslations = {
 /**
  * Hebrew translation resources.
  */
-export const heTranslations = {
+export const heTranslations: TranslationResourceMap = {
   app: {
     title: "t1d-analytics",
     play: "הפעל",

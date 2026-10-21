@@ -11,6 +11,12 @@ from typing import Any, Iterator, Optional, Union
 
 import duckdb
 
+from t1d_analytics.errors import (
+    EmptyQueryError,
+    MultipleStatementsError,
+    ReadOnlyViolationError,
+)
+
 SqlValue = Union[str, int, float, bool, None]
 
 READ_ONLY_SQL_PREFIXES = (
@@ -99,6 +105,43 @@ def is_read_only_sql_query(query: str) -> bool:
         return False
     first_word = unwrapped.split()[0].lower().rstrip(";").strip()
     return first_word in READ_ONLY_SQL_PREFIXES
+
+
+def validate_read_only_sql(query: str) -> str:
+    """
+    Validate that a SQL query is non-empty, contains a single statement, and is read-only.
+
+    Args:
+    ----
+        query: SQL query string to validate.
+
+    Returns:
+    -------
+        str: Stripped, validated SQL query string.
+
+    Raises:
+    ------
+        EmptyQueryError: If the query is empty or contains only comments/whitespace.
+        MultipleStatementsError: If the query contains multiple semicolon-separated statements.
+        ReadOnlyViolationError: If the query is not a read-only SQL statement.
+
+    """
+    unwrapped = strip_sql_comments_and_parens(query)
+    if not unwrapped:
+        raise EmptyQueryError("SQL query cannot be empty.")
+
+    without_literals = re.sub(r"'(?:''|[^'])*'", "''", unwrapped)
+    without_literals = re.sub(r'"(?:""|[^"])*"', '""', without_literals)
+    segments = [seg.strip() for seg in without_literals.split(";") if seg.strip()]
+    if len(segments) > 1:
+        raise MultipleStatementsError(
+            "Multiple SQL statements are not allowed in a single read-only query."
+        )
+
+    if not is_read_only_sql_query(unwrapped):
+        raise ReadOnlyViolationError(f"Query is not read-only: {query.strip()}")
+
+    return query.strip()
 
 
 def is_sql_query(query: str, conn: Optional[duckdb.DuckDBPyConnection] = None) -> bool:

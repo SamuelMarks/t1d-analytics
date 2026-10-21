@@ -31,11 +31,15 @@ from t1d_analytics.models import (
 from t1d_analytics.parser import fetch_html, parse_datasets
 
 
-def main() -> None:
-    """Execute the CLI application."""
-    # Initialize translator based on LANG env var
-    _ = get_translator()
+def build_cli_parser() -> argparse.ArgumentParser:
+    """
+    Build and return the root ArgumentParser for the T1D Analytics CLI.
 
+    Returns
+    -------
+        argparse.ArgumentParser: Configured CLI argument parser with all subcommands.
+
+    """
     parser = argparse.ArgumentParser(
         description="Downloader and analytics tool for T1D public datasets."
     )
@@ -531,42 +535,40 @@ def main() -> None:
         default=1,
         help="Number of TPU slices for multi-slice orchestration (default: 1).",
     )
+    return parser
 
+
+def main() -> None:
+    """Execute the CLI application."""
+    _ = get_translator()
+    parser = build_cli_parser()
     args = parser.parse_args()
 
     if isinstance(getattr(args, "lang", None), str):
         os.environ["LANG"] = args.lang
         _ = get_translator(args.lang)
 
+    command_handlers: dict[str, Callable[[argparse.Namespace], None]] = {
+        "download": handle_download,
+        "extract": handle_extract,
+        "load": handle_load,
+        "manifest": handle_manifest,
+        "query": handle_query,
+        "generate-training-data": handle_generate_training_data,
+        "export-training-data": handle_export_training_data,
+        "export": handle_export,
+        "evaluate": handle_evaluate,
+        "doctor": handle_doctor,
+        "profile": handle_profile,
+        "watch": handle_watch,
+        "train": handle_train,
+        "bridge-gemma-sql": handle_bridge_gemma_sql,
+    }
+
     try:
-        if args.command == "download":
-            handle_download(args)
-        elif args.command == "extract":
-            handle_extract(args)
-        elif args.command == "load":
-            handle_load(args)
-        elif args.command == "manifest":
-            handle_manifest(args)
-        elif args.command == "query":
-            handle_query(args)
-        elif args.command == "generate-training-data":
-            handle_generate_training_data(args)
-        elif args.command == "export-training-data":
-            handle_export_training_data(args)
-        elif args.command == "export":
-            handle_export(args)
-        elif args.command == "evaluate":
-            handle_evaluate(args)
-        elif args.command == "doctor":
-            handle_doctor(args)
-        elif args.command == "profile":
-            handle_profile(args)
-        elif args.command == "watch":
-            handle_watch(args)
-        elif args.command == "train":
-            handle_train(args)
-        elif args.command == "bridge-gemma-sql":
-            handle_bridge_gemma_sql(args)
+        handler = command_handlers.get(args.command)
+        if handler is not None:
+            handler(args)
     except Exception as e:
         print(_("An error occurred: {}", e), file=sys.stderr)
         sys.exit(1)
@@ -764,26 +766,27 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
         )
     )
     generator = training_data.TrainingDataGenerator(conn, args.model, provider=provider)
+    try:
+        ratios = None
+        if getattr(args, "split_ratios", None):
+            parts = [float(p.strip()) for p in args.split_ratios.split(",")]
+            if len(parts) == 3:
+                ratios = (parts[0], parts[1], parts[2])
 
-    ratios = None
-    if getattr(args, "split_ratios", None):
-        parts = [float(p.strip()) for p in args.split_ratios.split(",")]
-        if len(parts) == 3:
-            ratios = (parts[0], parts[1], parts[2])
+        # Extract schema
+        schema = generator._extract_schema()
 
-    # Extract schema
-    schema = generator._extract_schema()
+        # Generate pairs and write to db
+        total_tables = len(schema)
+        print(_("Found {} tables in the schema.", total_tables))
 
-    # Generate pairs and write to db
-    total_tables = len(schema)
-    print(_("Found {} tables in the schema.", total_tables))
+        for table_name, table_schema in schema.items():
+            print(_("Generating {} pairs for table: {}...", args.num_pairs, table_name))
+            pairs = generator._generate_pairs(table_schema, args.num_pairs)
+            generator.write_to_db(pairs, split_ratios=ratios)
+    finally:
+        conn.close()
 
-    for table_name, table_schema in schema.items():
-        print(_("Generating {} pairs for table: {}...", args.num_pairs, table_name))
-        pairs = generator._generate_pairs(table_schema, args.num_pairs)
-        generator.write_to_db(pairs, split_ratios=ratios)
-
-    conn.close()
     print(_("Training data generation complete!"))
 
 
@@ -836,15 +839,16 @@ def handle_export_training_data(args: argparse.Namespace) -> None:
     _ = get_translator()
     print(_("Connecting to DuckDB at {}...", args.db))
     conn = duckdb.connect(args.db, read_only=True)
-    generator = training_data.TrainingDataGenerator(conn)
+    try:
+        generator = training_data.TrainingDataGenerator(conn)
+        print(_("Exporting table '{}' to {}...", args.table, args.output_file))
+        if args.format == "jsonl":
+            generator.export_to_jsonl(args.table, Path(args.output_file))
+        else:
+            generator.export_to_parquet(args.table, Path(args.output_file))
+    finally:
+        conn.close()
 
-    print(_("Exporting table '{}' to {}...", args.table, args.output_file))
-    if args.format == "jsonl":
-        generator.export_to_jsonl(args.table, Path(args.output_file))
-    else:
-        generator.export_to_parquet(args.table, Path(args.output_file))
-
-    conn.close()
     print(_("Export complete!"))
 
 

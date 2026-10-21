@@ -7,10 +7,11 @@ import math
 import os
 import shutil
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -113,13 +114,18 @@ class BaseTrainingRunner(ABC):
         return 0
 
     @abstractmethod
-    def run_training(self, config: TrainingJobConfig) -> Dict[str, Any]:
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
         """
         Execute training run according to configuration parameters.
 
         Args:
         ----
             config: Training job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------
@@ -443,6 +449,52 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
 class BaseTorchCausalLMRunner(BaseTrainingRunner):
     """Shared base class for PyTorch causal LM training runners on CPU and GPU."""
 
+    def _evaluate(
+        self,
+        model: Any,
+        eval_dataset: List[Tuple[Any, Any]],
+        device: Any,
+        batch_size: int = 4,
+    ) -> Dict[str, float]:
+        """
+        Compute validation loss and perplexity on evaluation split.
+
+        Args:
+        ----
+            model: PyTorch model instance.
+            eval_dataset: Tokenized (input_ids, labels) pairs.
+            device: Compute device.
+            batch_size: Evaluation batch size.
+
+        Returns:
+        -------
+            Dict[str, float]: Evaluation metrics dictionary with 'eval_loss' and 'perplexity'.
+
+        """
+        import torch
+
+        model.eval()
+        total_loss = 0.0
+        total_batches = 0
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+
+        with torch.no_grad():
+            for i in range(0, len(eval_dataset), batch_size):
+                batch = eval_dataset[i : i + batch_size]
+                inps = torch.stack([b[0] for b in batch]).to(device)
+                lbls = torch.stack([b[1] for b in batch]).to(device)
+                outputs = model(inps)
+                logits = getattr(outputs, "logits", outputs)
+                loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
+                total_loss += float(loss.item())
+                total_batches += 1
+
+        avg_loss = total_loss / max(1, total_batches)
+        perplexity = round(math.exp(min(avg_loss, 20.0)), 4)
+
+        model.train()
+        return {"eval_loss": round(avg_loss, 4), "perplexity": perplexity}
+
     def _run_torch_optimizer_loop(
         self,
         model: Any,
@@ -457,6 +509,7 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         target_dev: Optional[Any] = None,
         mixed_precision: str = "fp32",
         ignore_index: Optional[int] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Tuple[List[float], float]:
         """
         Execute the shared PyTorch AdamW + CosineAnnealingLR training loop.
@@ -475,6 +528,7 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
             target_dev: Optional torch.device to move batch tensors onto.
             mixed_precision: Precision mode ('fp32' or 'fp16').
             ignore_index: Optional label index to ignore in CrossEntropyLoss.
+            cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------
@@ -507,7 +561,9 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
 
         for _ in range(epochs):
             for i in range(0, len(dataset), batch_size):
-                if step_idx >= total_steps:
+                if step_idx >= total_steps or (
+                    cancel_event is not None and cancel_event.is_set()
+                ):
                     break
                 batch = dataset[i : i + batch_size]
                 inps = torch.stack([b[0] for b in batch])
@@ -577,13 +633,18 @@ class LocalCpuRunner(BaseTorchCausalLMRunner):
         """
         return True
 
-    def run_training(self, config: TrainingJobConfig) -> Dict[str, Any]:
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
         """
         Execute training or dry-run on CPU.
 
         Args:
         ----
             config: Job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------
@@ -649,6 +710,7 @@ class LocalCpuRunner(BaseTorchCausalLMRunner):
                     weight_decay=hparams.weight_decay if hparams else 0.01,
                     accum_steps=accum_steps,
                     max_norm=max_norm,
+                    cancel_event=cancel_event,
                 )
                 self._save_model_checkpoint(model, out_path / "checkpoint-final")
         except Exception as e:
@@ -793,13 +855,18 @@ class LocalGpuRunner(BaseTorchCausalLMRunner):
             "Use --backend local-cpu or ensure drivers and PyTorch GPU builds are installed."
         )
 
-    def run_training(self, config: TrainingJobConfig) -> Dict[str, Any]:
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
         """
         Execute training or dry-run on local GPU.
 
         Args:
         ----
             config: Job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------
@@ -880,6 +947,7 @@ class LocalGpuRunner(BaseTorchCausalLMRunner):
                     max_norm=max_norm,
                     target_dev=target_dev,
                     mixed_precision=mixed_precision,
+                    cancel_event=cancel_event,
                 )
                 self._save_model_checkpoint(model, out_path / "checkpoint-gpu-final")
         except Exception as e:
@@ -961,59 +1029,18 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
                 f"HuggingFace execution requires 'transformers' and 'torch': {e}"
             ) from e
 
-    def _evaluate(
+    def run_training(
         self,
-        model: Any,
-        eval_dataset: List[Tuple[Any, Any]],
-        device: Any,
-        batch_size: int = 4,
-    ) -> Dict[str, float]:
-        """
-        Compute validation loss and perplexity on evaluation split.
-
-        Args:
-        ----
-            model: PyTorch model instance.
-            eval_dataset: Tokenized (input_ids, labels) pairs.
-            device: Compute device.
-            batch_size: Evaluation batch size.
-
-        Returns:
-        -------
-            Dict[str, float]: Evaluation metrics dictionary with 'eval_loss' and 'perplexity'.
-
-        """
-        import torch
-
-        model.eval()
-        total_loss = 0.0
-        total_batches = 0
-        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
-
-        with torch.no_grad():
-            for i in range(0, len(eval_dataset), batch_size):
-                batch = eval_dataset[i : i + batch_size]
-                inps = torch.stack([b[0] for b in batch]).to(device)
-                lbls = torch.stack([b[1] for b in batch]).to(device)
-                outputs = model(inps)
-                logits = getattr(outputs, "logits", outputs)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
-                total_loss += float(loss.item())
-                total_batches += 1
-
-        avg_loss = total_loss / max(1, total_batches)
-        perplexity = round(math.exp(min(avg_loss, 20.0)), 4)
-
-        model.train()
-        return {"eval_loss": round(avg_loss, 4), "perplexity": perplexity}
-
-    def run_training(self, config: TrainingJobConfig) -> Dict[str, Any]:
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
         """
         Execute training run using Hugging Face causal LM architecture.
 
         Args:
         ----
             config: Training job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------
@@ -1107,6 +1134,7 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
                     max_norm=max_norm,
                     target_dev=target_dev,
                     ignore_index=-100,
+                    cancel_event=cancel_event,
                 )
                 if eval_dataset:
                     eval_metrics = self._evaluate(
@@ -1616,13 +1644,18 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             f"Checkpoint download failed after {max_retries} attempts: {last_err}"
         ) from last_err
 
-    def run_training(self, config: TrainingJobConfig) -> Dict[str, Any]:
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
         """
         Dispatch MaxText workload to Cloud TPU cluster.
 
         Args:
         ----
             config: Training job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------
@@ -1731,6 +1764,7 @@ def sync_dataset_to_gcs(
     gcs_bucket: str,
     max_retries: int = 3,
     validate_checksum: bool = True,
+    sleep_fn: Optional[Callable[[float], None]] = None,
 ) -> str:
     """
     Synchronize exported dataset file to Google Cloud Storage bucket with retries and checksums.
@@ -1741,6 +1775,7 @@ def sync_dataset_to_gcs(
         gcs_bucket: Destination GCS bucket URL (e.g., 'gs://bucket-name').
         max_retries: Number of upload retry attempts.
         validate_checksum: Whether to compute and verify MD5 checksum.
+        sleep_fn: Optional injectable sleep function for retry backoff.
 
     Returns:
     -------
@@ -1780,6 +1815,7 @@ def sync_dataset_to_gcs(
     blob_prefix = "/".join(gcs_bucket[5:].rstrip("/").split("/")[1:])
     blob_name = f"{blob_prefix}/{local_path.name}".lstrip("/")
 
+    backoff_sleep = sleep_fn or time.sleep
     last_err: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -1789,7 +1825,7 @@ def sync_dataset_to_gcs(
             return dest_uri
         except Exception as e:
             last_err = e
-            time.sleep(0.05 * (2 ** (attempt - 1)))
+            backoff_sleep(0.05 * (2 ** (attempt - 1)))
 
     raise RuntimeError(
         f"GCS upload failed after {max_retries} attempts: {last_err}"
@@ -1844,13 +1880,18 @@ class Gemma4SqlRunner(BaseTrainingRunner):
             )
         return True
 
-    def run_training(self, config: TrainingJobConfig) -> Dict[str, Any]:
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
         """
         Execute pretrain or fine-tuning workflow via gemma-4-sql CLI.
 
         Args:
         ----
             config: Training job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------

@@ -106,12 +106,14 @@ from t1d_analytics.diagnostics import (
 )
 from t1d_analytics.errors import (
     DatabaseNotFoundError,
+    InvalidDatabasePathError,
     LlmTranslationError,
     MissingSdkError,
     ProviderNotConfiguredError,
     SchemaReadError,
     SqlExecutionError,
     T1DError,
+    TrainingJobNotFoundError,
 )
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.llm_client import (
@@ -230,6 +232,13 @@ class MemoryRateLimiter(BaseRateLimiter):
         """
         now = time.time()
         with RATE_LIMIT_LOCK:
+            expired_ips = [
+                ip
+                for ip, ts_list in RATE_LIMIT_STORE.items()
+                if not ts_list or (now - ts_list[-1] >= window_seconds)
+            ]
+            for ip in expired_ips:
+                RATE_LIMIT_STORE.pop(ip, None)
             timestamps = RATE_LIMIT_STORE.get(client_ip, [])
             valid_timestamps = [t for t in timestamps if now - t < window_seconds]
             if len(valid_timestamps) >= limit:
@@ -258,6 +267,7 @@ class MemoryRateLimiter(BaseRateLimiter):
             timestamps = RATE_LIMIT_STORE.get(client_ip, [])
             valid = [t for t in timestamps if now - t < window_seconds]
             if not valid:
+                RATE_LIMIT_STORE.pop(client_ip, None)
                 return 1
             oldest = min(valid)
             return max(1, math.ceil(window_seconds - (now - oldest)))
@@ -1001,7 +1011,7 @@ def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
     """
     enforce_rate_limit(req)
     provider_hdr = req.headers.get("x-provider")
-    api_key_hdr = req.headers.get("x-provider-api-key") or req.headers.get("x-api-key")
+    api_key_hdr = req.headers.get("x-provider-api-key")
     if provider_hdr and not request.provider:
         request.provider = provider_hdr
     if api_key_hdr and not request.api_key:
@@ -1048,6 +1058,8 @@ def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
                 sqlResult=results,
                 error=sql_error,
             )
+    except (HTTPException, InvalidDatabasePathError):
+        raise
     except ValueError as ve:
         logger.error(f"Database error during chat request: {ve}")
         return ChatResponse(content="backend.errorDbExecution", error=parse_error(ve))
@@ -1089,7 +1101,7 @@ async def stream_chat_events(
 
     try:
         db_path = validate_db_path(request.db_path)
-    except HTTPException:
+    except (HTTPException, InvalidDatabasePathError):
         payload = json.dumps({"event": "error", "error": "backend.invalidDatabasePath"})
         yield f"data: {payload}\n\n"
         return
@@ -1191,7 +1203,7 @@ async def chat_stream_endpoint(request: ChatRequest, req: Request) -> StreamingR
     """
     enforce_rate_limit(req)
     provider_hdr = req.headers.get("x-provider")
-    api_key_hdr = req.headers.get("x-provider-api-key") or req.headers.get("x-api-key")
+    api_key_hdr = req.headers.get("x-provider-api-key")
     if provider_hdr and not request.provider:
         request.provider = provider_hdr
     if api_key_hdr and not request.api_key:
@@ -1334,7 +1346,7 @@ def execute_sql_endpoint(
         db_path = validate_db_path(request.db_path)
         results = execute_sql(db_path, request.query)
         return ExecuteSqlResponse(sqlResult=results)
-    except HTTPException:
+    except (HTTPException, InvalidDatabasePathError):
         raise
     except ValueError as ve:
         logger.error(f"Database error during sql execution request: {ve}")
@@ -2225,6 +2237,9 @@ def submit_training_job(
     from t1d_analytics.models import TrainingBackend, TrainingJobConfig
     from t1d_analytics.training_runner import global_training_job_manager
 
+    validated_dataset_path = validate_db_path(job_req.dataset_path)
+    validated_output_dir = validate_db_path(job_req.output_dir)
+
     backend_val = job_req.backend.lower()
     if backend_val == "cpu":
         backend_val = "local-cpu"
@@ -2245,8 +2260,8 @@ def submit_training_job(
         )
 
     config = TrainingJobConfig(
-        dataset_path=job_req.dataset_path,
-        output_dir=job_req.output_dir,
+        dataset_path=validated_dataset_path,
+        output_dir=validated_output_dir,
         backend=backend_enum,
         model_name=job_req.model_name,
         dry_run=job_req.dry_run,
@@ -2291,17 +2306,14 @@ def get_training_job(job_id: str, req: Request) -> Dict[str, Any]:
 
     Raises:
     ------
-        HTTPException: 404 if the job ID is not found.
+        TrainingJobNotFoundError: 404 if the job ID is not found.
 
     """
     from t1d_analytics.training_runner import global_training_job_manager
 
     job = global_training_job_manager.get_job(job_id)
     if not job:
-        raise HTTPException(
-            status_code=404,
-            detail={"error_code": "backend.jobNotFound", "params": {"job_id": job_id}},
-        )
+        raise TrainingJobNotFoundError(params={"job_id": job_id})
     return job
 
 
@@ -2321,17 +2333,14 @@ def cancel_training_job(job_id: str, req: Request) -> Dict[str, Any]:
 
     Raises:
     ------
-        HTTPException: 404 if the job ID is not found.
+        TrainingJobNotFoundError: 404 if the job ID is not found.
 
     """
     from t1d_analytics.training_runner import global_training_job_manager
 
     cancelled = global_training_job_manager.cancel_job(job_id)
     if not cancelled:
-        raise HTTPException(
-            status_code=404,
-            detail={"error_code": "backend.jobNotFound", "params": {"job_id": job_id}},
-        )
+        raise TrainingJobNotFoundError(params={"job_id": job_id})
     job = global_training_job_manager.get_job(job_id)
     return job if job else {"job_id": job_id, "status": "cancelled"}
 

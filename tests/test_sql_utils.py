@@ -20,6 +20,7 @@ from t1d_analytics.sql_utils import (
     sanitize_spreadsheet_cell,
     sanitize_sql_value,
     strip_sql_comments_and_parens,
+    validate_read_only_sql,
 )
 
 
@@ -138,6 +139,7 @@ def test_open_sandboxed_duckdb(tmp_path: Path) -> None:
         db_file, read_only=False, disable_external_access=False
     ) as conn:
         conn.execute("CREATE TABLE t (x INT)")
+        conn.execute("CREATE TABLE chat_sessions (id VARCHAR)")
         conn.execute("INSERT INTO t VALUES (7)")
 
     with open_sandboxed_duckdb(
@@ -149,8 +151,32 @@ def test_open_sandboxed_duckdb(tmp_path: Path) -> None:
             conn.execute("DROP TABLE t")
         schemas = extract_table_schemas(conn)
         assert "t" in schemas
+        assert "chat_sessions" not in schemas
 
     assert is_internal_table("_t1d_ingestion_manifest") is True
     assert is_internal_table("chat_sessions", exclude_training_tables=True) is True
     assert is_internal_table("chat_sessions", exclude_training_tables=False) is False
     assert is_internal_table("patients") is False
+
+
+def test_validate_read_only_sql() -> None:
+    """Test validate_read_only_sql accepts valid read-only queries and rejects empty, multi-statement, and mutating SQL."""
+    from t1d_analytics.errors import (
+        EmptyQueryError,
+        MultipleStatementsError,
+        ReadOnlyViolationError,
+    )
+
+    assert (
+        validate_read_only_sql("  SELECT * FROM patients WHERE name = 'a;b'; ")
+        == "SELECT * FROM patients WHERE name = 'a;b';"
+    )
+
+    with pytest.raises(EmptyQueryError):
+        validate_read_only_sql("   -- only a comment\n ")
+
+    with pytest.raises(MultipleStatementsError):
+        validate_read_only_sql("SELECT 1; DROP TABLE patients;")
+
+    with pytest.raises(ReadOnlyViolationError):
+        validate_read_only_sql("DROP TABLE patients")

@@ -268,6 +268,18 @@ export function safeStorageRemove(key: string): void {
 }
 
 /**
+ * Metadata for an available workspace DuckDB database file.
+ */
+export interface AvailableDatabaseItem {
+  /** Display name of the database file. */
+  name: string;
+  /** Filesystem path to the database file. */
+  path: string;
+  /** File size in bytes. */
+  size_bytes: number;
+}
+
+/**
  * State manager for the Chat Application.
  */
 export class ChatState {
@@ -294,9 +306,11 @@ export class ChatState {
     ollamaRemediation: null,
   };
 
+  /** Currently selected DuckDB database path. */
   public currentDb: string = "t1d.duckdb";
-  public availableDbs: { name: string; path: string; size_bytes: number }[] =
-    [];
+  /** List of discovered workspace DuckDB databases. */
+  public availableDbs: AvailableDatabaseItem[] = [];
+  /** Whether server-side chat session synchronization is enabled. */
   public serverSyncEnabled: boolean = false;
   /** Whether token-by-token SSE streaming mode is enabled. */
   public streamingMode: boolean = false;

@@ -84,7 +84,7 @@ describe("ChatState", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
       ok: true,
       json: async () => ({ status: "ok" }),
-    } as any);
+    } as unknown as Response);
     state.renameChat(chat.id, "Synced Title");
     expect(fetchSpy).toHaveBeenCalled();
 
@@ -183,8 +183,8 @@ describe("ChatState", () => {
   });
 
   it("handles undefined localStorage gracefully", () => {
-    const originalLocalStorage = global.localStorage;
-    Object.defineProperty(global, "localStorage", {
+    const originalLocalStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, "localStorage", {
       value: undefined,
       configurable: true,
     });
@@ -193,7 +193,7 @@ describe("ChatState", () => {
     newState.createChat();
     newState.removeApiKey("openai");
 
-    Object.defineProperty(global, "localStorage", {
+    Object.defineProperty(globalThis, "localStorage", {
       value: originalLocalStorage,
       configurable: true,
     });
@@ -262,17 +262,17 @@ describe("ChatState", () => {
             updated_at: "2026-01-01",
             messages: [{ role: "user", content: "remote query" }],
           },
-          null as any,
-          {} as any,
+          null as unknown as Record<string, unknown>,
+          {} as unknown as Record<string, unknown>,
         ],
       }),
-    } as any);
+    } as unknown as Response);
 
     // POST /api/sessions mock response for chat1 upload
     fetchSpy.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ session_id: chat1.id, status: "created" }),
-    } as any);
+    } as unknown as Response);
 
     const ok = await state.syncWithServer();
     expect(ok).toBe(true);
@@ -298,12 +298,12 @@ describe("ChatState", () => {
           },
         ],
       }),
-    } as any);
+    } as unknown as Response);
     // Remote has 3 messages, remote-session-2 in local has 1 message so local remote-session-2 might trigger POST if not on server
     fetchSpy.mockResolvedValue({
       ok: true,
       json: async () => ({ status: "ok" }),
-    } as any);
+    } as unknown as Response);
     await state.syncWithServer();
     expect(state.activeChatId).toBe(state.chats[0].id);
     expect(chat1.title).toBe("Local Chat Updated");
@@ -316,7 +316,7 @@ describe("ChatState", () => {
     fetchSpy.mockResolvedValueOnce({
       ok: false,
       status: 503,
-    } as any);
+    } as unknown as Response);
 
     const ok = await state.syncWithServer();
     expect(ok).toBe(false);
@@ -338,7 +338,7 @@ describe("ChatState", () => {
     fetchSpy.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ status: "deleted" }),
-    } as any);
+    } as unknown as Response);
 
     state.deleteChat(chatId);
     expect(state.deletedChatIds.has(chatId)).toBe(true);
@@ -366,13 +366,13 @@ describe("ChatState", () => {
           messages: [],
         },
       ],
-    } as any);
+    } as unknown as Response);
 
     // Mock the propagation DELETE call for the tombstone
     fetchSpy.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ status: "deleted" }),
-    } as any);
+    } as unknown as Response);
 
     await state.syncWithServer();
 
@@ -403,7 +403,7 @@ describe("ChatState", () => {
           ],
         },
       ],
-    } as any);
+    } as unknown as Response);
 
     const ok = await state.syncWithServer();
     expect(ok).toBe(true);
@@ -427,7 +427,7 @@ describe("ChatState", () => {
           ],
         },
       ],
-    } as any);
+    } as unknown as Response);
     await state.syncWithServer();
     expect(local.title).toBe("New Remote Title");
 
@@ -500,18 +500,24 @@ describe("ChatState", () => {
     // Test syncWithServer handling sessions in deletedChatIds where DELETE fetch rejects
     const syncFetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (_url, init) => {
-        if (init?.method === "DELETE") {
-          return Promise.reject(new Error("Remote delete failure"));
-        }
-        return {
-          ok: true,
-          json: async () => [
-            { session_id: chat.id, title: "Old Deleted", messages: null },
-            { session_id: "new-session", title: "New Session", messages: null },
-          ],
-        } as any;
-      });
+      .mockImplementation(
+        async (_url: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === "DELETE") {
+            return Promise.reject(new Error("Remote delete failure"));
+          }
+          return {
+            ok: true,
+            json: async () => [
+              { session_id: chat.id, title: "Old Deleted", messages: null },
+              {
+                session_id: "new-session",
+                title: "New Session",
+                messages: null,
+              },
+            ],
+          } as unknown as Response;
+        },
+      );
 
     // Also add a local chat that has messages to test local message count comparison
     const activeChat = state.createChat("Active Local");
@@ -530,7 +536,7 @@ describe("ChatState", () => {
     const syncEmptyFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,
       json: async () => ({ unexpected: true }),
-    } as any);
+    } as unknown as Response);
     await state.syncWithServer();
     syncEmptyFetch.mockRestore();
 
@@ -557,7 +563,7 @@ describe("ChatState", () => {
           messages: undefined,
         },
       ],
-    } as any);
+    } as unknown as Response);
     await state.syncWithServer();
     syncFewerFetch.mockRestore();
   });
