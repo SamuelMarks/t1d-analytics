@@ -976,9 +976,8 @@ def test_cli_lang_options(capsys: CaptureFixture[str], tmp_path: Path) -> None:
         ):
             main()
         out = capsys.readouterr().out
-        assert (
-            snippet in out
-        ), f"Expected '{snippet}' in output for lang='{lang}', got: {out}"
+        err_msg = f"Expected '{snippet}' in output for lang='{lang}', got: {out}"
+        assert snippet in out, err_msg
 
 
 @patch("t1d_analytics.training_data.TrainingDataGenerator._generate_pairs")

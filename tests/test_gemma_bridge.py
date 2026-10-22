@@ -16,45 +16,35 @@ from t1d_analytics.gemma_bridge import (
 )
 
 
-def test_check_gemma_sql_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test check_gemma_sql_installed across environment variables, PATH, and importlib."""
-    # 1. Mock env var
-    monkeypatch.setenv("T1D_MOCK_GEMMA_SQL", "1")
-    assert check_gemma_sql_installed() is True
-
-    # 2. In PATH
-    monkeypatch.delenv("T1D_MOCK_GEMMA_SQL", raising=False)
+def test_check_gemma_sql_installed() -> None:
+    """Test check_gemma_sql_installed across PATH binary discovery and importlib spec lookup."""
+    # 1. Found in PATH
     with patch("shutil.which", return_value="/usr/local/bin/gemma-4-sql"):
         assert check_gemma_sql_installed() is True
 
-    # 3. Python module
+    # 2. Not in PATH, found as Python module
     with patch("shutil.which", return_value=None):
         with patch("importlib.util.find_spec", return_value=MagicMock()):
             assert check_gemma_sql_installed() is True
 
-    # 4. Neither
+    # 3. Neither in PATH nor installed as Python module
     with patch("shutil.which", return_value=None):
         with patch("importlib.util.find_spec", return_value=None):
             assert check_gemma_sql_installed() is False
 
 
-def test_get_gemma_sql_binary(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test resolving the gemma-4-sql executable binary."""
-    # 1. Mock env
-    monkeypatch.setenv("T1D_MOCK_GEMMA_SQL", "1")
-    assert "gemma-4-sql" in get_gemma_sql_binary()
-
-    # 2. PATH resolution
-    monkeypatch.delenv("T1D_MOCK_GEMMA_SQL", raising=False)
+def test_get_gemma_sql_binary() -> None:
+    """Test resolving the gemma-4-sql executable binary across PATH, module fallback, and error."""
+    # 1. PATH resolution
     with patch("shutil.which", return_value="/opt/bin/gemma-4-sql"):
         assert get_gemma_sql_binary() == "/opt/bin/gemma-4-sql"
 
-    # 3. Module fallback
+    # 2. Python module fallback
     with patch("shutil.which", return_value=None):
         with patch("importlib.util.find_spec", return_value=MagicMock()):
             assert get_gemma_sql_binary() == "python3 -m gemma_4_sql"
 
-    # 4. Not installed raises RuntimeError
+    # 3. Not installed raises RuntimeError
     with patch("shutil.which", return_value=None):
         with patch("importlib.util.find_spec", return_value=None):
             with pytest.raises(RuntimeError, match="gemma-4-sql is not installed"):
@@ -72,11 +62,8 @@ def test_run_gemma_sql_etl_validations(tmp_path: Path) -> None:
         run_gemma_sql_etl("sft", tmp_path / "missing.duckdb", "sft_data")
 
 
-def test_run_gemma_sql_etl_subprocess(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_gemma_sql_etl_subprocess(tmp_path: Path) -> None:
     """Test run_gemma_sql_etl subprocess execution and error propagation."""
-    monkeypatch.delenv("T1D_MOCK_GEMMA_SQL", raising=False)
     db_file = tmp_path / "data.duckdb"
     db_file.write_text("mock")
 
@@ -118,11 +105,8 @@ def test_run_gemma_sql_train_validations(tmp_path: Path) -> None:
         run_gemma_sql_train("sft", tmp_path / "nonexistent.yml")
 
 
-def test_run_gemma_sql_train_subprocess(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_gemma_sql_train_subprocess(tmp_path: Path) -> None:
     """Test run_gemma_sql_train subprocess execution and error propagation."""
-    monkeypatch.delenv("T1D_MOCK_GEMMA_SQL", raising=False)
     cfg_file = tmp_path / "config.yml"
     cfg_file.write_text("model: gemma")
 
@@ -170,11 +154,8 @@ def test_parse_gemma_sql_metrics() -> None:
     assert empty_metrics["learning_rate"] is None
 
 
-def test_run_gemma_sql_timeouts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_gemma_sql_timeouts(tmp_path: Path) -> None:
     """Test TimeoutError handling in run_gemma_sql_etl and run_gemma_sql_train."""
-    monkeypatch.delenv("T1D_MOCK_GEMMA_SQL", raising=False)
     db_file = tmp_path / "data.duckdb"
     db_file.write_text("mock")
     cfg_file = tmp_path / "cfg.yml"
@@ -300,20 +281,22 @@ def test_gemma_sql_pipeline_engine_missing_files(tmp_path: Path) -> None:
             engine.evaluate_sql("gemma-7b", valid_file, missing_file)
 
 
-def test_gemma_sql_pipeline_engine_native_fallbacks(tmp_path: Path) -> None:
+def test_gemma_sql_pipeline_engine_native_fallbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Test GemmaSqlPipelineEngine native in-process fallbacks when gemma_4_sql is unavailable."""
     # 1. Initialize with fallback enabled when import fails
-    from unittest.mock import MagicMock
-
     import duckdb
 
     mock_tok = MagicMock()
     mock_tok.encode.return_value = [1, 2]
-    patch("transformers.AutoTokenizer.from_pretrained", return_value=mock_tok).start()
-    patch(
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained", lambda *a, **kw: mock_tok
+    )
+    monkeypatch.setattr(
         "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
-        return_value=MagicMock(),
-    ).start()
+        lambda *a, **kw: MagicMock(),
+    )
 
     # Create test DuckDB database with clinical data
 

@@ -145,7 +145,6 @@ class MockTorchDevice:
 
 
 def test_prepare_dataset_raises_when_missing(tmp_path: Path) -> None:
-    """Test function."""
     """Test that prepare_dataset raises FileNotFoundError for nonexistent paths."""
     runner = LocalCpuRunner()
     config = TrainingJobConfig(
@@ -157,7 +156,6 @@ def test_prepare_dataset_raises_when_missing(tmp_path: Path) -> None:
 
 
 def test_prepare_dataset_success(tmp_path: Path) -> None:
-    """Test function."""
     """Test that prepare_dataset returns existing Path."""
     ds = tmp_path / "data.parquet"
     ds.write_text("content")
@@ -167,7 +165,6 @@ def test_prepare_dataset_success(tmp_path: Path) -> None:
 
 
 def test_local_cpu_runner_execution_and_dry_run(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalCpuRunner execution paths for normal, dry-run, and empty dataset modes."""
     ds = tmp_path / "data.jsonl"
     ds.write_text(
@@ -221,7 +218,6 @@ def test_local_cpu_runner_execution_and_dry_run(tmp_path: Path) -> None:
 
 
 def test_local_gpu_runner_validation_and_execution(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner environment validation and training runs."""
     runner = LocalGpuRunner()
 
@@ -311,7 +307,6 @@ def test_local_gpu_runner_validation_and_execution(tmp_path: Path) -> None:
 
 
 def test_remote_tpu_maxtext_runner(tmp_path: Path) -> None:
-    """Test function."""
     """Test RemoteTpuMaxTextRunner configuration generation and job dispatch."""
     runner = RemoteTpuMaxTextRunner()
 
@@ -445,7 +440,6 @@ def test_sync_dataset_to_gcs(tmp_path: Path) -> None:
 
 
 def test_get_training_runner() -> None:
-    """Test function."""
     """Test get_training_runner factory returns correct instances."""
     assert isinstance(get_training_runner(TrainingBackend.LOCAL_CPU), LocalCpuRunner)
     assert isinstance(get_training_runner(TrainingBackend.GEMMA_4_SQL), Gemma4SqlRunner)
@@ -457,7 +451,6 @@ def test_get_training_runner() -> None:
 
 
 def test_local_cpu_runner_with_real_datasets(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalCpuRunner dataset inspection, step progression, and metrics saving."""
     import duckdb
 
@@ -673,7 +666,6 @@ def test_count_dataset_samples_unsupported_suffix_and_duckdb_error(
 
 
 def test_local_gpu_runner_torch_import_error(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner raises TrainingExecutionError when torch is not importable."""
     runner = LocalGpuRunner()
     ds = tmp_path / "data.jsonl"
@@ -695,7 +687,6 @@ def test_local_gpu_runner_torch_import_error(tmp_path: Path) -> None:
 
 
 def test_local_gpu_runner_torch_cpu_fallback(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner fallback to CPU when torch is available but has neither CUDA nor MPS."""
     runner = LocalGpuRunner()
     ds = tmp_path / "data.jsonl"
@@ -717,14 +708,12 @@ def test_local_gpu_runner_torch_cpu_fallback(tmp_path: Path) -> None:
 
 
 def test_get_training_runner_gemma_4_sql() -> None:
-    """Test function."""
     """Test get_training_runner returns Gemma4SqlRunner for GEMMA_4_SQL backend."""
     runner = get_training_runner(TrainingBackend.GEMMA_4_SQL)
     assert isinstance(runner, Gemma4SqlRunner)
 
 
 def test_gemma_4_sql_runner_validate_environment_success() -> None:
-    """Test function."""
     """Test Gemma4SqlRunner environment validation success."""
     runner = Gemma4SqlRunner()
     with patch(
@@ -734,7 +723,6 @@ def test_gemma_4_sql_runner_validate_environment_success() -> None:
 
 
 def test_gemma_4_sql_runner_validate_environment_failure() -> None:
-    """Test function."""
     """Test Gemma4SqlRunner environment validation raises RuntimeError when missing."""
     runner = Gemma4SqlRunner()
     with patch(
@@ -747,7 +735,6 @@ def test_gemma_4_sql_runner_validate_environment_failure() -> None:
 
 
 def test_gemma_4_sql_runner_run_training_dry_run(tmp_path: Path) -> None:
-    """Test function."""
     """Test Gemma4SqlRunner dry-run mode for pretrain, posttrain, and sft stages."""
     runner = Gemma4SqlRunner()
     ds = tmp_path / "train.parquet"
@@ -796,7 +783,6 @@ def test_gemma_4_sql_runner_run_training_dry_run(tmp_path: Path) -> None:
 
 
 def test_gemma_4_sql_runner_run_training_execution(tmp_path: Path) -> None:
-    """Test function."""
     """Test Gemma4SqlRunner execution delegating to gemma_bridge.run_gemma_sql_train."""
     import subprocess
 
@@ -829,7 +815,6 @@ def test_gemma_4_sql_runner_run_training_execution(tmp_path: Path) -> None:
 
 
 def test_prepare_torch_dataset_missing_and_unsupported(tmp_path: Path) -> None:
-    """Test function."""
     """Test prepare_torch_dataset error conditions for missing files and unsupported formats."""
     missing = tmp_path / "nonexistent.jsonl"
     with pytest.raises(FileNotFoundError, match="Training dataset not found"):
@@ -842,7 +827,6 @@ def test_prepare_torch_dataset_missing_and_unsupported(tmp_path: Path) -> None:
 
 
 def test_prepare_torch_dataset_jsonl_parsing_and_error(tmp_path: Path) -> None:
-    """Test function."""
     """Test prepare_torch_dataset JSONL format reading, malformed row skipping, and empty error."""
     # Valid and malformed mixed
     jsonl_file = tmp_path / "valid.jsonl"
@@ -879,7 +863,6 @@ def test_prepare_torch_dataset_jsonl_parsing_and_error(tmp_path: Path) -> None:
 
 
 def test_prepare_torch_dataset_parquet_parsing_and_error(tmp_path: Path) -> None:
-    """Test function."""
     """Test prepare_torch_dataset Parquet format reading and error handling."""
     import duckdb
 
@@ -902,7 +885,6 @@ def test_prepare_torch_dataset_parquet_parsing_and_error(tmp_path: Path) -> None
 
 
 def test_local_cpu_runner_real_torch_training_and_model_save(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalCpuRunner real training loop with PyTorch generating model.pt and dry-run."""
     runner = LocalCpuRunner()
     ds = tmp_path / "train.jsonl"
@@ -940,7 +922,6 @@ def test_local_cpu_runner_real_torch_training_and_model_save(tmp_path: Path) -> 
 
 
 def test_prepare_torch_dataset_edge_cases(tmp_path: Path) -> None:
-    """Test function."""
     """Test prepare_torch_dataset with non-dict rows and empty text strings."""
     jsonl_file = tmp_path / "edge_cases.jsonl"
     jsonl_file.write_text(
@@ -958,7 +939,6 @@ def test_prepare_torch_dataset_edge_cases(tmp_path: Path) -> None:
 
 
 def test_prepare_torch_dataset_parquet_empty_and_no_cols(tmp_path: Path) -> None:
-    """Test function."""
     """Test prepare_torch_dataset when Parquet has no rows or columns cannot be resolved."""
     import duckdb
 
@@ -981,7 +961,6 @@ def test_prepare_torch_dataset_parquet_empty_and_no_cols(tmp_path: Path) -> None
 
 
 def test_local_cpu_runner_training_batch_break(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalCpuRunner training loop break when step_idx reaches total_steps across uneven batches."""
     runner = LocalCpuRunner()
     ds = tmp_path / "three_samples.jsonl"
@@ -1004,7 +983,6 @@ def test_local_cpu_runner_training_batch_break(tmp_path: Path) -> None:
 
 
 def test_local_cpu_runner_fallback_exception_paths(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalCpuRunner exception fallback paths for dry-run and normal execution modes."""
     import duckdb
 
@@ -1051,7 +1029,6 @@ def test_local_cpu_runner_fallback_exception_paths(tmp_path: Path) -> None:
 
 
 def test_local_gpu_runner_real_training_cuda_pipeline(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner authentic training execution with CUDA telemetry and checkpoints."""
     runner = LocalGpuRunner()
     ds = tmp_path / "train_gpu.jsonl"
@@ -1111,7 +1088,6 @@ def test_local_gpu_runner_real_training_cuda_pipeline(tmp_path: Path) -> None:
 
 
 def test_local_gpu_runner_real_training_mps_and_dry_run(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner real training execution with MPS device and dry-run mode."""
     runner = LocalGpuRunner()
     ds = tmp_path / "train_gpu.jsonl"
@@ -1154,7 +1130,6 @@ def test_local_gpu_runner_real_training_mps_and_dry_run(tmp_path: Path) -> None:
 
 
 def test_local_gpu_runner_fallback_on_exception(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner exception fallback for dry-run and normal runs."""
     runner = LocalGpuRunner()
     ds = tmp_path / "train_gpu.jsonl"
@@ -1198,7 +1173,6 @@ def test_local_gpu_runner_fallback_on_exception(tmp_path: Path) -> None:
 
 
 def test_local_gpu_runner_device_info_exceptions(tmp_path: Path) -> None:
-    """Test function."""
     """Test LocalGpuRunner handling exceptions when probing GPU device name and VRAM."""
     runner = LocalGpuRunner()
     ds = tmp_path / "train_gpu_exc.jsonl"
@@ -1231,7 +1205,6 @@ def test_local_gpu_runner_device_info_exceptions(tmp_path: Path) -> None:
 
 
 def test_remote_tpu_dispatch_xpk_and_gcloud_branches(tmp_path: Path) -> None:
-    """Test function."""
     """Test _dispatch_xpk_workload under mock, xpk binary, gcloud fallback, and errors."""
     import subprocess
 
@@ -1305,7 +1278,6 @@ def test_remote_tpu_dispatch_xpk_and_gcloud_branches(tmp_path: Path) -> None:
 
 
 def test_remote_tpu_poll_workload_status_branches() -> None:
-    """Test function."""
     """Test poll_workload_status under mock, success, failure, and timeout."""
     import subprocess
 
@@ -1396,7 +1368,7 @@ def test_remote_tpu_poll_workload_status_branches() -> None:
 
 
 def test_remote_tpu_download_checkpoints_from_gcs(tmp_path: Path) -> None:
-    """Test function."""
+    """Test download_checkpoints_from_gcs for URI validation, SDK download, and retry exhaustion."""
     import asyncio
     from unittest.mock import MagicMock, patch
 
@@ -1439,7 +1411,6 @@ def test_remote_tpu_download_checkpoints_from_gcs(tmp_path: Path) -> None:
 
 
 def test_remote_tpu_run_training_with_dispatch_flag(tmp_path: Path) -> None:
-    """Test function."""
     """Test RemoteTpuMaxTextRunner.run_training when T1D_EXECUTE_TPU_DISPATCH=1."""
     runner = RemoteTpuMaxTextRunner()
     ds = tmp_path / "ds.parquet"
@@ -1464,7 +1435,6 @@ def test_remote_tpu_run_training_with_dispatch_flag(tmp_path: Path) -> None:
 
 
 def test_prepare_torch_dataset_with_tokenizer(tmp_path: Path) -> None:
-    """Test function."""
     """Test prepare_torch_dataset with custom tokenizer, prompt masking, padding, and truncation."""
     ds = tmp_path / "train_tok.jsonl"
     ds.write_text('{"prompt": "question", "completion": "answer"}\n')
@@ -2600,6 +2570,15 @@ def test_huggingface_runner_validation_path_and_model_no_train(tmp_path: Path) -
         res_dry = runner.run_training(config)
     assert res_dry["status"] == "dry_run_completed"
     assert res_dry["eval_metrics"] == {}
+
+    with (
+        patch("torch.cuda.is_available", return_value=False),
+        patch("torch.backends.mps.is_available", return_value=True),
+        patch("torch.device", MockTorchDevice),
+    ):
+        res_dry_mps = runner.run_training(config)
+    assert res_dry_mps["status"] == "dry_run_completed"
+    assert res_dry_mps["eval_metrics"] == {}
 
     class MinimalCallableModel:
         """Callable model without .train() or .save_pretrained()."""

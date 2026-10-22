@@ -9,7 +9,7 @@ repos:
     hooks:
       - id: prettier
         name: prettier
-        entry: web/node_modules/.bin/prettier --write
+        entry: bash -c 'if [ ! -x web/node_modules/.bin/prettier ]; then (cd web && npm install --no-audit --no-fund --silent); fi && web/node_modules/.bin/prettier --write "$@"' --
         language: system
         types_or: [javascript, ts, css, html, json, markdown]
         pass_filenames: true

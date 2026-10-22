@@ -6,4 +6,4 @@ uvicorn>=0.29.0
 pydantic>=2.6.0
 openpyxl>=3.1.2
 pandas>=2.0.0
-any-llm-sdk[ollama]>=0.1.0
+any-llm-sdk[ollama]>=0.1.0; python_version >= '3.11'

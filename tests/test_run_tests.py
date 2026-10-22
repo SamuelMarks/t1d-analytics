@@ -364,17 +364,13 @@ def test_main_badge_colors_and_no_license_shield() -> None:
         def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
             """Provide mocked open handles for badge color verification tests."""
             filename = str(file)
-            if mode == "w":
-                return mock_open().return_value
             if "coverage.json" in filename:
                 return mock_open(
                     read_data='{"totals": {"percent_covered": 75}}'
                 ).return_value
-            if "README.md" in filename:
+            if "README.md" in filename and mode == "r":
                 return mock_open(read_data=readme_without_license).return_value
-            if "combined-coverage.lcov" in filename:
-                return mock_open().return_value
-            if "lcov" in filename:
+            if filename.endswith("lcov") or filename.endswith("lcov.info"):
                 return mock_open(read_data=lcov_content).return_value
             return mock_open().return_value
 
@@ -383,8 +379,6 @@ def test_main_badge_colors_and_no_license_shield() -> None:
             patch("builtins.open", side_effect=custom_open),
         ):
             main()
-            open("combined-coverage.lcov")
-            open("some_unknown_file.txt")
 
 
 def test_main_badge_colors_red_and_interrogate_no_match() -> None:
@@ -412,17 +406,13 @@ def test_main_badge_colors_red_and_interrogate_no_match() -> None:
         def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
             """Provide mock file handler for red color badges and interrogate mismatch tests."""
             filename = str(file)
-            if mode == "w":
-                return mock_open().return_value
             if "coverage.json" in filename:
                 return mock_open(
                     read_data='{"totals": {"percent_covered": 60}}'
                 ).return_value
-            if "README.md" in filename:
+            if "README.md" in filename and mode == "r":
                 return mock_open(read_data=readme_data).return_value
-            if "combined-coverage.lcov" in filename:
-                return mock_open().return_value
-            if "lcov" in filename:
+            if filename.endswith("lcov") or filename.endswith("lcov.info"):
                 return mock_open(read_data=lcov_content).return_value
             return mock_open().return_value
 
@@ -431,9 +421,6 @@ def test_main_badge_colors_red_and_interrogate_no_match() -> None:
             patch("builtins.open", side_effect=custom_open),
         ):
             main()
-            # Cover the missing branches in custom_open manually
-            open("combined-coverage.lcov")
-            open("some_unknown_file.txt")
 
 
 def test_module_dunder_main() -> None:
