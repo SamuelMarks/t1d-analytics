@@ -82,7 +82,7 @@ git clone https://github.com/SamuelMarks/libscript.git ~/.libscript
 cd ~/.libscript
 
 # Install the Google Cloud CLI component and authenticate
-./libscript.sh install cloud-providers/gcp/cli latest
+./libscript.sh install cloud-providers/gcp-cli latest
 
 # Install the HuggingFace CLI and XPK orchestrator
 ./libscript.sh install toolchains/huggingface-cli latest
@@ -96,13 +96,15 @@ cd ~/.libscript
 **Best for:** Rapid prototyping, parameter-efficient fine-tuning (LoRA / QLoRA), Supervised Fine-Tuning (SFT), and DuckDB ETL for T1D models.
 **Hardware:** Single TPU VM (e.g., `v4-8` or `v5litepod-8`).
 
-With `libscript`, you can utilize the `ml-training/tpu-vm-eval-node` stack. This stack automatically creates a TPU VM with an attached persistent disk for dataset caching, mounts GCS via `gcsfuse`, executes your ML loop inside a detached `tmux` session, and forwards TensorBoard (6006) to your local machine.
+With `libscript`, you can utilize the `_lib/ml-training` stack (or `./payloads/ai/gcp-tpu-vm/deploy.sh`). This stack automatically creates a TPU VM with an attached persistent disk for dataset caching, mounts GCS via `gcsfuse`, executes your ML loop inside a detached `tmux` session, and forwards TensorBoard (6006) to your local machine.
 
 ### Step 2.1: Provision the TPU VM
 
 ```bash
 # Creates the VM idempotently using the variables defined in Section 0
-./stacks/ml-training/tpu-vm-eval-node/setup.sh
+./_lib/ml-training/setup.sh
+# Or via the AI payload lifecycle script:
+./payloads/ai/gcp-tpu-vm/setup.sh
 ```
 
 ### Step 2.2: Upload the DuckDB Database to GCS
@@ -149,12 +151,19 @@ scp -r ./data/jaeb_raw/ t1d_analytics.duckdb $USER@$TPU_IP:~/ml_data/
 
 ### Step 2.3: Execute Workloads
 
-You can now dispatch native CLI commands using the stack's deployment script.
+You can dispatch native CLI commands using either the unified `libscript` ML orchestrator (`train`, `eval-ml`), `_lib/ml-training/deploy.sh` (which automatically syncs `APP_DIR`, installs `libscript.json` / `pyproject.toml` dependencies, forwards `HF_TOKEN`, and starts TensorBoard on port 6006), or direct `gcp-tpu-vm ssh`:
 
-**Example 1: Supervised Fine-Tuning (SFT) with LoRA via MaxText**
+**Example 1: Declarative Training Dispatch via `libscript.sh train`**
 
 ```bash
-./libscript.sh gcp/tpu-vm ssh "$TPU_NAME" "
+# Syncs the t1d-analytics repository, mounts GCS, and dispatches the training command on the TPU VM
+./libscript.sh train /path/to/t1d-analytics/libscript.json --target gcp-tpu-vm --backend maxtext
+```
+
+**Example 2: Supervised Fine-Tuning (SFT) with LoRA via MaxText**
+
+```bash
+./libscript.sh gcp-tpu-vm ssh "$TPU_NAME" "
   export HF_TOKEN=\$HF_TOKEN
 
   # 1. Apply PEFT/LoRA adapters
@@ -176,24 +185,33 @@ You can now dispatch native CLI commands using the stack's deployment script.
 
 ```bash
 # Creates the cluster via XPK with Kueue configured
-./libscript.sh gcp/gke-tpu-cluster create "$XPK_CLUSTER_NAME"
+./topologies/gke-tpu-cluster/cli.sh create "$XPK_CLUSTER_NAME"
 ```
 
 ### Step 3.2: Submit a Distributed Training Workload
 
-```bash
-# Add xpk to your path locally
-export PATH=\"./installed/xpk/bin:\$PATH\"
+You can submit the distributed workload using either `./payloads/ai/gke-xpk-training/deploy.sh` (or `./libscript.sh train libscript.json --target gke-xpk`) or `xpk workload create` directly:
 
-# Dispatch a multi-slice MaxText pretraining job
+```bash
+# Option 1: Via libscript GKE-XPK training payload
+export DOCKER_IMAGE="gcr.io/$GCP_PROJECT_ID/gemma-4-sql-runtime:latest"
+./payloads/ai/gke-xpk-training/deploy.sh \
+  --docker-image "$DOCKER_IMAGE" \
+  --tpu-type "$TPU_ACCELERATOR_TYPE" \
+  --num-slices "$NUM_SLICES" \
+  --spot \
+  --command "gemma-4-sql pretrain --model $MODEL_NAME --dataset /mnt/ml_data/t1d_analytics.duckdb --backend maxtext"
+
+# Option 2: Direct XPK CLI invocation
+export PATH="./installed/xpk/bin:$PATH"
 xpk workload create \
-  --cluster \"$XPK_CLUSTER_NAME\" \
-  --workload \"$WORKLOAD_NAME\" \
-  --tpu-type \"$TPU_ACCELERATOR_TYPE\" \
-  --num-slices \"$NUM_SLICES\" \
-  --env \"HF_TOKEN=$HF_TOKEN\" \
-  --docker-image \"gcr.io/$GCP_PROJECT_ID/gemma-4-sql-runtime:latest\" \
-  --command \"gemma-4-sql pretrain --model $MODEL_NAME --dataset /mnt/ml_data/t1d_analytics.duckdb --backend maxtext\"
+  --cluster "$XPK_CLUSTER_NAME" \
+  --workload "$WORKLOAD_NAME" \
+  --tpu-type "$TPU_ACCELERATOR_TYPE" \
+  --num-slices "$NUM_SLICES" \
+  --env "HF_TOKEN=$HF_TOKEN" \
+  --docker-image "gcr.io/$GCP_PROJECT_ID/gemma-4-sql-runtime:latest" \
+  --command "gemma-4-sql pretrain --model $MODEL_NAME --dataset /mnt/ml_data/t1d_analytics.duckdb --backend maxtext"
 ```
 
 ---
@@ -202,13 +220,23 @@ xpk workload create \
 
 ### Option A: Serving API using `libscript` Stacks
 
-Deploy a high-throughput vLLM API server natively:
+Deploy a high-throughput vLLM API server natively on a single TPU VM or GKE XPK cluster:
 
 ```bash
 # Deploy to a Single TPU VM
 export TPU_NAME="$SERVE_TPU_NAME"
-./stacks/ai-serving/tpu-vm-vllm/setup.sh
-./stacks/ai-serving/tpu-vm-vllm/deploy.sh
+./_lib/ai-serving/setup.sh
+./_lib/ai-serving/deploy.sh
+
+# Deploy distributed inference to a GKE TPU Cluster via XPK
+./payloads/ai/gke-xpk-inference/deploy.sh \
+  --docker-image "vllm/vllm-tpu:latest" \
+  --model "$MODEL_NAME" \
+  --tpu-type "$TPU_ACCELERATOR_TYPE"
+
+# Or via declarative ML CLI verbs:
+./libscript.sh serve-ml /path/to/t1d-analytics/libscript.json --target gcp-tpu-vm --backend vllm
+./libscript.sh infer /path/to/t1d-analytics/libscript.json --target gke-xpk --backend vllm
 ```
 
 ### Option B: DuckDB UDF Integration
@@ -216,7 +244,7 @@ export TPU_NAME="$SERVE_TPU_NAME"
 Embed the model directly into a DuckDB instance running on your TPU to query T1D analytics:
 
 ```bash
-./libscript.sh gcp/tpu-vm ssh "$SERVE_TPU_NAME" "
+./libscript.sh gcp-tpu-vm ssh "$SERVE_TPU_NAME" "
   gemma-4-sql embed-duckdb --model /mnt/ml_data/t1d-finetuned --db-path /mnt/ml_data/t1d_analytics.duckdb --prompt 'How many patients had hypo events yesterday?'
 "
 ```
@@ -228,7 +256,7 @@ Embed the model directly into a DuckDB instance running on your TPU to query T1D
 TPU VMs are ephemeral. Once your training run completes, export and upload the artifacts.
 
 ```bash
-./libscript.sh gcp/tpu-vm ssh "$TPU_NAME" "
+./libscript.sh gcp-tpu-vm ssh "$TPU_NAME" "
   # Export the trained model to safetensors
   gemma-4-sql export --model /mnt/ml_data/t1d-finetuned --path ./exported/t1d-pt --backend pytorch
 
@@ -247,15 +275,15 @@ To avoid runaway costs, destroy all compute resources once the assets are safely
 
 ```bash
 # If mounted manually, safely unmount first
-./libscript.sh gcp/tpu-vm ssh "$TPU_NAME" "~/.libscript/libscript.sh storage-layers/gcsfuse unmount /mnt/ml_data" || true
+./libscript.sh gcp-tpu-vm ssh "$TPU_NAME" "~/.libscript/libscript.sh storage-layers/gcsfuse unmount /mnt/ml_data" || true
 
 # Delete the TPU VM
-./libscript.sh gcp/tpu-vm delete "$TPU_NAME"
-./libscript.sh gcp/tpu-vm delete "$SERVE_TPU_NAME"
+./libscript.sh gcp-tpu-vm delete "$TPU_NAME"
+./libscript.sh gcp-tpu-vm delete "$SERVE_TPU_NAME"
 ```
 
 ### Teardown: GKE TPU Clusters (XPK)
 
 ```bash
-./libscript.sh gcp/gke-tpu-cluster delete "$XPK_CLUSTER_NAME"
+./topologies/gke-tpu-cluster/cli.sh delete "$XPK_CLUSTER_NAME"
 ```

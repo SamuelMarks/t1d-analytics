@@ -44,34 +44,50 @@ def main() -> None:
     """
     print("Running web install and build...")
     npm_cmd = shutil.which("npm") or "npm"
-    run_cmd([npm_cmd, "install"], cwd="web")
-    run_cmd([npm_cmd, "run", "build"], cwd="web")
+    run_cmd([npm_cmd, "install"], cwd="t1d-analytics-web")
+    run_cmd([npm_cmd, "run", "build"], cwd="t1d-analytics-web")
 
     print("Running python tests and coverage...")
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.path.abspath("src")
+    python_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+    env["PATH"] = f"{python_bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["PYTHONPATH"] = os.path.abspath(os.path.join("t1d-analytics-backend", "src"))
 
-    pytest_cmd = shutil.which("pytest") or "pytest"
-    run_cmd([pytest_cmd, "tests/", "--cov-report=json", "--cov-report=lcov"], env=env)
+    pytest_cmd = shutil.which("pytest", path=env["PATH"]) or "pytest"
+    run_cmd(
+        [
+            pytest_cmd,
+            "-c",
+            "t1d-analytics-backend/pyproject.toml",
+            "t1d-analytics-backend/tests/",
+            "--cov-report=json",
+            "--cov-report=lcov",
+        ],
+        env=env,
+    )
 
     print("Running frontend tests...")
-    run_cmd([npm_cmd, "run", "coverage"], cwd="web")
+    run_cmd([npm_cmd, "run", "coverage"], cwd="t1d-analytics-web")
 
     print("Running e2e tests...")
-    os.makedirs("tests/test_data", exist_ok=True)
+    os.makedirs("t1d-analytics-backend/tests/test_data", exist_ok=True)
 
-    with open("tests/test_data/patients.csv", "w") as f:
+    with open("t1d-analytics-backend/tests/test_data/patients.csv", "w") as f:
         f.write("id,name,age\n1,Alice,30\n2,Bob,40\n")
 
-    with open("tests/test_data/tiny.csv", "w") as f:
+    with open("t1d-analytics-backend/tests/test_data/tiny.csv", "w") as f:
         f.write("id,value\n1,100\n2,200\n")
+
+    for db_artifact in ("ci_test.duckdb", "ci_test.duckdb.wal"):
+        if os.path.exists(db_artifact):
+            os.remove(db_artifact)
 
     system_python = sys.executable
     run_cmd(
         [
             system_python,
             "-c",
-            "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('tests/test_data/', 'ci_test.duckdb')",
+            "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('t1d-analytics-backend/tests/test_data/', 'ci_test.duckdb')",
         ],
         env=env,
     )
@@ -90,7 +106,9 @@ def main() -> None:
 
     print("Starting frontend server...")
     frontend_proc = subprocess.Popen(
-        [npm_cmd, "run", "dev", "--", "--host", "127.0.0.1"], cwd="web", env=env
+        [npm_cmd, "run", "dev", "--", "--host", "127.0.0.1"],
+        cwd="t1d-analytics-web",
+        env=env,
     )
 
     print("Waiting for backend DB to connect and API to be ready...")
@@ -127,10 +145,12 @@ def main() -> None:
 
     print("Servers ready. Running playwright tests...")
     npx_cmd = shutil.which("npx") or "npx"
-    test_result = subprocess.run([npx_cmd, "playwright", "test"], cwd="web")
+    test_result = subprocess.run(
+        [npx_cmd, "playwright", "test"], cwd="t1d-analytics-web"
+    )
     coverage_result = subprocess.run(
         [npx_cmd, "nyc", "report", "--reporter=lcov", "--report-dir=coverage/e2e"],
-        cwd="web",
+        cwd="t1d-analytics-web",
     )
 
     print("Tearing down servers...")
@@ -152,7 +172,7 @@ def main() -> None:
     )
     lcov_files = [
         "coverage.lcov",
-        os.path.join("web", "coverage", "lcov.info"),
+        os.path.join("t1d-analytics-web", "coverage", "lcov.info"),
     ]
 
     for lcov_file in lcov_files:
@@ -217,9 +237,9 @@ def main() -> None:
     test_shield = f"[![Coverage](https://img.shields.io/badge/Coverage-{test_cov}%25-{test_color}.svg)](#)"
 
     try:
-        interrogate_cmd = shutil.which("interrogate") or "interrogate"
+        interrogate_cmd = shutil.which("interrogate", path=env["PATH"]) or "interrogate"
         result = subprocess.run(
-            [interrogate_cmd, "src/t1d_analytics"],
+            [interrogate_cmd, "t1d-analytics-backend/src/t1d_analytics"],
             capture_output=True,
             text=True,
             env=env,

@@ -1,13 +1,23 @@
 @echo off
 setlocal enabledelayedexpansion
 
-if "%CLOUD_PROVIDER%"=="" set "CLOUD_PROVIDER=azure"
-if "%LIBSCRIPT_ROOT_DIR%"=="" set "LIBSCRIPT_ROOT_DIR=%USERPROFILE%\repos\libscript"
+set "REPO_DIR=%~dp0"
+for %%F in ("%REPO_DIR%.env" "%REPO_DIR%.env.secrets") do (
+    if exist "%%~F" (
+        for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%%~F") do (
+            if not "%%~A"=="" (
+                if "!%%~A!"=="" set "%%~A=%%~B"
+            )
+        )
+    )
+)
+
+if "%CLOUD_PROVIDER%"=="" set "CLOUD_PROVIDER=%DEFAULT_CLOUD_PROVIDER%"
+if "%LIBSCRIPT_ROOT_DIR%"=="" set "LIBSCRIPT_ROOT_DIR=%USERPROFILE%epos\libscript"
 if "%LIBSCRIPT_CLI%"=="" set "LIBSCRIPT_CLI=%LIBSCRIPT_ROOT_DIR%\libscript.cmd"
 if "%NODE_NAME%"=="" set "NODE_NAME=test-t1d-analytics-node"
-if "%RG_NAME%"=="" set "RG_NAME=rg-analytics-test"
-if "%LOCATION%"=="" set "LOCATION=eastus"
-set "REPO_DIR=%~dp0"
+if "%RG_NAME%"=="" set "RG_NAME=default-rg"
+if "%LOCATION%"=="" set "LOCATION=default-region"
 if "%REMOTE_DEST%"=="" set "REMOTE_DEST=t1d-analytics-test"
 
 set "RUN_LOCAL=0"
@@ -70,12 +80,12 @@ echo   --live-cloud               Force live cloud provisioning and execution; f
 echo   --local, -l                Run tests locally using installed pytest/npm.
 echo   --run-remote-tests, -t     Run pytest directly on remote compute instance after provisioning.
 echo Environment variables:
-echo   CLOUD_PROVIDER     Cloud provider (azure, gcp, aws). Default: azure
-echo   LIBSCRIPT_ROOT_DIR Path to Libscript repo. Default: %%USERPROFILE%%\repos\libscript
-echo   NODE_NAME          Name of compute node. Default: test-t1d-analytics-node
-echo   RG_NAME            Resource group or project name. Default: rg-analytics-test
-echo   LOCATION           Cloud region/datacenter. Default: eastus
-echo   REMOTE_DEST        Destination folder on remote node. Default: t1d-analytics-test
+echo   CLOUD_PROVIDER     Cloud provider (%DEFAULT_CLOUD_PROVIDER%, gcp, aws). Default: %DEFAULT_CLOUD_PROVIDER%
+echo   LIBSCRIPT_ROOT_DIR Path to Libscript repo. Default: %%USERPROFILE%%epos\libscript
+echo   NODE_NAME          Name of compute node. Default: %NODE_NAME%
+echo   RG_NAME            Resource group or project name. Default: %RG_NAME%
+echo   LOCATION           Cloud region/datacenter. Default: %LOCATION%
+echo   REMOTE_DEST        Destination folder on remote node. Default: %REMOTE_DEST%
 exit /b 0
 
 :after_args
@@ -83,43 +93,119 @@ if "%MOCK_CLOUD%"=="1" goto run_mock_cloud
 if "%RUN_LOCAL%"=="1" goto run_local_tests
 if not exist "%LIBSCRIPT_CLI%" goto run_local_tests
 
+set "EXIT_CODE=0"
+
+:check_cloud_credentials
+echo Verifying CLI authentication credentials for '%CLOUD_PROVIDER%'...
+if /i "%CLOUD_PROVIDER%"=="%PRIMARY_CLOUD_PROVIDER%" (
+    where %PRIMARY_CLOUD_CLI_NAME% >nul 2>&1
+    if errorlevel 1 (
+        if "%LIVE_CLOUD%"=="1" (
+            echo ERROR: %PRIMARY_CLOUD_DISPLAY_NAME% CLI ^('%PRIMARY_CLOUD_CLI_NAME%'^) not found. 1>&2
+            exit /b 1
+        )
+    ) else (
+        call %PRIMARY_CLOUD_CLI_NAME% account show >nul 2>&1
+        if errorlevel 1 (
+            echo WARNING: %PRIMARY_CLOUD_DISPLAY_NAME% CLI not authenticated. Run '%PRIMARY_CLOUD_LOGIN_CMD%'. 1>&2
+            if "%LIVE_CLOUD%"=="1" (
+                echo ERROR: --live-cloud requires authenticated %PRIMARY_CLOUD_DISPLAY_NAME% credentials. 1>&2
+                exit /b 1
+            )
+        )
+    )
+)
+if /i "%CLOUD_PROVIDER%"=="gcp" (
+    where gcloud >nul 2>&1
+    if errorlevel 1 (
+        if "%LIVE_CLOUD%"=="1" (
+            echo ERROR: Google Cloud CLI ^('gcloud'^) not found. 1>&2
+            exit /b 1
+        )
+    ) else (
+        call gcloud auth print-access-token >nul 2>&1
+        if errorlevel 1 (
+            echo WARNING: Google Cloud CLI not authenticated. Run 'gcloud auth login'. 1>&2
+            if "%LIVE_CLOUD%"=="1" (
+                echo ERROR: --live-cloud requires authenticated GCP credentials. 1>&2
+                exit /b 1
+            )
+        )
+    )
+)
+if /i "%CLOUD_PROVIDER%"=="aws" (
+    where aws >nul 2>&1
+    if errorlevel 1 (
+        if "%LIVE_CLOUD%"=="1" (
+            echo ERROR: AWS CLI ^('aws'^) not found. 1>&2
+            exit /b 1
+        )
+    ) else (
+        call aws sts get-caller-identity >nul 2>&1
+        if errorlevel 1 (
+            echo WARNING: AWS CLI not authenticated. Run 'aws configure'. 1>&2
+            if "%LIVE_CLOUD%"=="1" (
+                echo ERROR: --live-cloud requires authenticated AWS credentials. 1>&2
+                exit /b 1
+            )
+        )
+    )
+)
+
 echo Starting %CLOUD_PROVIDER% deployment test for t1d-analytics...
 echo Node: %NODE_NAME%, Target: %RG_NAME% (%LOCATION%)
 
 rem Provision the stack
 call "%LIBSCRIPT_CLI%" provision "%CLOUD_PROVIDER%" "%NODE_NAME%" "%RG_NAME%" "%LOCATION%" "%REPO_DIR%" "%REMOTE_DEST%"
 if errorlevel 1 (
-    echo Provisioning failed on %CLOUD_PROVIDER%.
+    echo ERROR: Provisioning failed on %CLOUD_PROVIDER%. 1>&2
+    set "EXIT_CODE=1"
     goto cleanup
 )
 
 echo Verifying remote connectivity...
-call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "echo Deployment test successful"
+call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "echo Deployment test successful"
 if errorlevel 1 (
-    echo Remote execution verification failed on %CLOUD_PROVIDER%.
-    goto cleanup
+    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "echo Deployment test successful"
+    if errorlevel 1 (
+        echo ERROR: Remote execution verification failed on %CLOUD_PROVIDER%. 1>&2
+        set "EXIT_CODE=1"
+        goto cleanup
+    )
 )
 
 echo Verifying backend API health on remote host...
-call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "curl -sf http://localhost:8000/api/status || curl -sf http://127.0.0.1:8000/api/status"
+call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == "ready" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{"query": "SHOW TABLES"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
 if errorlevel 1 (
-    echo Backend API health check failed on %CLOUD_PROVIDER%.
-    goto cleanup
+    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == "ready" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{"query": "SHOW TABLES"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
+    if errorlevel 1 (
+        echo WARNING: Backend API health check failed on %CLOUD_PROVIDER%. 1>&2
+        set "EXIT_CODE=1"
+        goto cleanup
+    )
 )
 
 echo Verifying frontend web service on remote host...
-call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "curl -sf -I http://localhost:3000/ || curl -sf -I http://127.0.0.1:3000/"
+call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "curl -sf -I http://localhost:3000/ || curl -sf -I http://127.0.0.1:3000/"
 if errorlevel 1 (
-    echo Frontend web service check failed on %CLOUD_PROVIDER%.
-    goto cleanup
+    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "curl -sf -I http://localhost:3000/ || curl -sf -I http://127.0.0.1:3000/"
+    if errorlevel 1 (
+        echo WARNING: Frontend web service check failed on %CLOUD_PROVIDER%. 1>&2
+        set "EXIT_CODE=1"
+        goto cleanup
+    )
 )
 
 if "%RUN_REMOTE_TESTS%"=="1" (
     echo Running test suite on remote node...
-    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "cd %REMOTE_DEST% && pytest -q"
+    call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "cd %REMOTE_DEST% && pytest -q"
     if errorlevel 1 (
-        echo Remote test suite execution failed.
-        goto cleanup
+        call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "cd %REMOTE_DEST% && pytest -q"
+        if errorlevel 1 (
+            echo ERROR: Remote test suite execution failed. 1>&2
+            set "EXIT_CODE=1"
+            goto cleanup
+        )
     )
     echo Remote test suite passed.
 )
@@ -130,7 +216,7 @@ echo Deployment and remote health verification passed successfully.
 echo Cleaning up cloud resources on %CLOUD_PROVIDER% (%NODE_NAME%)...
 call "%LIBSCRIPT_CLI%" deprovision "%CLOUD_PROVIDER%" "%NODE_NAME%" "%RG_NAME%" "%LOCATION%" "%REPO_DIR%" "%REMOTE_DEST%"
 echo Deprovisioning complete.
-exit /b 0
+exit /b !EXIT_CODE!
 
 :run_mock_cloud
 echo ==========================================================
@@ -140,7 +226,7 @@ echo ==========================================================
 echo Verifying remote execution...
 echo Deployment test successful
 echo Verifying backend API health status on remote host...
-echo {"status": "healthy", "version": "0.1.0"}
+echo {"status": "ready", "tables_count": 4, "total_rows": 475, "version": "0.1.0"}
 echo Verifying frontend web service on remote host...
 echo HTTP/1.1 200 OK
 if "%RUN_REMOTE_TESTS%"=="1" (
@@ -164,8 +250,8 @@ if "%RUN_LOCAL%"=="1" (
 echo ==========================================================
 pytest
 if errorlevel 1 exit /b 1
-if exist "web" (
-    cd web
+if exist "t1d-analytics-web" (
+    cd t1d-analytics-web
     call npm test
     cd ..
 )

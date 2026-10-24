@@ -4,10 +4,10 @@ This repository contains the configuration and source code for the Stanford Heal
 
 ## Pre-requisites
 
-Ensure libscript is installed and you are authenticated to your chosen cloud provider.
+Ensure libscript is installed and you are authenticated to your chosen cloud provider (defaults loaded from `.env`).
 
 - **AWS**: aws configure
-- **Azure**: az login
+- **Default Provider (`$PRIMARY_CLOUD_DISPLAY_NAME`)**: `$PRIMARY_CLOUD_LOGIN_CMD`
 - **GCP**: gcloud auth login
 
 ## T1D Domain Pipeline
@@ -77,24 +77,79 @@ scp -r ./data/jaeb_raw/ t1d_analytics.duckdb $USER@$TPU_IP:~/t1d-analytics/
 
 ## 1. Initial Deployment
 
-To provision the infrastructure and deploy the stack:
+### Automated Stack Provisioning (`provision`)
+
+To provision the cloud infrastructure, mount the persistent data disk (`$DATA_DISK_MOUNT`), install dependencies (`python 3.12`, `nodejs 20.x`, `duckdb`, `nginx`, `ollama`, `uv`), initialize the DuckDB analytics database via `provision_db`, build the frontend, configure Nginx SPA and API reverse-proxy ingress via `netctl`, and start the `t1d-api` and `t1d-web` services:
+
+**Default Cloud Provider (`$CLOUD_PROVIDER` from `.env`):**
+
+```sh
+./libscript.sh provision "$CLOUD_PROVIDER" healthplatform-node "$RG_NAME" "$LOCATION" ./ t1d-analytics
+```
 
 **AWS:**
 
 ```sh
-./libscript.sh cloud aws node-group create healthplatform-node 1 ami-ubuntu-lts healthplatform-vpc --tags Key=Project,Value=StanfordResearch
-```
-
-**Azure:**
-
-```sh
-./libscript.sh cloud azure node create healthplatform-node Ubuntu2204 healthplatform-rg --vnet-name healthplatform-vnet --tags Project=StanfordResearch
+./libscript.sh provision aws healthplatform-node healthplatform-vpc us-east-1 ./ t1d-analytics
 ```
 
 **GCP:**
 
 ```sh
-./libscript.sh cloud gcp node create healthplatform-node ubuntu-2204-lts healthplatform-project --network healthplatform-vpc --labels project=stanfordresearch
+./libscript.sh provision gcp healthplatform-node healthplatform-project us-central1-a ./ t1d-analytics
+```
+
+### Local & Declarative Stack Orchestration
+
+You can also orchestrate dependencies, databases, frontend builds, services, reverse-proxy ingress, and ML workflows directly from `libscript.json`:
+
+```sh
+# Resolve and install stack dependencies + run install hooks
+./libscript.sh install-deps libscript.json
+
+# Provision DuckDB analytics database and emit .env.libscript
+./_lib/databases/provision_db.sh libscript.json
+
+# Compile and stage frontend SPA assets
+./_lib/app-servers/provision_frontend.sh --app-dir . --manifest libscript.json
+
+# Emit or apply Nginx reverse-proxy and SPA ingress configuration
+./_lib/networking/netctl/cli.sh apply libscript.json --format nginx
+
+# Build frontend, provision DuckDB, start services, and apply Nginx ingress
+./libscript.sh start
+./libscript.sh status
+./libscript.sh health
+./libscript.sh logs
+./libscript.sh stop
+
+# Execute declarative ML training or inference (supports --target local|gcp-tpu-vm|gcp-gpu-vm|gke-xpk)
+./libscript.sh train libscript.json --dry-run
+./libscript.sh infer libscript.json --dry-run
+./libscript.sh serve-ml libscript.json --target gcp-tpu-vm --backend vllm --dry-run
+./libscript.sh eval-ml libscript.json --target gke-xpk --backend maxtext --dry-run
+```
+
+### Direct Node Provisioning (Low-Level Provider Subcommands)
+
+If you need to create compute nodes or node groups directly via `libscript` provider routers:
+
+**AWS:**
+
+```sh
+./libscript.sh aws node-group create healthplatform-node 1 ami-ubuntu-lts healthplatform-vpc --tags Key=Project,Value=StanfordResearch
+```
+
+**Default Cloud Provider (`$CLOUD_PROVIDER`):**
+
+```sh
+./libscript.sh "$CLOUD_PROVIDER" node create healthplatform-node "$PRIMARY_CLOUD_VM_IMAGE" "$RG_NAME" --vnet-name healthplatform-vnet --tags Project=StanfordResearch
+```
+
+**GCP:**
+
+```sh
+./libscript.sh gcp node create healthplatform-node ubuntu-2404-lts healthplatform-project --network healthplatform-vpc --labels project=stanfordresearch
 ```
 
 ## 2. Provisioning the Backup Target
@@ -104,29 +159,29 @@ Before performing backups, ensure you have an object storage bucket available:
 **AWS S3:**
 
 ```sh
-./libscript.sh cloud aws storage create stanford-healthplatform-backups
+./libscript.sh aws storage create stanford-healthplatform-backups
 ```
 
-**Azure Blob Storage:**
+**Default Cloud Object Storage (`$CLOUD_PROVIDER`):**
 
 ```sh
-./libscript.sh cloud azure storage create stanfordhealthbackups
+./libscript.sh "$CLOUD_PROVIDER" storage create "$PRIMARY_CLOUD_STORAGE_ACCOUNT"
 ```
 
 **GCP Cloud Storage:**
 
 ```sh
-./libscript.sh cloud gcp storage create stanford-healthplatform-backups
+./libscript.sh gcp storage create stanford-healthplatform-backups
 ```
 
 ## 3. Backing Up Application State
 
-We need to selectively backup the shared Postgres database directories and Let's Encrypt certificates before tearing down the instance.
+We need to selectively backup the DuckDB analytics database (`$DATA_DISK_MOUNT`), PostgreSQL directories, and Let's Encrypt certificates before tearing down the instance.
 
 Using the explicit path retention feature:
 
 ```sh
-./libscript.sh cloud backup healthplatform-node --target azure --paths "/var/lib/postgresql/data /etc/letsencrypt" --keep-last 5
+./libscript.sh backup healthplatform-node --target "$CLOUD_PROVIDER" --paths "$DATA_DISK_MOUNT /var/lib/postgresql/data /etc/letsencrypt" --keep-last 5
 ```
 
 ## 4. Deprovisioning (With Data & IP Retention)
@@ -136,27 +191,27 @@ When the active research phase is paused, we can tear down the compute instances
 **AWS:**
 
 ```sh
-./libscript.sh cloud deprovision aws healthplatform-node healthplatform-vpc us-east-1 --retain-ip --retain-data
+./libscript.sh deprovision aws healthplatform-node healthplatform-vpc us-east-1 --retain-ip --retain-data
 ```
 
-**Azure:**
+**Default Cloud Provider (`$CLOUD_PROVIDER`):**
 
 ```sh
-./libscript.sh cloud deprovision azure healthplatform-node healthplatform-rg eastus --retain-ip --retain-data
+./libscript.sh deprovision "$CLOUD_PROVIDER" healthplatform-node "$RG_NAME" "$LOCATION" --retain-ip --retain-data
 ```
 
 **GCP:**
 
 ```sh
-./libscript.sh cloud deprovision gcp healthplatform-node healthplatform-project us-central1-a --retain-ip --retain-data
+./libscript.sh deprovision gcp healthplatform-node healthplatform-project us-central1-a --retain-ip --retain-data
 ```
 
 ## 5. Restoration & Reprovisioning
 
-To bring the environment back online, we use the restore command. This will map the retained IP back to the new instance, re-attach the persisted data disks, and pull the designated backup archive to restore the Postgres and LetsEncrypt state.
+To bring the environment back online, we use the restore or `--from-backup` provisioning command. This will map the retained IP back to the new instance, re-attach the persisted data disks, and pull the designated backup archive to restore application state.
 
 ```sh
-./libscript.sh cloud restore healthplatform-node --from-backup latest
+./libscript.sh restore healthplatform-node --from-backup latest
 ```
 
 ## 6. Automated Deployment & Health Verification (`test.sh` / `test.cmd`)
@@ -170,8 +225,8 @@ To automate provisioning, remote service inspection, and health validation acros
 # Force live cloud execution with strict pre-flight credential enforcement
 ./test.sh --live-cloud
 
-# Test deployment on Azure (default) or override provider/region
-CLOUD_PROVIDER=azure RG_NAME=rg-analytics-test LOCATION=eastus ./test.sh
+# Test deployment using .env defaults or override provider/region
+CLOUD_PROVIDER="$CLOUD_PROVIDER" RG_NAME="$RG_NAME" LOCATION="$LOCATION" ./test.sh
 
 # Run remote test suite as part of cloud verification
 ./test.sh --run-remote-tests
@@ -194,20 +249,20 @@ test.cmd --run-remote-tests
 | Flag                                       | Description                                                                                                                                       |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--unit-mock`, `--mock-cloud`, `--dry-run` | Executes the full verification workflow in mock mode, validating signal handlers and smoke assertions without spending cloud resources.           |
-| `--live-cloud`                             | Enforces live cloud provisioning; performs mandatory pre-flight CLI checks for `az`, `gcloud`, or `aws` and exits immediately if unauthenticated. |
+| `--live-cloud`                             | Enforces live cloud provisioning; performs mandatory pre-flight CLI checks for `$PRIMARY_CLOUD_CLI_NAME`, `gcloud`, or `aws` and exits immediately if unauthenticated. |
 | `--local`, `-l`                            | Runs the test suite locally on the current workstation using `pytest` and `npm test`.                                                             |
 | `--run-remote-tests`, `-t`                 | Runs `pytest` remotely on the provisioned compute node after health checks pass.                                                                  |
 
 ### Reference: Environment Variables
 
-| Variable             | Default                            | Description                                                   |
+| Variable             | Default (from `.env`)              | Description                                                   |
 | -------------------- | ---------------------------------- | ------------------------------------------------------------- |
-| `CLOUD_PROVIDER`     | `azure`                            | Target cloud provider (`azure`, `gcp`, or `aws`).             |
+| `CLOUD_PROVIDER`     | `$DEFAULT_CLOUD_PROVIDER`          | Target cloud provider (`$DEFAULT_CLOUD_PROVIDER`, `gcp`, or `aws`). |
 | `LIBSCRIPT_ROOT_DIR` | `$HOME/repos/libscript`            | Path to the Libscript root repository.                        |
 | `LIBSCRIPT_CLI`      | `$LIBSCRIPT_ROOT_DIR/libscript.sh` | Path to Libscript executable wrapper.                         |
 | `NODE_NAME`          | `test-t1d-analytics-node`          | Name of compute node to allocate.                             |
-| `RG_NAME`            | `rg-analytics-test`                | Resource group or GCP project ID.                             |
-| `LOCATION`           | `eastus`                           | Cloud region / datacenter zone.                               |
+| `RG_NAME`            | `$RG_NAME`                         | Resource group or GCP project ID.                             |
+| `LOCATION`           | `$LOCATION`                        | Cloud region / datacenter zone.                               |
 | `REMOTE_DEST`        | `t1d-analytics-test`               | Target remote destination directory.                          |
 | `T1D_MOCK_TPU`       | `0`                                | When `1`, simulates TPU workload creation and status polling. |
 | `T1D_MOCK_GCS`       | `0`                                | When `1`, simulates GCS upload and checkpoint downloads.      |

@@ -18,37 +18,38 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: "t1d-analytics-backend/requirements*.txt"
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
-          pip install -e .
+          pip install -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt
+          pip install -e t1d-analytics-backend
 
       - name: Lint and Code Quality (Ruff)
-        run: ruff check .
+        run: ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts
 
       - name: Static Type Checking (Mypy)
-        run: mypy src/ tests/
+        run: mypy --config-file t1d-analytics-backend/pyproject.toml t1d-analytics-backend/src/ t1d-analytics-backend/tests/ scripts/
 
       - name: Documentation Coverage (Interrogate)
-        run: interrogate -vv --fail-under=100 src/t1d_analytics
+        run: interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics
 
       - name: Build Sphinx Documentation
-        run: python -m sphinx -b html docs_src docs
+        run: python -m sphinx -b html t1d-analytics-backend/docs_src docs
 
       - name: Run Pytest Coverage
-        run: pytest tests/ --cov=src/t1d_analytics --cov-fail-under=100
+        run: pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests/ --cov=t1d-analytics-backend/src/t1d_analytics --cov-fail-under=100
 
       - name: Integration Test - Tiny Dataset Load
         run: |
-          mkdir -p tests/test_data
-          echo "id,name,value" > tests/test_data/tiny.csv
-          echo "1,Test A,100" >> tests/test_data/tiny.csv
-          echo "2,Test B,200" >> tests/test_data/tiny.csv
+          mkdir -p t1d-analytics-backend/tests/test_data
+          echo "id,name,value" > t1d-analytics-backend/tests/test_data/tiny.csv
+          echo "1,Test A,100" >> t1d-analytics-backend/tests/test_data/tiny.csv
+          echo "2,Test B,200" >> t1d-analytics-backend/tests/test_data/tiny.csv
 
           # Load tiny dataset into DuckDB
-          python -c "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('tests/test_data/', 'ci_test.duckdb')"
+          python -c "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('t1d-analytics-backend/tests/test_data/', 'ci_test.duckdb')"
 
           # Verify the database has the data
           python -c "import duckdb; conn = duckdb.connect('ci_test.duckdb'); res = conn.execute('SELECT count(*) FROM tiny').fetchone()[0]; assert res == 2, f'Expected 2 rows, got {res}'"
@@ -67,34 +68,34 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: t1d-analytics-web/package-lock.json
 
       - name: Install NPM dependencies
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         run: npm ci
 
       - name: Static Type Checking (TypeScript)
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         run: npm run typecheck
 
       - name: Build Web Application
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         run: npm run build
 
       - name: Generate TypeScript Documentation (TypeDoc)
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         run: npm run docs
 
       - name: Run Web Unit Tests (Vitest)
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         run: npm run coverage
 
       - name: Install Playwright Browsers
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         run: npx playwright install --with-deps chromium
 
       - name: Run Web E2E Tests (Playwright)
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         run: npx playwright test --project=chromium
 
       - name: Set up Python for Backend
@@ -102,26 +103,27 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: "t1d-analytics-backend/requirements*.txt"
 
       - name: Install Python dependencies for Backend
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
-          pip install -e .
+          pip install -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt
+          pip install -e t1d-analytics-backend
 
       - name: Setup Backend for Full E2E
         run: |
-          mkdir -p tests/test_data
-          echo "id,name,value" > tests/test_data/tiny.csv
-          echo "1,Test A,100" >> tests/test_data/tiny.csv
-          echo "2,Test B,200" >> tests/test_data/tiny.csv
-          echo "id,name,age" > tests/test_data/patients.csv
-          echo "1,Alice,30" >> tests/test_data/patients.csv
-          echo "2,Bob,40" >> tests/test_data/patients.csv
-          t1d-analytics load -d tests/test_data --db ci_test.duckdb
+          mkdir -p t1d-analytics-backend/tests/test_data
+          echo "id,name,value" > t1d-analytics-backend/tests/test_data/tiny.csv
+          echo "1,Test A,100" >> t1d-analytics-backend/tests/test_data/tiny.csv
+          echo "2,Test B,200" >> t1d-analytics-backend/tests/test_data/tiny.csv
+          echo "id,name,age" > t1d-analytics-backend/tests/test_data/patients.csv
+          echo "1,Alice,30" >> t1d-analytics-backend/tests/test_data/patients.csv
+          echo "2,Bob,40" >> t1d-analytics-backend/tests/test_data/patients.csv
+          t1d-analytics load -d t1d-analytics-backend/tests/test_data --db ci_test.duckdb
 
       - name: Run Web E2E Full Stack Tests (Playwright)
-        working-directory: ./web
+        working-directory: ./t1d-analytics-web
         env:
           T1D_DB_PATH: ../ci_test.duckdb
         run: npx playwright test tests-e2e-full -c playwright.full.config.ts
@@ -132,6 +134,6 @@ jobs:
         with:
           name: playwright-artifacts
           path: |
-            web/playwright-report/
-            web/test-results/
+            t1d-analytics-web/playwright-report/
+            t1d-analytics-web/test-results/
           retention-days: 7

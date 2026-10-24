@@ -2,14 +2,33 @@
 
 set -e
 
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Load defaults from .env and .env.secrets without overriding caller-supplied environment variables
+for env_file in "$REPO_DIR/.env" "$REPO_DIR/.env.secrets"; do
+    if [ -f "$env_file" ]; then
+        DQ='"'
+        while IFS='=' read -r key val || [ -n "$key" ]; do
+            case "$key" in
+                ''|\#*) continue ;;
+            esac
+            val="${val#$DQ}"
+            val="${val%$DQ}"
+            eval "cur=\${$key:-}"
+            if [ -z "$cur" ]; then
+                export "$key=$val"
+            fi
+        done < "$env_file"
+    fi
+done
+
 # Configuration with configurable defaults
-CLOUD_PROVIDER="${CLOUD_PROVIDER:-azure}"
+CLOUD_PROVIDER="${CLOUD_PROVIDER:-$DEFAULT_CLOUD_PROVIDER}"
 LIBSCRIPT_ROOT_DIR="${LIBSCRIPT_ROOT_DIR:-$HOME/repos/libscript}"
 LIBSCRIPT_CLI="${LIBSCRIPT_CLI:-$LIBSCRIPT_ROOT_DIR/libscript.sh}"
 NODE_NAME="${NODE_NAME:-test-t1d-analytics-node}"
-RG_NAME="${RG_NAME:-rg-analytics-test}"
-LOCATION="${LOCATION:-eastus}"
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+RG_NAME="${RG_NAME:-default-rg}"
+LOCATION="${LOCATION:-default-region}"
 REMOTE_DEST="${REMOTE_DEST:-t1d-analytics-test}"
 
 RUN_LOCAL=0
@@ -39,12 +58,12 @@ for arg in "$@"; do
             echo "  --local, -l                Run tests locally using installed pytest/npm."
             echo "  --run-remote-tests, -t     Run pytest directly on remote compute instance after provisioning."
             echo "Environment variables:"
-            echo "  CLOUD_PROVIDER     Cloud provider (azure, gcp, aws). Default: azure"
+            echo "  CLOUD_PROVIDER     Cloud provider ($DEFAULT_CLOUD_PROVIDER, gcp, aws). Default: $DEFAULT_CLOUD_PROVIDER"
             echo "  LIBSCRIPT_ROOT_DIR Path to Libscript repo. Default: \$HOME/repos/libscript"
-            echo "  NODE_NAME          Name of compute node. Default: test-t1d-analytics-node"
-            echo "  RG_NAME            Resource group or project name. Default: rg-analytics-test"
-            echo "  LOCATION           Cloud region/datacenter. Default: eastus"
-            echo "  REMOTE_DEST        Destination folder on remote node. Default: t1d-analytics-test"
+            echo "  NODE_NAME          Name of compute node. Default: $NODE_NAME"
+            echo "  RG_NAME            Resource group or project name. Default: $RG_NAME"
+            echo "  LOCATION           Cloud region/datacenter. Default: $LOCATION"
+            echo "  REMOTE_DEST        Destination folder on remote node. Default: $REMOTE_DEST"
             exit 0
             ;;
     esac
@@ -68,7 +87,7 @@ if [ "$MOCK_CLOUD" -eq 1 ]; then
     echo "Verifying remote execution..."
     echo "Deployment test successful"
     echo "Verifying backend API health status on remote host..."
-    echo '{"status": "healthy", "version": "0.1.0"}'
+    echo '{"status": "ready", "tables_count": 4, "total_rows": 475, "version": "0.1.0"}'
     echo "Verifying frontend web service on remote host..."
     echo "HTTP/1.1 200 OK"
     if [ "$RUN_REMOTE_TESTS" -eq 1 ]; then
@@ -89,8 +108,8 @@ if [ "$RUN_LOCAL" -eq 1 ] || [ ! -x "$LIBSCRIPT_CLI" ]; then
     fi
     echo "=========================================================="
     pytest
-    if [ -d "web" ]; then
-        (cd web && npm test)
+    if [ -d "t1d-analytics-web" ]; then
+        (cd t1d-analytics-web && npm test)
     fi
     echo "Local test suite completed successfully."
     exit 0
@@ -111,17 +130,17 @@ trap cleanup EXIT INT TERM
 check_cloud_credentials() {
     echo "Verifying CLI authentication credentials for '$CLOUD_PROVIDER'..."
     case "$CLOUD_PROVIDER" in
-        azure)
-            if command -v az >/dev/null 2>&1; then
-                if ! az account show >/dev/null 2>&1; then
-                    echo "WARNING: Azure CLI not authenticated. Run 'az login'." >&2
+        "$PRIMARY_CLOUD_PROVIDER")
+            if command -v "$PRIMARY_CLOUD_CLI_NAME" >/dev/null 2>&1; then
+                if ! "$PRIMARY_CLOUD_CLI_NAME" account show >/dev/null 2>&1; then
+                    echo "WARNING: $PRIMARY_CLOUD_DISPLAY_NAME CLI not authenticated. Run '$PRIMARY_CLOUD_LOGIN_CMD'." >&2
                     if [ "$LIVE_CLOUD" -eq 1 ]; then
-                        echo "ERROR: --live-cloud requires authenticated Azure credentials." >&2
+                        echo "ERROR: --live-cloud requires authenticated $PRIMARY_CLOUD_DISPLAY_NAME credentials." >&2
                         exit 1
                     fi
                 fi
             elif [ "$LIVE_CLOUD" -eq 1 ]; then
-                echo "ERROR: Azure CLI ('az') not found." >&2
+                echo "ERROR: $PRIMARY_CLOUD_DISPLAY_NAME CLI ('$PRIMARY_CLOUD_CLI_NAME') not found." >&2
                 exit 1
             fi
             ;;
@@ -169,11 +188,12 @@ if ! "$LIBSCRIPT_CLI" provision "$CLOUD_PROVIDER" "$NODE_NAME" "$RG_NAME" "$LOCA
 fi
 
 remote_exec() {
-    _CMD="$1"
+    cmd="$1"
     if [ -f "$LIBSCRIPT_ROOT_DIR/_lib/cloud-providers/$CLOUD_PROVIDER/cli.sh" ]; then
-        "$LIBSCRIPT_ROOT_DIR/_lib/cloud-providers/$CLOUD_PROVIDER/cli.sh" node exec "$NODE_NAME" "$RG_NAME" "$_CMD"
+        "$LIBSCRIPT_ROOT_DIR/_lib/cloud-providers/$CLOUD_PROVIDER/cli.sh" node exec "$NODE_NAME" "$RG_NAME" "$cmd"
     else
-        "$LIBSCRIPT_CLI" cloud "$CLOUD_PROVIDER" node exec "$NODE_NAME" "$RG_NAME" "$_CMD"
+        "$LIBSCRIPT_CLI" "$CLOUD_PROVIDER" node exec "$NODE_NAME" "$RG_NAME" "$cmd" 2>/dev/null || 
+            "$LIBSCRIPT_CLI" cloud "$CLOUD_PROVIDER" node exec "$NODE_NAME" "$RG_NAME" "$cmd"
     fi
 }
 
@@ -186,7 +206,7 @@ fi
 
 # 2. Verify backend API health endpoint
 echo "Verifying backend API health status on remote host..."
-if ! remote_exec "curl -sf http://localhost:8000/api/status || curl -sf http://127.0.0.1:8000/api/status"; then
+if ! remote_exec "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == "ready" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{"query": "SHOW TABLES"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"; then
     echo "WARNING: Backend API health endpoint check failed. Gathering diagnostic logs..."
     remote_exec "journalctl -u t1d-api -n 30 --no-pager 2>/dev/null || docker logs --tail 30 t1d-backend 2>/dev/null || true"
     exit 1

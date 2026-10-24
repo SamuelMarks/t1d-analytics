@@ -1,0 +1,65 @@
+{
+  "name": "t1d-analytics-web",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "docs": "typedoc --out ../docs/web src/main.ts src/ui.ts src/state.ts src/chart.ts src/i18n.ts src/formatters.ts src/clinical-dates.ts src/sql-highlight.ts",
+    "test:e2e": "playwright test --config=playwright.config.ts",
+    "test:e2e:full": "playwright test --config=playwright.full.config.ts",
+    "test:e2e:all": "npm run test:e2e && npm run test:e2e:full"
+  },
+  "typedocOptions": {
+    "treatWarningsAsErrors": true,
+    "validation": {
+      "notDocumented": true,
+      "invalidLink": true,
+      "notExported": true
+    },
+    "blockTags": [
+      "@default",
+      "@param",
+      "@returns",
+      "@module",
+      "@file",
+      "@fileoverview",
+      "@remarks",
+      "@example",
+      "@throws",
+      "@see",
+      "@deprecated"
+    ]
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.59.1",
+    "@types/dompurify": "^3.0.5",
+    "@types/highlight.js": "^9.12.4",
+    "@types/marked": "^5.0.2",
+    "@types/node": "^25.6.0",
+    "@vitest/coverage-istanbul": "^1.6.1",
+    "@vitest/coverage-v8": "^1.4.0",
+    "jsdom": "^24.0.0",
+    "monocart-reporter": "^2.12.4",
+    "nyc": "^18.0.0",
+    "prettier": "^3.8.2",
+    "typedoc": "^0.28.20",
+    "typescript": "^5.4.3",
+    "vite": "^5.2.7",
+    "vite-plugin-istanbul": "^5.0.0",
+    "vitest": "^1.4.0"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.15",
+    "highlight.js": "^11.11.1",
+    "i18next": "^26.0.5",
+    "marked": "^18.0.1"
+  }
+}

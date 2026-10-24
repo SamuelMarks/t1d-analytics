@@ -21,14 +21,14 @@ services:
   frontend:
     image: node:20-alpine
     container_name: t1d-frontend
-    working_dir: /app/web
+    working_dir: /app/t1d-analytics-web
     volumes:
-      - ./web:/app/web
+      - ./t1d-analytics-web:/app/t1d-analytics-web
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=development
-    command: sh -c "npm install && npx vite preview --port 3000 --host 0.0.0.0"
+    command: sh -c "npm install && npm run build && npx vite preview --port 3000 --host 0.0.0.0"
     depends_on:
       - backend
 

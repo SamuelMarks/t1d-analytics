@@ -12,12 +12,15 @@ To handle large-scale LLM training efficiently, we recommend utilizing Google Cl
 # Clone libscript and install requirements
 git clone https://github.com/SamuelMarks/libscript.git ~/.libscript
 cd ~/.libscript
-./libscript.sh install cloud-providers/gcp/cli latest
+./libscript.sh install cloud-providers/gcp-cli latest
 
 # Provision a TPU VM with persistent storage
 export TPU_NAME="gemma-t1d-node"
 export TPU_DATA_DISK_SIZE="500"
-./stacks/ml-training/tpu-vm-eval-node/setup.sh
+./_lib/ml-training/setup.sh
+
+# Or dispatch the training workflow declaratively via libscript.json
+./libscript.sh train /path/to/t1d-analytics/libscript.json --target gcp-tpu-vm --backend maxtext
 ```
 
 ### 1.2 Repository Installation
@@ -26,7 +29,7 @@ On the training instance, install the required frameworks. Both `t1d-analytics` 
 
 ```bash
 # Inside the TPU VM
-pip install -e /path/to/t1d-analytics
+pip install -e /path/to/t1d-analytics/t1d-analytics-backend
 pip install -e /path/to/gemma-4-sql[all]
 ```
 

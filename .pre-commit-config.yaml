@@ -1,30 +1,53 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.5
-    hooks:
-      - id: ruff
-        args: ["--fix"]
-      - id: ruff-format
   - repo: local
     hooks:
-      - id: prettier
-        name: prettier
-        entry: bash -c 'if [ ! -x web/node_modules/.bin/prettier ]; then (cd web && npm install --no-audit --no-fund --silent); fi && web/node_modules/.bin/prettier --write "$@"' --
-        language: system
-        types_or: [javascript, ts, css, html, json, markdown]
-        pass_filenames: true
-      - id: tsc
-        name: typecheck frontend
-        entry: bash -c 'cd web && npx tsc --noEmit'
+      - id: auto-format
+        name: Auto Format
+        entry: bash -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi && npx --prefix t1d-analytics-web prettier --write t1d-analytics-web"
         language: system
         pass_filenames: false
-      - id: mypy
-        name: typecheck backend
-        entry: mypy --strict src tests
+      - id: backend-lint
+        name: Backend Lint
+        entry: bash -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
         language: system
         pass_filenames: false
-      - id: tests-and-shields
-        name: run build, tests, coverage, and update shields
-        entry: sh -c 'python3 scripts/run_tests.py 2>/dev/null || python scripts/run_tests.py'
+      - id: backend-format
+        name: Backend Format
+        entry: bash -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
+        language: system
+        pass_filenames: false
+      - id: backend-mypy
+        name: Backend Mypy
+        entry: bash -c "if [ -x .venv/bin/mypy ]; then .venv/bin/mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; else mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; fi"
+        language: system
+        pass_filenames: false
+      - id: backend-test
+        name: Backend Tests
+        entry: bash -c "if [ -x .venv/bin/pytest ]; then .venv/bin/pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; else pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; fi"
+        language: system
+        pass_filenames: false
+      - id: frontend-lint
+        name: Frontend Lint
+        entry: bash -c "cd t1d-analytics-web && npm install --no-audit --no-fund --silent && npm run lint"
+        language: system
+        pass_filenames: false
+      - id: frontend-format
+        name: Frontend Format
+        entry: bash -c "cd t1d-analytics-web && npm run format"
+        language: system
+        pass_filenames: false
+      - id: frontend-test
+        name: Frontend Tests
+        entry: bash -c "cd t1d-analytics-web && npm run test:coverage && npm run docs"
+        language: system
+        pass_filenames: false
+      - id: e2e-test
+        name: E2E Tests
+        entry: bash -c "if [ -x .venv/bin/python ]; then .venv/bin/python scripts/run_tests.py; elif command -v python3 >/dev/null 2>&1; then python3 scripts/run_tests.py; else python scripts/run_tests.py; fi"
+        language: system
+        pass_filenames: false
+      - id: update-coverage-badges
+        name: Update Coverage Badges
+        entry: bash -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics; else interrogate -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics; fi"
         language: system
         pass_filenames: false

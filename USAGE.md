@@ -121,7 +121,7 @@ Start the backend server using `uvicorn`, and specify your database path using t
 ```bash
 # Ensure you are in the root directory of the project
 T1D_DB_PATH=/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb \
-uvicorn src.t1d_analytics.api:app --reload --host 0.0.0.0 --port 8000
+uvicorn t1d_analytics.api:app --app-dir t1d-analytics-backend/src --reload --host 0.0.0.0 --port 8000
 ```
 
 You should see output indicating that the server has started on `http://0.0.0.0:8000`. You can visit `http://localhost:8000/docs` in your browser to view the interactive API documentation.
@@ -133,7 +133,7 @@ You should see output indicating that the server has started on `http://0.0.0.0:
 With the backend running, open a **new terminal window** to start the frontend application.
 
 ```bash
-cd web
+cd t1d-analytics-web
 npm run dev
 ```
 
