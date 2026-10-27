@@ -46,6 +46,7 @@ from t1d_analytics.llm_client import (
     AnyLlmFactoryProtocol,
     build_clinical_sql_prompt,
     complete_llm_prompt,
+    create_any_llm_transport,
     extract_stream_delta,
     get_effective_api_key,
     resolve_provider_and_model,
@@ -175,20 +176,14 @@ def stream_llm_completion_tokens(
             params={"provider": resolved_provider, "env_var": env_var},
         )
 
-    if llm_factory is not None:
-        llm = (
-            llm_factory(resolved_provider, api_key=effective_api_key)
-            if effective_api_key
-            else llm_factory(resolved_provider)
-        )
-    else:
-        from any_llm import AnyLLM
-
-        llm = (
-            AnyLLM.create(resolved_provider, api_key=effective_api_key)
-            if effective_api_key
-            else AnyLLM.create(resolved_provider)
-        )
+    active_factory: AnyLlmFactoryProtocol = (
+        llm_factory if llm_factory is not None else create_any_llm_transport
+    )
+    llm = (
+        active_factory(resolved_provider, api_key=effective_api_key)
+        if effective_api_key
+        else active_factory(resolved_provider)
+    )
     try:
         stream_resp = llm.completion(
             model=actual_model,

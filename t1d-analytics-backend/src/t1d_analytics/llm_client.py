@@ -245,19 +245,6 @@ StreamMappingChunk = Mapping[
     ],
 ]
 
-ObjectChunkInput = Union[
-    OpenAiStreamChunkProtocol,
-    GeminiStreamChunkProtocol,
-    AnthropicStreamChunkProtocol,
-    DirectTextChunkProtocol,
-]
-
-StreamChunkInput = Union[
-    str,
-    StreamMappingChunk,
-    ObjectChunkInput,
-]
-
 
 @runtime_checkable
 class LlmCompletionMessageProtocol(Protocol):
@@ -284,6 +271,21 @@ class LlmCompletionResponseProtocol(Protocol):
     @property
     def choices(self) -> Sequence[LlmCompletionChoiceProtocol]:
         """Return completion choices."""
+
+
+ObjectChunkInput = Union[
+    LlmCompletionResponseProtocol,
+    OpenAiStreamChunkProtocol,
+    GeminiStreamChunkProtocol,
+    AnthropicStreamChunkProtocol,
+    DirectTextChunkProtocol,
+]
+
+StreamChunkInput = Union[
+    str,
+    StreamMappingChunk,
+    ObjectChunkInput,
+]
 
 
 @runtime_checkable
@@ -659,6 +661,7 @@ def _extract_delta_or_message_str(
             _DeltaProtocol,
             _DeltaContentProtocol,
             _DeltaTextProtocol,
+            LlmCompletionMessageProtocol,
         ]
     ],
     prefer_content: bool = True,
@@ -678,12 +681,12 @@ def _extract_delta_or_message_str(
     """
     if item is None:
         return ""
-    content_val: Optional[str] = None
-    text_val: Optional[str] = None
-    if isinstance(item, _DeltaContentProtocol):
-        content_val = item.content
-    if isinstance(item, _DeltaTextProtocol):
-        text_val = item.text
+    content_val: Optional[str] = (
+        item.content if isinstance(item, _DeltaContentProtocol) else None
+    )
+    text_val: Optional[str] = (
+        item.text if isinstance(item, _DeltaTextProtocol) else None
+    )
     primary = content_val if prefer_content else text_val
     secondary = text_val if prefer_content else content_val
     chosen = primary or secondary
@@ -834,6 +837,84 @@ def extract_stream_delta(chunk: StreamChunkInput, provider: str = "ollama") -> s
     return _extract_openai_chunk_delta(chunk)
 
 
+class _AnyLlmTransportAdapter:
+    """Adapter bridging `any_llm.AnyLLM` to `LlmTransportProtocol`."""
+
+    def __init__(self, provider: str, api_key: Optional[str] = None) -> None:
+        """
+        Initialize the underlying `AnyLLM` client instance.
+
+        Args:
+        ----
+            provider: Resolved LLM provider identifier.
+            api_key: Optional provider API key.
+
+        """
+        from any_llm import AnyLLM
+
+        self._client = (
+            AnyLLM.create(provider, api_key=api_key)
+            if api_key
+            else AnyLLM.create(provider)
+        )
+
+    def completion(
+        self,
+        *,
+        model: str,
+        messages: Sequence[Mapping[str, str]],
+        stream: bool = False,
+    ) -> Union[LlmCompletionResponseProtocol, StreamChunkInput]:
+        """
+        Delegate chat completion to the underlying `AnyLLM` instance.
+
+        Args:
+        ----
+            model: Model identifier string.
+            messages: Sequence of chat message mappings.
+            stream: Whether to request streaming token chunks.
+
+        Returns:
+        -------
+            Union[LlmCompletionResponseProtocol, StreamChunkInput]: Completion response or stream iterator.
+
+        """
+        completion_fn: Callable[
+            ...,
+            Union[LlmCompletionResponseProtocol, StreamChunkInput],
+        ] = self._client.completion
+        normalized_messages = [dict(m) for m in messages]
+        if stream:
+            return completion_fn(
+                model=model,
+                messages=normalized_messages,
+                stream=True,
+            )
+        return completion_fn(
+            model=model,
+            messages=normalized_messages,
+        )
+
+
+def create_any_llm_transport(
+    provider: str, api_key: Optional[str] = None
+) -> LlmTransportProtocol:
+    """
+    Create an `LlmTransportProtocol` backed by `any_llm.AnyLLM`.
+
+    Args:
+    ----
+        provider: Resolved LLM provider identifier.
+        api_key: Optional provider API key.
+
+    Returns:
+    -------
+        LlmTransportProtocol: Configured transport adapter.
+
+    """
+    return _AnyLlmTransportAdapter(provider, api_key=api_key)
+
+
 def complete_llm_prompt(
     prompt: str,
     model_name: str,
@@ -862,28 +943,19 @@ def complete_llm_prompt(
         normalize_ollama_host()
     effective_api_key = get_effective_api_key(resolved_provider, api_key)
 
-    if llm_factory is not None:
-        llm = (
-            llm_factory(resolved_provider, api_key=effective_api_key)
-            if effective_api_key
-            else llm_factory(resolved_provider)
-        )
-    else:
-        from any_llm import AnyLLM
-
-        llm = (
-            AnyLLM.create(resolved_provider, api_key=effective_api_key)
-            if effective_api_key
-            else AnyLLM.create(resolved_provider)
-        )
+    active_factory: AnyLlmFactoryProtocol = (
+        llm_factory if llm_factory is not None else create_any_llm_transport
+    )
+    llm = (
+        active_factory(resolved_provider, api_key=effective_api_key)
+        if effective_api_key
+        else active_factory(resolved_provider)
+    )
 
     response = llm.completion(
         model=actual_model,
         messages=[{"role": "user", "content": prompt}],
     )
-    if isinstance(response, LlmCompletionResponseProtocol) and response.choices:
-        raw_choice = response.choices[0].message.content
-        return (raw_choice or "").strip()
     return extract_stream_delta(response, resolved_provider).strip()
 
 

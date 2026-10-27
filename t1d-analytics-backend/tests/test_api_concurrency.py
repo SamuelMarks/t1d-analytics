@@ -30,9 +30,10 @@ def test_concurrent_chat_api_key_isolation(tmp_path: Path) -> None:
         """Create a mock AnyLLM instance that echoes the supplied API key."""
         api_key = str(kwargs.get("api_key", ""))
         mock_instance = MagicMock()
-        mock_choice = MagicMock()
-        mock_choice.message.content = (
-            f"```sql\nSELECT COUNT(*) FROM users -- {api_key}\n```"
+        mock_choice = MagicMock(
+            message=MagicMock(
+                content=f"```sql\nSELECT COUNT(*) FROM users -- {api_key}\n```"
+            )
         )
         mock_instance.completion.return_value = MagicMock(choices=[mock_choice])
         return mock_instance

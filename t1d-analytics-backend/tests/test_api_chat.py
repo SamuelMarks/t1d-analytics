@@ -108,11 +108,13 @@ def test_query_timeout_cartesian_product(mock_db: str) -> None:
 def test_generate_sql_from_nl_success(mock_create: MagicMock, mock_db: str) -> None:
     """Test natural language to SQL translation."""
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = """```sql
+    mock_msg = MagicMock(
+        content="""```sql
 SELECT * FROM users;
 ```"""
+    )
+    mock_choice = MagicMock(message=mock_msg)
+    mock_response = MagicMock(choices=[mock_choice])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
@@ -126,9 +128,9 @@ def test_generate_sql_from_nl_single_line_codeblock(
 ) -> None:
     """Test NL to SQL with single line codeblock."""
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = "```SELECT * FROM users```"
+    mock_msg = MagicMock(content="```SELECT * FROM users```")
+    mock_choice = MagicMock(message=mock_msg)
+    mock_response = MagicMock(choices=[mock_choice])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
@@ -140,17 +142,19 @@ def test_generate_sql_from_nl_single_line_codeblock(
 def test_generate_sql_from_nl_prefixes(mock_create: MagicMock, mock_db: str) -> None:
     """Test NL to SQL with 'sql' and 'duckdb' prefixes."""
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
+    mock_msg = MagicMock(
+        content="""sql
+SELECT * FROM a"""
+    )
+    mock_choice = MagicMock(message=mock_msg)
+    mock_response = MagicMock(choices=[mock_choice])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
-    mock_response.choices[0].message.content = """sql
-SELECT * FROM a"""
     sql = generate_sql_from_nl(mock_db, "test")
     assert sql[1] == "SELECT * FROM a"
 
-    mock_response.choices[0].message.content = """duckdb
+    mock_msg.content = """duckdb
 SELECT * FROM b"""
     sql = generate_sql_from_nl(mock_db, "test")
     assert sql[1] == "SELECT * FROM b"
@@ -192,9 +196,9 @@ def test_generate_sql_from_nl_db_not_found(mock_create: MagicMock) -> None:
 def test_generate_sql_fallback_no_prefix(mocker: MagicMock) -> None:
     """Test SQL fallback when prefix is missing."""
     mock_llm_instance = mocker.MagicMock()
-    mock_choice = mocker.MagicMock()
-    mock_choice.message.content = "SELECT * FROM test;"
-    mock_llm_instance.completion.return_value.choices = [mock_choice]
+    mock_msg = mocker.MagicMock(content="SELECT * FROM test;")
+    mock_choice = mocker.MagicMock(message=mock_msg)
+    mock_llm_instance.completion.return_value = mocker.MagicMock(choices=[mock_choice])
 
     mock_conn = mocker.MagicMock()
     full, sql = generate_sql_from_nl(
@@ -211,9 +215,8 @@ def test_generate_sql_fallback_no_prefix(mocker: MagicMock) -> None:
 def test_generate_sql_from_nl_multi_block(mock_create: MagicMock, mock_db: str) -> None:
     """Test generate_sql_from_nl extracts the final SQL query block when multiple markdown blocks exist."""
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = """
+    mock_msg = MagicMock(
+        content="""
     Here is some preliminary exploration:
     ```sql
     DESCRIBE users;
@@ -223,6 +226,9 @@ def test_generate_sql_from_nl_multi_block(mock_create: MagicMock, mock_db: str) 
     SELECT id, name FROM users WHERE id > 0;
     ```
     """
+    )
+    mock_choice = MagicMock(message=mock_msg)
+    mock_response = MagicMock(choices=[mock_choice])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
@@ -236,13 +242,15 @@ def test_generate_sql_from_nl_non_query_block(
 ) -> None:
     """Test generate_sql_from_nl falls back to last block if no keyword matched."""
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = """
+    mock_msg = MagicMock(
+        content="""
     ```text
     random text block
     ```
     """
+    )
+    mock_choice = MagicMock(message=mock_msg)
+    mock_response = MagicMock(choices=[mock_choice])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
@@ -606,19 +614,17 @@ def test_stream_llm_tokens_branches(mock_create: MagicMock) -> None:
     mock_llm = MagicMock()
     mock_create.return_value = mock_llm
 
-    chunk1 = MagicMock()
-    chunk1.choices = [MagicMock()]
-    chunk1.choices[0].delta.content = "token1 "
-    chunk1.choices[0].message = None
+    chunk1 = MagicMock(
+        choices=[MagicMock(delta=MagicMock(content="token1 "), message=None)]
+    )
     mock_llm.completion.return_value = [chunk1]
 
     tokens = list(stream_llm_tokens("prompt", "gemma4"))
     assert tokens == ["token1 "]
 
-    chunk2 = MagicMock()
-    chunk2.choices = [MagicMock()]
-    del chunk2.choices[0].delta
-    chunk2.choices[0].message.content = "token2 "
+    choice2 = MagicMock(message=MagicMock(content="token2 "))
+    del choice2.delta
+    chunk2 = MagicMock(choices=[choice2])
     mock_llm.completion.return_value = [chunk2]
 
     tokens2 = list(stream_llm_tokens("prompt", "gemma4"))
@@ -628,22 +634,26 @@ def test_stream_llm_tokens_branches(mock_create: MagicMock) -> None:
     tokens3 = list(stream_llm_tokens("prompt", "gemma4"))
     assert tokens3 == ["chunk_a", "chunk_b"]
 
-    empty_chunk = MagicMock()
-    empty_chunk.choices = [MagicMock()]
-    empty_chunk.choices[0].delta.content = ""
-    empty_chunk.choices[0].message.content = ""
+    empty_chunk = MagicMock(
+        choices=[
+            MagicMock(
+                delta=MagicMock(content=""),
+                message=MagicMock(content=""),
+            )
+        ]
+    )
     mock_llm.completion.return_value = [empty_chunk, types.SimpleNamespace()]
     assert list(stream_llm_tokens("prompt", "gemma4")) == []
 
-    mock_resp_obj = MagicMock()
-    mock_resp_obj.choices = [MagicMock()]
-    mock_resp_obj.choices[0].message.content = "non_iter fallback"
+    mock_resp_obj = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="non_iter fallback"))]
+    )
     mock_llm.completion.side_effect = [types.SimpleNamespace(), mock_resp_obj]
     assert list(stream_llm_tokens("prompt", "gemma4")) == ["non_iter fallback"]
 
-    mock_resp = MagicMock()
-    mock_resp.choices = [MagicMock()]
-    mock_resp.choices[0].message.content = "fallback words stream"
+    mock_resp = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="fallback words stream"))]
+    )
 
     def fail_streaming(
         **kwargs: typing.Union[SqlValue, list[dict[str, str]]],
@@ -784,12 +794,14 @@ def test_multiprovider_llm_validation(
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     mock_llm2 = MagicMock()
-    mock_choice = MagicMock()
-    mock_choice.message.content = """```sql
+    mock_choice = MagicMock(
+        message=MagicMock(
+            content="""```sql
 SELECT count(*) FROM users;
 ```"""
-    mock_resp = MagicMock()
-    mock_resp.choices = [mock_choice]
+        )
+    )
+    mock_resp = MagicMock(choices=[mock_choice])
     mock_llm2.completion.return_value = mock_resp
     with patch("any_llm.AnyLLM.create", return_value=mock_llm2):
         full, sql = generate_sql_from_nl(
@@ -812,26 +824,21 @@ def test_extract_stream_delta_various_providers() -> None:
     assert extract_stream_delta({"response": "tok4"}, "ollama") == "tok4"
     assert extract_stream_delta({"text": "tok5"}, "google") == "tok5"
 
-    chunk_openai_delta = MagicMock()
-    choice_delta = MagicMock()
-    choice_delta.delta.content = "openai_delta"
-    chunk_openai_delta.choices = [choice_delta]
+    choice_delta = MagicMock(delta=MagicMock(content="openai_delta"))
+    chunk_openai_delta = MagicMock(choices=[choice_delta])
     assert extract_stream_delta(chunk_openai_delta, "openai") == "openai_delta"
 
-    chunk_openai_msg = MagicMock()
     choice_msg = MagicMock(spec=["message"])
-    choice_msg.message.content = "openai_msg"
-    chunk_openai_msg.choices = [choice_msg]
+    choice_msg.message = MagicMock(content="openai_msg")
+    chunk_openai_msg = MagicMock(choices=[choice_msg])
     assert extract_stream_delta(chunk_openai_msg, "ollama") == "openai_msg"
 
-    chunk_openai_txt = MagicMock()
     choice_txt = MagicMock(spec=["text"])
     choice_txt.text = "openai_text"
-    chunk_openai_txt.choices = [choice_txt]
+    chunk_openai_txt = MagicMock(choices=[choice_txt])
     assert extract_stream_delta(chunk_openai_txt, "openai") == "openai_text"
 
-    chunk_anthropic = MagicMock()
-    chunk_anthropic.delta.text = "anthropic_tok"
+    chunk_anthropic = MagicMock(delta=MagicMock(text="anthropic_tok"))
     assert extract_stream_delta(chunk_anthropic, "anthropic") == "anthropic_tok"
 
     chunk_anthropic_content = MagicMock(spec=["delta"])
@@ -843,17 +850,13 @@ def test_extract_stream_delta_various_providers() -> None:
     )
 
     chunk_anthropic_choice = MagicMock(spec=["choices"])
-    choice_ant = MagicMock()
-    choice_ant.delta.text = "choice_ant_tok"
+    choice_ant = MagicMock(delta=MagicMock(text="choice_ant_tok"))
     chunk_anthropic_choice.choices = [choice_ant]
     assert extract_stream_delta(chunk_anthropic_choice, "anthropic") == "choice_ant_tok"
 
-    chunk_google = MagicMock()
-    part = MagicMock()
-    part.text = "google_tok"
-    cand = MagicMock()
-    cand.content.parts = [part]
-    chunk_google.candidates = [cand]
+    part = MagicMock(text="google_tok")
+    cand = MagicMock(content=MagicMock(parts=[part]))
+    chunk_google = MagicMock(candidates=[cand])
     assert extract_stream_delta(chunk_google, "google") == "google_tok"
 
     chunk_google_text = MagicMock(spec=["text"])
@@ -861,8 +864,7 @@ def test_extract_stream_delta_various_providers() -> None:
     assert extract_stream_delta(chunk_google_text, "google") == "google_direct_text"
 
     chunk_fallback_delta = MagicMock(spec=["choices"])
-    c_fall = MagicMock()
-    c_fall.delta.content = "fallback_content"
+    c_fall = MagicMock(delta=MagicMock(content="fallback_content"))
     chunk_fallback_delta.choices = [c_fall]
     assert (
         extract_stream_delta(chunk_fallback_delta, "other_provider")
@@ -967,10 +969,13 @@ def test_generate_sql_from_nl_with_direct_api_key(
     """Test generate_sql_from_nl passes client-supplied api_key to AnyLLM without polluting environment."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     mock_llm = MagicMock()
-    mock_choice = MagicMock()
-    mock_choice.message.content = """```sql
+    mock_choice = MagicMock(
+        message=MagicMock(
+            content="""```sql
 SELECT 1;
 ```"""
+        )
+    )
     mock_llm.completion.return_value = MagicMock(choices=[mock_choice])
 
     with patch("any_llm.AnyLLM.create", return_value=mock_llm) as mock_create:

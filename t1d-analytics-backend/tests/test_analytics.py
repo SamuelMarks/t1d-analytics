@@ -147,9 +147,8 @@ def test_handle_natural_language_success(
     conn.execute("INSERT INTO users VALUES ('Alice')")
 
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = "```sql\nSELECT name FROM users;\n```"
+    mock_msg = MagicMock(content="```sql\nSELECT name FROM users;\n```")
+    mock_response = MagicMock(choices=[MagicMock(message=mock_msg)])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
@@ -215,9 +214,8 @@ def test_handle_natural_language_multi_provider_success(
     conn.execute("INSERT INTO users VALUES ('Bob')")
 
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = "```sql\nSELECT name FROM users;\n```"
+    mock_msg = MagicMock(content="```sql\nSELECT name FROM users;\n```")
+    mock_response = MagicMock(choices=[MagicMock(message=mock_msg)])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
@@ -342,25 +340,24 @@ def test_handle_natural_language_edge_cases(
     conn.execute("INSERT INTO users VALUES ('Alice')")
 
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
+    mock_msg = MagicMock(content="```SELECT name FROM users;```")
+    mock_response = MagicMock(choices=[MagicMock(message=mock_msg)])
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
     # Case 1: startswith("```") but only 1 line
-    mock_response.choices[0].message.content = "```SELECT name FROM users;```"
     handle_natural_language(conn, "get all users")
     output = capsys.readouterr().out
     assert "SELECT name FROM users;" in output
 
     # Case 2: lower().startswith("sql\\n")
-    mock_response.choices[0].message.content = "sql\nSELECT name FROM users;"
+    mock_msg.content = "sql\nSELECT name FROM users;"
     handle_natural_language(conn, "get all users")
     output = capsys.readouterr().out
     assert "SELECT name FROM users;" in output
 
     # Case 3: lower().startswith("duckdb\\n")
-    mock_response.choices[0].message.content = "duckdb\nSELECT name FROM users;"
+    mock_msg.content = "duckdb\nSELECT name FROM users;"
     handle_natural_language(conn, "get all users")
     output = capsys.readouterr().out
     assert "SELECT name FROM users;" in output
@@ -461,9 +458,11 @@ def test_handle_natural_language_no_result(mocker: MagicMock) -> None:
     from t1d_analytics.analytics import handle_natural_language
 
     mock_llm = mocker.MagicMock()
-    mock_choice = mocker.MagicMock()
-    mock_choice.message.content = "```sql\nSELECT 1;\n```"
-    mock_llm.create.return_value.completion.return_value.choices = [mock_choice]
+    mock_msg = mocker.MagicMock(content="```sql\nSELECT 1;\n```")
+    mock_choice = mocker.MagicMock(message=mock_msg)
+    mock_llm.create.return_value.completion.return_value = mocker.MagicMock(
+        choices=[mock_choice]
+    )
     mocker.patch.dict("sys.modules", {"any_llm": mocker.MagicMock(AnyLLM=mock_llm)})
 
     conn = mocker.MagicMock()
@@ -474,7 +473,7 @@ def test_handle_natural_language_no_result(mocker: MagicMock) -> None:
 
     # Verify non-read-only SQL is rejected before execution
     conn.sql.reset_mock()
-    mock_choice.message.content = "DROP TABLE patients;"
+    mock_msg.content = "DROP TABLE patients;"
     handle_natural_language(conn, "drop everything")
     conn.sql.assert_not_called()
 
@@ -672,9 +671,9 @@ def test_handle_natural_language_ollama_host_prefix(
     """Test handle_natural_language prefixes http:// to OLLAMA_HOST if missing."""
     conn = duckdb.connect(":memory:")
     mock_llm = MagicMock()
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = "SELECT 1;"
+    mock_response = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="SELECT 1;"))]
+    )
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
