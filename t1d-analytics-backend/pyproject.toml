@@ -38,19 +38,27 @@ lint.ignore = ["D203", "D212", "E501"]
 [tool.mypy]
 strict = true
 disallow_untyped_defs = true
-warn_unused_ignores = false
+warn_unused_ignores = true
 mypy_path = ["src", "t1d-analytics-backend/src", "..", "."]
 
 [[tool.mypy.overrides]]
 module = [
     "any_llm",
+    "any_llm.*",
     "pandas",
+    "pandas.*",
     "pyreadstat",
+    "pyreadstat.*",
     "torch",
+    "torch.*",
     "transformers",
-    "peft"
+    "transformers.*",
+    "peft",
+    "peft.*"
 ]
 ignore_missing_imports = true
+follow_imports = "silent"
+disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 addopts = "--cov=t1d_analytics --cov=scripts.run_tests --cov=docs_src --cov-branch --cov-report=term-missing --cov-report=html --cov-report=lcov --cov-fail-under=100"
@@ -62,9 +70,12 @@ branch = true
 sigterm = true
 concurrency = ["multiprocessing", "thread"]
 parallel = true
+omit = ["tests/*", "*/tests/*"]
 
 [tool.coverage.report]
 show_missing = true
+fail_under = 100
+exclude_lines = []
 
 [tool.interrogate]
 ignore-init-method = false

@@ -3,14 +3,17 @@
 import argparse
 import datetime
 import importlib
+import inspect
 import json
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional, cast
+from typing import Callable, Dict, List, Optional, Union
 
 import duckdb
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from typing_extensions import TypedDict
 
 from t1d_analytics import (
     analytics,
@@ -20,6 +23,11 @@ from t1d_analytics import (
     training_data,
 )
 from t1d_analytics.downloader import parse_headers_file, process_datasets
+from t1d_analytics.errors import (
+    AuthPluginError,
+    CliValidationError,
+    DownloadError,
+)
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.models import (
     MaxTextConfig,
@@ -29,6 +37,154 @@ from t1d_analytics.models import (
     TrainingJobConfig,
 )
 from t1d_analytics.parser import fetch_html, parse_datasets
+
+
+class ManifestStageDict(TypedDict):
+    """Metadata for an exported synthetic training stage."""
+
+    rows: int
+    files: List[str]
+
+
+class CliNamespace(argparse.Namespace):
+    """Strongly-typed argparse Namespace with explicit default attributes for all CLI subcommands."""
+
+    lang: Optional[str] = None
+    command: str = ""
+    url: str = "https://public.t1d.org/datasets/diabetes"
+    output: str = "./data"
+    concurrency: int = 4
+    token: Optional[str] = None
+    user: Optional[str] = None
+    password: Optional[str] = None
+    headers: Optional[str] = None
+    auth_plugin: Optional[str] = None
+    data_dir: str = "./data"
+    db: str = "t1d_analytics.duckdb"
+    prefix_subdirs: bool = False
+    include_sas: bool = False
+    include_spss: bool = False
+    model: str = "gemma4"
+    provider: str = "ollama"
+    num_pairs: int = 5
+    split_ratios: Optional[str] = None
+    test_set: str = ""
+    allow_empty: bool = False
+    min_tables: int = 1
+    min_rows: int = 1
+    json: bool = False
+    sessions_db: Optional[str] = None
+    overwrite: bool = False
+    table: str = "sft_data"
+    format: str = "jsonl"
+    output_file: str = ""
+    action: str = "check"
+    stage: str = "sft"
+    output_dir: Optional[str] = None
+    config: Optional[str] = None
+    interval: float = 2.0
+    iterations: int = 0
+    samples_per_table: int = 5
+    export_formats: str = "jsonl,parquet"
+    backend: str = "local-cpu"
+    use_lora: bool = False
+    quantization: Optional[str] = None
+    execute_training: bool = False
+    split_validation: bool = False
+    learning_rate: float = 2e-5
+    batch_size: int = 4
+    num_epochs: int = 3
+    warmup_steps: int = 50
+    weight_decay: float = 0.01
+    max_seq_length: int = 2048
+    checkpoint_interval: int = 500
+    eval_steps: int = 100
+    dry_run: bool = False
+    gcs_bucket: str = "gs://t1d-analytics-artifacts"
+    tpu_zone: str = "us-central2-b"
+    tpu_type: str = "v4-8"
+    tpu_slices: int = 1
+
+
+class CliOptionsModel(BaseModel):
+    """Strongly-typed immutable configuration representing parsed CLI command-line options."""
+
+    model_config = ConfigDict(from_attributes=True, extra="ignore", frozen=True)
+
+    lang: Optional[str] = None
+    command: Optional[str] = None
+    url: str = "https://public.t1d.org/datasets/diabetes"
+    output: Optional[str] = None
+    concurrency: int = 4
+    token: Optional[str] = None
+    user: Optional[str] = None
+    password: Optional[str] = None
+    headers: Optional[str] = None
+    auth_plugin: Optional[str] = None
+    data_dir: str = "./data"
+    db: str = "t1d_analytics.duckdb"
+    prefix_subdirs: bool = False
+    include_sas: bool = False
+    include_spss: bool = False
+    model: str = "gemma4"
+    provider: str = "ollama"
+    num_pairs: int = 5
+    split_ratios: Optional[str] = None
+    test_set: str = ""
+    allow_empty: bool = False
+    min_tables: int = 1
+    min_rows: int = 1
+    json_output: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("json_output", "json"),
+    )
+    sessions_db: Optional[str] = None
+    overwrite: bool = False
+    table: str = "sft_data"
+    format: str = "jsonl"
+    output_file: str = ""
+    action: str = "check"
+    stage: str = "sft"
+    output_dir: Optional[str] = None
+    config: Optional[str] = None
+    interval: float = 2.0
+    iterations: int = 0
+    samples_per_table: int = 5
+    export_formats: str = "jsonl,parquet"
+    backend: str = "local-cpu"
+    use_lora: bool = False
+    quantization: Optional[str] = None
+    execute_training: bool = False
+    split_validation: bool = False
+    learning_rate: float = 2e-5
+    batch_size: int = 4
+    num_epochs: int = 3
+    warmup_steps: int = 50
+    weight_decay: float = 0.01
+    max_seq_length: int = 2048
+    checkpoint_interval: int = 500
+    eval_steps: int = 100
+    dry_run: bool = False
+    gcs_bucket: str = "gs://t1d-analytics-artifacts"
+    tpu_zone: str = "us-central2-b"
+    tpu_type: str = "v4-8"
+    tpu_slices: int = 1
+
+
+def parse_cli_options(args: argparse.Namespace) -> CliOptionsModel:
+    """
+    Convert an `argparse.Namespace` into a strongly-typed `CliOptionsModel`.
+
+    Args:
+    ----
+        args: Parsed CLI namespace.
+
+    Returns:
+    -------
+        CliOptionsModel: Immutable CLI options structure.
+
+    """
+    return CliOptionsModel.model_validate(args)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -256,6 +412,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Minimum total row count required across tables (default: 1).",
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit system health report as a JSON object.",
     )
 
     # Seed subcommand
@@ -586,13 +747,14 @@ def main() -> None:
     """Execute the CLI application."""
     _ = get_translator()
     parser = build_cli_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(namespace=CliNamespace())
+    opts = parse_cli_options(args)
 
-    if isinstance(getattr(args, "lang", None), str):
-        os.environ["LANG"] = args.lang
-        _ = get_translator(args.lang)
+    if opts.lang:
+        os.environ["LANG"] = opts.lang
+        _ = get_translator(opts.lang)
 
-    command_handlers: dict[str, Callable[[argparse.Namespace], None]] = {
+    command_handlers: dict[str, Callable[[CliOptionsModel], None]] = {
         "download": handle_download,
         "extract": handle_extract,
         "load": handle_load,
@@ -611,9 +773,9 @@ def main() -> None:
     }
 
     try:
-        handler = command_handlers.get(args.command)
+        handler = command_handlers.get(opts.command or "")
         if handler is not None:
-            handler(args)
+            handler(opts)
     except Exception as e:
         print(_("An error occurred: {}", e), file=sys.stderr)
         sys.exit(1)
@@ -633,151 +795,162 @@ def load_auth_plugin(plugin_spec: str) -> Callable[[], str]:
 
     Raises:
     ------
-        ValueError: If format is invalid or target function cannot be found or invoked.
+        AuthPluginError: If format is invalid or target function cannot be found or invoked.
 
     """
     if ":" not in plugin_spec:
-        raise ValueError(
+        raise AuthPluginError(
             f"Invalid auth plugin specifier '{plugin_spec}'. Expected 'module:function'."
         )
     mod_name, func_name = plugin_spec.split(":", 1)
     try:
         mod = importlib.import_module(mod_name)
     except Exception as e:
-        raise ValueError(
+        raise AuthPluginError(
             f"Failed to import auth plugin module '{mod_name}': {e}"
         ) from e
 
-    if not hasattr(mod, func_name):
-        raise ValueError(
+    members = dict(inspect.getmembers(mod))
+    if not func_name.isidentifier() or func_name not in members:
+        raise AuthPluginError(
             f"Auth plugin module '{mod_name}' has no attribute '{func_name}'."
         )
 
-    target_fn = getattr(mod, func_name)
-    if not callable(target_fn):
-        raise ValueError(
+    extracted = members[func_name]
+    if not callable(extracted):
+        raise AuthPluginError(
             f"Auth plugin attribute '{func_name}' in module '{mod_name}' is not callable."
         )
-    return cast(Callable[[], str], target_fn)
+
+    def _invoke_plugin() -> str:
+        """Invoke loaded auth plugin and return string token."""
+        return str(extracted())
+
+    return _invoke_plugin
 
 
-def handle_download(args: argparse.Namespace) -> None:
+def handle_download(opts: CliOptionsModel) -> None:
     """
     Handle the download subcommand.
 
     Args:
     ----
-        args: Arguments.
+        opts: Validated CLI options model.
+
+    Raises:
+    ------
+        DownloadError: If one or more dataset files fail to download.
 
     """
     _ = get_translator()
-    print(_("Fetching HTML from {}...", args.url))
-    html = fetch_html(args.url)
+    print(_("Fetching HTML from {}...", opts.url))
+    html = fetch_html(opts.url)
 
     print(_("Parsing datasets..."))
-    datasets = parse_datasets(html, base_url=args.url)
+    datasets = parse_datasets(html, base_url=opts.url)
     print(_("Found {} protocols.", len(datasets)))
 
     if not datasets:
         print(_("No datasets found. Exiting."))
         return
 
-    print(_("Starting downloads to {}...", args.output))
+    out_target = str(opts.output)
+    print(_("Starting downloads to {}...", out_target))
 
     auth: Optional[tuple[str, str]] = None
-    if getattr(args, "user", None) and getattr(args, "password", None):
-        auth = (args.user, args.password)
+    if opts.user and opts.password:
+        auth = (opts.user, opts.password)
 
     custom_headers: Optional[dict[str, str]] = None
-    if getattr(args, "headers", None):
-        custom_headers = parse_headers_file(Path(args.headers))
+    if opts.headers:
+        custom_headers = parse_headers_file(Path(opts.headers))
 
-    concurrency = getattr(args, "concurrency", 4)
-    token = getattr(args, "token", None)
-
+    token = opts.token
     auth_plugin_cb: Optional[Callable[[], str]] = None
-    if getattr(args, "auth_plugin", None):
-        auth_plugin_cb = load_auth_plugin(args.auth_plugin)
+    if opts.auth_plugin:
+        auth_plugin_cb = load_auth_plugin(opts.auth_plugin)
         if not token:
             token = auth_plugin_cb()
 
     summary = process_datasets(
         datasets,
-        args.output,
-        concurrency=concurrency,
+        out_target,
+        concurrency=opts.concurrency,
         token=token,
         auth=auth,
         headers=custom_headers,
-        page_url=args.url,
+        page_url=opts.url,
         token_refresh_callback=auth_plugin_cb,
     )
     failed = summary.get("failed", 0) if isinstance(summary, dict) else 0
     if isinstance(failed, int) and failed > 0:
-        raise RuntimeError(_("Download encountered errors: {} file(s) failed.", failed))
+        raise DownloadError(
+            _("Download encountered errors: {} file(s) failed.", failed)
+        )
     print(_("Done!"))
 
 
-def handle_extract(args: argparse.Namespace) -> None:
+def handle_extract(opts: CliOptionsModel) -> None:
     """
     Handle the extract subcommand.
 
     Args:
     ----
-        args: Command-line arguments.
+        opts: Validated CLI options model.
 
     """
-    analytics.extract_zips(args.data_dir)
+    analytics.extract_zips(opts.data_dir)
 
 
-def handle_load(args: argparse.Namespace) -> None:
+def handle_load(opts: CliOptionsModel) -> None:
     """
     Handle the load subcommand.
 
     Args:
     ----
-        args: Arguments.
+        opts: Validated CLI options model.
 
     """
     analytics.load_data_to_duckdb(
-        args.data_dir,
-        args.db,
-        prefix_subdirs=getattr(args, "prefix_subdirs", False),
-        include_sas=getattr(args, "include_sas", False),
-        include_spss=getattr(args, "include_spss", False),
+        opts.data_dir,
+        opts.db,
+        prefix_subdirs=opts.prefix_subdirs,
+        include_sas=opts.include_sas,
+        include_spss=opts.include_spss,
     )
 
 
-def handle_seed(args: argparse.Namespace) -> None:
+def handle_seed(opts: CliOptionsModel) -> None:
     """
     Handle the seed subcommand to generate baseline clinical CSVs and populate DuckDB.
 
     Args:
     ----
-        args: Arguments containing data_dir, db, sessions_db, and overwrite.
+        opts: Validated CLI options model containing data_dir, db, sessions_db, and overwrite.
 
     """
     table_counts = seed.seed_database(
-        data_dir=args.data_dir,
-        db_path=args.db,
-        sessions_db_path=getattr(args, "sessions_db", None),
-        overwrite_csvs=getattr(args, "overwrite", False),
+        data_dir=opts.data_dir,
+        db_path=opts.db,
+        sessions_db_path=opts.sessions_db,
+        overwrite_csvs=opts.overwrite,
     )
     total_rows = sum(table_counts.values())
     print(
-        f"Seeded {len(table_counts)} clinical tables ({total_rows} total rows) into {args.db}."
+        f"Seeded {len(table_counts)} clinical tables ({total_rows} total rows) into {opts.db}."
     )
 
 
-def handle_manifest(args: argparse.Namespace) -> None:
+def handle_manifest(opts: CliOptionsModel) -> None:
     """
     Handle the manifest subcommand.
 
     Args:
     ----
-        args: Arguments containing db path.
+        opts: Validated CLI options model containing db path.
 
     """
-    records = analytics.get_ingestion_manifest(args.db)
+    records = analytics.get_ingestion_manifest(opts.db)
     if not records:
         print("No ingestion manifest records found.")
         return
@@ -792,20 +965,19 @@ def handle_manifest(args: argparse.Namespace) -> None:
         )
 
 
-def handle_query(args: argparse.Namespace) -> None:
+def handle_query(opts: CliOptionsModel) -> None:
     """
     Handle the query subcommand.
 
     Args:
     ----
-        args: Arguments containing db, model, and optional provider.
+        opts: Validated CLI options model containing db, model, and optional provider.
 
     """
-    provider = getattr(args, "provider", "ollama")
-    analytics.run_query_repl(args.db, model=args.model, provider=provider)
+    analytics.run_query_repl(opts.db, model=opts.model, provider=opts.provider)
 
 
-def handle_generate_training_data(args: argparse.Namespace) -> None:
+def handle_generate_training_data(opts: CliOptionsModel) -> None:
     """
     Handle the generate-training-data subcommand.
 
@@ -815,40 +987,40 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
 
     Args:
     ----
-        args: Command-line arguments containing db, num_pairs, model, provider, and split_ratios.
+        opts: Validated CLI options model containing db, num_pairs, model, provider, and split_ratios.
 
     """
     _ = get_translator()
 
-    print(_("Connecting to DuckDB at {}...", args.db))
-    conn = duckdb.connect(args.db)
+    print(_("Connecting to DuckDB at {}...", opts.db))
+    conn = duckdb.connect(opts.db)
 
-    provider = getattr(args, "provider", "ollama")
+    provider = opts.provider
     print(
         _(
             "Initializing TrainingDataGenerator with model '{}' (provider: '{}')...",
-            args.model,
+            opts.model,
             provider,
         )
     )
-    generator = training_data.TrainingDataGenerator(conn, args.model, provider=provider)
+    generator = training_data.TrainingDataGenerator(conn, opts.model, provider=provider)
     try:
         ratios = None
-        if getattr(args, "split_ratios", None):
-            parts = [float(p.strip()) for p in args.split_ratios.split(",")]
+        if opts.split_ratios:
+            parts = [float(p.strip()) for p in opts.split_ratios.split(",")]
             if len(parts) == 3:
                 ratios = (parts[0], parts[1], parts[2])
 
         # Extract schema
-        schema = generator._extract_schema()
+        schema = generator.extract_schema()
 
         # Generate pairs and write to db
         total_tables = len(schema)
         print(_("Found {} tables in the schema.", total_tables))
 
         for table_name, table_schema in schema.items():
-            print(_("Generating {} pairs for table: {}...", args.num_pairs, table_name))
-            pairs = generator._generate_pairs(table_schema, args.num_pairs)
+            print(_("Generating {} pairs for table: {}...", opts.num_pairs, table_name))
+            pairs = generator.generate_pairs(table_schema, opts.num_pairs)
             generator.write_to_db(pairs, split_ratios=ratios)
     finally:
         conn.close()
@@ -856,16 +1028,16 @@ def handle_generate_training_data(args: argparse.Namespace) -> None:
     print(_("Training data generation complete!"))
 
 
-def handle_evaluate(args: argparse.Namespace) -> None:
+def handle_evaluate(opts: CliOptionsModel) -> None:
     """
     Handle the evaluate subcommand.
 
     Args:
     ----
-        args: Command-line arguments containing db, test_set, model, and output.
+        opts: Validated CLI options model containing db, test_set, model, and output.
 
     """
-    test_file = Path(args.test_set)
+    test_file = Path(opts.test_set)
     if not test_file.exists():
         print(f"Test set file {test_file} does not exist.")
         return
@@ -880,11 +1052,11 @@ def handle_evaluate(args: argparse.Namespace) -> None:
             if line:
                 test_data.append(json.loads(line))
 
-    metrics = training_data.evaluate_text_to_sql(args.db, test_data, model=args.model)
+    metrics = training_data.evaluate_text_to_sql(opts.db, test_data, model=opts.model)
     print(metrics["markdown_report"])
 
-    if getattr(args, "output", None):
-        out_p = Path(args.output)
+    if opts.output:
+        out_p = Path(opts.output)
         out_p.parent.mkdir(parents=True, exist_ok=True)
         if out_p.suffix.lower() == ".csv":
             out_p.write_text(metrics["csv_report"])
@@ -893,102 +1065,101 @@ def handle_evaluate(args: argparse.Namespace) -> None:
         print(f"Report saved to {out_p}")
 
 
-def handle_export_training_data(args: argparse.Namespace) -> None:
+def handle_export_training_data(opts: CliOptionsModel) -> None:
     """
     Handle exporting training data to JSONL or Parquet format.
 
     Args:
     ----
-        args: Command-line arguments containing db, table, format, and output-file.
+        opts: Validated CLI options model containing db, table, format, and output_file.
 
     """
     _ = get_translator()
-    print(_("Connecting to DuckDB at {}...", args.db))
-    conn = duckdb.connect(args.db, read_only=True)
+    print(_("Connecting to DuckDB at {}...", opts.db))
+    conn = duckdb.connect(opts.db, read_only=True)
     try:
         generator = training_data.TrainingDataGenerator(conn)
-        print(_("Exporting table '{}' to {}...", args.table, args.output_file))
-        if args.format == "jsonl":
-            generator.export_to_jsonl(args.table, Path(args.output_file))
+        print(_("Exporting table '{}' to {}...", opts.table, opts.output_file))
+        if opts.format == "jsonl":
+            generator.export_to_jsonl(opts.table, Path(opts.output_file))
         else:
-            generator.export_to_parquet(args.table, Path(args.output_file))
+            generator.export_to_parquet(opts.table, Path(opts.output_file))
     finally:
         conn.close()
 
     print(_("Export complete!"))
 
 
-def handle_export(args: argparse.Namespace) -> None:
+def handle_export(opts: CliOptionsModel) -> None:
     """
     Handle exporting database tables to Excel (.xlsx), Parquet, or CSV format.
 
     Args:
     ----
-        args: Command-line arguments containing db, table, format, and output_file.
+        opts: Validated CLI options model containing db, table, format, and output_file.
 
     """
     _ = get_translator()
-    print(_("Connecting to DuckDB at {}...", args.db))
-    print(_("Exporting table '{}' to {}...", args.table, args.output_file))
+    print(_("Connecting to DuckDB at {}...", opts.db))
+    print(_("Exporting table '{}' to {}...", opts.table, opts.output_file))
     analytics.export_table(
-        db_path=args.db,
-        table_name=args.table,
-        output_path=args.output_file,
-        export_format=args.format,
+        db_path=opts.db,
+        table_name=opts.table,
+        output_path=opts.output_file,
+        export_format=opts.format,
     )
     print(_("Export complete!"))
 
 
-def handle_doctor(args: argparse.Namespace) -> None:
+def handle_doctor(opts: CliOptionsModel) -> None:
     """
     Handle the doctor subcommand to inspect system health.
 
     Args:
     ----
-        args: Arguments containing db path.
+        opts: Validated CLI options model containing db path and threshold flags.
 
     """
-    health = diagnostics.get_system_health(db_path=args.db)
+    health = diagnostics.get_system_health(db_path=opts.db)
     db = health.database
     ollama = health.ollama
 
-    print("=" * 60)
-    print("T1D Analytics System Health Report")
-    print("=" * 60)
-    print(f"Overall Status: {health.status.upper()}")
-    print("-" * 60)
-    print(f"Database ({db.configured_path}):")
-    print(f"  Connected: {db.connected}")
-    print(f"  Status:    {db.status_code.value}")
-    print(f"  Tables:    {db.table_count}")
-    print(f"  Rows:      {db.total_rows}")
-    print(f"  Message:   {db.message}")
-    if db.remediation:
-        print(f"  Action:    {db.remediation}")
-    print("-" * 60)
-    print("Ollama LLM Service:")
-    print(f"  Online:    {ollama.accessible}")
-    models_str = (
-        ", ".join(ollama.available_models) if ollama.available_models else "None"
-    )
-    print(f"  Models:    {models_str}")
-    print(f"  Message:   {ollama.message}")
-    if ollama.remediation:
-        print(f"  Action:    {ollama.remediation}")
-    print("-" * 60)
-    print("Cloud LLM Providers:")
-    for prov_name, prov_stat in health.providers.items():
-        print(f"  {prov_name.capitalize()}:")
-        print(f"    Configured:    {prov_stat.configured}")
-        print(f"    SDK Installed: {prov_stat.sdk_installed}")
-        print(f"    API Key Set:   {prov_stat.api_key_set}")
-        if prov_stat.remediation:
-            print(f"    Action:        {prov_stat.remediation}")
-    print("=" * 60)
-
-    allow_empty = bool(getattr(args, "allow_empty", False))
-    min_tables = int(getattr(args, "min_tables", 1))
-    min_rows = int(getattr(args, "min_rows", 1))
+    if opts.json_output:
+        print(json.dumps(health.to_dict(), indent=2))
+    else:
+        print("=" * 60)
+        print("T1D Analytics System Health Report")
+        print("=" * 60)
+        print(f"Overall Status: {health.status.upper()}")
+        print("-" * 60)
+        print(f"Database ({db.configured_path}):")
+        print(f"  Connected: {db.connected}")
+        print(f"  Status:    {db.status_code.value}")
+        print(f"  Tables:    {db.table_count}")
+        print(f"  Rows:      {db.total_rows}")
+        print(f"  Message:   {db.message}")
+        if db.remediation:
+            print(f"  Action:    {db.remediation}")
+        print("-" * 60)
+        print("Ollama LLM Service:")
+        print(f"  Online:    {ollama.accessible}")
+        models_str = (
+            ", ".join(ollama.available_models) if ollama.available_models else "None"
+        )
+        print(f"  Models:    {models_str}")
+        print(f"  Message:   {ollama.message}")
+        if ollama.remediation:
+            print(f"  Action:    {ollama.remediation}")
+        print("-" * 60)
+        print("Cloud LLM Providers:")
+        for prov_name, prov_stat in health.providers.items():
+            print(f"  {prov_name.capitalize()}:")
+            print(f"    Configured:    {prov_stat.configured}")
+            print(f"    SDK Installed: {prov_stat.sdk_installed}")
+            print(f"    API Key Set:   {prov_stat.api_key_set}")
+            if prov_stat.remediation:
+                print(f"    Action:        {prov_stat.remediation}")
+        print("=" * 60)
 
     if not db.connected or db.status_code in (
         diagnostics.DatabaseStatusCode.MISSING_FILE,
@@ -997,20 +1168,22 @@ def handle_doctor(args: argparse.Namespace) -> None:
     ):
         sys.exit(1)
 
-    if not allow_empty and (db.table_count < min_tables or db.total_rows < min_rows):
+    if not opts.allow_empty and (
+        db.table_count < opts.min_tables or db.total_rows < opts.min_rows
+    ):
         sys.exit(1)
 
 
-def handle_profile(args: argparse.Namespace) -> None:
+def handle_profile(opts: CliOptionsModel) -> None:
     """
     Handle the profile subcommand to analyze data quality and completeness of a table.
 
     Args:
     ----
-        args: Arguments containing db path and table name.
+        opts: Validated CLI options model containing db path and table name.
 
     """
-    report = analytics.profile_table(args.db, args.table)
+    report = analytics.profile_table(opts.db, opts.table)
     print("=" * 60)
     print(f"Table Profile: {report['table_name']}")
     print(f"Total Rows: {report['total_rows']} | Columns: {report['column_count']}")
@@ -1026,18 +1199,18 @@ def handle_profile(args: argparse.Namespace) -> None:
     print("=" * 60)
 
 
-def handle_watch(args: argparse.Namespace) -> None:
+def handle_watch(opts: CliOptionsModel) -> None:
     """
     Handle the watch subcommand to monitor and incrementally ingest files into DuckDB.
 
     Args:
     ----
-        args: Arguments containing data_dir, db, interval, iterations, and prefix_subdirs.
+        opts: Validated CLI options model containing data_dir, db, interval, iterations, and prefix_subdirs.
 
     """
-    data_path = Path(args.data_dir)
+    data_path = Path(opts.data_dir)
     print(
-        f"Watching directory '{data_path}' for changes (interval: {args.interval}s)..."
+        f"Watching directory '{data_path}' for changes (interval: {opts.interval}s)..."
     )
     seen_hashes: dict[str, str] = {}
 
@@ -1045,9 +1218,9 @@ def handle_watch(args: argparse.Namespace) -> None:
     while True:
         count += 1
         exts = ["*.csv", "*.parquet", "*.txt", "*.csv.gz"]
-        if getattr(args, "include_sas", False):
+        if opts.include_sas:
             exts.extend(["*.sas7bdat", "*.xpt"])
-        if getattr(args, "include_spss", False):
+        if opts.include_spss:
             exts.append("*.sav")
 
         current_files: list[Path] = []
@@ -1063,12 +1236,13 @@ def handle_watch(args: argparse.Namespace) -> None:
         for del_f in deleted_files:
             del seen_hashes[del_f]
             print(f"Detected file deletion: '{del_f}'. Pruning manifest...")
-            if Path(args.db).exists():
+            if Path(opts.db).exists():
                 try:
-                    conn = duckdb.connect(args.db)
+                    conn = duckdb.connect(opts.db)
+                    del_name = Path(del_f).name
                     conn.execute(
-                        "DELETE FROM _t1d_ingestion_manifest WHERE file_path = ?",
-                        (del_f,),
+                        "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR source_file = ?",
+                        (del_f, del_name),
                     )
                     conn.close()
                 except duckdb.Error as e:
@@ -1094,62 +1268,94 @@ def handle_watch(args: argparse.Namespace) -> None:
             print(f"Detected file changes or new files in '{data_path}'. Ingesting...")
             analytics.load_data_to_duckdb(
                 str(data_path),
-                args.db,
-                prefix_subdirs=getattr(args, "prefix_subdirs", False),
+                opts.db,
+                prefix_subdirs=opts.prefix_subdirs,
             )
             print("Ingestion complete.")
 
-        if args.iterations > 0 and count >= args.iterations:
+        if opts.iterations > 0 and count >= opts.iterations:
             break
-        time.sleep(args.interval)
+        time.sleep(opts.interval)
 
 
-def handle_train(args: argparse.Namespace) -> None:
+def validate_cli_hyperparameters(opts: CliOptionsModel) -> TrainingHyperparameters:
     """
-    Handle the train subcommand to orchestrate synthetic data generation and export.
+    Validate CLI training hyperparameter bounds and return a `TrainingHyperparameters` instance.
 
     Args:
     ----
-        args: Arguments containing db, output_dir, samples_per_table, provider, model, export_formats, and optional flags.
+        opts: Validated CLI options model.
+
+    Returns:
+    -------
+        TrainingHyperparameters: Validated hyperparameter configuration.
+
+    Raises:
+    ------
+        CliValidationError: If any hyperparameter violates domain constraints.
 
     """
-    print("=" * 60)
-    print("T1D Synthetic Training Orchestrator")
-    print(f"Database: {args.db}")
-    print(f"Model: {args.provider}/{args.model}")
-    print(f"Samples per table: {args.samples_per_table}")
-    print("=" * 60)
+    if opts.learning_rate <= 0.0:
+        raise CliValidationError("Learning rate must be positive.")
+    if opts.batch_size < 1:
+        raise CliValidationError("Batch size must be at least 1.")
+    if opts.num_epochs < 1:
+        raise CliValidationError("Number of epochs must be at least 1.")
+    if opts.warmup_steps < 0:
+        raise CliValidationError("Warmup steps cannot be negative.")
+    if opts.weight_decay < 0.0:
+        raise CliValidationError("Weight decay cannot be negative.")
+    if opts.max_seq_length < 64:
+        raise CliValidationError("Max sequence length must be at least 64.")
 
-    conn = duckdb.connect(args.db)
-    generator = training_data.TrainingDataGenerator(
-        conn,
-        model=args.model,
-        provider=args.provider,
+    return TrainingHyperparameters(
+        learning_rate=opts.learning_rate,
+        batch_size=opts.batch_size,
+        num_epochs=opts.num_epochs,
+        warmup_steps=opts.warmup_steps,
+        weight_decay=opts.weight_decay,
+        max_seq_length=opts.max_seq_length,
+        checkpoint_interval=opts.checkpoint_interval,
+        eval_steps=opts.eval_steps,
     )
 
-    print("Generating synthetic pairs and persisting to DuckDB...")
-    schema = generator._extract_schema()
-    split_r = (0.8, 0.1, 0.1) if getattr(args, "split_validation", False) else None
-    for table_name, table_schema in schema.items():
-        print(f"Generating {args.samples_per_table} pairs for table: {table_name}...")
-        pairs = generator._generate_pairs(table_schema, args.samples_per_table)
-        generator.write_to_db(pairs, split_ratios=split_r)
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def export_training_stages(
+    conn: duckdb.DuckDBPyConnection,
+    generator: training_data.TrainingDataGenerator,
+    out_dir: Path,
+    formats: List[str],
+    split_val_flag: bool,
+) -> Dict[str, ManifestStageDict]:
+    """
+    Export generated training tables from DuckDB into JSONL and/or Parquet files.
 
-    formats = [f.strip().lower() for f in args.export_formats.split(",")]
+    Args:
+    ----
+        conn: Active DuckDB connection.
+        generator: Initialized `TrainingDataGenerator`.
+        out_dir: Target output directory.
+        formats: Requested export formats (e.g., `['jsonl', 'parquet']`).
+        split_val_flag: Whether stratified split tables should also be exported.
+
+    Returns:
+    -------
+        Dict[str, ManifestStageDict]: Stage-to-metadata mapping for the training manifest.
+
+    """
+    import shutil
+
     stages_to_export = ["sft_data", "pretrain_data", "dpo_data"]
-    if getattr(args, "split_validation", False):
+    if split_val_flag:
         stages_to_export.extend(["sft_data_train", "sft_data_val", "sft_data_test"])
 
     all_tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
-    manifest_stages: dict[str, Any] = {}
+    manifest_stages: Dict[str, ManifestStageDict] = {}
 
     for stage in stages_to_export:
         if stage in all_tables:
             count_res = conn.execute(f'SELECT COUNT(*) FROM "{stage}"').fetchone()
-            stage_count = count_res[0] if count_res else 0
+            stage_count = int(count_res[0]) if count_res else 0
             manifest_stages[stage] = {"rows": stage_count, "files": []}
 
             if "jsonl" in formats:
@@ -1164,119 +1370,97 @@ def handle_train(args: argparse.Namespace) -> None:
                 generator.export_to_parquet(stage, p)
                 manifest_stages[stage]["files"].append(str(p.name))
 
-    # Maintain training_data.jsonl and training_data.parquet aliases for compatibility
     if "jsonl" in formats and (out_dir / "sft_data.jsonl").exists():
-        import shutil
-
         shutil.copyfile(out_dir / "sft_data.jsonl", out_dir / "training_data.jsonl")
 
     if "parquet" in formats and (out_dir / "sft_data.parquet").exists():
-        import shutil
-
         shutil.copyfile(out_dir / "sft_data.parquet", out_dir / "training_data.parquet")
 
-    manifest_file = out_dir / "training_manifest.json"
+    return manifest_stages
 
-    manifest_file.write_text(
-        json.dumps(
-            {
-                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "database": args.db,
-                "model": f"{args.provider}/{args.model}",
-                "stages": manifest_stages,
-            },
-            indent=2,
-        )
+
+verify_split_prompt_leakage = diagnostics.verify_split_prompt_leakage
+
+
+def handle_train(opts: CliOptionsModel) -> None:
+    """
+    Handle the train subcommand to orchestrate synthetic data generation and export.
+
+    Args:
+    ----
+        opts: Validated CLI options model containing db, output_dir, samples_per_table, provider, model, export_formats, and optional flags.
+
+    """
+    print("=" * 60)
+    print("T1D Synthetic Training Orchestrator")
+    print(f"Database: {opts.db}")
+    print(f"Model: {opts.provider}/{opts.model}")
+    print(f"Samples per table: {opts.samples_per_table}")
+    print("=" * 60)
+
+    conn = duckdb.connect(opts.db)
+    generator = training_data.TrainingDataGenerator(
+        conn,
+        model=opts.model,
+        provider=opts.provider,
     )
 
-    split_validation_passed = True
-    if getattr(args, "split_validation", False):
-        print("Validating dataset splits for prompt leakage...")
-        tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
-        train_tbl = (
-            "sft_train"
-            if "sft_train" in tables
-            else ("sft_data_train" if "sft_data_train" in tables else None)
-        )
-        val_tbl = (
-            "sft_val"
-            if "sft_val" in tables
-            else ("sft_data_val" if "sft_data_val" in tables else None)
-        )
-        if train_tbl and val_tbl:
-            train_prompts = set(
-                r[0]
-                for r in conn.execute(f'SELECT prompt FROM "{train_tbl}"').fetchall()
-            )
-            val_prompts = set(
-                r[0] for r in conn.execute(f'SELECT prompt FROM "{val_tbl}"').fetchall()
-            )
-            overlap = train_prompts.intersection(val_prompts)
-            if overlap:
-                print(
-                    f"Warning: Found {len(overlap)} overlapping prompts between train and val splits."
-                )
-                split_validation_passed = False
-            else:
-                print("Split validation passed: 0 prompt overlap detected.")
-        else:
-            print("Split validation skipped: split tables not found.")
+    print("Generating synthetic pairs and persisting to DuckDB...")
+    schema = generator.extract_schema()
+    split_val_flag = opts.split_validation
+    split_r = (0.8, 0.1, 0.1) if split_val_flag else None
+    for table_name, table_schema in schema.items():
+        print(f"Generating {opts.samples_per_table} pairs for table: {table_name}...")
+        pairs = generator.generate_pairs(table_schema, opts.samples_per_table)
+        generator.write_to_db(pairs, split_ratios=split_r)
 
-    lr = getattr(args, "learning_rate", 2e-5)
-    if lr <= 0.0:
-        raise ValueError("Learning rate must be positive.")
-    batch_sz = getattr(args, "batch_size", 4)
-    if batch_sz < 1:
-        raise ValueError("Batch size must be at least 1.")
-    epochs = getattr(args, "num_epochs", 3)
-    if epochs < 1:
-        raise ValueError("Number of epochs must be at least 1.")
-    warmup = getattr(args, "warmup_steps", 50)
-    if warmup < 0:
-        raise ValueError("Warmup steps cannot be negative.")
-    w_decay = getattr(args, "weight_decay", 0.01)
-    if w_decay < 0.0:
-        raise ValueError("Weight decay cannot be negative.")
-    max_len = getattr(args, "max_seq_length", 2048)
-    if max_len < 64:
-        raise ValueError("Max sequence length must be at least 64.")
+    out_dir = Path(str(opts.output_dir))
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    hparams = TrainingHyperparameters(
-        learning_rate=lr,
-        batch_size=batch_sz,
-        num_epochs=epochs,
-        warmup_steps=warmup,
-        weight_decay=w_decay,
-        max_seq_length=max_len,
-        checkpoint_interval=getattr(args, "checkpoint_interval", 500),
-        eval_steps=getattr(args, "eval_steps", 100),
+    formats = [f.strip().lower() for f in opts.export_formats.split(",")]
+    manifest_stages = export_training_stages(
+        conn=conn,
+        generator=generator,
+        out_dir=out_dir,
+        formats=formats,
+        split_val_flag=split_val_flag,
     )
 
-    manifest = {
-        "model": f"{args.provider}/{args.model}",
-        "database": str(args.db),
-        "samples_per_table": args.samples_per_table,
-        "backend": getattr(args, "backend", "local-cpu"),
+    split_validation_passed = (
+        verify_split_prompt_leakage(conn) if split_val_flag else True
+    )
+    hparams = validate_cli_hyperparameters(opts)
+
+    backend_val = opts.backend
+    manifest: Dict[
+        str,
+        Union[str, int, bool, List[str], Dict[str, ManifestStageDict]],
+    ] = {
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "model": f"{opts.provider}/{opts.model}",
+        "database": str(opts.db),
+        "samples_per_table": int(opts.samples_per_table),
+        "backend": backend_val,
         "tables_processed": list(schema.keys()),
         "export_formats": formats,
+        "stages": manifest_stages,
         "split_validation_passed": split_validation_passed,
     }
     manifest_path = out_dir / "training_manifest.json"
-    with open(manifest_path, "w") as mf:
+    with open(manifest_path, "w", encoding="utf-8") as mf:
         json.dump(manifest, mf, indent=2)
     print(f"Exported training manifest to {manifest_path}...")
 
-    if getattr(args, "execute_training", False):
-        backend_val = getattr(args, "backend", "local-cpu")
+    if opts.execute_training:
         maxtext_cfg = None
         if backend_val == "remote-tpu-maxtext":
             maxtext_cfg = MaxTextConfig(
                 project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp"),
-                zone=getattr(args, "tpu_zone", "us-central2-b"),
-                bucket_url=getattr(args, "gcs_bucket", "gs://t1d-analytics-artifacts"),
-                accelerator_type=TpuAcceleratorType(getattr(args, "tpu_type", "v4-8")),
-                num_slices=getattr(args, "tpu_slices", 1),
-                model_name=args.model,
+                zone=opts.tpu_zone,
+                bucket_url=opts.gcs_bucket,
+                accelerator_type=TpuAcceleratorType(opts.tpu_type),
+                num_slices=opts.tpu_slices,
+                model_name=opts.model,
             )
 
         target_parquet = out_dir / "sft_data.parquet"
@@ -1291,15 +1475,15 @@ def handle_train(args: argparse.Namespace) -> None:
             )
         )
         config = TrainingJobConfig(
-            model_name=args.model,
+            model_name=opts.model,
             backend=TrainingBackend(backend_val),
             dataset_path=ds_target,
             output_dir=str(out_dir / "checkpoints"),
             hyperparameters=hparams,
-            dry_run=getattr(args, "dry_run", False),
+            dry_run=opts.dry_run,
             maxtext_config=maxtext_cfg,
-            use_lora=getattr(args, "use_lora", False),
-            quantization=getattr(args, "quantization", None),
+            use_lora=opts.use_lora,
+            quantization=opts.quantization,
         )
         print(f"Initiating training runner with backend '{config.backend.value}'...")
         from t1d_analytics import training_runner
@@ -1318,44 +1502,63 @@ def handle_train(args: argparse.Namespace) -> None:
     print("Training orchestration completed successfully.")
 
 
-def handle_bridge_gemma_sql(args: argparse.Namespace) -> None:
+def handle_bridge_gemma_sql(opts: CliOptionsModel) -> None:
     """
     Handle the bridge-gemma-sql command to interact with external gemma-4-sql toolchains.
 
     Args:
     ----
-        args: Command-line arguments containing action, stage, db, table, output_dir, and config.
+        opts: Validated CLI options model containing action, stage, db, table, output_dir, and config.
+
+    Raises:
+    ------
+        CliValidationError: If `--config` is omitted for the `'train'` action.
 
     """
-    if args.action == "check":
+    if opts.action == "check":
         installed = gemma_bridge.check_gemma_sql_installed()
         print(f"gemma-4-sql installed: {installed}")
         if not installed:
             print("Action: Install via 'pip install -e /path/to/gemma-4-sql[all]'.")
-    elif args.action == "etl":
+    elif opts.action == "etl":
         print(
-            f"Running gemma-4-sql ETL for stage '{args.stage}' from {args.db}:{args.table}..."
+            f"Running gemma-4-sql ETL for stage '{opts.stage}' from {opts.db}:{opts.table}..."
         )
         res = gemma_bridge.run_gemma_sql_etl(
-            stage=args.stage,
-            duckdb_path=args.db,
-            duckdb_table=args.table,
-            output_dir=args.output_dir,
+            stage=opts.stage,
+            duckdb_path=opts.db,
+            duckdb_table=opts.table,
+            output_dir=opts.output_dir,
         )
         print(res.stdout)
         print("gemma-4-sql ETL completed successfully.")
     else:  # train
-        if not args.config:
-            raise ValueError("--config path is required for 'train' action.")
+        if not opts.config:
+            raise CliValidationError("--config path is required for 'train' action.")
         print(
-            f"Running gemma-4-sql training for stage '{args.stage}' with config '{args.config}'..."
+            f"Running gemma-4-sql training for stage '{opts.stage}' with config '{opts.config}'..."
         )
         res = gemma_bridge.run_gemma_sql_train(
-            stage=args.stage,
-            config_path=args.config,
+            stage=opts.stage,
+            config_path=opts.config,
         )
         print(res.stdout)
         print("gemma-4-sql training completed successfully.")
+
+
+_handle_download_cmd = handle_download
+_handle_extract_cmd = handle_extract
+_handle_load_cmd = handle_load
+_handle_manifest_cmd = handle_manifest
+_handle_export_cmd = handle_export
+_handle_query_cmd = handle_query
+_handle_generate_training_data_cmd = handle_generate_training_data
+_handle_evaluate_cmd = handle_evaluate
+_handle_doctor_cmd = handle_doctor
+_handle_seed_cmd = handle_seed
+_handle_train_cmd = handle_train
+_handle_gemma_etl_cmd = handle_bridge_gemma_sql
+_handle_gemma_train_cmd = handle_bridge_gemma_sql
 
 
 if __name__ == "__main__":

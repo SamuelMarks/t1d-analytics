@@ -5,15 +5,29 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import duckdb
+from pydantic.dataclasses import dataclass
 
+from t1d_analytics.api_schemas import JsonLevel1, JsonLevel2
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.llm_client import PROVIDER_ENV_KEYS, normalize_ollama_host
+from t1d_analytics.sql_utils import SqlValue
+
+DatabaseDetailsDict = Dict[str, JsonLevel1]
+DiagnosticDict = Dict[str, JsonLevel2]
+SystemHealthDict = Dict[
+    str,
+    Union[
+        SqlValue,
+        DiagnosticDict,
+        Dict[str, DiagnosticDict],
+    ],
+]
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +120,13 @@ class DatabaseStatus:
     status: HealthStatus = HealthStatus.UNHEALTHY
 
     @property
-    def details(self) -> dict[str, object]:
+    def details(self) -> DatabaseDetailsDict:
         """Return nested details dictionary for declarative health check evaluators."""
         return {
             "configured_path": self.configured_path,
             "table_count": self.table_count,
             "total_rows": self.total_rows,
-            "tables": self.tables,
+            "tables": list(self.tables),
             "has_initial_data": self.has_initial_data,
             "file_size_bytes": self.file_size_bytes,
             "writable": self.writable,
@@ -120,7 +134,7 @@ class DatabaseStatus:
             "disk_free_bytes": self.disk_free_bytes,
         }
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> DiagnosticDict:
         """Convert database status to dictionary representation."""
         return {
             "status": self.status.value,
@@ -132,7 +146,7 @@ class DatabaseStatus:
             "remediation": self.remediation,
             "table_count": self.table_count,
             "total_rows": self.total_rows,
-            "tables": self.tables,
+            "tables": list(self.tables),
             "has_initial_data": self.has_initial_data,
             "file_size_bytes": self.file_size_bytes,
             "writable": self.writable,
@@ -152,11 +166,11 @@ class OllamaStatus:
     remediation: Optional[str] = None
     version: Optional[str] = None
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> DiagnosticDict:
         """Convert Ollama status to dictionary representation."""
         return {
             "accessible": self.accessible,
-            "available_models": self.available_models,
+            "available_models": list(self.available_models),
             "message": self.message,
             "remediation": self.remediation,
             "version": self.version,
@@ -174,7 +188,7 @@ class CloudProviderStatus:
     message: str = ""
     remediation: Optional[str] = None
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> DiagnosticDict:
         """Convert cloud provider status to dictionary representation."""
         return {
             "provider": self.provider,
@@ -198,7 +212,7 @@ class SystemHealth:
     providers: Dict[str, CloudProviderStatus] = field(default_factory=dict)
     sessions_database_healthy: bool = True
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> SystemHealthDict:
         """Convert system health to dictionary representation."""
         return {
             "status": self.status,
@@ -256,6 +270,13 @@ def check_database_health(
     """
     _ = get_translator(lang)
     target_path_str = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
+    if (
+        db_path is None
+        and "T1D_DB_PATH" not in os.environ
+        and not Path(target_path_str).exists()
+        and Path("data/t1d.duckdb").exists()
+    ):
+        target_path_str = "data/t1d.duckdb"
     target_path = Path(target_path_str)
 
     # 1. Check if database file exists on disk
@@ -341,7 +362,21 @@ def check_database_health(
             integrity_ok = False
         raw_tables = conn.execute("SHOW TABLES").fetchall()
         all_tables = [row[0] for row in raw_tables]
-        tables = [t for t in all_tables if not t.startswith("_t1d_")]
+        compat_views = {
+            "tblaptsummary",
+            "adverseevents",
+            "subjects",
+            "hba1c",
+            "demographics",
+        }
+        primary_tables = [
+            t for t in all_tables if not t.startswith("_t1d_") and t not in compat_views
+        ]
+        tables = (
+            primary_tables
+            if primary_tables
+            else [t for t in all_tables if not t.startswith("_t1d_")]
+        )
         for tbl_name in tables:
             safe_tbl = tbl_name.replace('"', '""')
             cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
@@ -715,3 +750,47 @@ def log_startup_diagnostics(db_path: Optional[str] = None) -> None:
 
     logger.info(f"System Status: {health.status.upper()}")
     logger.info("=" * 60)
+
+
+def verify_split_prompt_leakage(conn: duckdb.DuckDBPyConnection) -> bool:
+    """
+    Verify that train and validation SFT split tables have zero overlapping prompts.
+
+    Args:
+    ----
+        conn: Active DuckDB connection.
+
+    Returns:
+    -------
+        bool: True if zero overlap or split tables absent; False if prompt leakage is detected.
+
+    """
+    print("Validating dataset splits for prompt leakage...")
+    tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    train_tbl = (
+        "sft_train"
+        if "sft_train" in tables
+        else ("sft_data_train" if "sft_data_train" in tables else None)
+    )
+    val_tbl = (
+        "sft_val"
+        if "sft_val" in tables
+        else ("sft_data_val" if "sft_data_val" in tables else None)
+    )
+    if train_tbl and val_tbl:
+        train_prompts = {
+            r[0] for r in conn.execute(f'SELECT prompt FROM "{train_tbl}"').fetchall()
+        }
+        val_prompts = {
+            r[0] for r in conn.execute(f'SELECT prompt FROM "{val_tbl}"').fetchall()
+        }
+        overlap = train_prompts.intersection(val_prompts)
+        if overlap:
+            print(
+                f"Warning: Found {len(overlap)} overlapping prompts between train and val splits."
+            )
+            return False
+        print("Split validation passed: 0 prompt overlap detected.")
+        return True
+    print("Split validation skipped: split tables not found.")
+    return True

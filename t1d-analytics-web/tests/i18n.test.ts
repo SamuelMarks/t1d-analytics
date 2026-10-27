@@ -4,7 +4,7 @@
  * Unit tests for internationalization (i18next), RTL directionality, and DOM translation.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import i18next, {
@@ -104,62 +104,38 @@ describe("i18n.ts", () => {
   it("determines initial language correctly when falling back to navigator", () => {
     localStorage.clear();
 
-    // We need to mock navigator to trigger the language check.
-    // jsdom allows us to set language via Object.defineProperty
     const originalNavigator = window.navigator;
-    Object.defineProperty(window, "navigator", {
-      value: { language: "ar-AE" },
-      configurable: true,
-    });
+    vi.stubGlobal("navigator", { language: "ar-AE" });
 
     expect(getInitialLang()).toBe("ar");
 
-    Object.defineProperty(window, "navigator", {
-      value: { language: "fr-FR" },
-      configurable: true,
-    });
+    vi.stubGlobal("navigator", { language: "fr-FR" });
 
     expect(getInitialLang()).toBe("en");
 
     // restore
-    Object.defineProperty(window, "navigator", {
-      value: originalNavigator,
-      configurable: true,
-    });
+    vi.stubGlobal("navigator", originalNavigator);
   });
 
   it("determines initial language correctly when falling back to navigator, no navigator available", () => {
     localStorage.clear();
 
-    // We need to mock navigator to undefined
     const originalNavigator = window.navigator;
-    Object.defineProperty(window, "navigator", {
-      value: undefined,
-      configurable: true,
-    });
+    vi.stubGlobal("navigator", undefined);
 
     expect(getInitialLang()).toBe("en");
 
     // restore
-    Object.defineProperty(window, "navigator", {
-      value: originalNavigator,
-      configurable: true,
-    });
+    vi.stubGlobal("navigator", originalNavigator);
   });
 
   it("determines initial language correctly when localStorage is undefined", () => {
     const originalLocalStorage = window.localStorage;
-    Object.defineProperty(window, "localStorage", {
-      value: undefined,
-      configurable: true,
-    });
+    vi.stubGlobal("localStorage", undefined);
 
     expect(getInitialLang()).toBe("en");
 
-    Object.defineProperty(window, "localStorage", {
-      value: originalLocalStorage,
-      configurable: true,
-    });
+    vi.stubGlobal("localStorage", originalLocalStorage);
   });
 
   it("sets document dir based on initial language correctly", () => {

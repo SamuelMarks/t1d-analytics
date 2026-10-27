@@ -1,7 +1,10 @@
 """Domain error hierarchy for T1D Analytics."""
 
-import json
-from typing import Any, Dict, Optional, TypedDict
+from typing import Dict, Mapping, Optional, Union
+
+from typing_extensions import TypedDict
+
+ErrorParamValue = Union[str, int, float, bool, None]
 
 
 class ErrorDetailDict(TypedDict):
@@ -16,7 +19,7 @@ class ErrorDetailDict(TypedDict):
     """
 
     error_code: str
-    params: Dict[str, Any]
+    params: Dict[str, ErrorParamValue]
 
 
 class T1DError(Exception):
@@ -29,6 +32,7 @@ class T1DError(Exception):
         message: Human-readable fallback error description.
         params: Structured interpolation parameters for localized error rendering.
         status_code: Default HTTP status code corresponding to this error.
+        headers: Optional HTTP response headers associated with the error.
 
     """
 
@@ -40,8 +44,9 @@ class T1DError(Exception):
         message: str = "",
         *,
         error_code: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[Mapping[str, ErrorParamValue]] = None,
         status_code: Optional[int] = None,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> None:
         """
         Initialize a T1DError instance.
@@ -52,25 +57,29 @@ class T1DError(Exception):
             error_code: Optional override for the i18n error code.
             params: Optional dictionary of error interpolation parameters.
             status_code: Optional override for the HTTP status code.
+            headers: Optional HTTP headers to attach to error responses.
 
         """
         self.error_code: str = error_code or self.default_error_code
-        self.params: Dict[str, Any] = (
+        self.params: Dict[str, ErrorParamValue] = (
             dict(params)
             if params is not None
             else ({"error": message} if message else {})
         )
-        self.message: str = message or json.dumps(
-            {"error_code": self.error_code, "params": self.params}
-        )
+        fallback_msg = str(self.params.get("error") or self.error_code)
+        self.message: str = message or fallback_msg
         self.status_code: int = (
             status_code if status_code is not None else self.default_status_code
         )
-        super().__init__(
-            json.dumps({"error_code": self.error_code, "params": self.params})
-            if not message
-            else f"{message} ({json.dumps({'error_code': self.error_code, 'params': self.params})})"
+        self.headers: Optional[Dict[str, str]] = (
+            dict(headers) if headers is not None else None
         )
+        display_msg = (
+            f"{self.message} [{self.error_code}]"
+            if self.error_code not in self.message
+            else self.message
+        )
+        super().__init__(display_msg)
 
     def to_dict(self) -> ErrorDetailDict:
         """
@@ -136,6 +145,63 @@ class InvalidColumnNameError(InvalidIdentifierError):
     default_status_code = 400
 
 
+InvalidSortColumnError = InvalidColumnNameError
+
+
+class InvalidPaginationError(DatabaseError):
+    """Raised when table pagination parameters (limit or offset) are out of valid bounds."""
+
+    default_error_code = "backend.invalidPagination"
+    default_status_code = 400
+
+
+class InvalidSortOrderError(DatabaseError):
+    """Raised when table sort order is neither 'asc' nor 'desc'."""
+
+    default_error_code = "backend.invalidSortOrder"
+    default_status_code = 400
+
+
+class ExportError(DatabaseError):
+    """Raised when streaming a table export (CSV, JSON, XLSX, Parquet) fails unexpectedly."""
+
+    default_error_code = "backend.serverError"
+    default_status_code = 500
+
+
+class RateLimitExceededError(T1DError):
+    """Raised when a client exceeds the sliding-window API request rate limit."""
+
+    default_error_code = "backend.rateLimitExceeded"
+    default_status_code = 429
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        retry_after: int = 1,
+        params: Optional[Mapping[str, ErrorParamValue]] = None,
+    ) -> None:
+        """
+        Initialize a RateLimitExceededError with a Retry-After header.
+
+        Args:
+        ----
+            message: Optional human-readable error message.
+            retry_after: Seconds until the client may retry.
+            params: Optional dictionary of error interpolation parameters.
+
+        """
+        self.retry_after: int = max(1, int(retry_after))
+        super().__init__(
+            message,
+            error_code=self.default_error_code,
+            params=params,
+            status_code=self.default_status_code,
+            headers={"Retry-After": str(self.retry_after)},
+        )
+
+
 class SqlExecutionError(DatabaseError):
     """Raised when a DuckDB SQL query fails during execution or times out."""
 
@@ -150,14 +216,14 @@ class ReadOnlyViolationError(SqlExecutionError):
     default_status_code = 400
 
 
-class EmptyQueryError(SqlExecutionError):
+class EmptyQueryError(ReadOnlyViolationError):
     """Raised when an empty or whitespace-only SQL statement is submitted."""
 
     default_error_code = "backend.emptyMessage"
     default_status_code = 400
 
 
-class MultipleStatementsError(SqlExecutionError):
+class MultipleStatementsError(ReadOnlyViolationError):
     """Raised when multiple semicolon-delimited SQL statements are submitted in a single query."""
 
     default_error_code = "backend.multipleStatements"
@@ -286,8 +352,134 @@ class TrainingExecutionError(TrainingError):
     default_status_code = 500
 
 
-class DownloadError(T1DError, RuntimeError):
+class ToolchainNotFoundError(TrainingError):
+    """Raised when an external training or cloud CLI toolchain (gemma-4-sql, xpk, gcloud) is not installed."""
+
+    default_error_code = "backend.toolchainMissing"
+    default_status_code = 503
+
+
+class GcsSyncError(TrainingError):
+    """Raised when syncing training datasets or checkpoints with Google Cloud Storage fails."""
+
+    default_error_code = "backend.gcsSyncFailed"
+    default_status_code = 502
+
+
+class TpuWorkloadError(TrainingError):
+    """Raised when dispatching, polling, or reclaiming a remote TPU workload fails."""
+
+    default_error_code = "backend.tpuWorkloadFailed"
+    default_status_code = 502
+
+
+class SeedVerificationError(DatabaseError, RuntimeError):
+    """Raised when database seeding verification fails due to missing or empty clinical tables."""
+
+    default_error_code = "backend.seedVerificationFailed"
+    default_status_code = 500
+
+
+class DownloadError(T1DError, RuntimeError, ValueError):
     """Raised when dataset downloading, checksum verification, or ASP.NET postback fails."""
 
     default_error_code = "backend.downloadFailed"
     default_status_code = 502
+
+
+class CliValidationError(T1DError, ValueError):
+    """Raised when CLI arguments or training hyperparameters fail validation."""
+
+    default_error_code = "backend.cliValidationFailed"
+    default_status_code = 400
+
+
+class AuthPluginError(T1DError, ValueError):
+    """Raised when dynamically loading or invoking an authentication plugin fails."""
+
+    default_error_code = "backend.authPluginFailed"
+    default_status_code = 400
+
+
+class InvalidTrainingBackendError(TrainingError, ValueError):
+    """Raised when an unsupported training backend identifier is requested."""
+
+    default_error_code = "backend.invalidBackend"
+    default_status_code = 400
+
+
+class GemmaToolchainError(ToolchainNotFoundError):
+    """Raised when the external gemma-4-sql binary or Python module fails or is missing."""
+
+    default_error_code = "backend.gemmaToolchainFailed"
+    default_status_code = 503
+
+
+class InvalidStageError(TrainingError, ValueError):
+    """Raised when an unsupported training or ETL pipeline stage is requested."""
+
+    default_error_code = "backend.invalidStage"
+    default_status_code = 400
+
+
+class TpuOrchestrationError(TpuWorkloadError):
+    """Raised when Cloud TPU workload dispatch, status polling, or reclamation fails."""
+
+    default_error_code = "backend.tpuOrchestrationFailed"
+    default_status_code = 502
+
+
+class TpuPreemptionError(TpuOrchestrationError):
+    """Raised when a spot Cloud TPU workload is preempted during execution."""
+
+    default_error_code = "backend.tpuPreempted"
+    default_status_code = 503
+
+
+class TpuPollingTimeoutError(TpuOrchestrationError, TimeoutError):
+    """Raised when polling a remote TPU workload or external trainer exceeds its timeout."""
+
+    default_error_code = "backend.tpuPollingTimeout"
+    default_status_code = 504
+
+
+class GcsStorageError(GcsSyncError):
+    """Raised when Google Cloud Storage upload, download, or bucket validation fails."""
+
+    default_error_code = "backend.gcsStorageFailed"
+    default_status_code = 502
+
+
+class ChecksumMismatchError(GcsStorageError, ValueError):
+    """Raised when a downloaded checkpoint or dataset fails checksum verification."""
+
+    default_error_code = "backend.checksumMismatch"
+    default_status_code = 502
+
+
+class InvalidGcsUriError(GcsStorageError, ValueError):
+    """Raised when a Google Cloud Storage URI does not begin with the required 'gs://' scheme."""
+
+    default_error_code = "backend.invalidGcsUri"
+    default_status_code = 400
+
+
+class ConfigFileNotFoundError(TrainingError, FileNotFoundError, ValueError):
+    """Raised when a required training or ETL configuration file is missing on disk."""
+
+    default_error_code = "backend.configNotFound"
+    default_status_code = 404
+
+
+class SubprocessTimeoutError(TrainingError, TimeoutError):
+    """Raised when a local training or ETL CLI subprocess exceeds its execution timeout."""
+
+    default_error_code = "backend.subprocessTimeout"
+    default_status_code = 504
+
+
+class SchemaExtractionError(DatabaseError, RuntimeError):
+    """Raised when extracting or formatting database schemas for LLM prompts fails."""
+
+    default_error_code = "backend.schemaExtractionFailed"
+    default_status_code = 500

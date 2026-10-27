@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  classifySqlResult,
   getCurrentLocale,
   formatNumber,
   formatPercent,
@@ -23,7 +24,7 @@ describe("formatters.ts", () => {
     expect(getCurrentLocale()).toBe(i18next.language || "en");
 
     const originalLang = i18next.language;
-    (i18next as unknown as { language: string }).language = "";
+    i18next.language = "";
     document.documentElement.lang = "ja";
     expect(getCurrentLocale()).toBe("ja");
 
@@ -31,7 +32,7 @@ describe("formatters.ts", () => {
     expect(getCurrentLocale()).toBe("en");
 
     // restore
-    (i18next as unknown as { language: string }).language = originalLang;
+    i18next.language = originalLang;
   });
 
   it("formats numbers with locale or override", () => {
@@ -114,5 +115,38 @@ describe("formatters.ts", () => {
       "en",
     );
     expect(formattedTimeStr).toBe("14:30");
+  });
+
+  it("classifies SQL results into empty, scalar, and table variants", () => {
+    expect(classifySqlResult(undefined)).toEqual({ kind: "empty" });
+    expect(classifySqlResult([])).toEqual({ kind: "empty" });
+
+    expect(classifySqlResult([{ total_patients: 42 }])).toEqual({
+      kind: "scalar",
+      column: "total_patients",
+      value: 42,
+      formattedValue: "42",
+    });
+
+    expect(classifySqlResult([{ max_glucose: null }])).toEqual({
+      kind: "scalar",
+      column: "max_glucose",
+      value: null,
+      formattedValue: "NULL",
+    });
+
+    const singleRowMultiCol = [{ id: 1, gender: "F" }];
+    expect(classifySqlResult(singleRowMultiCol)).toEqual({
+      kind: "table",
+      columns: ["id", "gender"],
+      rows: singleRowMultiCol,
+    });
+
+    const multiRowSingleCol = [{ id: 1 }, { id: 2 }];
+    expect(classifySqlResult(multiRowSingleCol)).toEqual({
+      kind: "table",
+      columns: ["id"],
+      rows: multiRowSingleCol,
+    });
   });
 });

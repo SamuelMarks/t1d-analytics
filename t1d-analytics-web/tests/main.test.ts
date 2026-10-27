@@ -16,14 +16,14 @@ describe("main.ts", () => {
   });
 
   it("initializes ChatState and ChatUI, and creates a chat if none exist", async () => {
+    const createChatSpy = vi.fn();
+    const stateObj = {
+      chats: [],
+      createChat: createChatSpy,
+    };
     vi.doMock("../src/state", () => {
       return {
-        ChatState: vi.fn().mockImplementation(() => {
-          return {
-            chats: [],
-            createChat: vi.fn(),
-          };
-        }),
+        ChatState: vi.fn().mockImplementation(() => stateObj),
       };
     });
     vi.doMock("../src/ui", () => ({ ChatUI: vi.fn() }));
@@ -34,22 +34,19 @@ describe("main.ts", () => {
     await import("../src/main");
 
     expect(ChatState).toHaveBeenCalledTimes(1);
-
-    const stateMock = (ChatState as import("vitest").Mock).mock.results[0]
-      .value as { createChat: import("vitest").Mock };
-
-    expect(stateMock.createChat).toHaveBeenCalledTimes(1);
+    expect(createChatSpy).toHaveBeenCalledTimes(1);
     expect(ChatUI).toHaveBeenCalledTimes(1);
-    expect(ChatUI).toHaveBeenCalledWith(stateMock);
+    expect(ChatUI).toHaveBeenCalledWith(stateObj);
   });
 
   it("does not create a chat if one already exists", async () => {
+    const createChatSpy = vi.fn();
     vi.doMock("../src/state", () => {
       return {
         ChatState: vi.fn().mockImplementation(() => {
           return {
             chats: [{ id: "existing" }],
-            createChat: vi.fn(),
+            createChat: createChatSpy,
           };
         }),
       };
@@ -57,12 +54,35 @@ describe("main.ts", () => {
     vi.doMock("../src/ui", () => ({ ChatUI: vi.fn() }));
     vi.doMock("../src/i18n", () => ({ translateDocument: vi.fn() }));
 
-    const { ChatState } = await import("../src/state");
     await import("../src/main");
 
-    const stateMock = (ChatState as import("vitest").Mock).mock.results[0]
-      .value as { createChat: import("vitest").Mock };
-
-    expect(stateMock.createChat).not.toHaveBeenCalled();
+    expect(createChatSpy).not.toHaveBeenCalled();
   });
+
+  it("integrates real ChatState and ChatUI against index.html DOM fixture on startup", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const html = fs.readFileSync(
+      path.resolve(__dirname, "../index.html"),
+      "utf-8",
+    );
+    document.documentElement.innerHTML = html;
+    localStorage.clear();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ models: [], tables: [], databases: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    vi.doUnmock("../src/state");
+    vi.doUnmock("../src/ui");
+    vi.doUnmock("../src/i18n");
+
+    await import("../src/main");
+
+    const chatItems = document.querySelectorAll("#chat-list .chat-item");
+    expect(chatItems.length).toBe(1);
+  }, 20000);
 });

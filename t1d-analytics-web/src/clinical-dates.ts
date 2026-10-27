@@ -5,6 +5,22 @@
  */
 
 /**
+ * Primitive or Date cell value accepted in clinical CGM dataset rows.
+ */
+export type ClinicalRowValue =
+  | string
+  | number
+  | boolean
+  | Date
+  | null
+  | undefined;
+
+/**
+ * Input value accepted by clinical date/time parsers.
+ */
+export type ClinicalDateInput = ClinicalRowValue | Record<string, never>;
+
+/**
  * Parsed clinical date structure containing day identifier, minute of day, and epoch milliseconds.
  */
 export interface ParsedClinicalDate {
@@ -36,11 +52,11 @@ const MONTH_NAMES: Record<string, number> = {
 
 /**
  * Parse a raw timestamp value into date day key and minute of the day without timezone shifts.
- * @param {unknown} rawTime - The raw date/time string, Date, or timestamp number.
+ * @param {ClinicalDateInput} rawTime - The raw date/time string, Date, or timestamp number.
  * @returns {ParsedClinicalDate | null} Parsed day key, minute of day, and epoch milliseconds.
  */
 export function parseDateAndMinuteOfDay(
-  rawTime: unknown,
+  rawTime: ClinicalDateInput,
 ): ParsedClinicalDate | null {
   if (rawTime instanceof Date) {
     const epochMs = rawTime.getTime();
@@ -194,20 +210,22 @@ export function parseDateAndMinuteOfDay(
 
 /**
  * Filter CGM rows to a configurable observation window.
- * @param {Array<Record<string, unknown>>} rows - Full CGM dataset rows.
+ * @param {Array<Record<string, ClinicalRowValue>>} rows - Full CGM dataset rows.
  * @param {string} timeCol - Column name representing date/time.
  * @param {number} [days=14] - Duration of the observation window in days (0 for all data).
- * @returns {Array<Record<string, unknown>>} Filtered rows within the window of latest reading.
+ * @returns {Array<Record<string, ClinicalRowValue>>} Filtered rows within the window of latest reading.
  */
 export function filterObservationWindow(
-  rows: Array<Record<string, unknown>>,
+  rows: Array<Record<string, ClinicalRowValue>>,
   timeCol: string,
   days: number = 14,
-): Array<Record<string, unknown>> {
+): Array<Record<string, ClinicalRowValue>> {
   if (days <= 0) return rows;
   let maxTime = -Infinity;
-  const parsedRows: Array<{ row: Record<string, unknown>; timeMs: number }> =
-    [];
+  const parsedRows: Array<{
+    row: Record<string, ClinicalRowValue>;
+    timeMs: number;
+  }> = [];
 
   for (const r of rows) {
     const rawTime = r[timeCol];
@@ -231,13 +249,13 @@ export function filterObservationWindow(
 
 /**
  * Filter CGM rows to the most recent 14-day window.
- * @param {Array<Record<string, unknown>>} rows - Full CGM dataset rows.
+ * @param {Array<Record<string, ClinicalRowValue>>} rows - Full CGM dataset rows.
  * @param {string} timeCol - Column name representing date/time.
- * @returns {Array<Record<string, unknown>>} Filtered rows within 14 days of latest reading.
+ * @returns {Array<Record<string, ClinicalRowValue>>} Filtered rows within 14 days of latest reading.
  */
 export function filter14DayWindow(
-  rows: Array<Record<string, unknown>>,
+  rows: Array<Record<string, ClinicalRowValue>>,
   timeCol: string,
-): Array<Record<string, unknown>> {
+): Array<Record<string, ClinicalRowValue>> {
   return filterObservationWindow(rows, timeCol, 14);
 }

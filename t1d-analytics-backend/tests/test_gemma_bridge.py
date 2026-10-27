@@ -1,19 +1,99 @@
 """Tests for gemma_bridge external toolchain bridge module."""
 
 import subprocess
+import types
 from pathlib import Path
+from typing import Dict, Optional, Union
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from t1d_analytics.gemma_bridge import (
+    EtlPayloadDict,
+    EvalAccuracyDict,
+    GemmaSqlBridge,
     GemmaSqlPipelineEngine,
+    InProcessDuckDbGemmaFallback,
+    SubprocessGemmaToolchain,
+    _classify_sql_error_hint,
+    _extract_schema_map_from_text,
     check_gemma_sql_installed,
+    execute_agentic_nl_to_sql,
     get_gemma_sql_binary,
     parse_gemma_sql_metrics,
+    prune_schema_with_gemma_rag,
+    resolve_local_gemma_sql_repo,
     run_gemma_sql_etl,
     run_gemma_sql_train,
+    validate_sql_tokens,
 )
+from t1d_analytics.job_manager import JobMetricValue
+
+
+class _FakeGemmaLibraryModule:
+    """Realistic contract-verifying fake module implementing _GemmaLibraryProtocol."""
+
+    def run_etl(
+        self,
+        stage: str,
+        *,
+        duckdb_path: str,
+        duckdb_table: str,
+        output_dir: Optional[str] = None,
+    ) -> EtlPayloadDict:
+        """Validate ETL arguments and return structured shard metadata."""
+        assert stage in ("pretrain", "sft", "posttrain")
+        assert Path(duckdb_path).exists()
+        assert duckdb_table.isidentifier()
+        return {
+            "table": duckdb_table,
+            "rows": 10,
+            "output_dir": output_dir or "",
+            "shards": 5,
+        }
+
+    def run_sft(
+        self,
+        *,
+        model: str,
+        dataset: str,
+        output_dir: str,
+        hyperparameters: Dict[str, Union[int, float, str, bool]],
+    ) -> Dict[str, JobMetricValue]:
+        """Validate SFT arguments and return structured training metrics."""
+        assert model
+        assert Path(dataset).exists()
+        assert Path(output_dir).exists()
+        assert isinstance(hyperparameters, dict)
+        return {"loss": 0.12, "steps": 10}
+
+    def run_dpo(
+        self,
+        *,
+        model: str,
+        dataset: str,
+        output_dir: str,
+        beta: float,
+    ) -> Dict[str, JobMetricValue]:
+        """Validate DPO arguments and return structured alignment metrics."""
+        assert model
+        assert Path(dataset).exists()
+        assert Path(output_dir).exists()
+        assert beta > 0.0
+        return {"loss": 0.08, "beta": beta}
+
+    def evaluate_sql(
+        self,
+        *,
+        model: str,
+        test_cases: str,
+        duckdb_path: str,
+    ) -> Union[EvalAccuracyDict, float]:
+        """Validate SQL evaluation arguments and return accuracy score."""
+        assert model
+        assert Path(test_cases).exists()
+        assert Path(duckdb_path).exists()
+        return 0.94
 
 
 def test_check_gemma_sql_installed() -> None:
@@ -183,7 +263,7 @@ def test_run_gemma_sql_timeouts(tmp_path: Path) -> None:
 
 
 def test_gemma_sql_pipeline_engine_library_mode(tmp_path: Path) -> None:
-    """Test GemmaSqlPipelineEngine direct in-process library execution."""
+    """Test GemmaSqlPipelineEngine direct in-process library execution against contract-verifying fake."""
     db_file = tmp_path / "train.duckdb"
     db_file.write_text("data")
     ds_file = tmp_path / "data.jsonl"
@@ -192,19 +272,19 @@ def test_gemma_sql_pipeline_engine_library_mode(tmp_path: Path) -> None:
     tc_file.write_text("tests")
     out_dir = tmp_path / "out"
 
-    mock_gemma_pkg = MagicMock()
-    mock_gemma_pkg.run_etl.return_value = {"shards": 5}
-    mock_gemma_pkg.run_sft.return_value = {"loss": 0.12}
-    mock_gemma_pkg.run_dpo.return_value = {"loss": 0.08}
-    mock_gemma_pkg.evaluate_sql.return_value = 0.94
+    fake_gemma_pkg = _FakeGemmaLibraryModule()
+    assert GemmaSqlBridge is GemmaSqlPipelineEngine
+    assert isinstance(SubprocessGemmaToolchain(), SubprocessGemmaToolchain)
+    assert isinstance(InProcessDuckDbGemmaFallback(), InProcessDuckDbGemmaFallback)
 
-    with patch.dict("sys.modules", {"gemma_4_sql": mock_gemma_pkg}):
+    with patch("importlib.import_module", return_value=fake_gemma_pkg):
         engine = GemmaSqlPipelineEngine()
         assert engine.is_library_available is True
 
         res_etl = engine.run_etl("sft", db_file, "my_table", out_dir)
         assert res_etl["execution_mode"] == "library"
         assert res_etl["result"]["shards"] == 5
+        assert res_etl["result"]["table"] == "my_table"
 
         res_sft = engine.run_sft("gemma-7b", ds_file, out_dir)
         assert res_sft["execution_mode"] == "library"
@@ -290,23 +370,31 @@ def test_gemma_sql_pipeline_engine_missing_files(tmp_path: Path) -> None:
             engine.evaluate_sql("gemma-7b", valid_file, missing_file)
 
 
-def test_gemma_sql_pipeline_engine_native_fallbacks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gemma_sql_pipeline_engine_native_fallbacks(tmp_path: Path) -> None:
     """Test GemmaSqlPipelineEngine native in-process fallbacks when gemma_4_sql is unavailable."""
     # 1. Initialize with fallback enabled when import fails
     import duckdb
 
     mock_tok = MagicMock()
     mock_tok.encode.return_value = [1, 2]
-    monkeypatch.setattr(
+    p_tok = patch(
         "transformers.AutoTokenizer.from_pretrained", lambda *a, **kw: mock_tok
     )
-    monkeypatch.setattr(
+    p_hf = patch(
         "t1d_analytics.training_runner.HuggingFaceCausalLMFactory.create_model",
         lambda *a, **kw: MagicMock(),
     )
+    p_tok.start()
+    p_hf.start()
+    try:
+        _run_native_fallbacks_assertions(tmp_path, duckdb)
+    finally:
+        p_hf.stop()
+        p_tok.stop()
 
+
+def _run_native_fallbacks_assertions(tmp_path: Path, duckdb: types.ModuleType) -> None:
+    """Execute assertions for GemmaSqlPipelineEngine native in-process fallbacks."""
     # Create test DuckDB database with clinical data
 
     with patch(
@@ -336,13 +424,43 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(
     etl_res_no_out = engine.run_etl("sft", db_file, "cgm_metrics", output_dir=None)
     assert etl_res_no_out["status"] == "completed"
 
-    # 3. Native run_sft (with and without hyperparameters)
+    with pytest.raises(ValueError, match="Invalid DuckDB table identifier"):
+        engine.run_etl("sft", db_file, "cgm_metrics; DROP TABLE cgm_metrics;")
+
+    # Test run_etl when table has no columns (rel.description is None/empty)
+    with patch(
+        "duckdb.DuckDBPyConnection.execute",
+        return_value=MagicMock(description=None, fetchall=lambda: []),
+    ):
+        etl_empty_cols = engine.run_etl(
+            "sft", db_file, "cgm_metrics", output_dir=tmp_path / "etl_empty_cols"
+        )
+        assert etl_empty_cols["status"] == "completed"
+
+    # 3. Native run_sft (with and without hyperparameters, and with dry_run=False)
     ds_file = tmp_path / "etl_out" / "sft_data.jsonl"
     sft_res = engine.run_sft(
         "gemma-2b", ds_file, tmp_path / "sft_out", hyperparameters={"num_epochs": 1}
     )
     assert sft_res["status"] == "completed"
     assert sft_res["execution_mode"] == "native_in_process"
+
+    sft_res_full = engine.run_sft(
+        "gemma-2b",
+        ds_file,
+        tmp_path / "sft_out_full",
+        hyperparameters={
+            "num_epochs": 1,
+            "dry_run": False,
+            "use_tiny_model": True,
+        },
+        dry_run=False,
+    )
+    assert sft_res_full["status"] == "completed"
+    assert sft_res_full["result"]["status"] == "completed"
+    assert (
+        tmp_path / "sft_out_full" / "checkpoint-final" / "training_metrics.json"
+    ).exists()
 
     sft_res_no_hparams = engine.run_sft(
         "gemma-2b", ds_file, tmp_path / "sft_out2", hyperparameters=None
@@ -365,8 +483,24 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(
     assert "result" in dpo_res
     assert dpo_res["result"]["status"] == "dry_run_completed"
     assert dpo_res["result"]["dpo_pairs"] == 2
-    assert dpo_res["result"]["dpo_loss"] > 0.0
-    assert dpo_res["result"]["reward_margin"] > 0.0
+    dpo_loss_val = dpo_res["result"]["dpo_loss"]
+    reward_margin_val = dpo_res["result"]["reward_margin"]
+    assert isinstance(dpo_loss_val, (int, float))
+    assert isinstance(reward_margin_val, (int, float))
+    assert float(dpo_loss_val) > 0.0
+    assert float(reward_margin_val) > 0.0
+
+    dpo_res_full = engine.run_dpo(
+        "gemma-2b",
+        pref_file,
+        tmp_path / "dpo_out_full",
+        beta=0.05,
+        dry_run=False,
+    )
+    assert dpo_res_full["result"]["status"] == "completed"
+    assert (
+        tmp_path / "dpo_out_full" / "checkpoint-final" / "training_metrics.json"
+    ).exists()
 
     # Also test DPO when no valid chosen_sql pairs exist in file
     pref_empty = tmp_path / "pref_empty.jsonl"
@@ -382,9 +516,10 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(
     empty_tc = tmp_path / "empty_cases.jsonl"
     empty_tc.write_text("\n")
     eval_empty = engine.evaluate_sql("gemma-2b", empty_tc, db_file)
+    assert isinstance(eval_empty["accuracy"], dict)
     assert eval_empty["accuracy"]["total"] == 0
 
-    # 6. Native evaluate_sql - valid test cases (including malformed json and non-dict lines)
+    # 6. Native evaluate_sql - valid test cases (including malformed json, non-dict lines, and missing prediction)
     valid_tc = tmp_path / "test_cases.jsonl"
     valid_tc.write_text(
         "not a json line\n"
@@ -393,13 +528,15 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(
         '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT tir FROM cgm_metrics"}\n'
         '{"gold_sql": "SELECT tir FROM cgm_metrics", "predicted_sql": "SELECT mean_glucose FROM cgm_metrics"}\n'
         '{"gold_sql": "SELECT * FROM cgm_metrics", "predicted_sql": "INVALID SYNTAX %%%"}\n'
+        '{"gold_sql": "SELECT * FROM cgm_metrics", "predicted_sql": ""}\n'
     )
     eval_res = engine.evaluate_sql("gemma-2b", valid_tc, db_file)
     assert eval_res["status"] == "completed"
     assert eval_res["execution_mode"] == "native_in_process"
-    assert eval_res["accuracy"]["total"] == 4
-    assert eval_res["accuracy"]["exact_match"] == 0.5
-    assert eval_res["accuracy"]["execution_accuracy"] == 0.5
+    assert isinstance(eval_res["accuracy"], dict)
+    assert eval_res["accuracy"]["total"] == 5
+    assert eval_res["accuracy"]["exact_match"] == 0.4
+    assert eval_res["accuracy"]["execution_accuracy"] == 0.4
 
     # 7. Native evaluate_sql - unexpected exception during execution
     with patch(
@@ -407,13 +544,12 @@ def test_gemma_sql_pipeline_engine_native_fallbacks(
     ):
         eval_err = engine.evaluate_sql("gemma-2b", valid_tc, db_file)
         assert eval_err["status"] == "completed"
-        assert eval_err["accuracy"]["total"] == 4
+        assert isinstance(eval_err["accuracy"], dict)
+        assert eval_err["accuracy"]["total"] == 5
         assert eval_err["accuracy"]["execution_accuracy"] == 0.0
 
 
-def test_run_gemma_sql_etl_extra_args(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_gemma_sql_etl_extra_args(tmp_path: Path) -> None:
     """Test run_gemma_sql_etl with extra_args."""
     import duckdb
 
@@ -424,32 +560,237 @@ def test_run_gemma_sql_etl_extra_args(
     conn.execute("CREATE TABLE t (id INT)")
     conn.close()
 
-    monkeypatch.setattr(
-        "t1d_analytics.gemma_bridge.get_gemma_sql_binary", lambda: "echo"
-    )
-
-    res = run_gemma_sql_etl(
-        "sft",
-        db_path,
-        "t",
-        output_dir=tmp_path / "out",
-        extra_args=["--verbose", "true"],
-    )
-    assert res.returncode == 0
+    with patch("t1d_analytics.gemma_bridge.get_gemma_sql_binary", return_value="echo"):
+        res = run_gemma_sql_etl(
+            "sft",
+            db_path,
+            "t",
+            output_dir=tmp_path / "out",
+            extra_args=["--verbose", "true"],
+        )
+        assert res.returncode == 0
 
 
-def test_run_gemma_sql_train_extra_args(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_gemma_sql_train_extra_args(tmp_path: Path) -> None:
     """Test run_gemma_sql_train with extra_args."""
     from t1d_analytics.gemma_bridge import run_gemma_sql_train
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text("epochs: 1")
 
-    monkeypatch.setattr(
-        "t1d_analytics.gemma_bridge.get_gemma_sql_binary", lambda: "echo"
-    )
+    with patch("t1d_analytics.gemma_bridge.get_gemma_sql_binary", return_value="echo"):
+        res = run_gemma_sql_train("sft", str(cfg), extra_args=["--debug"])
+        assert res.returncode == 0
 
-    res = run_gemma_sql_train("sft", str(cfg), extra_args=["--debug"])
-    assert res.returncode == 0
+
+def test_resolve_local_gemma_sql_repo(tmp_path: Path) -> None:
+    """Test resolve_local_gemma_sql_repo across found, already in sys.path, and missing paths."""
+    import sys
+
+    fake_root = tmp_path / "workspace" / "sub" / "project"
+    fake_root.mkdir(parents=True)
+    gemma_pkg = tmp_path / "workspace" / "gemma-4-sql" / "src" / "gemma_4_sql"
+    gemma_pkg.mkdir(parents=True)
+    (gemma_pkg / "__init__.py").write_text("")
+
+    fake_file = fake_root / "module.py"
+    fake_file.write_text("")
+
+    clean_path = [p for p in sys.path if str(tmp_path) not in p]
+    with patch("sys.path", clean_path):
+        found = resolve_local_gemma_sql_repo(search_root=fake_file)
+        assert found == gemma_pkg.parent
+        assert str(gemma_pkg.parent) in sys.path
+
+        # Second call when already in sys.path
+        found_again = resolve_local_gemma_sql_repo(search_root=fake_root)
+        assert found_again == gemma_pkg.parent
+
+    # Missing repo reaching filesystem root
+    with patch("pathlib.Path.exists", return_value=False):
+        assert resolve_local_gemma_sql_repo(search_root=Path("/a/b")) is None
+
+
+def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
+    """Test _extract_schema_map_from_text and prune_schema_with_gemma_rag across text, DDL, SDK, and fallback."""
+    assert prune_schema_with_gemma_rag("", "Table: patients") == "Table: patients"
+    assert prune_schema_with_gemma_rag("query", "   ") == "   "
+    assert prune_schema_with_gemma_rag("query", "no tables here") == "no tables here"
+
+    nl = chr(10)
+    schema_text = nl.join(
+        [
+            "Table: patients",
+            "Columns:",
+            "  - subject_id (INTEGER)",
+            "  - age (INTEGER)",
+            "  -",
+            "Table:",
+            "Table: cgm_readings",
+            "Columns:",
+            "  - subject_id (INTEGER)",
+            "  - glucose (DOUBLE)",
+        ]
+    )
+    parsed_map = _extract_schema_map_from_text(schema_text)
+    assert "patients" in parsed_map
+    assert "cgm_readings" in parsed_map
+
+    # Test single-line Columns: format emitted by get_database_schema and inline Table: | Columns: format
+    canonical_schema = nl.join(
+        [
+            "-- Table: lab_results | Columns: patient_id, hba1c, ",
+            "-- Table: empty_inline | NoCols: x",
+            "-- Table:   | Columns: ignored",
+            "Table: visits",
+            "Columns: visit_id (INTEGER), patient_id (INTEGER), ",
+            "Sample row: (1, 10)",
+        ]
+    )
+    canonical_map = _extract_schema_map_from_text(canonical_schema)
+    assert canonical_map["lab_results"] == ["patient_id", "hba1c"]
+    assert canonical_map["empty_inline"] == []
+    assert canonical_map["visits"] == ["visit_id", "patient_id"]
+
+    ddl_text = (
+        'CREATE TABLE "patients" (subject_id INT, age INT, , PRIMARY KEY (subject_id));'
+        + nl
+        + "CREATE TABLE IF NOT EXISTS visits (visit_id INT, patient_id INT);"
+    )
+    ddl_map = _extract_schema_map_from_text(ddl_text)
+    assert ddl_map["patients"] == ["subject_id", "age"]
+    assert ddl_map["visits"] == ["visit_id", "patient_id"]
+
+    # 1. Using gemma_4_sql.sdk.rag module
+    mock_rag = MagicMock()
+    mock_rag.retrieve_relevant_schema.return_value = (
+        "-- Relevant Schema Context:"
+        + nl
+        + "-- Table: patients | Columns: subject_id, age"
+    )
+    with patch("importlib.import_module", return_value=mock_rag):
+        enriched = prune_schema_with_gemma_rag("average age of patients", schema_text)
+        assert "-- Relevant Schema Context:" in enriched
+        assert schema_text in enriched
+
+    # 2. When retrieve_relevant_schema returns empty string -> falls back to built-in ranking
+    mock_rag_empty = MagicMock()
+    mock_rag_empty.retrieve_relevant_schema.return_value = "   "
+    with patch("importlib.import_module", return_value=mock_rag_empty):
+        enriched_fb = prune_schema_with_gemma_rag("glucose readings", schema_text)
+        assert "-- Table: cgm_readings" in enriched_fb
+
+    from t1d_analytics.api_schemas import ColumnInfo, TableSchemaModel
+    from t1d_analytics.gemma_bridge import score_sql_completion_logprob
+
+    # 3. When import_module raises -> falls back to built-in ranking (with and without matching words)
+    with patch("importlib.import_module", side_effect=ImportError("no rag")):
+        enriched_err = prune_schema_with_gemma_rag("unrelated words xyz", ddl_text)
+        assert "-- Relevant Schema Context:" in enriched_err
+
+        structured_models = [
+            TableSchemaModel(
+                table_name="patients",
+                columns=[
+                    ColumnInfo(name="subject_id", type="INTEGER"),
+                    ColumnInfo(name="age", type="DOUBLE"),
+                ],
+                sample_row="(1, 24.5)",
+            )
+        ]
+        enriched_models = prune_schema_with_gemma_rag("patients age", structured_models)
+        assert "-- Table: patients | Columns: subject_id, age" in enriched_models
+        assert prune_schema_with_gemma_rag("", structured_models) != ""
+        assert prune_schema_with_gemma_rag("patients", []) == ""
+
+        good_score = score_sql_completion_logprob(
+            "Count patients by age",
+            "SELECT COUNT(subject_id), age FROM patients GROUP BY age",
+        )
+        bad_syntax = score_sql_completion_logprob(
+            "Count patients by age",
+            "SELECT COUNT(subject_id",
+        )
+        non_readonly = score_sql_completion_logprob(
+            "Count patients by age",
+            "DROP TABLE patients",
+        )
+        empty_score = score_sql_completion_logprob("Count patients", "   ")
+        assert good_score > bad_syntax
+        assert good_score > non_readonly
+        assert bad_syntax > empty_score
+
+
+def test_validate_sql_tokens() -> None:
+    """Test validate_sql_tokens with gemma_4_sql.tokenization.SQLTokenizer and byte fallback."""
+    mock_tok_mod = MagicMock()
+    mock_tok_instance = MagicMock()
+    mock_tok_instance.encode.return_value = [10, 20, 30]
+    mock_tok_mod.SQLTokenizer.return_value = mock_tok_instance
+
+    with patch("importlib.import_module", return_value=mock_tok_mod):
+        assert validate_sql_tokens("SELECT 1") == [10, 20, 30]
+
+    # Non-list return from encode falls back to UTF-8 bytes
+    mock_tok_instance.encode.return_value = "not-a-list"
+    with patch("importlib.import_module", return_value=mock_tok_mod):
+        assert validate_sql_tokens("AB") == [65, 66]
+
+    # ImportError falls back to UTF-8 bytes
+    with patch("importlib.import_module", side_effect=ImportError("missing")):
+        assert validate_sql_tokens("AB") == [65, 66]
+
+    from t1d_analytics.sql_agent import validate_sql_tokens as raw_validate_sql_tokens
+
+    with patch("importlib.import_module", side_effect=ImportError("missing")):
+        assert raw_validate_sql_tokens("AB", repo_resolver=None) == [65, 66]
+
+
+def test_classify_sql_error_hint_and_execute_agentic_nl_to_sql() -> None:
+    """Test _classify_sql_error_hint and execute_agentic_nl_to_sql self-correction loop."""
+    assert "column names" in _classify_sql_error_hint(
+        "Binder Error: Referenced column 'bad_col' not found"
+    )
+    assert "table names" in _classify_sql_error_hint(
+        "Catalog Error: Table with name bad_tbl does not exist"
+    )
+    assert _classify_sql_error_hint("Syntax error near SELECT") == ""
+
+    # 1. Succeeds on second attempt after self-correction
+    prompts_seen = []
+
+    def fake_gen(prompt: str) -> str:
+        """Generate candidate SQL across retry turns."""
+        nl = chr(10)
+        prompts_seen.append(prompt)
+        if len(prompts_seen) == 1:
+            return f"```sql{nl}SELECT bad_col FROM patients{nl}```"
+        return f"```sql{nl}SELECT COUNT(*) AS cnt FROM patients{nl}```"
+
+    from t1d_analytics.sql_utils import SqlValue
+
+    def fake_exec(db: str, sql: str) -> list[dict[str, SqlValue]]:
+        """Execute candidate SQL and fail if bad_col is present."""
+        if "bad_col" in sql:
+            raise RuntimeError("Binder Error: Referenced column 'bad_col' not found")
+        return [{"cnt": 100}]
+
+    res = execute_agentic_nl_to_sql(
+        "test.duckdb", "count patients", fake_gen, fake_exec, max_retries=2
+    )
+    assert res["success"] is True
+    assert res["attempts"] == 2
+    assert res["rows"] == [{"cnt": 100}]
+    assert res["error"] is None
+
+    # 2. Exhausts retries and returns failure
+    res_fail = execute_agentic_nl_to_sql(
+        "test.duckdb",
+        "count patients",
+        lambda _: "SELECT bad_col FROM patients",
+        fake_exec,
+        max_retries=2,
+    )
+    assert res_fail["success"] is False
+    assert res_fail["attempts"] == 2
+    assert res_fail["error"] is not None

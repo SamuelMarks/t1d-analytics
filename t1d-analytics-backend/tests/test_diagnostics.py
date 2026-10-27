@@ -2,7 +2,6 @@
 
 import json
 import logging
-import typing
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -47,7 +46,7 @@ def test_check_database_health_os_error(tmp_path: Path) -> None:
     """Test check_database_health when stat raises OSError."""
     target_file = tmp_path / "locked.duckdb"
     target_file.touch()
-    with patch.object(Path, "stat", side_effect=OSError("Permission denied")):
+    with patch("pathlib.Path.stat", side_effect=OSError("Permission denied")):
         status = check_database_health(str(target_file))
         assert status.status_code == DatabaseStatusCode.UNREADABLE
         assert "Cannot access" in status.message
@@ -233,9 +232,7 @@ def test_log_startup_diagnostics_all_branches(tmp_path: Path) -> None:
             available_models=["gemma4"],
             message="Online",
         )
-        with patch.object(
-            logging.getLogger("t1d_analytics.diagnostics"), "info"
-        ) as mock_info:
+        with patch("t1d_analytics.diagnostics.logger.info") as mock_info:
             log_startup_diagnostics(db_path=db_file)
             assert mock_info.called
 
@@ -253,9 +250,7 @@ def test_log_startup_diagnostics_all_branches(tmp_path: Path) -> None:
             message="Model missing",
             remediation="Run ollama pull",
         )
-        with patch.object(
-            logging.getLogger("t1d_analytics.diagnostics"), "warning"
-        ) as mock_warn:
+        with patch("t1d_analytics.diagnostics.logger.warning") as mock_warn:
             log_startup_diagnostics(db_path=db_file2)
             assert mock_warn.called
 
@@ -270,16 +265,18 @@ def test_log_startup_diagnostics_all_branches(tmp_path: Path) -> None:
             message="Offline",
             remediation="Start Ollama",
         )
-        with patch.object(
-            logging.getLogger("t1d_analytics.diagnostics"), "error"
-        ) as mock_err:
+        with patch("t1d_analytics.diagnostics.logger.error") as mock_err:
             log_startup_diagnostics(db_path=missing_file)
             assert mock_err.called
 
 
-def test_log_startup_diagnostics_no_remediations() -> None:
+def test_log_startup_diagnostics_no_remediations(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Test log_startup_diagnostics when remediation strings are None."""
     from t1d_analytics.diagnostics import DatabaseStatus, OllamaStatus, SystemHealth
+
+    caplog.set_level(logging.INFO, logger="t1d_analytics.diagnostics")
 
     # Test warning branch with remediation=None
     mock_health_warn = SystemHealth(
@@ -305,6 +302,10 @@ def test_log_startup_diagnostics_no_remediations() -> None:
         "t1d_analytics.diagnostics.get_system_health", return_value=mock_health_warn
     ):
         log_startup_diagnostics()
+    assert "Empty" in caplog.text
+    assert "No gemma" in caplog.text
+    assert "-> Action:" not in caplog.text
+    caplog.clear()
 
     # Test error branch with remediation=None
     mock_health_err = SystemHealth(
@@ -330,6 +331,8 @@ def test_log_startup_diagnostics_no_remediations() -> None:
         "t1d_analytics.diagnostics.get_system_health", return_value=mock_health_err
     ):
         log_startup_diagnostics()
+    assert "Missing" in caplog.text
+    assert "-> Action:" not in caplog.text
 
 
 def test_check_ollama_health_host_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -341,7 +344,7 @@ def test_check_ollama_health_host_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OLLAMA_HOST", "remote-gpu:11434")
     requested_urls = []
 
-    def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+    def mock_urlopen(req: Request, timeout: float = 2.0) -> io.BytesIO:
         """Record requested URL and return mock models JSON."""
         requested_urls.append(req.full_url)
         return io.BytesIO(b'{"models": [{"name": "gemma4:latest"}]}')
@@ -405,7 +408,7 @@ def test_check_database_health_integrity_fail(tmp_path: Path) -> None:
     class FakeConn:
         """Fake DuckDB connection that fails on duckdb_tables inspection."""
 
-        def execute(self, sql: str) -> typing.Any:
+        def execute(self, sql: str) -> MagicMock:
             """Raise corruption error on duckdb_tables query."""
             if "duckdb_tables" in sql:
                 raise Exception("Corrupt block detected")
@@ -450,7 +453,7 @@ def test_check_ollama_health_with_version(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
-    def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+    def mock_urlopen(req: Request, timeout: float = 2.0) -> io.BytesIO:
         """Return version JSON or models JSON based on endpoint."""
         if "/api/version" in req.full_url:
             return io.BytesIO(b'{"version": "0.1.28"}')
@@ -471,7 +474,7 @@ def test_check_ollama_health_version_error(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
-    def mock_urlopen(req: Request, timeout: float = 2.0) -> typing.Any:
+    def mock_urlopen(req: Request, timeout: float = 2.0) -> io.BytesIO:
         """Raise URLError on /api/version and return models on /api/tags."""
         if "/api/version" in req.full_url:
             raise urllib.error.URLError("Not found")

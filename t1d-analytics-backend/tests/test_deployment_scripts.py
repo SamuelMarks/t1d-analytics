@@ -14,8 +14,6 @@ TEST_CMD_PATH = REPO_ROOT / "test.cmd"
 DOTENV_PATH = REPO_ROOT / ".env"
 DOTENV_SECRETS_TPL_PATH = REPO_ROOT / ".env.secrets.tpl"
 DOTENV_SECRETS_PATH = REPO_ROOT / ".env.secrets"
-WINE_BINARY = shutil.which("wine") or "/Users/samuel/.local/bin/wine"
-HAS_WINE = Path(WINE_BINARY).is_file() and os.access(WINE_BINARY, os.X_OK)
 
 
 def load_dotenv_dict() -> dict[str, str]:
@@ -524,32 +522,59 @@ def test_test_cmd_static_validation() -> None:
 
 
 def test_test_cmd_control_flow_and_arguments() -> None:
-    """Verify that test.cmd handles help flags, mock-cloud flags, and error exit codes."""
-    cmd_path = REPO_ROOT / "test.cmd"
-    content = cmd_path.read_text(encoding="utf-8")
+    """Verify structured CLI flag and control-flow parity between test.sh and test.cmd."""
+    import re
 
-    # Verify CLI flag parsing branches in test.cmd
-    for flag in (
-        "--help",
-        "-h",
-        "--mock-cloud",
-        "--unit-mock",
-        "--dry-run",
-        "--live-cloud",
-    ):
-        assert flag in content, f"Expected CLI flag '{flag}' in test.cmd"
+    sh_content = TEST_SH_PATH.read_text(encoding="utf-8")
+    cmd_content = TEST_CMD_PATH.read_text(encoding="utf-8")
 
-    assert "Usage: %0" in content
-    assert "Running in Mock Cloud mode" in content
-    assert "Deprovisioning complete." in content
-    assert "exit /b 0" in content
-    assert "exit /b 1" in content
+    # 1. Extract CLI flags supported by test.sh's case "$arg" block and test.cmd's :parse_args block
+    sh_case_match = re.search(r'case "\$arg" in(.*?)esac', sh_content, flags=re.DOTALL)
+    assert sh_case_match is not None
+    sh_flags = set(re.findall(r"(--[a-z-]+|-[hlt])\b", sh_case_match.group(1)))
+    cmd_flags = set(re.findall(r'if "%~1"=="(--[a-z-]+|-[hlt])"', cmd_content))
+    assert sh_flags == cmd_flags
+
+    # 2. Verify every goto target in test.cmd resolves to a defined label
+    cmd_gotos = {
+        target
+        for target in re.findall(r"\bgoto\s+:?([a-zA-Z0-9_]+)", cmd_content)
+        if target.lower() != "eof"
+    }
+    cmd_labels = set(
+        re.findall(r"^:([a-zA-Z0-9_]+)\b", cmd_content, flags=re.MULTILINE)
+    )
+    assert cmd_gotos <= cmd_labels
+
+    # 3. Verify default configuration variable names match between test.sh and test.cmd
+    expected_config_vars = {
+        "CLOUD_PROVIDER",
+        "LIBSCRIPT_ROOT_DIR",
+        "LIBSCRIPT_CLI",
+        "NODE_NAME",
+        "RG_NAME",
+        "LOCATION",
+        "REMOTE_DEST",
+        "RUN_LOCAL",
+        "RUN_REMOTE_TESTS",
+        "MOCK_CLOUD",
+        "LIVE_CLOUD",
+    }
+    for var_name in expected_config_vars:
+        assert re.search(rf"\b{var_name}=", sh_content)
+        assert re.search(rf'\bset "{var_name}=', cmd_content)
+
+    assert "Usage: %0" in cmd_content
+    assert "Running in Mock Cloud mode" in cmd_content
+    assert "Deprovisioning complete." in cmd_content
+    assert "exit /b 0" in cmd_content
+    assert "exit /b 1" in cmd_content
     assert (
         "--live-cloud requires authenticated %PRIMARY_CLOUD_DISPLAY_NAME% credentials."
-        in content
+        in cmd_content
     )
-    assert "--live-cloud requires authenticated GCP credentials." in content
-    assert "--live-cloud requires authenticated AWS credentials." in content
+    assert "--live-cloud requires authenticated GCP credentials." in cmd_content
+    assert "--live-cloud requires authenticated AWS credentials." in cmd_content
 
 
 def test_libscript_config_and_docs_consistency() -> None:
@@ -582,8 +607,11 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert "deps" in config
     assert config["deps"]["python"] == "3.12"
     assert config["deps"]["duckdb"] == "latest"
+    assert config["deps"]["postgres"] == "18"
     assert "databases" in config
-    assert config["databases"][0]["engine"] == "duckdb"
+    db_engines = [db["engine"] for db in config["databases"]]
+    assert "postgres" in db_engines
+    assert "duckdb" in db_engines
     assert "frontends" in config
     assert config["frontends"]["web"]["source_dir"] in ("t1d-analytics-web", "web")
     assert config["frontends"]["web"]["output_dir"] == "dist"

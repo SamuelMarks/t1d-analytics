@@ -13,21 +13,381 @@ import python from "highlight.js/lib/languages/python";
 import "highlight.js/styles/github-dark.css";
 import { ChatState, type Message, resolveTableJoin } from "./state";
 import i18next, { setLanguage } from "./i18n";
-import { formatNumber } from "./formatters";
+import {
+  type SqlCellValue,
+  classifySqlResult,
+  formatNumber,
+} from "./formatters";
 import { renderCgmCard } from "./chart";
 import {
+  type ExportableCellValue,
+  exportRowsToCsv as exportRowsToCsvHelper,
+  exportRowsToJson as exportRowsToJsonHelper,
+} from "./exporters";
+import { consumeSseChatStream, type SseFinalChatData } from "./sse-stream";
+import {
+  type ApiErrorInput,
   type CohortFilterParams,
   buildCohortSql,
   fetchWithBackendError,
+  isReadOnlySqlStatement,
+  normalizeJoinType,
   parseApiError,
+  parseResponseJson,
   trapModalFocus,
+  updateInputHighlight,
 } from "./sql-highlight";
+import {
+  type DbStatusCode,
+  type SystemStatusHost,
+  SystemStatusController,
+  isDbStatusCode,
+} from "./controllers/system-status-controller";
+import {
+  type CohortBuilderHost,
+  CohortBuilderModalController,
+} from "./controllers/cohort-modal-controller";
+import {
+  type ProviderSettingsHost,
+  ProviderSettingsModalController,
+} from "./controllers/provider-modal-controller";
+import {
+  type TablePreviewHost,
+  TablePreviewModalController,
+} from "./controllers/table-modal-controller";
 
-export { type CohortFilterParams, buildCohortSql, trapModalFocus };
+export {
+  type CohortFilterParams,
+  buildCohortSql,
+  isReadOnlySqlStatement,
+  normalizeJoinType,
+  parseResponseJson,
+  trapModalFocus,
+  updateInputHighlight,
+  type DbStatusCode,
+  type SystemStatusHost,
+  SystemStatusController,
+  isDbStatusCode,
+  type CohortBuilderHost,
+  CohortBuilderModalController,
+  type ProviderSettingsHost,
+  ProviderSettingsModalController,
+  type TablePreviewHost,
+  TablePreviewModalController,
+};
+
+/**
+ * Database health diagnostics block returned by `/api/status` and `/api/schema`.
+ */
+export interface DatabaseHealthApiPayload {
+  /** Whether the DuckDB file exists on disk. */
+  exists?: boolean;
+  /** Whether a read-only connection succeeded. */
+  connected?: boolean;
+  /** Diagnostic status code string. */
+  status_code?: string;
+  /** Configured filesystem path for the database. */
+  configured_path?: string;
+  /** Human-readable diagnostic message. */
+  message?: string | null;
+  /** Suggested remediation command or action. */
+  remediation?: string | null;
+  /** Number of tables discovered in the database. */
+  table_count?: number;
+  /** Whether initial clinical tables are present. */
+  has_initial_data?: boolean;
+  /** Database file size in bytes. */
+  file_size_bytes?: number;
+  /** Whether the database directory/file is writable. */
+  writable?: boolean;
+  /** Whether PRAGMA integrity checks passed. */
+  integrity_ok?: boolean;
+  /** Free disk space in bytes. */
+  disk_free_bytes?: number;
+}
+
+/**
+ * Response payload returned by `/api/status`.
+ */
+export interface HealthApiResponse {
+  /** Overall system health status ('healthy', 'degraded', 'error', 'offline'). */
+  status: "healthy" | "degraded" | "error" | "offline";
+  /** Database health diagnostics block. */
+  database?: DatabaseHealthApiPayload;
+  /** Local Ollama service health diagnostics block. */
+  ollama?: {
+    /** Whether Ollama is reachable over HTTP. */
+    accessible?: boolean;
+    /** Diagnostic message for Ollama. */
+    message?: string | null;
+    /** Remediation guidance for Ollama. */
+    remediation?: string | null;
+    /** Detected Ollama version string. */
+    version?: string | null;
+  };
+}
+
+/**
+ * Response payload returned by `/api/schema`.
+ */
+export interface SchemaApiResponse {
+  /** Database health diagnostics block. */
+  database?: DatabaseHealthApiPayload;
+  /** Array of discovered database tables and their columns. */
+  tables?: Array<{
+    /** Table identifier. */
+    name: string;
+    /** Columns belonging to the table. */
+    columns: Array<{
+      /** Column identifier. */
+      name: string;
+      /** SQL data type string. */
+      type: string;
+    }>;
+  }>;
+}
+
+/**
+ * Model metadata entry returned by `/api/models`.
+ */
+export interface ModelApiItem {
+  /** Model identifier string. */
+  name: string;
+  /** Model size in bytes (for local Ollama models). */
+  size?: number;
+  /** Provider identifier ('ollama', 'openai', 'anthropic', 'google', etc.). */
+  provider?: string;
+  /** Whether credentials are configured on the server. */
+  configured?: boolean;
+  /** Whether an API key is required. */
+  requires_key?: boolean;
+  /** Whether the model is available for selection. */
+  available?: boolean;
+  /** Whether the provider is reachable. */
+  reachable?: boolean;
+  /** Optional error code when unconfigured or offline. */
+  error_code?: string;
+}
+
+/**
+ * Response payload returned by `/api/models`.
+ */
+export interface ModelsApiResponse {
+  /** Available models across local and cloud providers. */
+  models?: ModelApiItem[];
+}
+
+/**
+ * Response payload returned by `/api/chat` and `/api/execute-sql`.
+ */
+export interface ChatApiResponse {
+  /** Assistant response text or translation key. */
+  content?: string;
+  /** Generated or executed SQL query string. */
+  sqlQuery?: string;
+  /** Tabular SQL query result rows. */
+  sqlResult?: Record<string, SqlCellValue>[];
+  /** Structured or string API error payload. */
+  error?: ApiErrorInput;
+}
+
+/**
+ * Response payload returned by `/api/databases`.
+ */
+export interface DatabasesApiResponse {
+  /** Discovered workspace DuckDB databases. */
+  databases?: Array<{
+    /** Database filename. */
+    name: string;
+    /** Database path. */
+    path: string;
+    /** File size in bytes. */
+    size_bytes: number;
+  }>;
+  /** Currently active default database path. */
+  current_db?: string;
+}
+
+/**
+ * Response payload returned by `/api/providers/status`.
+ */
+export interface ProvidersStatusApiResponse {
+  /** Provider status list. */
+  providers?: Array<{
+    /** Provider identifier. */
+    provider: string;
+    /** Whether credentials are configured. */
+    configured: boolean;
+  }>;
+}
+
+/**
+ * Response payload returned by `/api/table/{table_name}`.
+ */
+export interface TableDataApiResponse {
+  /** Total number of pages for the current pagination limit. */
+  total_pages?: number;
+  /** Current page of row records. */
+  rows: Array<Record<string, SqlCellValue>>;
+}
 
 hljs.registerLanguage("sql", sql);
 hljs.registerLanguage("markdown", markdown);
 hljs.registerLanguage("python", python);
+
+/**
+ * Looks up a typed element by ID using `document.querySelector<T>("#" + id)`.
+ * @template T - Target HTML element subtype.
+ * @param {string} id - The DOM element ID.
+ * @returns {T | null} The matched element or null.
+ */
+function queryElementById<T extends HTMLElement>(id: string): T | null {
+  return document.querySelector<T>(`#${id}`);
+}
+
+/**
+ * Looks up a required typed element by ID and throws a descriptive Error if missing.
+ * @template T - Target HTML element subtype.
+ * @param {string} id - The DOM element ID.
+ * @returns {T} The matched element.
+ * @throws {Error} When the required mount element is not found in the document.
+ */
+export function requireElementById<T extends HTMLElement>(id: string): T {
+  const el = document.querySelector<T>(`#${id}`);
+  if (!el) {
+    throw new Error(`Required DOM element #${id} not found`);
+  }
+  return el;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * Child element specification for `createSvgIcon`.
+ */
+interface SvgChildSpec {
+  /** SVG shape tag name. */
+  tag: "polyline" | "rect" | "line" | "path" | "polygon";
+  /** Attribute dictionary for the SVG shape. */
+  attrs: Record<string, string>;
+}
+
+/**
+ * Creates an SVG icon element using `document.createElementNS`.
+ * @param {number} size - Width and height in pixels.
+ * @param {SvgChildSpec[]} children - SVG shape children to append.
+ * @param {string} [fill="none"] - SVG `fill` attribute value.
+ * @param {boolean} [ariaHidden=false] - Whether to set `aria-hidden="true"`.
+ * @returns {SVGSVGElement} The constructed SVG element.
+ */
+function createSvgIcon(
+  size: number,
+  children: SvgChildSpec[],
+  fill: string = "none",
+  ariaHidden: boolean = false,
+): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", fill);
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  if (ariaHidden) {
+    svg.setAttribute("aria-hidden", "true");
+  }
+  for (const childSpec of children) {
+    const childEl = document.createElementNS(SVG_NS, childSpec.tag);
+    for (const [attrName, attrVal] of Object.entries(childSpec.attrs)) {
+      childEl.setAttribute(attrName, attrVal);
+    }
+    svg.appendChild(childEl);
+  }
+  return svg;
+}
+
+/**
+ * Options for constructing a schema diagnostic card via DOM APIs.
+ */
+interface SchemaDiagnosticCardOptions {
+  /** Leading icon text. */
+  icon: string;
+  /** Header title text. */
+  title: string;
+  /** Optional descriptive paragraph text. */
+  description?: string;
+  /** Optional CLI command string to render with a copy button. */
+  command?: string;
+  /** Whether to include a reload schema button. */
+  showReload?: boolean;
+  /** Whether to apply the `.error-text` styling and `role="alert"`. */
+  isError?: boolean;
+  /** Whether to set `role="alert"` on the card container. */
+  isAlert?: boolean;
+}
+
+/**
+ * Constructs a `.schema-diagnostic-card` element using safe DOM APIs without `innerHTML`.
+ * @param {SchemaDiagnosticCardOptions} options - Card configuration options.
+ * @returns {HTMLDivElement} The constructed diagnostic card element.
+ */
+function createSchemaDiagnosticCard(
+  options: SchemaDiagnosticCardOptions,
+): HTMLDivElement {
+  const card = document.createElement("div");
+  card.className = options.isError
+    ? "schema-diagnostic-card error-text"
+    : "schema-diagnostic-card";
+  if (options.isAlert || options.isError) {
+    card.setAttribute("role", "alert");
+  }
+
+  const header = document.createElement("div");
+  header.className = "schema-diagnostic-header";
+  const iconSpan = document.createElement("span");
+  iconSpan.textContent = options.icon;
+  const titleSpan = document.createElement("span");
+  titleSpan.textContent = options.title;
+  header.append(iconSpan, titleSpan);
+  card.appendChild(header);
+
+  if (options.description) {
+    const descP = document.createElement("p");
+    descP.className = "schema-diagnostic-desc";
+    descP.textContent = options.description;
+    card.appendChild(descP);
+  }
+
+  if (options.command) {
+    const cmdBox = document.createElement("div");
+    cmdBox.className = "schema-command-box";
+    const codeEl = document.createElement("code");
+    codeEl.textContent = options.command;
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "btn btn-xs btn-secondary copy-cmd-btn";
+    copyBtn.setAttribute("data-cmd", options.command);
+    copyBtn.textContent = i18next.t("status.copyCommand");
+    cmdBox.append(codeEl, copyBtn);
+    card.appendChild(cmdBox);
+  }
+
+  if (options.showReload) {
+    const reloadBtn = document.createElement("button");
+    reloadBtn.className = "btn btn-xs btn-primary reload-schema-btn";
+    reloadBtn.textContent = i18next.t("status.reloadSchema");
+    card.appendChild(reloadBtn);
+  }
+
+  return card;
+}
+
+/** Active ChatUI instance so re-instantiation in tests automatically disposes previous listeners/timers. */
+let activeChatUIInstance: ChatUI | null = null;
+
+/** Active AbortController for listeners bound during the currently open table preview modal. */
+let activeTableModalListenerController: AbortController = new AbortController();
 
 /**
  * UI controller class that binds the state to the DOM elements.
@@ -35,6 +395,18 @@ hljs.registerLanguage("python", python);
 export class ChatUI {
   /** Global application state store. */
   private state: ChatState;
+  /** AbortController for global document/window listeners bound by this ChatUI instance. */
+  private globalListenerController: AbortController;
+  /** Interval timer ID for periodic system status polling, or null when inactive. */
+  private statusPollTimer: number | null = null;
+  /** Sub-controller for the Table Preview Modal. */
+  public readonly tableModalController: TablePreviewModalController;
+  /** Sub-controller for the Visual Cohort Builder Modal. */
+  public readonly cohortModalController: CohortBuilderModalController;
+  /** Sub-controller for the Provider Settings Modal. */
+  public readonly providerModalController: ProviderSettingsModalController;
+  /** Sub-controller for System Status & Diagnostics. */
+  public readonly systemStatusController: SystemStatusController;
 
   // DOM Elements
   /** Sidebar list element containing chat sessions. */
@@ -154,9 +526,9 @@ export class ChatUI {
 
   // Modal accessibility focus tracking and listeners
   /** Element that held focus prior to opening the cohort modal. */
-  private previousFocusCohort: HTMLElement | null = null;
+  private previousFocusCohort: Element | null = null;
   /** Element that held focus prior to opening the provider settings modal. */
-  private previousFocusProvider: HTMLElement | null = null;
+  private previousFocusProvider: Element | null = null;
   /** Keydown listener for focus trapping inside the cohort modal. */
   private onCohortModalKeyDown: ((e: KeyboardEvent) => void) | null = null;
   /** Keydown listener for focus trapping inside the provider modal. */
@@ -167,150 +539,127 @@ export class ChatUI {
    * @param {ChatState} state The global state object.
    */
   constructor(state: ChatState) {
+    if (activeChatUIInstance) {
+      activeChatUIInstance.dispose();
+    }
+    this.globalListenerController = new AbortController();
+    activeChatUIInstance = this;
     this.state = state;
+    this.tableModalController = new TablePreviewModalController(this);
+    this.cohortModalController = new CohortBuilderModalController(this);
+    this.providerModalController = new ProviderSettingsModalController(this);
+    this.systemStatusController = new SystemStatusController(this);
 
-    // Bind DOM elements
-    this.chatListEl = document.getElementById("chat-list") as HTMLElement;
-    this.newChatBtn = document.getElementById(
-      "new-chat-btn",
-    ) as HTMLButtonElement;
-    this.messagesContainer = document.getElementById(
-      "messages-container",
-    ) as HTMLElement;
-    this.chatForm = document.getElementById("chat-form") as HTMLFormElement;
-    this.chatInputWrapper = document.getElementById(
-      "chat-input-wrapper",
-    ) as HTMLElement;
-    this.chatInputHighlight = document.getElementById(
+    // Bind required DOM elements
+    this.chatListEl = requireElementById<HTMLElement>("chat-list");
+    this.newChatBtn = requireElementById<HTMLButtonElement>("new-chat-btn");
+    this.messagesContainer =
+      requireElementById<HTMLElement>("messages-container");
+    this.chatForm = requireElementById<HTMLFormElement>("chat-form");
+    this.chatInputWrapper =
+      requireElementById<HTMLElement>("chat-input-wrapper");
+    this.chatInputHighlight = requireElementById<HTMLElement>(
       "chat-input-highlight",
-    ) as HTMLElement;
-    this.chatInput = document.getElementById(
-      "chat-input",
-    ) as HTMLTextAreaElement;
-    this.sendBtn = document.getElementById("send-btn") as HTMLButtonElement;
-    this.modelSelect = document.getElementById(
-      "model-select",
-    ) as HTMLSelectElement;
-    this.dbSelect = document.getElementById(
-      "db-select",
-    ) as HTMLSelectElement | null;
-    this.syncSessionsBtn = document.getElementById(
-      "sync-sessions-btn",
-    ) as HTMLButtonElement | null;
-    this.langSelect = document.getElementById(
-      "lang-select",
-    ) as HTMLSelectElement;
+    );
+    this.chatInput = requireElementById<HTMLTextAreaElement>("chat-input");
+    this.sendBtn = requireElementById<HTMLButtonElement>("send-btn");
+    this.modelSelect = requireElementById<HTMLSelectElement>("model-select");
+    this.dbSelect = queryElementById<HTMLSelectElement>("db-select");
+    this.syncSessionsBtn =
+      queryElementById<HTMLButtonElement>("sync-sessions-btn");
+    this.langSelect = requireElementById<HTMLSelectElement>("lang-select");
 
-    this.openSidebarBtn = document.getElementById(
-      "open-sidebar-btn",
-    ) as HTMLButtonElement;
-    this.closeSidebarBtn = document.getElementById(
-      "close-sidebar-btn",
-    ) as HTMLButtonElement;
-    this.themeToggleBtn = document.getElementById(
-      "theme-toggle-btn",
-    ) as HTMLButtonElement;
-    this.overlay = document.getElementById("overlay") as HTMLElement;
+    this.openSidebarBtn =
+      requireElementById<HTMLButtonElement>("open-sidebar-btn");
+    this.closeSidebarBtn =
+      requireElementById<HTMLButtonElement>("close-sidebar-btn");
+    this.themeToggleBtn =
+      requireElementById<HTMLButtonElement>("theme-toggle-btn");
+    this.overlay = requireElementById<HTMLElement>("overlay");
 
     // Diagnostic and status elements
-    this.systemStatusChip = document.getElementById(
-      "system-status-chip",
-    ) as HTMLButtonElement | null;
+    this.systemStatusChip =
+      queryElementById<HTMLButtonElement>("system-status-chip");
     this.statusChipText = document.getElementById("status-chip-text");
     this.systemStatusBanner = document.getElementById("system-status-banner");
     this.bannerTitle = document.getElementById("banner-title");
     this.bannerDesc = document.getElementById("banner-desc");
     this.bannerIcon = document.getElementById("banner-icon");
-    this.bannerRetryBtn = document.getElementById(
-      "banner-retry-btn",
-    ) as HTMLButtonElement | null;
-    this.bannerInstructionsBtn = document.getElementById(
+    this.bannerRetryBtn =
+      queryElementById<HTMLButtonElement>("banner-retry-btn");
+    this.bannerInstructionsBtn = queryElementById<HTMLButtonElement>(
       "banner-instructions-btn",
-    ) as HTMLButtonElement | null;
+    );
     this.bannerInstructionsDrawer = document.getElementById(
       "banner-instructions-drawer",
     );
-    this.bannerDismissBtn = document.getElementById(
-      "banner-dismiss-btn",
-    ) as HTMLButtonElement | null;
+    this.bannerDismissBtn =
+      queryElementById<HTMLButtonElement>("banner-dismiss-btn");
 
     // Cohort filter elements
-    this.cohortFilterBtn = document.getElementById(
-      "cohort-filter-btn",
-    ) as HTMLButtonElement | null;
+    this.cohortFilterBtn =
+      queryElementById<HTMLButtonElement>("cohort-filter-btn");
     this.cohortModal = document.getElementById("cohort-modal");
-    this.closeCohortModalBtn = document.getElementById(
+    this.closeCohortModalBtn = queryElementById<HTMLButtonElement>(
       "close-cohort-modal-btn",
-    ) as HTMLButtonElement | null;
-    this.cohortTableSelect = document.getElementById(
+    );
+    this.cohortTableSelect = queryElementById<HTMLSelectElement>(
       "cohort-table-select",
-    ) as HTMLSelectElement | null;
-    this.cohortJoinTableSelect = document.getElementById(
+    );
+    this.cohortJoinTableSelect = queryElementById<HTMLSelectElement>(
       "cohort-join-table-select",
-    ) as HTMLSelectElement | null;
-    this.cohortJoinTypeSelect = document.getElementById(
+    );
+    this.cohortJoinTypeSelect = queryElementById<HTMLSelectElement>(
       "cohort-join-type-select",
-    ) as HTMLSelectElement | null;
-    this.cohortJoinOnInput = document.getElementById(
+    );
+    this.cohortJoinOnInput = queryElementById<HTMLInputElement>(
       "cohort-join-on-input",
-    ) as HTMLInputElement | null;
-    this.cohortMinAge = document.getElementById(
-      "cohort-min-age",
-    ) as HTMLInputElement | null;
-    this.cohortMaxAge = document.getElementById(
-      "cohort-max-age",
-    ) as HTMLInputElement | null;
-    this.cohortGenderSelect = document.getElementById(
+    );
+    this.cohortMinAge = queryElementById<HTMLInputElement>("cohort-min-age");
+    this.cohortMaxAge = queryElementById<HTMLInputElement>("cohort-max-age");
+    this.cohortGenderSelect = queryElementById<HTMLSelectElement>(
       "cohort-gender-select",
-    ) as HTMLSelectElement | null;
-    this.cohortTxGroup = document.getElementById(
-      "cohort-txgroup",
-    ) as HTMLInputElement | null;
-    this.cohortMaxTIR = document.getElementById(
-      "cohort-max-tir",
-    ) as HTMLInputElement | null;
-    this.cohortMinHbA1c = document.getElementById(
-      "cohort-min-hba1c",
-    ) as HTMLInputElement | null;
+    );
+    this.cohortTxGroup = queryElementById<HTMLInputElement>("cohort-txgroup");
+    this.cohortMaxTIR = queryElementById<HTMLInputElement>("cohort-max-tir");
+    this.cohortMinHbA1c =
+      queryElementById<HTMLInputElement>("cohort-min-hba1c");
     this.cohortSqlPreview = document.getElementById("cohort-sql-preview");
-    this.cohortInsertChatBtn = document.getElementById(
+    this.cohortInsertChatBtn = queryElementById<HTMLButtonElement>(
       "cohort-insert-chat-btn",
-    ) as HTMLButtonElement | null;
-    this.cohortExecuteBtn = document.getElementById(
-      "cohort-execute-btn",
-    ) as HTMLButtonElement | null;
+    );
+    this.cohortExecuteBtn =
+      queryElementById<HTMLButtonElement>("cohort-execute-btn");
 
     // Provider settings elements
-    this.providerSettingsBtn = document.getElementById(
+    this.providerSettingsBtn = queryElementById<HTMLButtonElement>(
       "provider-settings-btn",
-    ) as HTMLButtonElement | null;
+    );
     this.providerStatusDot = document.getElementById("provider-status-dot");
     this.providerModal = document.getElementById("provider-modal");
-    this.closeProviderModalBtn = document.getElementById(
+    this.closeProviderModalBtn = queryElementById<HTMLButtonElement>(
       "close-provider-modal-btn",
-    ) as HTMLButtonElement | null;
-    this.providerKeyOpenAI = document.getElementById(
+    );
+    this.providerKeyOpenAI = queryElementById<HTMLInputElement>(
       "provider-key-openai",
-    ) as HTMLInputElement | null;
-    this.providerKeyAnthropic = document.getElementById(
+    );
+    this.providerKeyAnthropic = queryElementById<HTMLInputElement>(
       "provider-key-anthropic",
-    ) as HTMLInputElement | null;
-    this.providerKeyGoogle = document.getElementById(
+    );
+    this.providerKeyGoogle = queryElementById<HTMLInputElement>(
       "provider-key-google",
-    ) as HTMLInputElement | null;
-    this.providerStoreConsent = document.getElementById(
+    );
+    this.providerStoreConsent = queryElementById<HTMLInputElement>(
       "provider-store-consent",
-    ) as HTMLInputElement | null;
-    this.providerSaveBtn = document.getElementById(
-      "provider-save-btn",
-    ) as HTMLButtonElement | null;
-    this.providerClearBtn = document.getElementById(
-      "provider-clear-btn",
-    ) as HTMLButtonElement | null;
+    );
+    this.providerSaveBtn =
+      queryElementById<HTMLButtonElement>("provider-save-btn");
+    this.providerClearBtn =
+      queryElementById<HTMLButtonElement>("provider-clear-btn");
 
-    this.streamingToggleBtn = document.getElementById(
+    this.streamingToggleBtn = queryElementById<HTMLButtonElement>(
       "streaming-toggle-btn",
-    ) as HTMLButtonElement | null;
+    );
     this.streamingEnabled = this.state.streamingMode;
     this.updateStreamingToggleUi();
 
@@ -320,20 +669,82 @@ export class ChatUI {
     this.render();
 
     // Hash routing
-    window.addEventListener("hashchange", () => {
-      const hashId = window.location.hash.slice(1);
-      if (hashId && hashId !== this.state.activeChatId) {
-        this.state.setActiveChat(hashId);
-        this.render();
-        this.chatInput.focus();
-      }
-    });
+    window.addEventListener(
+      "hashchange",
+      () => {
+        const hashId = window.location.hash.slice(1);
+        if (hashId && hashId !== this.state.activeChatId) {
+          this.state.setActiveChat(hashId);
+          this.render();
+          this.chatInput.focus();
+        }
+      },
+      { signal: this.globalListenerController.signal },
+    );
 
     if (window.location.hash) {
       const hashId = window.location.hash.slice(1);
       this.state.setActiveChat(hashId);
       this.render();
     }
+  }
+
+  /**
+   * Starts periodic background polling of `/api/status`.
+   * @param {number} [intervalMs=30000] - Polling interval in milliseconds.
+   * @returns {void}
+   */
+  public startStatusPolling(intervalMs: number = 30000): void {
+    this.stopStatusPolling();
+    this.statusPollTimer = window.setInterval(() => {
+      void this.checkSystemStatus();
+    }, intervalMs);
+  }
+
+  /**
+   * Stops any active background system status polling interval.
+   * @returns {void}
+   */
+  public stopStatusPolling(): void {
+    if (this.statusPollTimer !== null) {
+      window.clearInterval(this.statusPollTimer);
+      this.statusPollTimer = null;
+    }
+  }
+
+  /**
+   * Disposes global event listeners, modal listeners, and active status polling timers.
+   * @returns {void}
+   */
+  public dispose(): void {
+    this.stopStatusPolling();
+    this.globalListenerController.abort();
+    activeTableModalListenerController.abort();
+    if (this.cohortModal && this.onCohortModalKeyDown) {
+      this.cohortModal.removeEventListener(
+        "keydown",
+        this.onCohortModalKeyDown,
+      );
+      this.onCohortModalKeyDown = null;
+    }
+    if (this.providerModal && this.onProviderModalKeyDown) {
+      this.providerModal.removeEventListener(
+        "keydown",
+        this.onProviderModalKeyDown,
+      );
+      this.onProviderModalKeyDown = null;
+    }
+    if (activeChatUIInstance === this) {
+      activeChatUIInstance = null;
+    }
+  }
+
+  /**
+   * Alias for `dispose()` to clean up intervals and global listeners.
+   * @returns {void}
+   */
+  public destroy(): void {
+    this.dispose();
   }
 
   /**
@@ -441,7 +852,7 @@ export class ChatUI {
           ? `/api/status?db_path=${encodeURIComponent(targetDb)}`
           : "/api/status";
       const response = await fetchWithBackendError(url);
-      const health = await response.json();
+      const health = await parseResponseJson<HealthApiResponse>(response);
 
       this.state.setSystemStatus({
         backendOnline: true,
@@ -449,7 +860,9 @@ export class ChatUI {
         dbConfigured: Boolean(health.database?.exists),
         dbExists: Boolean(health.database?.exists),
         dbConnected: Boolean(health.database?.connected),
-        dbStatusCode: health.database?.status_code || "unknown",
+        dbStatusCode: isDbStatusCode(health.database?.status_code)
+          ? health.database.status_code
+          : "unknown",
         dbMessage: health.database?.message || null,
         dbRemediation: health.database?.remediation || null,
         tableCount: Number(health.database?.table_count) || 0,
@@ -570,15 +983,16 @@ export class ChatUI {
    * @returns {void}
    */
   private bindSchemaDiagnosticButtons(container: HTMLElement): void {
-    container.querySelectorAll(".copy-cmd-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        const target = e.currentTarget as HTMLButtonElement;
-        const cmd = target.dataset.cmd;
-        if (cmd) {
-          void this.copyCommandToClipboard(cmd, target);
-        }
+    container
+      .querySelectorAll<HTMLButtonElement>(".copy-cmd-btn")
+      .forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const cmd = btn.dataset.cmd;
+          if (cmd) {
+            void this.copyCommandToClipboard(cmd, btn);
+          }
+        });
       });
-    });
 
     container.querySelectorAll(".reload-schema-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -604,9 +1018,9 @@ export class ChatUI {
           ? `/api/schema?db_path=${encodeURIComponent(targetDb)}`
           : "/api/schema";
       const response = await fetchWithBackendError(url);
-      const data = await response.json();
+      const data = await parseResponseJson<SchemaApiResponse>(response);
 
-      schemaContent.innerHTML = ""; // Clear loading message
+      schemaContent.replaceChildren();
 
       if (data.database) {
         const dbStatus = data.database;
@@ -617,7 +1031,9 @@ export class ChatUI {
           dbConfigured: Boolean(dbStatus.exists),
           dbExists: Boolean(dbStatus.exists),
           dbConnected: Boolean(dbStatus.connected),
-          dbStatusCode: dbStatus.status_code || "unknown",
+          dbStatusCode: isDbStatusCode(dbStatus.status_code)
+            ? dbStatus.status_code
+            : "unknown",
           dbMessage: dbStatus.message || null,
           dbRemediation: dbStatus.remediation || null,
           tableCount: Number(dbStatus.table_count) || 0,
@@ -669,40 +1085,37 @@ export class ChatUI {
       if (!data.tables || data.tables.length === 0) {
         const dbStatus = data.database;
         if (dbStatus && dbStatus.status_code === "missing_file") {
-          schemaContent.innerHTML = `
-            <div class="schema-diagnostic-card" role="alert">
-              <div class="schema-diagnostic-header">
-                <span>📁</span>
-                <span>${i18next.t("status.dbMissingTitle")}</span>
-              </div>
-              <p class="schema-diagnostic-desc">${i18next.t(
-                "status.dbMissingDesc",
-                { path: dbStatus.configured_path },
-              )}</p>
-              <div class="schema-command-box">
-                <code>t1d-analytics load --db ${dbStatus.configured_path}</code>
-                <button class="btn btn-xs btn-secondary copy-cmd-btn" data-cmd="t1d-analytics load --db ${dbStatus.configured_path}">${i18next.t("status.copyCommand")}</button>
-              </div>
-              <button class="btn btn-xs btn-primary reload-schema-btn">${i18next.t("status.reloadSchema")}</button>
-            </div>
-          `;
+          schemaContent.replaceChildren(
+            createSchemaDiagnosticCard({
+              icon: "📁",
+              title: i18next.t("status.dbMissingTitle"),
+              description: i18next.t("status.dbMissingDesc", {
+                path: dbStatus.configured_path,
+              }),
+              command: `t1d-analytics load --db ${dbStatus.configured_path}`,
+              showReload: true,
+              isAlert: true,
+            }),
+          );
         } else if (dbStatus && dbStatus.status_code === "empty_db") {
-          schemaContent.innerHTML = `
-            <div class="schema-diagnostic-card" role="alert">
-              <div class="schema-diagnostic-header">
-                <span>🗄️</span>
-                <span>${i18next.t("status.dbEmptyTitle")}</span>
-              </div>
-              <p class="schema-diagnostic-desc">${i18next.t("status.dbEmptyDesc")}</p>
-              <div class="schema-command-box">
-                <code>t1d-analytics load</code>
-                <button class="btn btn-xs btn-secondary copy-cmd-btn" data-cmd="t1d-analytics load">${i18next.t("status.copyCommand")}</button>
-              </div>
-              <button class="btn btn-xs btn-primary reload-schema-btn">${i18next.t("status.reloadSchema")}</button>
-            </div>
-          `;
+          schemaContent.replaceChildren(
+            createSchemaDiagnosticCard({
+              icon: "🗄️",
+              title: i18next.t("status.dbEmptyTitle"),
+              description: i18next.t("status.dbEmptyDesc"),
+              command: "t1d-analytics load",
+              showReload: true,
+              isAlert: true,
+            }),
+          );
         } else {
-          schemaContent.innerHTML = `<div class="schema-loading" role="status" aria-live="polite" data-i18n="ui.noTables">${i18next.t("ui.noTables")}</div>`;
+          const noTablesDiv = document.createElement("div");
+          noTablesDiv.className = "schema-loading";
+          noTablesDiv.setAttribute("role", "status");
+          noTablesDiv.setAttribute("aria-live", "polite");
+          noTablesDiv.setAttribute("data-i18n", "ui.noTables");
+          noTablesDiv.textContent = i18next.t("ui.noTables");
+          schemaContent.replaceChildren(noTablesDiv);
         }
         this.bindSchemaDiagnosticButtons(schemaContent);
         return;
@@ -723,11 +1136,14 @@ export class ChatUI {
           toggleBtn.className = "schema-table-header-toggle";
           toggleBtn.setAttribute("aria-expanded", "false");
           toggleBtn.setAttribute("aria-controls", `schema-table-${table.name}`);
-          toggleBtn.innerHTML = `
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-              <polyline points="9 18 15 12 9 6"></polyline>
-            </svg>
-          `;
+          toggleBtn.appendChild(
+            createSvgIcon(
+              12,
+              [{ tag: "polyline", attrs: { points: "9 18 15 12 9 6" } }],
+              "none",
+              true,
+            ),
+          );
           const titleSpan = document.createElement("span");
           titleSpan.textContent = table.name;
           toggleBtn.appendChild(titleSpan);
@@ -739,13 +1155,34 @@ export class ChatUI {
           viewBtn.setAttribute("data-table", table.name);
           viewBtn.setAttribute("data-i18n-aria-label", "aria.viewTableData");
           viewBtn.setAttribute("data-i18n-title", "ui.viewTableData");
-          viewBtn.innerHTML = `
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-              <line x1="3" y1="9" x2="21" y2="9"></line>
-              <line x1="9" y1="21" x2="9" y2="9"></line>
-            </svg>
-          `;
+          viewBtn.appendChild(
+            createSvgIcon(
+              14,
+              [
+                {
+                  tag: "rect",
+                  attrs: {
+                    x: "3",
+                    y: "3",
+                    width: "18",
+                    height: "18",
+                    rx: "2",
+                    ry: "2",
+                  },
+                },
+                {
+                  tag: "line",
+                  attrs: { x1: "3", y1: "9", x2: "21", y2: "9" },
+                },
+                {
+                  tag: "line",
+                  attrs: { x1: "9", y1: "21", x2: "9", y2: "9" },
+                },
+              ],
+              "none",
+              true,
+            ),
+          );
 
           headerDiv.appendChild(toggleBtn);
           headerDiv.appendChild(viewBtn);
@@ -794,16 +1231,15 @@ export class ChatUI {
       const errMsg = i18next.t("ui.failedSchema");
       this.announce(errMsg, true);
       const backendUrl = window.location.origin;
-      schemaContent.innerHTML = `
-        <div class="schema-diagnostic-card error-text" role="alert">
-          <div class="schema-diagnostic-header">
-            <span>⚠️</span>
-            <span>${i18next.t("status.offlineTitle")}</span>
-          </div>
-          <p class="schema-diagnostic-desc">${i18next.t("status.offlineDesc", { url: backendUrl })}</p>
-          <button class="btn btn-xs btn-primary reload-schema-btn">${i18next.t("status.reloadSchema")}</button>
-        </div>
-      `;
+      schemaContent.replaceChildren(
+        createSchemaDiagnosticCard({
+          icon: "⚠️",
+          title: i18next.t("status.offlineTitle"),
+          description: i18next.t("status.offlineDesc", { url: backendUrl }),
+          showReload: true,
+          isError: true,
+        }),
+      );
       this.bindSchemaDiagnosticButtons(schemaContent);
       this.state.setSystemStatus({
         backendOnline: false,
@@ -826,11 +1262,20 @@ export class ChatUI {
    */
   public async loadModels(): Promise<void> {
     try {
-      const response = await fetchWithBackendError("/api/models");
-      const data = await response.json();
+      const customModels = this.state.getConfiguredModels();
+      const modelsUrl =
+        customModels.length > 0
+          ? `/api/models?configured_models=${encodeURIComponent(customModels.join(","))}`
+          : "/api/models";
+      const response = await fetchWithBackendError(modelsUrl);
+      const data = await parseResponseJson<ModelsApiResponse>(response);
 
       // Preserve the "Literal SQL" option
-      this.modelSelect.innerHTML = `<option value="sql" data-i18n="app.literalSql">${i18next.t("app.literalSql")}</option>`;
+      const sqlOption = document.createElement("option");
+      sqlOption.value = "sql";
+      sqlOption.setAttribute("data-i18n", "app.literalSql");
+      sqlOption.textContent = i18next.t("app.literalSql");
+      this.modelSelect.replaceChildren(sqlOption);
 
       const groups: Record<string, HTMLOptGroupElement> = {
         ollama: document.createElement("optgroup"),
@@ -846,45 +1291,67 @@ export class ChatUI {
       );
       groups.google.label = i18next.t("provider.groupGoogle", "Google");
 
-      const modelsList = Array.isArray(data.models) ? data.models : [];
-      modelsList.forEach(
-        (model: {
-          name: string;
-          size?: number;
-          provider?: string;
-          configured?: boolean;
-          requires_key?: boolean;
-          available?: boolean;
-          reachable?: boolean;
-          error_code?: string;
-        }) => {
-          const prov =
-            model.provider ||
-            (model.name.includes("/") ? model.name.split("/")[0] : "ollama");
-          const hasKey = Boolean(this.state.getApiKey(prov));
-          const isConfigured = model.configured || hasKey;
-          const isReachable = model.reachable !== false;
-          const isAvailable = model.available !== false && isConfigured;
+      const modelsList: Array<{
+        name: string;
+        size?: number;
+        provider?: string;
+        configured?: boolean;
+        requires_key?: boolean;
+        available?: boolean;
+        reachable?: boolean;
+        error_code?: string;
+      }> = Array.isArray(data.models) ? [...data.models] : [];
 
-          let badge = "🟢";
-          if (!isReachable) {
-            badge = "🔴";
-          } else if (!isConfigured) {
-            badge = "🟡";
-          }
+      for (const customModel of customModels) {
+        const normalized = customModel.includes(":")
+          ? customModel.replace(":", "/")
+          : customModel;
+        if (!modelsList.some((m) => m.name === normalized)) {
+          const prov = normalized.includes("/")
+            ? normalized.split("/")[0]
+            : "ollama";
+          modelsList.push({
+            name: normalized,
+            provider: prov,
+            configured: true,
+            requires_key: prov !== "ollama",
+            available: true,
+            reachable: true,
+          });
+        }
+      }
 
-          const option = document.createElement("option");
-          option.value = model.name;
-          option.setAttribute("data-provider", prov);
-          option.textContent = `${model.name} ${badge}`;
-          if (!isAvailable && model.error_code) {
-            option.title = `${model.name} (${model.error_code})`;
-          }
+      modelsList.forEach((model) => {
+        const prov =
+          model.provider ||
+          (model.name.includes("/") ? model.name.split("/")[0] : "ollama");
+        const hasKey = Boolean(this.state.getApiKey(prov));
+        const isConfigured = model.configured || hasKey;
+        const isReachable = model.reachable !== false;
+        const isAvailable = model.available !== false && isConfigured;
 
-          const targetGroup = groups[prov] || groups.ollama;
-          targetGroup.appendChild(option);
-        },
-      );
+        let badge = "🟢";
+        if (!isReachable) {
+          badge = "🔴";
+        } else if (!isConfigured) {
+          badge = "🟡";
+        }
+
+        const option = document.createElement("option");
+        option.value = model.name;
+        option.setAttribute("data-provider", prov);
+        option.textContent = `${model.name} ${badge}`;
+        if (!isAvailable && model.error_code) {
+          option.title = `${model.name} (${model.error_code})`;
+        }
+
+        if (!groups[prov]) {
+          const dynamicGroup = document.createElement("optgroup");
+          dynamicGroup.label = `${prov.charAt(0).toUpperCase() + prov.slice(1)} (any-llm)`;
+          groups[prov] = dynamicGroup;
+        }
+        groups[prov].appendChild(option);
+      });
 
       for (const grp of Object.values(groups)) {
         if (grp.children.length > 0) {
@@ -966,7 +1433,7 @@ export class ChatUI {
       : "aria.switchToLightMode";
     this.themeToggleBtn.setAttribute("data-i18n-aria-label", ariaKey);
     this.themeToggleBtn.setAttribute("aria-label", i18next.t(ariaKey));
-    this.themeToggleBtn.innerHTML = isLight ? "☾" : "☀";
+    this.themeToggleBtn.textContent = isLight ? "☾" : "☀";
   }
 
   /**
@@ -1296,17 +1763,21 @@ export class ChatUI {
     }
 
     // Global click listener to close dropdowns
-    document.addEventListener("click", (e) => {
-      const target = e.target as HTMLElement;
-      if (target && typeof target.closest === "function") {
-        if (!target.closest(".dropdown-container")) {
+    document.addEventListener(
+      "click",
+      (e) => {
+        const target = e.target;
+        if (target instanceof Element) {
+          if (!target.closest(".dropdown-container")) {
+            this.closeAllDropdowns();
+          }
+        } else {
+          // e.g. target is Document
           this.closeAllDropdowns();
         }
-      } else {
-        // e.g. target is Document
-        this.closeAllDropdowns();
-      }
-    });
+      },
+      { signal: this.globalListenerController.signal },
+    );
   }
 
   /**
@@ -1323,27 +1794,99 @@ export class ChatUI {
    * @returns {void}
    */
   private syncHighlight(): void {
-    let value = this.chatInput.value;
+    updateInputHighlight(
+      this.chatInput,
+      this.chatInputHighlight,
+      this.modelSelect.value,
+    );
+  }
 
-    // Ensure trailing newlines don't collapse
-    if (value.endsWith("\n")) {
-      value += " ";
+  /**
+   * Executes a SQL query against `/api/execute-sql` and either appends a new assistant message or updates an existing message in place.
+   * @param {string} queryToPlay - The SQL query string to execute.
+   * @param {HTMLButtonElement} triggerBtn - The button element that triggered execution.
+   * @param {Message} [messageToUpdate] - Optional existing assistant message to update in place.
+   * @returns {Promise<void>}
+   */
+  private async executeDirectSqlAction(
+    queryToPlay: string,
+    triggerBtn: HTMLButtonElement,
+    messageToUpdate?: Message,
+  ): Promise<void> {
+    triggerBtn.disabled = true;
+    try {
+      const dbPathOpt =
+        this.state.currentDb && this.state.currentDb !== "t1d.duckdb"
+          ? { db_path: this.state.currentDb }
+          : {};
+      const response = await fetchWithBackendError("/api/execute-sql", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: queryToPlay, ...dbPathOpt }),
+      });
+      const data = await parseResponseJson<ChatApiResponse>(response);
+
+      let contentStr = "";
+      let sqlRes: Record<string, SqlCellValue>[] | undefined = data.sqlResult;
+
+      if (data.error) {
+        const parsedError = parseApiError(data.error);
+        contentStr = i18next.t("ui.errorDetails", { error: parsedError });
+        this.announce(contentStr, true);
+      } else {
+        const classified = classifySqlResult(sqlRes);
+        if (classified.kind === "empty") {
+          contentStr = i18next.t("ui.noRows", "No rows returned");
+          this.announce(contentStr, false);
+          sqlRes = [];
+        } else if (classified.kind === "scalar") {
+          contentStr = classified.formattedValue;
+          sqlRes = undefined;
+        } else {
+          contentStr = i18next.t("app.tableData", "Table Data");
+        }
+      }
+
+      if (messageToUpdate) {
+        messageToUpdate.content = contentStr;
+        messageToUpdate.sqlResult = sqlRes;
+        messageToUpdate.isError = !!data.error;
+        this.state.saveToLocalStorage();
+      } else {
+        this.state.addMessageToActiveChat({
+          role: "assistant",
+          content: contentStr,
+          sqlResult: sqlRes,
+          sqlQuery: queryToPlay,
+          isError: !!data.error,
+          model: "sql",
+        });
+      }
+      this.renderMessages();
+      this.scrollToBottom();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
+      if (messageToUpdate) {
+        messageToUpdate.content = announcedErr;
+        messageToUpdate.sqlResult = undefined;
+        messageToUpdate.isError = true;
+        this.state.saveToLocalStorage();
+      } else {
+        this.announce(announcedErr, true);
+        this.state.addMessageToActiveChat({
+          role: "assistant",
+          content: announcedErr,
+          isError: true,
+          sqlQuery: queryToPlay,
+          model: "sql",
+        });
+      }
+      this.renderMessages();
+      this.scrollToBottom();
+    } finally {
+      triggerBtn.disabled = false;
     }
-
-    this.chatInputHighlight!.textContent = value;
-
-    if (this.modelSelect.value === "sql") {
-      this.chatInputHighlight!.className = "language-sql";
-    } else {
-      this.chatInputHighlight!.className = "language-markdown";
-    }
-    delete this.chatInputHighlight!.dataset.highlighted;
-    hljs.highlightElement(this.chatInputHighlight!);
-
-    // Auto-resize both textarea and wrapper
-    this.chatInput.style.height = "auto";
-    const scrollHeight = this.chatInput.scrollHeight;
-    this.chatInput.style.height = scrollHeight + "px";
   }
 
   /**
@@ -1375,10 +1918,16 @@ export class ChatUI {
     const content = text ?? this.chatInput.value.trim();
     if (!content) return;
 
+    const effectiveModel =
+      modelOverride ??
+      (this.modelSelect.value === "sql" || isReadOnlySqlStatement(content)
+        ? "sql"
+        : this.modelSelect.value);
+
     this.state.addMessageToActiveChat({
       role: "user",
       content,
-      model: modelOverride || this.modelSelect.value,
+      model: effectiveModel,
     });
 
     if (text === undefined) {
@@ -1401,11 +1950,29 @@ export class ChatUI {
     loadingDiv.className = "message assistant loading";
     loadingDiv.setAttribute("role", "status");
     loadingDiv.setAttribute("aria-live", "polite");
-    loadingDiv.innerHTML = `<div class="typing-indicator" aria-label="${i18next.t("ui.querying")}"><span></span><span></span><span></span><span class="sr-only">${i18next.t("ui.querying")}</span></div><div style="font-size: 0.85em; margin-top: 0.5rem; opacity: 0.7;">${i18next.t("ui.querying")}</div>`;
+    const queryingLabel = i18next.t("ui.querying");
+    const typingIndicator = document.createElement("div");
+    typingIndicator.className = "typing-indicator";
+    typingIndicator.setAttribute("aria-label", queryingLabel);
+    typingIndicator.append(
+      document.createElement("span"),
+      document.createElement("span"),
+      document.createElement("span"),
+    );
+    const srSpan = document.createElement("span");
+    srSpan.className = "sr-only";
+    srSpan.textContent = queryingLabel;
+    typingIndicator.appendChild(srSpan);
+    const loadingTextDiv = document.createElement("div");
+    loadingTextDiv.style.fontSize = "0.85em";
+    loadingTextDiv.style.marginTop = "0.5rem";
+    loadingTextDiv.style.opacity = "0.7";
+    loadingTextDiv.textContent = queryingLabel;
+    loadingDiv.append(typingIndicator, loadingTextDiv);
     this.messagesContainer.appendChild(loadingDiv);
     this.scrollToBottom();
 
-    const model = modelOverride ?? this.modelSelect.value;
+    const model = effectiveModel;
     const selectedOption = this.modelSelect.selectedOptions?.[0];
     const provider =
       selectedOption?.getAttribute("data-provider") ||
@@ -1445,16 +2012,12 @@ export class ChatUI {
       api_key: apiKey,
       ...(dbPathPayload ? { db_path: dbPathPayload } : {}),
       history: historyPayload,
+      auto_execute: model === "sql",
     };
 
     let streamUsed = false;
     let streamText = "";
-    let finalData: {
-      content?: string;
-      sqlResult?: Record<string, string | number | boolean | null>[];
-      sqlQuery?: string;
-      error?: unknown;
-    } | null = null;
+    let finalData: SseFinalChatData | null = null;
 
     if (this.streamingEnabled) {
       try {
@@ -1472,44 +2035,17 @@ export class ChatUI {
           streamResp.body?.getReader
         ) {
           const reader = streamResp.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
+          const contentEl = document.createElement("div");
+          contentEl.className = "message-content streaming-content";
+          loadingDiv.replaceChildren(contentEl);
 
-          loadingDiv.innerHTML = `<div class="message-content streaming-content"></div>`;
-          const contentEl = loadingDiv.querySelector(
-            ".streaming-content",
-          ) as HTMLElement;
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const parts = buffer.split("\n\n");
-            buffer = parts.pop() || "";
-            for (const part of parts) {
-              const line = part.trim();
-              if (line.startsWith("data: ")) {
-                try {
-                  const eventData = JSON.parse(line.slice(6));
-                  if (eventData.event === "token" && eventData.token) {
-                    streamText += eventData.token;
-                    if (contentEl) {
-                      contentEl.textContent = streamText;
-                      this.scrollToBottom();
-                    }
-                  } else if (
-                    eventData.event === "result" ||
-                    eventData.event === "done"
-                  ) {
-                    finalData = eventData;
-                    streamUsed = true;
-                  }
-                } catch {
-                  // ignore JSON parse errors on partial chunks
-                }
-              }
-            }
-          }
+          const sseOutcome = await consumeSseChatStream(reader, (accText) => {
+            contentEl.textContent = accText;
+            this.scrollToBottom();
+          });
+          streamUsed = sseOutcome.streamUsed;
+          streamText = sseOutcome.streamText;
+          finalData = sseOutcome.finalData;
         }
       } catch {
         streamUsed = false;
@@ -1526,6 +2062,13 @@ export class ChatUI {
         const parsedError = parseApiError(finalData.error);
         assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
         this.announce(assistantMsg, true);
+      } else {
+        const classifiedStream = classifySqlResult(finalData.sqlResult);
+        if (classifiedStream.kind === "scalar") {
+          assistantMsg = assistantMsg
+            ? `${assistantMsg} **${classifiedStream.column}:** ${classifiedStream.formattedValue}`
+            : classifiedStream.formattedValue;
+        }
       }
 
       this.state.addMessageToActiveChat({
@@ -1544,7 +2087,7 @@ export class ChatUI {
           body: JSON.stringify(payload),
         });
 
-        const data = await response.json();
+        const data = await parseResponseJson<ChatApiResponse>(response);
         loadingDiv.remove();
 
         let assistantMsg =
@@ -1555,6 +2098,13 @@ export class ChatUI {
           const parsedError = parseApiError(data.error);
           assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
           this.announce(assistantMsg, true);
+        } else {
+          const classifiedBatch = classifySqlResult(data.sqlResult);
+          if (classifiedBatch.kind === "scalar") {
+            assistantMsg = assistantMsg
+              ? `${assistantMsg} **${classifiedBatch.column}:** ${classifiedBatch.formattedValue}`
+              : classifiedBatch.formattedValue;
+          }
         }
 
         this.state.addMessageToActiveChat({
@@ -1605,7 +2155,7 @@ export class ChatUI {
     try {
       const resp = await fetch("/api/databases");
       if (!resp.ok) return;
-      const data = await resp.json();
+      const data = await parseResponseJson<DatabasesApiResponse>(resp);
       const dbs: { name: string; path: string; size_bytes: number }[] =
         data.databases || [];
       this.state.setAvailableDbs(dbs, data.current_db);
@@ -1621,7 +2171,7 @@ export class ChatUI {
    */
   public renderDatabaseDropdown(): void {
     if (!this.dbSelect) return;
-    this.dbSelect.innerHTML = "";
+    this.dbSelect.replaceChildren();
     if (this.state.availableDbs.length === 0) {
       const opt = document.createElement("option");
       opt.value = this.state.currentDb || "t1d.duckdb";
@@ -1672,9 +2222,7 @@ export class ChatUI {
   public getCohortSql(): string {
     const tableName = this.cohortTableSelect?.value || "patients";
     const joinTableName = this.cohortJoinTableSelect?.value || undefined;
-    const joinType =
-      (this.cohortJoinTypeSelect?.value as "INNER JOIN" | "LEFT JOIN") ||
-      "INNER JOIN";
+    const joinType = normalizeJoinType(this.cohortJoinTypeSelect?.value);
     const joinCondition = this.cohortJoinOnInput?.value?.trim() || undefined;
     const minAge = this.cohortMinAge?.value
       ? parseFloat(this.cohortMinAge.value)
@@ -1743,7 +2291,8 @@ export class ChatUI {
    * @returns {void}
    */
   public openCohortModal(): void {
-    if (!this.cohortModal) return;
+    const cohortModal = this.cohortModal;
+    if (!cohortModal) return;
     const tableHeaders = document.querySelectorAll(
       ".schema-table-header-toggle span, .schema-table-header h4",
     );
@@ -1758,7 +2307,7 @@ export class ChatUI {
         : ["demographics", "cgm_data", "patients"];
 
     if (this.cohortTableSelect) {
-      this.cohortTableSelect.innerHTML = "";
+      this.cohortTableSelect.replaceChildren();
       for (const t of finalTables) {
         const opt = document.createElement("option");
         opt.value = t;
@@ -1768,7 +2317,7 @@ export class ChatUI {
     }
 
     if (this.cohortJoinTableSelect) {
-      this.cohortJoinTableSelect.innerHTML = "";
+      this.cohortJoinTableSelect.replaceChildren();
       const noneOpt = document.createElement("option");
       noneOpt.value = "";
       noneOpt.setAttribute("data-i18n", "cohort.noneSingleTable");
@@ -1788,17 +2337,17 @@ export class ChatUI {
     this.handleCohortJoinTableChange();
     this.updateCohortSqlPreview();
 
-    const activeCohort = document.activeElement as HTMLElement | null;
+    const activeCohort = document.activeElement;
     this.previousFocusCohort =
       activeCohort && activeCohort !== document.body
         ? activeCohort
         : this.cohortFilterBtn;
-    this.cohortModal.classList.remove("hidden");
-    this.cohortModal.removeAttribute("aria-hidden");
+    cohortModal.classList.remove("hidden");
+    cohortModal.removeAttribute("aria-hidden");
     this.onCohortModalKeyDown = (e: KeyboardEvent) => {
-      trapModalFocus(e, this.cohortModal!, () => this.closeCohortModal());
+      trapModalFocus(e, cohortModal, () => this.closeCohortModal());
     };
-    this.cohortModal.addEventListener("keydown", this.onCohortModalKeyDown);
+    cohortModal.addEventListener("keydown", this.onCohortModalKeyDown);
     this.cohortMinAge?.focus();
   }
 
@@ -1818,7 +2367,7 @@ export class ChatUI {
       this.onCohortModalKeyDown = null;
     }
     if (
-      this.previousFocusCohort &&
+      this.previousFocusCohort instanceof HTMLElement &&
       document.body.contains(this.previousFocusCohort)
     ) {
       this.previousFocusCohort.focus();
@@ -1832,7 +2381,8 @@ export class ChatUI {
    * @returns {Promise<void>}
    */
   public async openProviderModal(): Promise<void> {
-    if (!this.providerModal) return;
+    const providerModal = this.providerModal;
+    if (!providerModal) return;
 
     if (this.providerKeyOpenAI) {
       this.providerKeyOpenAI.value = this.state.getApiKey("openai") || "";
@@ -1844,30 +2394,27 @@ export class ChatUI {
       this.providerKeyGoogle.value = this.state.getApiKey("google") || "";
     }
 
-    const activeProvider = document.activeElement as HTMLElement | null;
+    const activeProvider = document.activeElement;
     this.previousFocusProvider =
       activeProvider && activeProvider !== document.body
         ? activeProvider
         : this.providerSettingsBtn;
     this.updateModalBadgesFromLocal();
-    this.providerModal.classList.remove("hidden");
-    this.providerModal.removeAttribute("aria-hidden");
+    providerModal.classList.remove("hidden");
+    providerModal.removeAttribute("aria-hidden");
     if (this.onProviderModalKeyDown) {
-      this.providerModal.removeEventListener(
-        "keydown",
-        this.onProviderModalKeyDown,
-      );
+      providerModal.removeEventListener("keydown", this.onProviderModalKeyDown);
     }
     this.onProviderModalKeyDown = (e: KeyboardEvent) => {
-      trapModalFocus(e, this.providerModal!, () => this.closeProviderModal());
+      trapModalFocus(e, providerModal, () => this.closeProviderModal());
     };
-    this.providerModal.addEventListener("keydown", this.onProviderModalKeyDown);
+    providerModal.addEventListener("keydown", this.onProviderModalKeyDown);
     this.providerKeyOpenAI?.focus();
 
     try {
       const resp = await fetch("/api/providers/status");
       if (resp.ok) {
-        const data = await resp.json();
+        const data = await parseResponseJson<ProvidersStatusApiResponse>(resp);
         for (const p of data.providers || []) {
           this.updateModalBadge(
             p.provider,
@@ -1928,7 +2475,7 @@ export class ChatUI {
       this.onProviderModalKeyDown = null;
     }
     if (
-      this.previousFocusProvider &&
+      this.previousFocusProvider instanceof HTMLElement &&
       document.body.contains(this.previousFocusProvider)
     ) {
       this.previousFocusProvider.focus();
@@ -2030,7 +2577,7 @@ export class ChatUI {
    * @returns {void}
    */
   private renderSidebar(): void {
-    this.chatListEl.innerHTML = "";
+    this.chatListEl.replaceChildren();
 
     this.state.chats.forEach((chat) => {
       const isActive = chat.id === this.state.activeChatId;
@@ -2069,7 +2616,7 @@ export class ChatUI {
 
       const dropdownBtn = document.createElement("button");
       dropdownBtn.className = "dropdown-btn";
-      dropdownBtn.innerHTML = "&#8942;"; // 3 vertical dots
+      dropdownBtn.textContent = "\u22EE"; // 3 vertical dots
       dropdownBtn.setAttribute("aria-label", i18next.t("aria.chatOptions"));
       dropdownBtn.setAttribute("data-i18n-aria-label", "aria.chatOptions");
       dropdownBtn.setAttribute("aria-haspopup", "menu");
@@ -2173,8 +2720,8 @@ export class ChatUI {
       });
 
       dropdownMenu.addEventListener("keydown", (e) => {
-        const index = menuItems.indexOf(
-          document.activeElement as HTMLButtonElement,
+        const index = menuItems.findIndex(
+          (item) => item === document.activeElement,
         );
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -2219,7 +2766,13 @@ export class ChatUI {
     const activeChat = this.state.getActiveChat();
 
     if (!activeChat) {
-      this.messagesContainer.innerHTML = `<div class="empty-state" role="status" aria-live="polite" data-i18n="app.emptyState">${i18next.t("app.emptyState")}</div>`;
+      const emptyDiv = document.createElement("div");
+      emptyDiv.className = "empty-state";
+      emptyDiv.setAttribute("role", "status");
+      emptyDiv.setAttribute("aria-live", "polite");
+      emptyDiv.setAttribute("data-i18n", "app.emptyState");
+      emptyDiv.textContent = i18next.t("app.emptyState");
+      this.messagesContainer.replaceChildren(emptyDiv);
       this.chatInput.disabled = true;
       this.chatInputWrapper.classList.add("disabled");
       this.sendBtn.disabled = true;
@@ -2256,7 +2809,7 @@ export class ChatUI {
     const activeChat = this.state.getActiveChat();
     if (!activeChat) return;
 
-    this.messagesContainer.innerHTML = "";
+    this.messagesContainer.replaceChildren();
 
     if (activeChat.messages.length === 0) {
       const emptyStateDiv = document.createElement("div");
@@ -2269,27 +2822,20 @@ export class ChatUI {
         this.state.systemStatus.dbStatusCode === "missing_initial_data" ||
         this.state.systemStatus.dbStatusCode === "missing_file"
       ) {
-        const dbNotice = document.createElement("div");
-        dbNotice.className = "schema-diagnostic-card";
+        const dbNotice = createSchemaDiagnosticCard({
+          icon: "ℹ️",
+          title: i18next.t("status.emptyDbPrompt"),
+          command: "t1d-analytics load",
+        });
         dbNotice.style.marginBottom = "1rem";
-        dbNotice.innerHTML = `
-          <div class="schema-diagnostic-header">
-            <span>ℹ️</span>
-            <span>${i18next.t("status.emptyDbPrompt")}</span>
-          </div>
-          <div class="schema-command-box">
-            <code>t1d-analytics load</code>
-            <button class="btn btn-xs btn-secondary copy-cmd-btn" data-cmd="t1d-analytics load">${i18next.t("status.copyCommand")}</button>
-          </div>
-        `;
         this.bindSchemaDiagnosticButtons(dbNotice);
         emptyStateDiv.appendChild(dbNotice);
       }
 
-      emptyStateDiv.insertAdjacentHTML(
-        "beforeend",
-        `<p style="margin-bottom: 1rem;">${i18next.t("ui.noMessagesYet")}</p>`,
-      );
+      const noMessagesP = document.createElement("p");
+      noMessagesP.style.marginBottom = "1rem";
+      noMessagesP.textContent = i18next.t("ui.noMessagesYet");
+      emptyStateDiv.appendChild(noMessagesP);
 
       const chipsContainer = document.createElement("div");
       chipsContainer.className = "chips-container";
@@ -2400,20 +2946,38 @@ export class ChatUI {
         btn.setAttribute("data-i18n-aria-label", "aria.copyQuery");
         btn.title = i18next.t("ui.copyQuery", "Copy Query");
         btn.setAttribute("data-i18n-title", "ui.copyQuery");
-        btn.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-        `;
+        const renderCopyIcon = (): SVGSVGElement =>
+          createSvgIcon(14, [
+            {
+              tag: "rect",
+              attrs: {
+                x: "9",
+                y: "9",
+                width: "13",
+                height: "13",
+                rx: "2",
+                ry: "2",
+              },
+            },
+            {
+              tag: "path",
+              attrs: {
+                d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1",
+              },
+            },
+          ]);
+        btn.replaceChildren(renderCopyIcon());
         btn.addEventListener("click", async () => {
           try {
             await navigator.clipboard.writeText(textToCopy);
             this.announce(i18next.t("status.commandCopied"));
-            const originalSvg = btn.innerHTML;
-            btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+            btn.replaceChildren(
+              createSvgIcon(14, [
+                { tag: "polyline", attrs: { points: "20 6 9 17 4 12" } },
+              ]),
+            );
             setTimeout(() => {
-              btn.innerHTML = originalSvg;
+              btn.replaceChildren(renderCopyIcon());
             }, 2000);
           } catch (err) {
             console.error("Failed to copy text: ", err);
@@ -2435,73 +2999,18 @@ export class ChatUI {
           i18next.t("aria.playQuery", "Execute Query"),
         );
         btn.setAttribute("data-i18n-aria-label", "aria.playQuery");
-        btn.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polygon points="5 3 19 12 5 21 5 3"></polygon>
-          </svg>
-          <span data-i18n="app.play">${i18next.t("app.play", "Play")}</span>
-        `;
-        btn.addEventListener("click", async () => {
-          btn.disabled = true;
-          try {
-            const response = await fetchWithBackendError("/api/execute-sql", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ query: queryToPlay }),
-            });
-            const data = await response.json();
-
-            let contentStr = "";
-            let sqlRes = data.sqlResult;
-
-            if (data.error) {
-              const parsedError = parseApiError(data.error);
-              contentStr = i18next.t("ui.errorDetails", { error: parsedError });
-              this.announce(contentStr, true);
-            } else if (!sqlRes || sqlRes.length === 0) {
-              contentStr = i18next.t("ui.noRows", "No rows returned");
-              this.announce(contentStr, false);
-              sqlRes = []; // ensure it triggers table/empty rendering logic
-            } else if (
-              sqlRes.length === 1 &&
-              Object.keys(sqlRes[0]).length === 1
-            ) {
-              // Scalar result
-              const key = Object.keys(sqlRes[0])[0];
-              const val = sqlRes[0][key];
-              contentStr = val === null ? "NULL" : String(val);
-              sqlRes = undefined; // Do not render as table
-            } else {
-              // Full table
-              contentStr = i18next.t("app.tableData", "Table Data");
-            }
-
-            this.state.addMessageToActiveChat({
-              role: "assistant",
-              content: contentStr,
-              sqlResult: sqlRes,
-              sqlQuery: queryToPlay,
-              isError: !!data.error,
-              model: "sql",
-            });
-            this.renderMessages();
-            this.scrollToBottom();
-          } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : String(err);
-            const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
-            this.announce(announcedErr, true);
-            this.state.addMessageToActiveChat({
-              role: "assistant",
-              content: announcedErr,
-              isError: true,
-              sqlQuery: queryToPlay,
-              model: "sql",
-            });
-            this.renderMessages();
-            this.scrollToBottom();
-          } finally {
-            btn.disabled = false;
-          }
+        const playSvg = createSvgIcon(
+          14,
+          [{ tag: "polygon", attrs: { points: "5 3 19 12 5 21 5 3" } }],
+          "currentColor",
+          true,
+        );
+        const playLabelSpan = document.createElement("span");
+        playLabelSpan.setAttribute("data-i18n", "app.play");
+        playLabelSpan.textContent = i18next.t("app.play", "Play");
+        btn.replaceChildren(playSvg, playLabelSpan);
+        btn.addEventListener("click", () => {
+          void this.executeDirectSqlAction(queryToPlay, btn);
         });
         return btn;
       };
@@ -2525,68 +3034,20 @@ export class ChatUI {
         btn.setAttribute("data-i18n-aria-label", "aria.refreshQuery");
         btn.title = i18next.t("ui.refreshQuery", "Refresh Query");
         btn.setAttribute("data-i18n-title", "ui.refreshQuery");
-        btn.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="23 4 23 10 17 10"></polyline>
-            <polyline points="1 20 1 14 7 14"></polyline>
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-          </svg>
-        `;
-        btn.addEventListener("click", async () => {
-          btn.disabled = true;
-          try {
-            const response = await fetchWithBackendError("/api/execute-sql", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ query: queryToPlay }),
-            });
-            const data = await response.json();
-
-            let contentStr = "";
-            let sqlRes = data.sqlResult;
-
-            if (data.error) {
-              const parsedError = parseApiError(data.error);
-              contentStr = i18next.t("ui.errorDetails", { error: parsedError });
-              this.announce(contentStr, true);
-            } else if (!sqlRes || sqlRes.length === 0) {
-              contentStr = i18next.t("ui.noRows", "No rows returned");
-              this.announce(contentStr, false);
-              sqlRes = []; // ensure it triggers table/empty rendering logic
-            } else if (
-              sqlRes.length === 1 &&
-              Object.keys(sqlRes[0]).length === 1
-            ) {
-              // Scalar result
-              const key = Object.keys(sqlRes[0])[0];
-              const val = sqlRes[0][key];
-              contentStr = val === null ? "NULL" : String(val);
-              sqlRes = undefined; // Do not render as table
-            } else {
-              // Full table
-              contentStr = i18next.t("app.tableData", "Table Data");
-            }
-
-            messageToUpdate.content = contentStr;
-            messageToUpdate.sqlResult = sqlRes;
-            messageToUpdate.isError = !!data.error;
-
-            this.state.saveToLocalStorage();
-            this.renderMessages();
-            this.scrollToBottom();
-          } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : String(err);
-            messageToUpdate.content = i18next.t("ui.errorComm", {
-              error: errorMsg,
-            });
-            messageToUpdate.sqlResult = undefined;
-            messageToUpdate.isError = true;
-            this.state.saveToLocalStorage();
-            this.renderMessages();
-            this.scrollToBottom();
-          } finally {
-            btn.disabled = false;
-          }
+        btn.replaceChildren(
+          createSvgIcon(14, [
+            { tag: "polyline", attrs: { points: "23 4 23 10 17 10" } },
+            { tag: "polyline", attrs: { points: "1 20 1 14 7 14" } },
+            {
+              tag: "path",
+              attrs: {
+                d: "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+              },
+            },
+          ]),
+        );
+        btn.addEventListener("click", () => {
+          void this.executeDirectSqlAction(queryToPlay, btn, messageToUpdate);
         });
         return btn;
       };
@@ -2620,31 +3081,35 @@ export class ChatUI {
         contentDiv.appendChild(headerDiv);
         contentDiv.appendChild(preBlock);
       } else {
-        const rawHtml = marked.parse(msg.content ?? "") as string;
+        const rawHtml = String(marked.parse(msg.content ?? ""));
         contentDiv.innerHTML = DOMPurify.sanitize(rawHtml, {
           ADD_ATTR: ["target"],
         });
-        const codeBlocks = contentDiv.querySelectorAll("pre code");
-        codeBlocks.forEach((block) => {
-          hljs.highlightElement(block as HTMLElement);
+        contentDiv
+          .querySelectorAll<HTMLElement>("pre")
+          .forEach((preElement) => {
+            preElement
+              .querySelectorAll<HTMLElement>("code")
+              .forEach((block) => {
+                hljs.highlightElement(block);
 
-          // Add copy and play button for SQL markdown blocks
-          if (block.className.includes("language-sql")) {
-            const preElement = block.parentElement!;
-            const wrapper = document.createElement("div");
-            wrapper.className = "sql-query-container";
+                // Add copy and play button for SQL markdown blocks
+                if (block.className.includes("language-sql")) {
+                  const wrapper = document.createElement("div");
+                  wrapper.className = "sql-query-container";
 
-            const headerDiv = document.createElement("div");
-            headerDiv.className = "sql-query-header";
-            const queryStr = block.textContent!;
-            headerDiv.appendChild(createCopyBtn(queryStr));
-            headerDiv.appendChild(createPlayBtn(queryStr));
+                  const headerDiv = document.createElement("div");
+                  headerDiv.className = "sql-query-header";
+                  const queryStr = String(block.textContent);
+                  headerDiv.appendChild(createCopyBtn(queryStr));
+                  headerDiv.appendChild(createPlayBtn(queryStr));
 
-            preElement.parentNode!.insertBefore(wrapper, preElement);
-            wrapper.appendChild(headerDiv);
-            wrapper.appendChild(preElement);
-          }
-        });
+                  preElement.replaceWith(wrapper);
+                  wrapper.appendChild(headerDiv);
+                  wrapper.appendChild(preElement);
+                }
+              });
+          });
       }
 
       if (msg.isError) {
@@ -2686,8 +3151,9 @@ export class ChatUI {
         queryContainer.appendChild(preBlock);
         msgDiv.appendChild(queryContainer);
       }
-      if (msg.sqlResult) {
-        if (msg.sqlResult.length > 0) {
+      const sqlRows = msg.sqlResult;
+      if (sqlRows) {
+        if (sqlRows.length > 0) {
           const tableContainer = document.createElement("div");
           tableContainer.className = "sql-table-container";
 
@@ -2703,10 +3169,7 @@ export class ChatUI {
             i18next.t("table.exportCsv", "Export CSV"),
           );
           csvBtn.addEventListener("click", () =>
-            this.exportRowsToCsv(
-              msg.sqlResult as Array<Record<string, unknown>>,
-              "query_results.csv",
-            ),
+            this.exportRowsToCsv(sqlRows, "query_results.csv"),
           );
 
           const jsonBtn = document.createElement("button");
@@ -2719,10 +3182,7 @@ export class ChatUI {
             i18next.t("table.exportJson", "Export JSON"),
           );
           jsonBtn.addEventListener("click", () =>
-            this.exportRowsToJson(
-              msg.sqlResult as Array<Record<string, unknown>>,
-              "query_results.json",
-            ),
+            this.exportRowsToJson(sqlRows, "query_results.json"),
           );
 
           toolbar.appendChild(csvBtn);
@@ -2739,7 +3199,7 @@ export class ChatUI {
 
           const thead = document.createElement("thead");
           const headerRow = document.createElement("tr");
-          const columns = Object.keys(msg.sqlResult[0]);
+          const columns = Object.keys(sqlRows[0]);
 
           columns.forEach((col) => {
             const th = document.createElement("th");
@@ -2751,7 +3211,7 @@ export class ChatUI {
           table.appendChild(thead);
 
           const tbody = document.createElement("tbody");
-          msg.sqlResult.forEach((row) => {
+          sqlRows.forEach((row) => {
             const tr = document.createElement("tr");
             columns.forEach((col) => {
               const td = document.createElement("td");
@@ -2766,9 +3226,7 @@ export class ChatUI {
           });
           table.appendChild(tbody);
 
-          const cgmCard = renderCgmCard(
-            msg.sqlResult as Array<Record<string, unknown>>,
-          );
+          const cgmCard = renderCgmCard(sqlRows);
           if (cgmCard) {
             tableContainer.appendChild(cgmCard);
           }
@@ -2795,7 +3253,7 @@ export class ChatUI {
   /** Number of rows fetched per page in the table preview modal. */
   private readonly ROWS_PER_PAGE = 25;
   /** Array of row objects currently rendered in the table preview modal. */
-  private currentModalRows: Array<Record<string, unknown>> = [];
+  private currentModalRows: Array<Record<string, SqlCellValue>> = [];
   /** Column name currently used to sort the table preview modal, or empty string for default. */
   private currentSortBy: string = "";
   /** Active sort direction ('asc' or 'desc') in the table preview modal. */
@@ -2808,8 +3266,8 @@ export class ChatUI {
    * @param {string} tableName - The name of the table to display.
    * @returns {Promise<void>}
    */
-  private async openTableModal(tableName: string): Promise<void> {
-    const previousFocus = document.activeElement as HTMLElement | null;
+  public async openTableModal(tableName: string): Promise<void> {
+    const previousFocus = document.activeElement;
     this.currentTable = tableName;
     this.currentPage = 1;
     this.currentSortBy = "";
@@ -2819,22 +3277,17 @@ export class ChatUI {
     const modal = document.getElementById("table-modal");
     const modalTitle = document.getElementById("modal-title");
     const closeBtn = document.getElementById("close-modal-btn");
-    const prevBtn = document.getElementById(
-      "prev-page-btn",
-    ) as HTMLButtonElement;
-    const nextBtn = document.getElementById(
-      "next-page-btn",
-    ) as HTMLButtonElement;
+    const prevBtn = queryElementById<HTMLButtonElement>("prev-page-btn");
+    const nextBtn = queryElementById<HTMLButtonElement>("next-page-btn");
 
-    const searchInput = document.getElementById(
-      "modal-table-search",
-    ) as HTMLInputElement | null;
-    const sortSelect = document.getElementById(
+    const searchInput =
+      queryElementById<HTMLInputElement>("modal-table-search");
+    const sortSelect = queryElementById<HTMLSelectElement>(
       "modal-table-sort-col",
-    ) as HTMLSelectElement | null;
-    const sortOrderBtn = document.getElementById(
+    );
+    const sortOrderBtn = queryElementById<HTMLButtonElement>(
       "modal-table-sort-order",
-    ) as HTMLButtonElement | null;
+    );
 
     if (!modal || !modalTitle || !closeBtn || !prevBtn || !nextBtn) return;
 
@@ -2842,12 +3295,11 @@ export class ChatUI {
       searchInput.value = "";
     }
     if (sortSelect) {
-      sortSelect.innerHTML = "";
       const defaultOpt = document.createElement("option");
       defaultOpt.value = "";
       defaultOpt.setAttribute("data-i18n", "table.sortDefault");
       defaultOpt.textContent = i18next.t("table.sortDefault", "(Default)");
-      sortSelect.appendChild(defaultOpt);
+      sortSelect.replaceChildren(defaultOpt);
     }
     if (sortOrderBtn) {
       sortOrderBtn.setAttribute("data-i18n", "table.sortAsc");
@@ -2859,21 +3311,21 @@ export class ChatUI {
     modal.setAttribute("aria-modal", "true");
 
     // Wire up modal export buttons if present
-    const modalExportCsvBtn = document.getElementById(
+    const modalExportCsvBtn = queryElementById<HTMLButtonElement>(
       "modal-export-csv-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportJsonBtn = document.getElementById(
+    );
+    const modalExportJsonBtn = queryElementById<HTMLButtonElement>(
       "modal-export-json-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportFullCsvBtn = document.getElementById(
+    );
+    const modalExportFullCsvBtn = queryElementById<HTMLButtonElement>(
       "modal-export-full-csv-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportExcelBtn = document.getElementById(
+    );
+    const modalExportExcelBtn = queryElementById<HTMLButtonElement>(
       "modal-export-excel-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportParquetBtn = document.getElementById(
+    );
+    const modalExportParquetBtn = queryElementById<HTMLButtonElement>(
       "modal-export-parquet-btn",
-    ) as HTMLButtonElement | null;
+    );
 
     if (modalExportCsvBtn) {
       modalExportCsvBtn.onclick = () =>
@@ -2926,6 +3378,10 @@ export class ChatUI {
     // Focus the first interactive element
     closeBtn.focus();
 
+    activeTableModalListenerController.abort();
+    activeTableModalListenerController = new AbortController();
+    const modalSignal = activeTableModalListenerController.signal;
+
     // Close listeners
     /**
      * Closes the table preview modal and restores focus to the triggering element.
@@ -2934,13 +3390,13 @@ export class ChatUI {
     const closeModal = (): void => {
       modal.setAttribute("aria-hidden", "true");
       modal.removeAttribute("aria-modal");
-      // Clean up event listeners
-      closeBtn.removeEventListener("click", closeModal);
-      modal.removeEventListener("click", overlayClick);
-      modal.removeEventListener("keydown", onModalKeyDown);
+      activeTableModalListenerController.abort();
 
       // Restore focus to where it was before opening the modal
-      if (previousFocus && document.body.contains(previousFocus)) {
+      if (
+        previousFocus instanceof HTMLElement &&
+        document.body.contains(previousFocus)
+      ) {
         previousFocus.focus();
       } else {
         document.getElementById("chat-input")?.focus();
@@ -2957,7 +3413,7 @@ export class ChatUI {
       trapModalFocus(e, modal, closeModal);
     };
 
-    modal.addEventListener("keydown", onModalKeyDown);
+    modal.addEventListener("keydown", onModalKeyDown, { signal: modalSignal });
 
     /**
      * Closes the table preview modal when clicking the backdrop overlay.
@@ -2968,53 +3424,61 @@ export class ChatUI {
       if (e.target === modal) closeModal();
     };
 
-    closeBtn.addEventListener("click", closeModal);
-    modal.addEventListener("click", overlayClick);
+    closeBtn.addEventListener("click", closeModal, { signal: modalSignal });
+    modal.addEventListener("click", overlayClick, { signal: modalSignal });
 
     // Wire search input with debouncing or immediate input
     if (searchInput) {
-      const newSearchInput = searchInput.cloneNode(true) as HTMLInputElement;
-      searchInput.parentNode?.replaceChild(newSearchInput, searchInput);
-      newSearchInput.addEventListener("input", () => {
-        this.currentSearchTerm = newSearchInput.value.trim();
-        this.currentPage = 1;
-        this.fetchTableData();
-      });
+      searchInput.addEventListener(
+        "input",
+        () => {
+          this.currentSearchTerm = searchInput.value.trim();
+          this.currentPage = 1;
+          void this.fetchTableData();
+        },
+        { signal: modalSignal },
+      );
     }
 
     // Wire sort controls
     if (sortSelect) {
-      const newSortSelect = sortSelect.cloneNode(true) as HTMLSelectElement;
-      sortSelect.parentNode?.replaceChild(newSortSelect, sortSelect);
-      newSortSelect.addEventListener("change", () => {
-        this.currentSortBy = newSortSelect.value;
-        this.currentPage = 1;
-        this.fetchTableData();
-      });
+      sortSelect.addEventListener(
+        "change",
+        () => {
+          this.currentSortBy = sortSelect.value;
+          this.currentPage = 1;
+          void this.fetchTableData();
+        },
+        { signal: modalSignal },
+      );
     }
 
     if (sortOrderBtn) {
-      const newSortOrderBtn = sortOrderBtn.cloneNode(true) as HTMLButtonElement;
-      sortOrderBtn.parentNode?.replaceChild(newSortOrderBtn, sortOrderBtn);
-      newSortOrderBtn.addEventListener("click", () => {
-        this.currentSortOrder =
-          this.currentSortOrder === "asc" ? "desc" : "asc";
-        const sortKey =
-          this.currentSortOrder === "asc" ? "table.sortAsc" : "table.sortDesc";
-        const sortLabel = i18next.t(
-          sortKey,
-          this.currentSortOrder.toUpperCase(),
-        );
-        newSortOrderBtn.setAttribute("data-i18n", sortKey);
-        newSortOrderBtn.textContent = sortLabel;
-        newSortOrderBtn.setAttribute(
-          "aria-label",
-          `${i18next.t("table.toggleSortOrder", "Toggle sort order")} (${sortLabel})`,
-        );
-        this.announce(sortLabel);
-        this.currentPage = 1;
-        this.fetchTableData();
-      });
+      sortOrderBtn.addEventListener(
+        "click",
+        () => {
+          this.currentSortOrder =
+            this.currentSortOrder === "asc" ? "desc" : "asc";
+          const sortKey =
+            this.currentSortOrder === "asc"
+              ? "table.sortAsc"
+              : "table.sortDesc";
+          const sortLabel = i18next.t(
+            sortKey,
+            this.currentSortOrder.toUpperCase(),
+          );
+          sortOrderBtn.setAttribute("data-i18n", sortKey);
+          sortOrderBtn.textContent = sortLabel;
+          sortOrderBtn.setAttribute(
+            "aria-label",
+            `${i18next.t("table.toggleSortOrder", "Toggle sort order")} (${sortLabel})`,
+          );
+          this.announce(sortLabel);
+          this.currentPage = 1;
+          void this.fetchTableData();
+        },
+        { signal: modalSignal },
+      );
     }
 
     // Pagination listeners (use clean ones)
@@ -3025,7 +3489,7 @@ export class ChatUI {
     const prevFn = (): void => {
       if (this.currentPage > 1) {
         this.currentPage--;
-        this.fetchTableData();
+        void this.fetchTableData();
       }
     };
     /**
@@ -3034,17 +3498,11 @@ export class ChatUI {
      */
     const nextFn = (): void => {
       this.currentPage++;
-      this.fetchTableData();
+      void this.fetchTableData();
     };
 
-    // Replace elements to clear old listeners
-    const newPrevBtn = prevBtn.cloneNode(true) as HTMLButtonElement;
-    const newNextBtn = nextBtn.cloneNode(true) as HTMLButtonElement;
-    prevBtn.parentNode?.replaceChild(newPrevBtn, prevBtn);
-    nextBtn.parentNode?.replaceChild(newNextBtn, nextBtn);
-
-    newPrevBtn.addEventListener("click", prevFn);
-    newNextBtn.addEventListener("click", nextFn);
+    prevBtn.addEventListener("click", prevFn, { signal: modalSignal });
+    nextBtn.addEventListener("click", nextFn, { signal: modalSignal });
 
     await this.fetchTableData();
   }
@@ -3057,19 +3515,15 @@ export class ChatUI {
     const loading = document.getElementById("table-loading");
     const thead = document.getElementById("modal-table-head");
     const tbody = document.getElementById("modal-table-body");
-    const prevBtn = document.getElementById(
-      "prev-page-btn",
-    ) as HTMLButtonElement;
-    const nextBtn = document.getElementById(
-      "next-page-btn",
-    ) as HTMLButtonElement;
+    const prevBtn = queryElementById<HTMLButtonElement>("prev-page-btn");
+    const nextBtn = queryElementById<HTMLButtonElement>("next-page-btn");
     const indicator = document.getElementById("page-indicator");
-    const sortSelect = document.getElementById(
+    const sortSelect = queryElementById<HTMLSelectElement>(
       "modal-table-sort-col",
-    ) as HTMLSelectElement | null;
-    const sortOrderBtn = document.getElementById(
+    );
+    const sortOrderBtn = queryElementById<HTMLButtonElement>(
       "modal-table-sort-order",
-    ) as HTMLButtonElement | null;
+    );
 
     if (!loading || !thead || !tbody || !prevBtn || !nextBtn || !indicator)
       return;
@@ -3077,21 +3531,21 @@ export class ChatUI {
     loading.style.display = "block";
     prevBtn.disabled = true;
     nextBtn.disabled = true;
-    const modalExportCsvBtn = document.getElementById(
+    const modalExportCsvBtn = queryElementById<HTMLButtonElement>(
       "modal-export-csv-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportJsonBtn = document.getElementById(
+    );
+    const modalExportJsonBtn = queryElementById<HTMLButtonElement>(
       "modal-export-json-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportFullCsvBtn = document.getElementById(
+    );
+    const modalExportFullCsvBtn = queryElementById<HTMLButtonElement>(
       "modal-export-full-csv-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportExcelBtn = document.getElementById(
+    );
+    const modalExportExcelBtn = queryElementById<HTMLButtonElement>(
       "modal-export-excel-btn",
-    ) as HTMLButtonElement | null;
-    const modalExportParquetBtn = document.getElementById(
+    );
+    const modalExportParquetBtn = queryElementById<HTMLButtonElement>(
       "modal-export-parquet-btn",
-    ) as HTMLButtonElement | null;
+    );
 
     if (modalExportCsvBtn) modalExportCsvBtn.disabled = true;
     if (modalExportJsonBtn) modalExportJsonBtn.disabled = true;
@@ -3111,7 +3565,7 @@ export class ChatUI {
       }
 
       const response = await fetchWithBackendError(url);
-      const data = await response.json();
+      const data = await parseResponseJson<TableDataApiResponse>(response);
 
       loading.style.display = "none";
       const formattedPage = formatNumber(this.currentPage);
@@ -3136,8 +3590,8 @@ export class ChatUI {
       }
 
       this.currentModalRows = data.rows;
-      thead.innerHTML = "";
-      tbody.innerHTML = "";
+      thead.replaceChildren();
+      tbody.replaceChildren();
 
       if (data.rows.length > 0) {
         // Render header
@@ -3250,12 +3704,11 @@ export class ChatUI {
       } else {
         const msg = i18next.t("ui.noDataAvailable");
         this.announce(msg, false);
-        tbody.innerHTML = "";
         const tr = document.createElement("tr");
         const td = document.createElement("td");
         td.textContent = msg;
         tr.appendChild(td);
-        tbody.appendChild(tr);
+        tbody.replaceChildren(tr);
         prevBtn.disabled = true;
         nextBtn.disabled = true;
       }
@@ -3267,7 +3720,6 @@ export class ChatUI {
         interpolation: { escapeValue: false },
       });
       this.announce(errMsg, true);
-      tbody.innerHTML = "";
       const tr = document.createElement("tr");
       const td = document.createElement("td");
       td.className = "error-text";
@@ -3275,90 +3727,33 @@ export class ChatUI {
       td.setAttribute("aria-live", "assertive");
       td.textContent = errMsg;
       tr.appendChild(td);
-      tbody.appendChild(tr);
+      tbody.replaceChildren(tr);
     }
   }
 
   /**
    * Export row objects as a downloadable CSV file.
-   * @param {Array<Record<string, unknown>>} rows - The data rows to export.
+   * @param {Array<Record<string, ExportableCellValue>>} rows - The data rows to export.
    * @param {string} filename - The filename for the downloaded file.
    * @returns {void}
    */
   public exportRowsToCsv(
-    rows: Array<Record<string, unknown>>,
+    rows: Array<Record<string, ExportableCellValue>>,
     filename: string,
   ): void {
-    if (!rows || rows.length === 0) return;
-    const columnSet = new Set<string>();
-    for (const r of rows) {
-      for (const k of Object.keys(r)) {
-        columnSet.add(k);
-      }
-    }
-    const columns = Array.from(columnSet);
-    if (columns.length === 0) return;
-
-    const headerLine = columns
-      .map((col) => `"${col.replace(/"/g, '""')}"`)
-      .join(",");
-    const dataLines = rows.map((row) =>
-      columns
-        .map((col) => {
-          const val = row[col];
-          if (val === null || val === undefined) return '""';
-          let strVal =
-            typeof val === "object" ? JSON.stringify(val) : String(val);
-          if (strVal && ["=", "+", "-", "@", "\t", "\r"].includes(strVal[0])) {
-            let isNumeric = false;
-            if (strVal[0] === "+" || strVal[0] === "-") {
-              const num = Number(strVal);
-              isNumeric = !isNaN(num) && isFinite(num);
-            }
-            if (!isNumeric) {
-              strVal = `'${strVal}`;
-            }
-          }
-          return `"${strVal.replace(/"/g, '""')}"`;
-        })
-        .join(","),
-    );
-    const csvContent = "\uFEFF" + [headerLine, ...dataLines].join("\r\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", filename);
-    link.style.display = "none";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    exportRowsToCsvHelper(rows, filename);
   }
 
   /**
    * Export row objects as a downloadable JSON file.
-   * @param {Array<Record<string, unknown>>} rows - The data rows to export.
+   * @param {Array<Record<string, ExportableCellValue>>} rows - The data rows to export.
    * @param {string} filename - The filename for the downloaded file.
    * @returns {void}
    */
   public exportRowsToJson(
-    rows: Array<Record<string, unknown>>,
+    rows: Array<Record<string, ExportableCellValue>>,
     filename: string,
   ): void {
-    if (!rows || rows.length === 0) return;
-    const jsonContent = JSON.stringify(rows, null, 2);
-    const blob = new Blob([jsonContent], {
-      type: "application/json;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", filename);
-    link.style.display = "none";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    exportRowsToJsonHelper(rows, filename);
   }
 }

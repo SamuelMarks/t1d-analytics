@@ -58,7 +58,7 @@ test.describe("App Workflows E2E", () => {
       const url = new URL(route.request().url());
       const offset = parseInt(url.searchParams.get("offset") || "0", 10);
 
-      let rows: any[] = [];
+      let rows: Array<{ id: number; username: string }> = [];
       if (offset === 0) {
         rows = Array.from({ length: 25 }, (_, i) => ({
           id: i + 1,
@@ -191,10 +191,10 @@ test.describe("App Workflows E2E", () => {
       "SELECT * FROM users;",
     );
 
-    // Click the play button
+    // Click the execute button
     const playBtn = assistantMessage
-      .locator("button")
-      .filter({ hasText: "Play" });
+      .locator("button.play-sql-btn")
+      .filter({ hasText: "Execute" });
     await expect(playBtn).toBeVisible();
     await playBtn.click();
 

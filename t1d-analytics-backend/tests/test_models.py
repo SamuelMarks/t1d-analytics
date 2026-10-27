@@ -241,8 +241,8 @@ def test_maxtext_config_build_full_parameters() -> None:
 
 
 def test_status_response_model() -> None:
-    """Test StatusResponse dataclass instantiation and to_dict conversion."""
-    from t1d_analytics.models import StatusResponse
+    """Test StatusResponse model instantiation, defaults, and to_dict conversion."""
+    from t1d_analytics.models import ColumnInfo, StatusResponse, TableSchemaModel
 
     resp = StatusResponse(
         status="ready",
@@ -256,3 +256,17 @@ def test_status_response_model() -> None:
     assert d["total_rows"] == 475
     assert d["required_tables_present"] is True
     assert d["database"] == {}
+
+    schema_model = TableSchemaModel(
+        table_name="patients",
+        columns=[
+            ColumnInfo(name="subject_id", type="INTEGER"),
+            ColumnInfo(name="age", type="DOUBLE"),
+        ],
+        sample_row="Sample row: (1, 24.5)",
+    )
+    assert schema_model.column_names() == ["subject_id", "age"]
+    prompt_block = schema_model.to_prompt_block()
+    assert "Table: patients" in prompt_block
+    assert "Columns: subject_id (INTEGER), age (DOUBLE)" in prompt_block
+    assert "Sample row: (1, 24.5)" in prompt_block

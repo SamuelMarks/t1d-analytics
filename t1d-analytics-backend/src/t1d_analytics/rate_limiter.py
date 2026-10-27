@@ -8,7 +8,9 @@ from abc import ABC, abstractmethod
 from typing import Callable, Dict, List, Optional
 
 import duckdb
-from fastapi import HTTPException, Request
+from fastapi import Request
+
+from t1d_analytics.errors import RateLimitExceededError
 
 RATE_LIMIT_STORE: Dict[str, List[float]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
@@ -275,7 +277,7 @@ def enforce_rate_limit(
 
     Raises:
     ------
-        HTTPException: 429 Too Many Requests if the limit is exceeded.
+        RateLimitExceededError: 429 Too Many Requests if the limit is exceeded.
 
     """
     client_ip = request.client.host if request.client else "unknown"
@@ -283,11 +285,7 @@ def enforce_rate_limit(
         retry_after = get_rate_limiter().get_retry_after(
             client_ip, window_seconds=window_seconds
         )
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error_code": "backend.rateLimitExceeded",
-                "params": {"limit": limit, "window": int(window_seconds)},
-            },
-            headers={"Retry-After": str(retry_after)},
+        raise RateLimitExceededError(
+            retry_after=retry_after,
+            params={"limit": limit, "window": int(window_seconds)},
         )

@@ -1,7 +1,6 @@
 """Concurrency and multi-threading contention tests for DuckDB."""
 
 import concurrent.futures
-import typing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -122,12 +121,14 @@ def test_multiprocess_duckdb_writes(tmp_path: Path) -> None:
     original_connect = duckdb.connect
     calls: list[int] = []
 
-    def mock_connect(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+    def mock_connect(
+        database: str = ":memory:", read_only: bool = False
+    ) -> duckdb.DuckDBPyConnection:
         """Raise lock IOException on first call then delegate to duckdb.connect."""
         calls.append(1)
         if len(calls) == 1:
             raise duckdb.IOException("database is locked")
-        return original_connect(*args, **kwargs)
+        return original_connect(database, read_only=read_only)
 
     with patch("duckdb.connect", side_effect=mock_connect):
         execute_duckdb_write_with_retry(

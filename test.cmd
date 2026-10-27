@@ -1,6 +1,56 @@
 @echo off
-setlocal enabledelayedexpansion
+:: # test.cmd
+::
+:: ## Overview
+:: End-to-end cloud deployment, health verification, and test execution harness
+:: for T1D Analytics using LibScript on Windows.
+::
+:: ## Usage
+:: test.cmd [--unit-mock|--mock-cloud|--dry-run] [--live-cloud] [--local|-l] [--run-remote-tests|-t]
 
+setlocal EnableDelayedExpansion
+set "THIS_FILE=%~f0"
+
+if defined STACK (
+    echo !STACK! | findstr /C:":%THIS_FILE%:" >nul 2>&1
+    if not errorlevel 1 (
+        echo [STOP] processing "%THIS_FILE%" >&2
+        exit /b 0
+    )
+)
+set "STACK=%STACK%:%THIS_FILE%:"
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+
+if not defined LIBSCRIPT_ROOT_DIR (
+    set "d=%SCRIPT_DIR%"
+    call :find_root
+)
+goto :root_found
+
+:: ## find_root
+:: Ascends the directory tree looking for ROOT or libscript.cmd.
+:find_root
+if exist "!d!\libscript.cmd" (
+    set "LIBSCRIPT_ROOT_DIR=!d!"
+    exit /b 0
+)
+if exist "!d!\ROOT" (
+    set "LIBSCRIPT_ROOT_DIR=!d!"
+    exit /b 0
+)
+for %%P in ("!d!") do set "parent=%%~dpP"
+set "d=!parent:~0,-1!"
+if "!d!"=="" (
+    set "LIBSCRIPT_ROOT_DIR=%USERPROFILE%\repos\libscript"
+    exit /b 0
+)
+goto :find_root
+
+:: ## root_found
+:: Continues execution once LIBSCRIPT_ROOT_DIR is verified.
+:root_found
 set "REPO_DIR=%~dp0"
 for %%F in ("%REPO_DIR%.env" "%REPO_DIR%.env.secrets") do (
     if exist "%%~F" (
@@ -13,7 +63,7 @@ for %%F in ("%REPO_DIR%.env" "%REPO_DIR%.env.secrets") do (
 )
 
 if "%CLOUD_PROVIDER%"=="" set "CLOUD_PROVIDER=%DEFAULT_CLOUD_PROVIDER%"
-if "%LIBSCRIPT_ROOT_DIR%"=="" set "LIBSCRIPT_ROOT_DIR=%USERPROFILE%epos\libscript"
+if "%LIBSCRIPT_ROOT_DIR%"=="" set "LIBSCRIPT_ROOT_DIR=%USERPROFILE%\repos\libscript"
 if "%LIBSCRIPT_CLI%"=="" set "LIBSCRIPT_CLI=%LIBSCRIPT_ROOT_DIR%\libscript.cmd"
 if "%NODE_NAME%"=="" set "NODE_NAME=test-t1d-analytics-node"
 if "%RG_NAME%"=="" set "RG_NAME=default-rg"
@@ -25,6 +75,8 @@ set "RUN_REMOTE_TESTS=0"
 set "MOCK_CLOUD=0"
 set "LIVE_CLOUD=0"
 
+:: ## parse_args
+:: Parses CLI flags for mock, live, local, and remote test execution.
 :parse_args
 if "%~1"=="" goto after_args
 if "%~1"=="--unit-mock" (
@@ -72,6 +124,8 @@ if "%~1"=="-h" goto show_help
 shift
 goto parse_args
 
+:: ## show_help
+:: Displays command-line usage instructions and environment variable defaults.
 :show_help
 echo Usage: %0 [--unit-mock^|--mock-cloud] [--live-cloud] [--local^|-l] [--run-remote-tests^|-t]
 echo Options:
@@ -81,13 +135,15 @@ echo   --local, -l                Run tests locally using installed pytest/npm.
 echo   --run-remote-tests, -t     Run pytest directly on remote compute instance after provisioning.
 echo Environment variables:
 echo   CLOUD_PROVIDER     Cloud provider (%DEFAULT_CLOUD_PROVIDER%, gcp, aws). Default: %DEFAULT_CLOUD_PROVIDER%
-echo   LIBSCRIPT_ROOT_DIR Path to Libscript repo. Default: %%USERPROFILE%%epos\libscript
+echo   LIBSCRIPT_ROOT_DIR Path to Libscript repo. Default: %%USERPROFILE%%\repos\libscript
 echo   NODE_NAME          Name of compute node. Default: %NODE_NAME%
 echo   RG_NAME            Resource group or project name. Default: %RG_NAME%
 echo   LOCATION           Cloud region/datacenter. Default: %LOCATION%
 echo   REMOTE_DEST        Destination folder on remote node. Default: %REMOTE_DEST%
 exit /b 0
 
+:: ## after_args
+:: Dispatches execution to mock cloud, local tests, or live cloud provisioning.
 :after_args
 if "%MOCK_CLOUD%"=="1" goto run_mock_cloud
 if "%RUN_LOCAL%"=="1" goto run_local_tests
@@ -95,6 +151,8 @@ if not exist "%LIBSCRIPT_CLI%" goto run_local_tests
 
 set "EXIT_CODE=0"
 
+:: ## check_cloud_credentials
+:: Verifies cloud CLI installation and authentication status.
 :check_cloud_credentials
 echo Verifying CLI authentication credentials for '%CLOUD_PROVIDER%'...
 if /i "%CLOUD_PROVIDER%"=="%PRIMARY_CLOUD_PROVIDER%" (
@@ -175,9 +233,9 @@ if errorlevel 1 (
 )
 
 echo Verifying backend API health on remote host...
-call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == "ready" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{"query": "SHOW TABLES"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
+call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
 if errorlevel 1 (
-    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == "ready" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{"query": "SHOW TABLES"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
+    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
     if errorlevel 1 (
         echo WARNING: Backend API health check failed on %CLOUD_PROVIDER%. 1>&2
         set "EXIT_CODE=1"
@@ -212,12 +270,16 @@ if "%RUN_REMOTE_TESTS%"=="1" (
 
 echo Deployment and remote health verification passed successfully.
 
+:: ## cleanup
+:: Deprovisions cloud resources on exit and returns EXIT_CODE.
 :cleanup
 echo Cleaning up cloud resources on %CLOUD_PROVIDER% (%NODE_NAME%)...
 call "%LIBSCRIPT_CLI%" deprovision "%CLOUD_PROVIDER%" "%NODE_NAME%" "%RG_NAME%" "%LOCATION%" "%REPO_DIR%" "%REMOTE_DEST%"
 echo Deprovisioning complete.
 exit /b !EXIT_CODE!
 
+:: ## run_mock_cloud
+:: Executes simulated cloud deployment and health checks locally.
 :run_mock_cloud
 echo ==========================================================
 echo Running in Mock Cloud mode (--mock-cloud specified)...
@@ -239,6 +301,8 @@ echo Mock deprovisioning cloud resources on %CLOUD_PROVIDER% (%NODE_NAME%)...
 echo Deprovisioning complete.
 exit /b 0
 
+:: ## run_local_tests
+:: Runs backend and frontend unit test suites locally.
 :run_local_tests
 echo ==========================================================
 if "%RUN_LOCAL%"=="1" (

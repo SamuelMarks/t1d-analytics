@@ -16,7 +16,7 @@ import crypto from "crypto";
 export const test = baseTest.extend<{ page: Page }>({
   page: async ({ page }, use) => {
     await use(page);
-    const coverage = await page.evaluate(() => (window as any).__coverage__);
+    const coverage = await page.evaluate(() => window.__coverage__);
     if (coverage) {
       const nycPath = path.join(process.cwd(), ".nyc_output");
       if (!fs.existsSync(nycPath)) {

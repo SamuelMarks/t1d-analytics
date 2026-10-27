@@ -1,7 +1,9 @@
 """Internationalization and localization module for T1D Analytics."""
 
 import os
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Union
+
+FormatArgValue = Union[str, int, float, bool, None, BaseException]
 
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "en": {},
@@ -263,7 +265,7 @@ def get_translator(lang: Optional[str] = None) -> Callable[..., str]:
 
     lang_dict = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
 
-    def translate(text: str, *args: Any, **kwargs: Any) -> str:
+    def translate(text: str, *args: FormatArgValue, **kwargs: FormatArgValue) -> str:
         """
         Translate the given text and format it with positional and keyword arguments.
 

@@ -10,6 +10,21 @@ import { ChatState, resolveTableJoin } from "../src/state";
 describe("ChatState", () => {
   let state: ChatState;
 
+  /**
+   * Creates a standard Fetch API Response with a JSON body.
+   * @param {string} jsonBody - Serialized JSON string.
+   * @param {number} [status=200] - HTTP status code.
+   * @returns {Response} Constructed Fetch Response object.
+   */
+  const createJsonResponse = (
+    jsonBody: string,
+    status: number = 200,
+  ): Response =>
+    new Response(jsonBody, {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+
   beforeEach(() => {
     localStorage.clear();
     state = new ChatState();
@@ -19,10 +34,16 @@ describe("ChatState", () => {
     localStorage.clear();
   });
 
-  it("initializes empty state", () => {
+  it("initializes empty state and preserves empty strings in localStorage", () => {
     expect(state.chats).toEqual([]);
     expect(state.activeChatId).toBeNull();
     expect(state.getActiveChat()).toBeNull();
+
+    localStorage.setItem("empty_key", "");
+    expect(localStorage.getItem("empty_key")).toBe("");
+    expect(localStorage.length).toBe(1);
+    expect(localStorage.key(0)).toBe("empty_key");
+    expect(localStorage.key(99)).toBeNull();
   });
 
   it("creates a new chat and sets it as active", () => {
@@ -87,10 +108,11 @@ describe("ChatState", () => {
 
     // With server sync enabled, triggers POST fetch
     state.serverSyncEnabled = true;
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ status: "ok" }),
-    } as unknown as Response);
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        createJsonResponse(JSON.stringify({ status: "ok" })),
+      );
     state.renameChat(chat.id, "Synced Title");
     expect(fetchSpy).toHaveBeenCalled();
 
@@ -190,19 +212,13 @@ describe("ChatState", () => {
 
   it("handles undefined localStorage gracefully", () => {
     const originalLocalStorage = globalThis.localStorage;
-    Object.defineProperty(globalThis, "localStorage", {
-      value: undefined,
-      configurable: true,
-    });
+    vi.stubGlobal("localStorage", undefined);
 
     const newState = new ChatState();
     newState.createChat();
     newState.removeApiKey("openai");
 
-    Object.defineProperty(globalThis, "localStorage", {
-      value: originalLocalStorage,
-      configurable: true,
-    });
+    vi.stubGlobal("localStorage", originalLocalStorage);
   });
 
   it("handles corrupted JSON in t1d_analytics_chats gracefully", () => {
@@ -250,35 +266,37 @@ describe("ChatState", () => {
     state.addMessageToActiveChat({ role: "assistant", content: "hi" });
 
     // Server returns one existing session with 1 message, and one new remote session
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        sessions: [
-          {
-            session_id: chat1.id,
-            title: "Local Chat",
-            created_at: "2026-01-01",
-            updated_at: "2026-01-01",
-            messages: [{ role: "user", content: "hello" }],
-          },
-          {
-            session_id: "remote-session-2",
-            title: "Remote Session",
-            created_at: "2026-01-01",
-            updated_at: "2026-01-01",
-            messages: [{ role: "user", content: "remote query" }],
-          },
-          null as unknown as Record<string, unknown>,
-          {} as unknown as Record<string, unknown>,
-        ],
-      }),
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(
+        JSON.stringify({
+          sessions: [
+            {
+              session_id: chat1.id,
+              title: "Local Chat",
+              created_at: "2026-01-01",
+              updated_at: "2026-01-01",
+              messages: [{ role: "user", content: "hello" }],
+            },
+            {
+              session_id: "remote-session-2",
+              title: "Remote Session",
+              created_at: "2026-01-01",
+              updated_at: "2026-01-01",
+              messages: [{ role: "user", content: "remote query" }],
+            },
+            null,
+            {},
+          ],
+        }),
+      ),
+    );
 
     // POST /api/sessions mock response for chat1 upload
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ session_id: chat1.id, status: "created" }),
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(
+        JSON.stringify({ session_id: chat1.id, status: "created" }),
+      ),
+    );
 
     const ok = await state.syncWithServer();
     expect(ok).toBe(true);
@@ -287,29 +305,29 @@ describe("ChatState", () => {
 
     // ActiveChatId set if empty
     state.activeChatId = null;
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        sessions: [
-          {
-            session_id: chat1.id,
-            title: "Local Chat Updated",
-            created_at: "2026-01-01",
-            updated_at: "2026-01-01",
-            messages: [
-              { role: "user", content: "hello" },
-              { role: "assistant", content: "hi" },
-              { role: "user", content: "more" },
-            ],
-          },
-        ],
-      }),
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(
+        JSON.stringify({
+          sessions: [
+            {
+              session_id: chat1.id,
+              title: "Local Chat Updated",
+              created_at: "2026-01-01",
+              updated_at: "2026-01-01",
+              messages: [
+                { role: "user", content: "hello" },
+                { role: "assistant", content: "hi" },
+                { role: "user", content: "more" },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
     // Remote has 3 messages, remote-session-2 in local has 1 message so local remote-session-2 might trigger POST if not on server
-    fetchSpy.mockResolvedValue({
-      ok: true,
-      json: async () => ({ status: "ok" }),
-    } as unknown as Response);
+    fetchSpy.mockResolvedValue(
+      createJsonResponse(JSON.stringify({ status: "ok" })),
+    );
     await state.syncWithServer();
     expect(state.activeChatId).toBe(state.chats[0].id);
     expect(chat1.title).toBe("Local Chat Updated");
@@ -319,10 +337,9 @@ describe("ChatState", () => {
 
   it("handles syncWithServer network or server error with offline fallback", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    fetchSpy.mockResolvedValueOnce({
-      ok: false,
-      status: 503,
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(JSON.stringify({ error: "Unavailable" }), 503),
+    );
 
     const ok = await state.syncWithServer();
     expect(ok).toBe(false);
@@ -341,10 +358,9 @@ describe("ChatState", () => {
     const chatId = chat.id;
 
     // Mock successful DELETE
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ status: "deleted" }),
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(JSON.stringify({ status: "deleted" })),
+    );
 
     state.deleteChat(chatId);
     expect(state.deletedChatIds.has(chatId)).toBe(true);
@@ -354,31 +370,31 @@ describe("ChatState", () => {
     );
 
     // Now simulate syncWithServer where server returns the deleted session
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [
-        {
-          session_id: chatId,
-          title: "To Be Deleted",
-          created_at: "2024-01-01",
-          updated_at: "2024-01-01",
-          messages: [],
-        },
-        {
-          session_id: "other-session",
-          title: "Other Session",
-          created_at: "2024-01-01",
-          updated_at: "2024-01-01",
-          messages: [],
-        },
-      ],
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(
+        JSON.stringify([
+          {
+            session_id: chatId,
+            title: "To Be Deleted",
+            created_at: "2024-01-01",
+            updated_at: "2024-01-01",
+            messages: [],
+          },
+          {
+            session_id: "other-session",
+            title: "Other Session",
+            created_at: "2024-01-01",
+            updated_at: "2024-01-01",
+            messages: [],
+          },
+        ]),
+      ),
+    );
 
     // Mock the propagation DELETE call for the tombstone
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ status: "deleted" }),
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(JSON.stringify({ status: "deleted" })),
+    );
 
     await state.syncWithServer();
 
@@ -395,21 +411,22 @@ describe("ChatState", () => {
     const local = state.createChat("Old Title");
     local.isTemporary = false;
 
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [
-        {
-          session_id: local.id,
-          title: "New Remote Title",
-          created_at: "2024-01-01",
-          updated_at: "2024-01-01",
-          messages: [
-            { role: "user", content: "Hello" },
-            { role: "assistant", content: "Hi" },
-          ],
-        },
-      ],
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(
+        JSON.stringify([
+          {
+            session_id: local.id,
+            title: "New Remote Title",
+            created_at: "2024-01-01",
+            updated_at: "2024-01-01",
+            messages: [
+              { role: "user", content: "Hello" },
+              { role: "assistant", content: "Hi" },
+            ],
+          },
+        ]),
+      ),
+    );
 
     const ok = await state.syncWithServer();
     expect(ok).toBe(true);
@@ -419,21 +436,22 @@ describe("ChatState", () => {
     // Test when titleModified is true but matches remote title exactly (falsy branch of title !== remote?.title)
     local.titleModified = true;
     local.title = "New Remote Title";
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [
-        {
-          session_id: local.id,
-          title: "New Remote Title",
-          created_at: "2024-01-01",
-          updated_at: "2024-01-01",
-          messages: [
-            { role: "user", content: "Hello" },
-            { role: "assistant", content: "Hi" },
-          ],
-        },
-      ],
-    } as unknown as Response);
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(
+        JSON.stringify([
+          {
+            session_id: local.id,
+            title: "New Remote Title",
+            created_at: "2024-01-01",
+            updated_at: "2024-01-01",
+            messages: [
+              { role: "user", content: "Hello" },
+              { role: "assistant", content: "Hi" },
+            ],
+          },
+        ]),
+      ),
+    );
     await state.syncWithServer();
     expect(local.title).toBe("New Remote Title");
 
@@ -511,17 +529,16 @@ describe("ChatState", () => {
           if (init?.method === "DELETE") {
             return Promise.reject(new Error("Remote delete failure"));
           }
-          return {
-            ok: true,
-            json: async () => [
+          return createJsonResponse(
+            JSON.stringify([
               { session_id: chat.id, title: "Old Deleted", messages: null },
               {
                 session_id: "new-session",
                 title: "New Session",
                 messages: null,
               },
-            ],
-          } as unknown as Response;
+            ]),
+          );
         },
       );
 
@@ -539,10 +556,11 @@ describe("ChatState", () => {
     expect(newChat?.messages).toEqual([]);
 
     // Test rawData fallback when server returns an object without sessions array
-    const syncEmptyFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({ unexpected: true }),
-    } as unknown as Response);
+    const syncEmptyFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () =>
+        createJsonResponse(JSON.stringify({ unexpected: true })),
+      );
     await state.syncWithServer();
     syncEmptyFetch.mockRestore();
 
@@ -555,21 +573,23 @@ describe("ChatState", () => {
       "Null Server Msgs Local",
       true,
     );
-    const syncFewerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => [
-        {
-          session_id: localWithMessages.id,
-          title: "Multi Message Local",
-          messages: [{ role: "user", content: "M1" }],
-        },
-        {
-          session_id: localWithNullServerMsgs.id,
-          title: "Null Server Msgs Local",
-          messages: undefined,
-        },
-      ],
-    } as unknown as Response);
+    const syncFewerFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () =>
+        createJsonResponse(
+          JSON.stringify([
+            {
+              session_id: localWithMessages.id,
+              title: "Multi Message Local",
+              messages: [{ role: "user", content: "M1" }],
+            },
+            {
+              session_id: localWithNullServerMsgs.id,
+              title: "Null Server Msgs Local",
+            },
+          ]),
+        ),
+      );
     await state.syncWithServer();
     syncFewerFetch.mockRestore();
   });
@@ -634,5 +654,22 @@ describe("ChatState", () => {
       ["col_a", "col_b"],
     );
     expect(relNull).toBeNull();
+  });
+
+  it("manages configured Mozilla any-llm models in localStorage", () => {
+    expect(state.getConfiguredModels()).toEqual([]);
+    state.setConfiguredModels(
+      "groq/llama-3.3-70b, , mistral:codestral-latest ",
+    );
+    expect(state.getConfiguredModels()).toEqual([
+      "groq/llama-3.3-70b",
+      "mistral:codestral-latest",
+    ]);
+    state.setConfiguredModels("   ,  ");
+    expect(state.getConfiguredModels()).toEqual([]);
+    state.setConfiguredModels("deepseek/deepseek-chat");
+    expect(state.getConfiguredModels()).toEqual(["deepseek/deepseek-chat"]);
+    state.removeConfiguredModels();
+    expect(state.getConfiguredModels()).toEqual([]);
   });
 });

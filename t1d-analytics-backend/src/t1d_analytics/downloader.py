@@ -10,13 +10,25 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 from urllib.parse import unquote, urlparse
 
 import requests
+from typing_extensions import TypedDict
 
+from t1d_analytics.errors import DownloadError
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.models import DatasetInfo
+
+
+class DownloadSummaryDict(TypedDict):
+    """Summary metrics returned by parallel dataset downloading."""
+
+    total: int
+    succeeded: int
+    failed: int
+    errors: list[dict[str, str]]
+
 
 _file_locks: dict[str, threading.Lock] = {}
 _file_locks_guard = threading.Lock()
@@ -192,7 +204,7 @@ def _verify_and_finalize_download(
         digest = hasher.hexdigest()
         if digest.lower() != expected_sha256.lower():
             tmp_path.unlink(missing_ok=True)
-            raise ValueError(
+            raise DownloadError(
                 f"SHA-256 mismatch for {filename}: expected {expected_sha256}, got {digest}"
             )
 
@@ -506,7 +518,7 @@ def process_datasets(
     cookies: Optional[dict[str, str]] = None,
     page_url: Optional[str] = None,
     token_refresh_callback: Optional[Callable[[], str]] = None,
-) -> dict[str, Any]:
+) -> DownloadSummaryDict:
     """
     Process and download all given datasets in parallel without halting on single file failures.
 
@@ -524,7 +536,7 @@ def process_datasets(
 
     Returns:
     -------
-        dict[str, Any]: Metrics containing total, succeeded, failed counts, and error list.
+        DownloadSummaryDict: Metrics containing total, succeeded, failed counts, and error list.
 
     """
     _ = get_translator()

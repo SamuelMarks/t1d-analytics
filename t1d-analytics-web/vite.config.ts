@@ -7,6 +7,10 @@
 import { defineConfig } from "vite";
 import istanbul from "vite-plugin-istanbul";
 
+const apiProxyTarget =
+  process.env.VITE_API_PROXY_TARGET ||
+  `http://127.0.0.1:${process.env.T1D_API_PORT || "8000"}`;
+
 /**
  * Vite configuration for development, preview server proxying, and Istanbul instrumentation.
  */
@@ -17,16 +21,16 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8000",
+        target: apiProxyTarget,
         changeOrigin: true,
       },
     },
   },
   preview: {
-    port: 3000,
+    port: Number(process.env.T1D_WEB_PORT || 3000),
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8000",
+        target: apiProxyTarget,
         changeOrigin: true,
       },
     },

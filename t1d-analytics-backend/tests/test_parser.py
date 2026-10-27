@@ -368,8 +368,8 @@ def test_parse_datasets_with_postback() -> None:
     assert gen_datasets[1].postback_target is None
 
 
-def test_extract_device_info_non_tag() -> None:
-    """Test extracting device info with non-tag children."""
+def test_parse_datasets_ignores_non_tag_table_children() -> None:
+    """Test parse_datasets ignores non-Tag NavigableString children inside table rows."""
     from bs4 import BeautifulSoup, NavigableString
 
     from t1d_analytics.parser import parse_datasets
@@ -379,14 +379,13 @@ def test_extract_device_info_non_tag() -> None:
         <tr>
             <th>Protocol</th>
         </tr>
-        <tr>just some text inside tr without wrapping in td? no, tr containing a NavigableString child</tr>
+        <tr>just some text inside tr without wrapping in td</tr>
     </table>
     """
     soup = BeautifulSoup(html, "html.parser")
-    # inject a navigable string directly into the tr list
     table = soup.find("table")
     assert table is not None
     table.append(NavigableString("some text"))
 
-    res = parse_datasets(html)
+    res = parse_datasets(str(soup))
     assert res == []

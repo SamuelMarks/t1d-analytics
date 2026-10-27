@@ -1,8 +1,38 @@
 #!/bin/sh
+# # test.sh
+#
+# ## Overview
+# End-to-end cloud deployment, health verification, and test execution harness
+# for T1D Analytics using LibScript.
+#
+# ## Usage
+# ./test.sh [--unit-mock|--mock-cloud|--dry-run] [--live-cloud] [--local|-l] [--run-remote-tests|-t] [args]
 
-set -e
+set -feu
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ "${SCRIPT_NAME-}" ]; then
+    THIS_FILE="${SCRIPT_NAME}"
+elif [ "${BASH_SOURCE-}" ]; then
+    THIS_FILE="${BASH_SOURCE}"
+elif [ "${ZSH_VERSION-}" ]; then
+    # libscript-allow-eval
+    # shellcheck disable=SC2296
+    THIS_FILE="${(%):-%x}"
+else
+    THIS_FILE="${0}"
+fi
+
+case "${STACK+x}" in
+    *':'"${THIS_FILE}"':'*)
+        printf '[STOP]     processing "%s"\n' "${THIS_FILE}" >&2
+        if (return 0 2>/dev/null); then return; else exit 0; fi ;;
+    *) printf '[CONTINUE] processing "%s"\n' "${THIS_FILE}" >&2 ;;
+esac
+export STACK="${STACK:-}${THIS_FILE}"':'
+SCRIPT_DIR=$(cd -- "$(dirname -- "${THIS_FILE}")" && pwd)
+: "${LIBSCRIPT_ROOT_DIR:=$(d="$SCRIPT_DIR"; while [ ! -f "$d/libscript.sh" ]; do n="${d%/*}"; [ -z "$n" ] && n="/"; [ "$d" = "$n" ] && break; d="$n"; done; if [ -f "$d/libscript.sh" ]; then printf '%s\n' "$d"; elif [ -d "$HOME/repos/libscript" ]; then printf '%s\n' "$HOME/repos/libscript"; else printf '%s\n' "$d"; fi)}"
+
+REPO_DIR="$SCRIPT_DIR"
 
 # Load defaults from .env and .env.secrets without overriding caller-supplied environment variables
 for env_file in "$REPO_DIR/.env" "$REPO_DIR/.env.secrets"; do
@@ -14,7 +44,7 @@ for env_file in "$REPO_DIR/.env" "$REPO_DIR/.env.secrets"; do
             esac
             val="${val#$DQ}"
             val="${val%$DQ}"
-            eval "cur=\${$key:-}"
+            eval "cur=\${$key:-}" # libscript-allow-eval
             if [ -z "$cur" ]; then
                 export "$key=$val"
             fi
@@ -23,7 +53,7 @@ for env_file in "$REPO_DIR/.env" "$REPO_DIR/.env.secrets"; do
 done
 
 # Configuration with configurable defaults
-CLOUD_PROVIDER="${CLOUD_PROVIDER:-$DEFAULT_CLOUD_PROVIDER}"
+CLOUD_PROVIDER="${CLOUD_PROVIDER:-${DEFAULT_CLOUD_PROVIDER:-azure}}"
 LIBSCRIPT_ROOT_DIR="${LIBSCRIPT_ROOT_DIR:-$HOME/repos/libscript}"
 LIBSCRIPT_CLI="${LIBSCRIPT_CLI:-$LIBSCRIPT_ROOT_DIR/libscript.sh}"
 NODE_NAME="${NODE_NAME:-test-t1d-analytics-node}"
@@ -58,7 +88,7 @@ for arg in "$@"; do
             echo "  --local, -l                Run tests locally using installed pytest/npm."
             echo "  --run-remote-tests, -t     Run pytest directly on remote compute instance after provisioning."
             echo "Environment variables:"
-            echo "  CLOUD_PROVIDER     Cloud provider ($DEFAULT_CLOUD_PROVIDER, gcp, aws). Default: $DEFAULT_CLOUD_PROVIDER"
+            echo "  CLOUD_PROVIDER     Cloud provider (${DEFAULT_CLOUD_PROVIDER:-azure}, gcp, aws). Default: ${DEFAULT_CLOUD_PROVIDER:-azure}"
             echo "  LIBSCRIPT_ROOT_DIR Path to Libscript repo. Default: \$HOME/repos/libscript"
             echo "  NODE_NAME          Name of compute node. Default: $NODE_NAME"
             echo "  RG_NAME            Resource group or project name. Default: $RG_NAME"
@@ -75,6 +105,8 @@ if [ "$MOCK_CLOUD" -eq 1 ]; then
     echo "Simulating provisioning on $CLOUD_PROVIDER ($NODE_NAME)..."
     echo "=========================================================="
     MOCK_CLEANED_UP=0
+    # ## mock_cleanup
+    # Simulates cloud resource teardown on exit or signal in mock mode.
     mock_cleanup() {
         if [ "$MOCK_CLEANED_UP" -eq 0 ]; then
             MOCK_CLEANED_UP=1
@@ -116,6 +148,8 @@ if [ "$RUN_LOCAL" -eq 1 ] || [ ! -x "$LIBSCRIPT_CLI" ]; then
 fi
 
 CLEANED_UP=0
+# ## cleanup
+# Deprovisions cloud resources on exit, interrupt, or termination.
 cleanup() {
     if [ "$CLEANED_UP" -eq 0 ]; then
         CLEANED_UP=1
@@ -127,20 +161,22 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+# ## check_cloud_credentials
+# Validates cloud CLI installation and authentication status for the active provider.
 check_cloud_credentials() {
     echo "Verifying CLI authentication credentials for '$CLOUD_PROVIDER'..."
     case "$CLOUD_PROVIDER" in
-        "$PRIMARY_CLOUD_PROVIDER")
-            if command -v "$PRIMARY_CLOUD_CLI_NAME" >/dev/null 2>&1; then
+        "${PRIMARY_CLOUD_PROVIDER:-}")
+            if [ -n "${PRIMARY_CLOUD_CLI_NAME:-}" ] && command -v "$PRIMARY_CLOUD_CLI_NAME" >/dev/null 2>&1; then
                 if ! "$PRIMARY_CLOUD_CLI_NAME" account show >/dev/null 2>&1; then
-                    echo "WARNING: $PRIMARY_CLOUD_DISPLAY_NAME CLI not authenticated. Run '$PRIMARY_CLOUD_LOGIN_CMD'." >&2
+                    echo "WARNING: ${PRIMARY_CLOUD_DISPLAY_NAME:-Cloud} CLI not authenticated. Run '${PRIMARY_CLOUD_LOGIN_CMD:-}'." >&2
                     if [ "$LIVE_CLOUD" -eq 1 ]; then
-                        echo "ERROR: --live-cloud requires authenticated $PRIMARY_CLOUD_DISPLAY_NAME credentials." >&2
+                        echo "ERROR: --live-cloud requires authenticated ${PRIMARY_CLOUD_DISPLAY_NAME:-Cloud} credentials." >&2
                         exit 1
                     fi
                 fi
             elif [ "$LIVE_CLOUD" -eq 1 ]; then
-                echo "ERROR: $PRIMARY_CLOUD_DISPLAY_NAME CLI ('$PRIMARY_CLOUD_CLI_NAME') not found." >&2
+                echo "ERROR: ${PRIMARY_CLOUD_DISPLAY_NAME:-Cloud} CLI ('${PRIMARY_CLOUD_CLI_NAME:-}') not found." >&2
                 exit 1
             fi
             ;;
@@ -187,6 +223,8 @@ if ! "$LIBSCRIPT_CLI" provision "$CLOUD_PROVIDER" "$NODE_NAME" "$RG_NAME" "$LOCA
     exit 1
 fi
 
+# ## remote_exec
+# Executes a shell command on the provisioned remote compute node via LibScript.
 remote_exec() {
     cmd="$1"
     if [ -f "$LIBSCRIPT_ROOT_DIR/_lib/cloud-providers/$CLOUD_PROVIDER/cli.sh" ]; then
@@ -206,7 +244,7 @@ fi
 
 # 2. Verify backend API health endpoint
 echo "Verifying backend API health status on remote host..."
-if ! remote_exec "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == "ready" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{"query": "SHOW TABLES"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"; then
+if ! remote_exec "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"; then
     echo "WARNING: Backend API health endpoint check failed. Gathering diagnostic logs..."
     remote_exec "journalctl -u t1d-api -n 30 --no-pager 2>/dev/null || docker logs --tail 30 t1d-backend 2>/dev/null || true"
     exit 1

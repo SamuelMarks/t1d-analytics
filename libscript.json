@@ -1,12 +1,23 @@
 {
   "$schema": "https://raw.githubusercontent.com/SamuelMarks/libscript/master/libscript.schema.json",
   "name": "t1d-analytics",
+  "aliases": [
+    "t1d",
+    "t1d_analytics",
+    "t1d-analytics"
+  ],
   "version": "0.1.0",
   "domain": "t1d-analytics.healthplatform.io",
-  "env_files": [".env", ".env.secrets", ".env.libscript"],
+  "env_files": [
+    ".env",
+    ".env.secrets",
+    ".env.libscript"
+  ],
   "deps": {
     "python": "3.12",
     "nodejs": "20.x",
+    "postgres": "18",
+    "valkey": "latest",
     "duckdb": "latest",
     "nginx": "latest",
     "ollama": "latest",
@@ -21,6 +32,10 @@
       {
         "name": "nodejs",
         "version": "20.x"
+      },
+      {
+        "name": "postgres",
+        "version": "18"
       },
       {
         "name": "duckdb",
@@ -43,6 +58,10 @@
     ],
     "required": {
       "databases": [
+        {
+          "name": "postgres",
+          "version": "18"
+        },
         {
           "name": "duckdb",
           "version": "latest"
@@ -80,41 +99,108 @@
           "version": "latest"
         }
       ],
-      "capabilities": ["systemd"]
+      "capabilities": [
+        "${INIT_SYSTEM}"
+      ]
     }
   },
   "databases": [
     {
+      "engine": "postgres",
+      "name": "t1d_analytics_db",
+      "legacy_names": [
+        "t1d_analytics",
+        "t1d_db"
+      ],
+      "user": "postgres",
+      "password": "postgres",
+      "password_env": "POSTGRES_PASSWORD",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "url_env": "T1D_POSTGRES_URL",
+      "db_env": "T1D_POSTGRES_DB",
+      "min_tables": 2,
+      "required_tables": [
+        "chat_sessions",
+        "t1d_cohort_metadata"
+      ],
+      "min_rows": {
+        "chat_sessions": 1,
+        "t1d_cohort_metadata": 4
+      },
+      "seed_command": "PGPASSWORD=\"postgres\" psql -h \"${POSTGRES_SERVER:-127.0.0.1}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USER:-postgres}\" -d t1d_analytics_db -c \"CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Session', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO chat_sessions (id, title) VALUES ('default-t1d-session', 'T1D Clinical Analytics Baseline Session') ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW(); CREATE TABLE IF NOT EXISTS t1d_cohort_metadata (table_name TEXT PRIMARY KEY, min_rows INTEGER NOT NULL, description TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO t1d_cohort_metadata (table_name, min_rows, description) VALUES ('patients', 100, 'T1D clinical trial baseline cohort'), ('cgm_readings', 200, 'Continuous glucose monitoring traces'), ('hba1c_labs', 150, 'Longitudinal HbA1c and C-Peptide labs'), ('dka_adverse_events', 25, 'Diabetic ketoacidosis and severe hypoglycemia events') ON CONFLICT (table_name) DO UPDATE SET min_rows = EXCLUDED.min_rows, description = EXCLUDED.description, updated_at = NOW();\""
+    },
+    {
       "engine": "duckdb",
       "name": "t1d_analytics",
-      "path": "${T1D_DB_PATH}",
+      "path": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+      "fallback_paths": [
+        "/mnt/data/t1d_analytics.duckdb",
+        "data/t1d_analytics.duckdb"
+      ],
       "url_env": "T1D_DB_URL",
-      "min_tables": 1,
-      "health_command": ".venv/bin/t1d-analytics doctor --db ${T1D_DB_PATH}"
+      "min_tables": 4,
+      "required_tables": [
+        "patients",
+        "cgm_readings",
+        "hba1c_labs",
+        "dka_adverse_events"
+      ],
+      "min_rows": {
+        "patients": 100,
+        "cgm_readings": 200,
+        "hba1c_labs": 150,
+        "dka_adverse_events": 25
+      },
+      "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --sessions-db \"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"",
+      "health_command": "if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
+    },
+    {
+      "engine": "duckdb",
+      "name": "t1d_sessions",
+      "path": "${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}",
+      "path_env": "T1D_SESSIONS_DB_PATH",
+      "url_env": "T1D_SESSIONS_DB_URL",
+      "fallback_paths": [
+        "/mnt/data/t1d_sessions.duckdb",
+        "data/sessions.duckdb"
+      ]
+    },
+    {
+      "engine": "valkey",
+      "name": "t1d_analytics_cache",
+      "host": "127.0.0.1",
+      "port": 6379,
+      "db_index": 1,
+      "url_env": "T1D_VALKEY_URL"
     }
   ],
   "frontends": {
     "web": {
       "source_dir": "t1d-analytics-web",
       "output_dir": "dist",
-      "build_command": "set -a && [ -f ../.env ] && . ../.env && [ -f ../.env.secrets ] && . ../.env.secrets && set +a && export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && npm run build"
+      "build_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && npm run build"
     }
   },
   "ingress": {
     "provider": "nginx",
     "domain": "t1d-analytics.healthplatform.io",
+    "expect_html": "<html",
     "tls": "letsencrypt",
     "port": 3000,
-    "listen": [80, 443],
+    "listen": [
+      80,
+      443
+    ],
     "routes": {
       "/api": {
-        "proxy": "http://127.0.0.1:8000"
+        "proxy": "http://127.0.0.1:8001"
       },
       "/docs": {
-        "proxy": "http://127.0.0.1:8000"
+        "proxy": "http://127.0.0.1:8001"
       },
       "/openapi.json": {
-        "proxy": "http://127.0.0.1:8000"
+        "proxy": "http://127.0.0.1:8001"
       },
       "/": {
         "static": "./t1d-analytics-web/dist",
@@ -125,62 +211,46 @@
   "hooks": {
     "pre_install": [
       {
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo mkdir -p \"$DATA_DISK_MOUNT\" \"$TMP_DATA_DIR\"",
+        "name": "prepare-t1d-mount-dirs",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo mkdir -p \"${DATA_DISK_MOUNT:-/mnt/data}\" \"${TMP_DATA_DIR:-/tmp/data}\"",
+        "cmd_windows": "if not exist data mkdir data",
         "condition": "unix",
         "ignore_errors": true
       },
       {
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && if ! (mountpoint -q \"$DATA_DISK_MOUNT\" 2>/dev/null || grep -qs \" $DATA_DISK_MOUNT \" /proc/mounts 2>/dev/null); then if [ -b \"$PRIMARY_BLOCK_DEVICE\" ]; then sudo mount \"$PRIMARY_BLOCK_DEVICE\" \"$DATA_DISK_MOUNT\" 2>/dev/null || true; elif [ -b \"$SECONDARY_BLOCK_DEVICE\" ]; then sudo mount \"$SECONDARY_BLOCK_DEVICE\" \"$DATA_DISK_MOUNT\" 2>/dev/null || true; fi; fi",
+        "name": "ensure-t1d-block-device-mounted",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; if ! (mountpoint -q \"${DATA_DISK_MOUNT:-/mnt/data}\" 2>/dev/null || grep -qs \" ${DATA_DISK_MOUNT:-/mnt/data} \" /proc/mounts 2>/dev/null); then if [ -b \"$PRIMARY_BLOCK_DEVICE\" ]; then sudo mount \"$PRIMARY_BLOCK_DEVICE\" \"${DATA_DISK_MOUNT:-/mnt/data}\" 2>/dev/null || true; elif [ -b \"$SECONDARY_BLOCK_DEVICE\" ]; then sudo mount \"$SECONDARY_BLOCK_DEVICE\" \"${DATA_DISK_MOUNT:-/mnt/data}\" 2>/dev/null || true; fi; fi",
+        "cmd_windows": "rem Block device mounts managed by Windows Disk Management",
         "condition": "unix",
         "ignore_errors": true
       }
     ],
     "install": [
       {
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo mkdir -p \"$DATA_DISK_MOUNT\" \"$TMP_DATA_DIR\"",
+        "name": "prepare-t1d-install-dirs",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo mkdir -p \"${DATA_DISK_MOUNT:-/mnt/data}\" \"${TMP_DATA_DIR:-/tmp/data}\"",
+        "cmd_windows": "if not exist data mkdir data",
         "condition": "unix",
         "ignore_errors": true
       },
       {
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && if ! (mountpoint -q \"$DATA_DISK_MOUNT\" 2>/dev/null || grep -qs \" $DATA_DISK_MOUNT \" /proc/mounts 2>/dev/null); then if [ -b \"$PRIMARY_BLOCK_DEVICE\" ]; then sudo mount \"$PRIMARY_BLOCK_DEVICE\" \"$DATA_DISK_MOUNT\" 2>/dev/null || true; elif [ -b \"$SECONDARY_BLOCK_DEVICE\" ]; then sudo mount \"$SECONDARY_BLOCK_DEVICE\" \"$DATA_DISK_MOUNT\" 2>/dev/null || true; fi; fi",
-        "condition": "unix",
-        "ignore_errors": true
-      },
-      {
-        "command": "set -a && [ -f ../.env ] && . ../.env && [ -f ../.env.secrets ] && . ../.env.secrets && set +a && export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && uv sync --python 3.12",
+        "name": "install-t1d-backend-deps",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export HOME=\"${REMOTE_HOME:-/home/${REMOTE_USER}}\" UV_PYTHON_INSTALL_DIR=\"${REMOTE_HOME:-/home/${REMOTE_USER}}/.local/share/uv/python\" UV_CACHE_DIR=\"${REMOTE_HOME:-/home/${REMOTE_USER}}/.cache/uv\" PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && _lock_hash=$(cksum uv.lock 2>/dev/null | awk '{print $1\"_\"$2}' || printf 'none') && if [ \"${FORCE_REINSTALL:-0}\" != \"1\" ] && [ -x .venv/bin/t1d-analytics ] && [ -x .venv/bin/uvicorn ] && [ -f .venv/.libscript_lock_hash ] && [ \"$(cat .venv/.libscript_lock_hash 2>/dev/null)\" = \"$_lock_hash\" ]; then printf '[REUSE] t1d-analytics-backend .venv is up-to-date.\\n'; else uv sync --python 3.12 && printf '%s\\n' \"$_lock_hash\" > .venv/.libscript_lock_hash; fi",
+        "cmd_windows": "uv sync --python 3.12",
         "working_dir": "t1d-analytics-backend"
       },
       {
-        "command": "set -a && [ -f ../.env ] && . ../.env && [ -f ../.env.secrets ] && . ../.env.secrets && set +a && export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && npm install",
+        "name": "install-t1d-frontend-deps",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && _pkg_hash=$(cksum package-lock.json 2>/dev/null | awk '{print $1\"_\"$2}' || printf 'none') && if [ \"${FORCE_REINSTALL:-0}\" != \"1\" ] && [ -d node_modules/vite ] && [ -f node_modules/.libscript_pkg_hash ] && [ \"$(cat node_modules/.libscript_pkg_hash 2>/dev/null)\" = \"$_pkg_hash\" ]; then printf '[REUSE] t1d-analytics-web node_modules is up-to-date.\\n'; else npm install && printf '%s\\n' \"$_pkg_hash\" > node_modules/.libscript_pkg_hash; fi",
+        "cmd_windows": "npm install",
         "working_dir": "t1d-analytics-web"
       }
     ],
     "post_install": [
       {
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo mkdir -p \"$DATA_DISK_MOUNT\" \"$TMP_DATA_DIR\"",
-        "condition": "unix",
-        "ignore_errors": true
-      },
-      {
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && if ! (mountpoint -q \"$DATA_DISK_MOUNT\" 2>/dev/null || grep -qs \" $DATA_DISK_MOUNT \" /proc/mounts 2>/dev/null); then if [ -b \"$PRIMARY_BLOCK_DEVICE\" ]; then sudo mount \"$PRIMARY_BLOCK_DEVICE\" \"$DATA_DISK_MOUNT\" 2>/dev/null || true; elif [ -b \"$SECONDARY_BLOCK_DEVICE\" ]; then sudo mount \"$SECONDARY_BLOCK_DEVICE\" \"$DATA_DISK_MOUNT\" 2>/dev/null || true; fi; fi",
-        "condition": "unix",
-        "ignore_errors": true
-      },
-      {
-        "command": "set -a && [ -f ../.env ] && . ../.env && [ -f ../.env.secrets ] && . ../.env.secrets && set +a && export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && uv sync --python 3.12",
-        "working_dir": "t1d-analytics-backend"
-      },
-      {
-        "name": "ingest-t1d-duckdb",
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && .venv/bin/t1d-analytics seed --data-dir data --db \"$T1D_DB_PATH\" && .venv/bin/t1d-analytics load --data-dir data --db \"$T1D_DB_PATH\" && .venv/bin/t1d-analytics doctor --db \"$T1D_DB_PATH\"",
-        "cmd_windows": ".venv\\Scripts\\t1d-analytics.exe seed --data-dir data --db data\\t1d_analytics.duckdb && .venv\\Scripts\\t1d-analytics.exe load --data-dir data --db data\\t1d_analytics.duckdb && .venv\\Scripts\\t1d-analytics.exe doctor --db data\\t1d_analytics.duckdb"
-      },
-      {
-        "command": "set -a && [ -f ../.env ] && . ../.env && [ -f ../.env.secrets ] && . ../.env.secrets && set +a && export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && npm install && npm run build",
-        "working_dir": "t1d-analytics-web"
-      },
-      {
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo chown -R \"$REMOTE_USER:$REMOTE_GROUP\" \"$REMOTE_APP_DIR\" || true",
+        "name": "fix-t1d-workspace-ownership",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo chown -R \"${REMOTE_USER:-ubuntu}:${REMOTE_GROUP:-ubuntu}\" \"${DATA_DISK_MOUNT:-/mnt/data}\" . || true",
+        "cmd_windows": "rem Workspace ownership managed by Windows ACLs",
         "condition": "unix",
         "ignore_errors": true
       }
@@ -188,64 +258,103 @@
     "db_migrate": [
       {
         "name": "prepare-t1d-data-dir",
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo mkdir -p \"$DATA_DISK_MOUNT\" && sudo chown -R $(whoami):$(whoami) \"$DATA_DISK_MOUNT\"",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo mkdir -p \"${DATA_DISK_MOUNT:-/mnt/data}\" data && sudo chown -R $(whoami):$(whoami) \"${DATA_DISK_MOUNT:-/mnt/data}\" data",
+        "cmd_windows": "if not exist data mkdir data",
         "condition": "unix"
       },
       {
-        "name": "seed-and-load-t1d-duckdb",
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && .venv/bin/t1d-analytics seed --data-dir data --db \"$T1D_DB_PATH\" && .venv/bin/t1d-analytics load --data-dir data --db \"$T1D_DB_PATH\" && .venv/bin/t1d-analytics doctor --db \"$T1D_DB_PATH\"",
-        "cmd_windows": ".venv\\Scripts\\t1d-analytics.exe load --data-dir data --db data\\t1d_analytics.duckdb && .venv\\Scripts\\t1d-analytics.exe doctor --db data\\t1d_analytics.duckdb"
+        "name": "upsert-and-confirm-t1d-duckdb",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\"; _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"; _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\"; _tcnt=0; if [ -f \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); fi; if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then printf '[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into \"%s\"...\\n' \"$_db\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; fi; if command -v duckdb >/dev/null 2>&1 && [ -f \"$_db\" ]; then _tcnt=$(duckdb \"$_db\" -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); _sz=$(du -sh \"$_db\" 2>/dev/null | awk '{print $1}'); printf '[UPSERT:DUCKDB] [CONFIRM] T1D DuckDB \"%s\" verified (%s, %s tables); sessions DB \"%s\" verified.\\n' \"$_db\" \"${_sz:-0B}\" \"${_tcnt:-0}\" \"$_sdb\"; fi",
+        "cmd_windows": "echo [UPSERT:DUCKDB] Verifying and upserting T1D DuckDB datasets... && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe doctor --db \"%T1D_DB_PATH%\" --min-tables 4 --min-rows 400 || (t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe seed --data-dir data --db \"%T1D_DB_PATH%\" --sessions-db \"%T1D_SESSIONS_DB_PATH%\" && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe load --data-dir data --db \"%T1D_DB_PATH%\")"
       },
       {
         "name": "ensure-duckdb-permissions",
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo chown -R \"$REMOTE_USER:$REMOTE_GROUP\" \"$DATA_DISK_MOUNT\" data 2>/dev/null || true",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo chown -R \"${REMOTE_USER:-ubuntu}:${REMOTE_GROUP:-ubuntu}\" \"${DATA_DISK_MOUNT:-/mnt/data}\" data 2>/dev/null || true",
+        "cmd_windows": "rem DuckDB permissions managed by Windows ACLs",
+        "condition": "unix"
+      }
+    ],
+    "pre_start": [
+      {
+        "name": "normalize-t1d-data-ownership",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo chown -R \"${REMOTE_USER:-ubuntu}:${REMOTE_GROUP:-ubuntu}\" \"${DATA_DISK_MOUNT:-/mnt/data}\" \"${TMP_DATA_DIR:-/tmp/data}\" data 2>/dev/null || true",
+        "cmd_windows": "rem Data ownership managed by Windows ACLs",
         "condition": "unix"
       }
     ],
     "health": [
       {
         "name": "doctor-check",
-        "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && .venv/bin/t1d-analytics doctor --db \"$T1D_DB_PATH\""
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
       },
       {
         "name": "api-status-check",
-        "command": "curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1'"
+        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '.status == \"ready\" and .tables_count >= 4 and .total_rows > 0'"
       }
     ],
     "build": [
       {
-        "command": "set -a && [ -f ../.env ] && . ../.env && [ -f ../.env.secrets ] && . ../.env.secrets && set +a && export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && npm run build",
+        "name": "build-vite-web",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && if [ \"${FORCE_REBUILD:-0}\" != \"1\" ] && [ -f dist/index.html ]; then _cnt=$(find dist -type f 2>/dev/null | wc -l | tr -d ' '); _sz=$(du -sh dist 2>/dev/null | awk '{print $1}'); printf '[BUILD] [REUSE] Vite build (vite build) output verified at dist/index.html (%s files, %s; pass --force-rebuild to re-run vite build).\\n' \"${_cnt:-0}\" \"${_sz:-0B}\"; else printf '[BUILD] [vite build] Building React/Vite frontend (t1d-analytics-web) -> dist/...\\n' && npm run build; fi",
+        "cmd_windows": "if not \"%FORCE_REBUILD%\"==\"1\" if exist \"dist\\index.html\" (echo [BUILD] [REUSE] Vite build ^(vite build^) output verified at dist\\index.html ^(pass --force-rebuild to re-run vite build^).) else (echo [BUILD] [vite build] Building React/Vite frontend ^(t1d-analytics-web^) -^> dist\\... && npm run build)",
         "working_dir": "t1d-analytics-web"
       }
     ]
   },
   "services": {
     "t1d-api": {
-      "command": "${UV_BIN} run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port 8000",
+      "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.local/bin:/root/.local/bin:$PATH\" && uv run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port ${T1D_API_PORT:-8001}",
       "working_dir": "t1d-analytics-backend",
-      "port": 8000,
-      "env_files": [".env", ".env.secrets", ".env.libscript"],
+      "user": "${SERVICE_USER:-ubuntu}",
+      "port": 8001,
+      "env_files": [
+        ".env",
+        ".env.secrets",
+        ".env.libscript"
+      ],
       "env": {
-        "T1D_DB_PATH": "${T1D_DB_PATH}",
-        "T1D_DATA_DIR": "${T1D_DATA_DIR}",
-        "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH}",
-        "OLLAMA_HOST": "${OLLAMA_HOST}"
+        "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+        "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics-test/data}",
+        "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}",
+        "T1D_POSTGRES_URL": "${T1D_POSTGRES_URL:-postgresql://postgres:postgres@127.0.0.1:5432/t1d_analytics_db}",
+        "POSTGRES_SERVER": "127.0.0.1",
+        "POSTGRES_USER": "postgres",
+        "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-postgres}",
+        "POSTGRES_DB": "t1d_analytics_db",
+        "POSTGRES_PORT": "5432",
+        "OLLAMA_HOST": "${OLLAMA_HOST:-http://127.0.0.1:11434}",
+        "PATH": "${SERVICE_PATH}"
       },
       "health_check": {
-        "url": "http://127.0.0.1:8000/api/health",
+        "url": "http://127.0.0.1:8001/api/health",
         "expect_status": 200,
-        "expect_json": ".database.status == \"healthy\" and (.database.details.table_count // 0) >= 1 and (.database.details.total_rows // 0) > 0"
+        "retries": 15,
+        "interval": 2,
+        "timeout": 5,
+        "expect_json": ".database.status == \"healthy\" and (.database.details.table_count // 0) >= 4 and (.database.details.total_rows // 0) > 0 and .sessions_database_healthy == true"
       }
     },
     "t1d-web": {
-      "command": "${NPX_BIN} vite preview --port 3000 --host",
+      "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
       "working_dir": "t1d-analytics-web",
+      "user": "${SERVICE_USER:-ubuntu}",
       "port": 3000,
-      "env_files": [".env", ".env.secrets", ".env.libscript"],
+      "env_files": [
+        ".env",
+        ".env.secrets",
+        ".env.libscript"
+      ],
       "env": {
         "NODE_ENV": "production",
-        "VOLTA_HOME": "${VOLTA_HOME}",
+        "VOLTA_HOME": "${VOLTA_HOME:-/home/${REMOTE_USER}/.volta}",
         "PATH": "${SERVICE_PATH}"
+      },
+      "health_check": {
+        "url": "http://127.0.0.1:3000",
+        "expect_status": 200,
+        "retries": 15,
+        "interval": 2,
+        "timeout": 5
       }
     }
   },
@@ -257,68 +366,120 @@
     "scheduling": "spot",
     "slices": 1,
     "tensor_parallel_size": 1,
-    "etl_command": "t1d-analytics generate-training-data --db ${TMP_DATA_DIR}/t1d_analytics.duckdb --num-pairs 100 --model gemma4",
-    "train_command": "gemma-4-sql sft --model google/gemma-4 --dataset ${TMP_DATA_DIR}/t1d_analytics.duckdb --backend maxtext",
-    "infer_command": "t1d-analytics query --db ${TMP_DATA_DIR}/t1d_analytics.duckdb --model gemma4"
+    "etl_command": "t1d-analytics generate-training-data --db ${TMP_DATA_DIR:-/tmp/data}/t1d_analytics.duckdb --num-pairs 100 --model gemma4",
+    "train_command": "gemma-4-sql sft --model google/gemma-4 --dataset ${TMP_DATA_DIR:-/tmp/data}/t1d_analytics.duckdb --backend maxtext",
+    "infer_command": "t1d-analytics query --db ${TMP_DATA_DIR:-/tmp/data}/t1d_analytics.duckdb --model gemma4"
   },
   "infrastructure": {
     "databases": [
       {
+        "engine": "postgres",
+        "name": "t1d_analytics_db",
+        "legacy_names": [
+          "t1d_analytics",
+          "t1d_db"
+        ],
+        "user": "postgres",
+        "password": "postgres",
+      "password_env": "POSTGRES_PASSWORD",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "url_env": "T1D_POSTGRES_URL",
+        "db_env": "T1D_POSTGRES_DB",
+        "min_tables": 2,
+        "required_tables": [
+          "chat_sessions",
+          "t1d_cohort_metadata"
+        ],
+        "min_rows": {
+          "chat_sessions": 1,
+          "t1d_cohort_metadata": 4
+        },
+        "seed_command": "PGPASSWORD=\"postgres\" psql -h \"${POSTGRES_SERVER:-127.0.0.1}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USER:-postgres}\" -d t1d_analytics_db -c \"CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Session', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO chat_sessions (id, title) VALUES ('default-t1d-session', 'T1D Clinical Analytics Baseline Session') ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW(); CREATE TABLE IF NOT EXISTS t1d_cohort_metadata (table_name TEXT PRIMARY KEY, min_rows INTEGER NOT NULL, description TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO t1d_cohort_metadata (table_name, min_rows, description) VALUES ('patients', 100, 'T1D clinical trial baseline cohort'), ('cgm_readings', 200, 'Continuous glucose monitoring traces'), ('hba1c_labs', 150, 'Longitudinal HbA1c and C-Peptide labs'), ('dka_adverse_events', 25, 'Diabetic ketoacidosis and severe hypoglycemia events') ON CONFLICT (table_name) DO UPDATE SET min_rows = EXCLUDED.min_rows, description = EXCLUDED.description, updated_at = NOW();\""
+      },
+      {
         "engine": "duckdb",
         "name": "t1d_analytics",
-        "path": "${T1D_DB_PATH}",
+        "path": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
         "url_env": "T1D_DB_URL",
-        "min_tables": 1,
-        "health_command": ".venv/bin/t1d-analytics doctor --db ${T1D_DB_PATH}"
+        "min_tables": 4,
+        "required_tables": [
+          "patients",
+          "cgm_readings",
+          "hba1c_labs",
+          "dka_adverse_events"
+        ],
+        "min_rows": {
+          "patients": 100,
+          "cgm_readings": 200,
+          "hba1c_labs": 150,
+          "dka_adverse_events": 25
+        },
+        "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --sessions-db \"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"",
+        "health_command": "if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
       }
     ],
     "services": {
       "t1d-api": {
-        "command": "${UV_BIN} run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port 8000",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.local/bin:/root/.local/bin:$PATH\" && uv run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port ${T1D_API_PORT:-8001}",
         "working_dir": "t1d-analytics-backend",
-        "port": 8000,
-        "env_files": [".env", ".env.secrets", ".env.libscript"],
+        "user": "${SERVICE_USER:-ubuntu}",
+        "port": 8001,
+        "env_files": [
+          ".env",
+          ".env.secrets",
+          ".env.libscript"
+        ],
         "env": {
-          "T1D_DB_PATH": "${T1D_DB_PATH}",
-          "T1D_DATA_DIR": "${T1D_DATA_DIR}",
-          "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH}",
-          "OLLAMA_HOST": "${OLLAMA_HOST}"
+          "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+          "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics-test/data}",
+          "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}",
+          "T1D_POSTGRES_URL": "${T1D_POSTGRES_URL:-postgresql://postgres:postgres@127.0.0.1:5432/t1d_analytics_db}",
+          "POSTGRES_SERVER": "127.0.0.1",
+          "POSTGRES_USER": "postgres",
+          "POSTGRES_PASSWORD": "${POSTGRES_PASSWORD:-postgres}",
+          "POSTGRES_DB": "t1d_analytics_db",
+          "POSTGRES_PORT": "5432",
+          "OLLAMA_HOST": "${OLLAMA_HOST:-http://127.0.0.1:11434}",
+          "PATH": "${SERVICE_PATH}"
         },
         "health_check": {
-          "url": "http://127.0.0.1:8000/api/health",
+          "url": "http://127.0.0.1:8001/api/health",
           "expect_status": 200,
-          "expect_json": ".database.status == \"healthy\" and (.database.details.table_count // 0) >= 1 and (.database.details.total_rows // 0) > 0"
+          "retries": 15,
+          "interval": 2,
+          "timeout": 5,
+          "expect_json": ".database.status == \"healthy\" and (.database.details.table_count // 0) >= 4 and (.database.details.total_rows // 0) > 0 and .sessions_database_healthy == true"
+        }
+      },
+      "t1d-web": {
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
+        "working_dir": "t1d-analytics-web",
+        "user": "${SERVICE_USER:-ubuntu}",
+        "port": 3000,
+        "env_files": [
+          ".env",
+          ".env.secrets",
+          ".env.libscript"
+        ],
+        "env": {
+          "NODE_ENV": "production",
+          "VOLTA_HOME": "${VOLTA_HOME:-/home/${REMOTE_USER}/.volta}",
+          "PATH": "${SERVICE_PATH}"
+        },
+        "health_check": {
+          "url": "http://127.0.0.1:3000",
+          "expect_status": 200,
+          "retries": 15,
+          "interval": 2,
+          "timeout": 5
         }
       }
     },
     "hooks": {
-      "db_migrate": [
-        {
-          "name": "prepare-t1d-data-dir",
-          "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo mkdir -p \"$DATA_DISK_MOUNT\" && sudo chown -R $(whoami):$(whoami) \"$DATA_DISK_MOUNT\"",
-          "condition": "unix"
-        },
-        {
-          "name": "seed-and-load-t1d-duckdb",
-          "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && .venv/bin/t1d-analytics seed --data-dir data --db \"$T1D_DB_PATH\" && .venv/bin/t1d-analytics load --data-dir data --db \"$T1D_DB_PATH\" && .venv/bin/t1d-analytics doctor --db \"$T1D_DB_PATH\"",
-          "cmd_windows": ".venv\\Scripts\\t1d-analytics.exe load --data-dir data --db data\\t1d_analytics.duckdb && .venv\\Scripts\\t1d-analytics.exe doctor --db data\\t1d_analytics.duckdb"
-        },
-        {
-          "name": "ensure-duckdb-permissions",
-          "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && sudo chown -R \"$REMOTE_USER:$REMOTE_GROUP\" \"$DATA_DISK_MOUNT\" data 2>/dev/null || true",
-          "condition": "unix"
-        }
-      ],
-      "health": [
-        {
-          "name": "doctor-check",
-          "command": "set -a && [ -f .env ] && . ./.env && [ -f .env.secrets ] && . ./.env.secrets && set +a && .venv/bin/t1d-analytics doctor --db \"$T1D_DB_PATH\""
-        },
-        {
-          "name": "api-status-check",
-          "command": "curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1'"
-        }
-      ]
+      "db_migrate": [],
+      "pre_start": [],
+      "health": []
     },
     "node": {
       "size": "${NODE_SIZE}",
@@ -328,10 +489,26 @@
           "mount_path": "${DATA_DISK_MOUNT}",
           "name": "data-disk"
         }
+      ],
+      "capabilities": [
+        "${INIT_SYSTEM:-auto}"
       ]
     },
     "network": {
-      "ports": ["22", "80", "443", "3000", "8000"]
+      "ports": [
+        "22",
+        "80",
+        "443",
+        "3000",
+        "8000",
+        "8001"
+      ]
+    }
+  },
+  "init_system": "${INIT_SYSTEM:-auto}",
+  "service_overrides": {
+    "ollama": {
+      "OLLAMA_MODELS": "${DATA_MOUNT_DIR}/ollama_models"
     }
   }
 }

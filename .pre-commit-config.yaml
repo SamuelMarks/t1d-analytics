@@ -48,6 +48,6 @@ repos:
         pass_filenames: false
       - id: update-coverage-badges
         name: Update Coverage Badges
-        entry: bash -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics; else interrogate -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics; fi"
+        entry: bash -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; else interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; fi"
         language: system
         pass_filenames: false

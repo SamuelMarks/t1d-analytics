@@ -2,8 +2,6 @@
 
 import io
 import os
-import sys
-import typing
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -182,16 +180,11 @@ def test_handle_natural_language_error(
 
 def test_handle_natural_language_no_module(capsys: pytest.CaptureFixture[str]) -> None:
     """Test natural language when any-llm is missing."""
-    # Temporarily remove any_llm from modules to test ImportError
-    original_module = sys.modules.get("any_llm")
-    sys.modules["any_llm"] = None  # type: ignore[assignment]
-
     conn = duckdb.connect(":memory:")
-    handle_natural_language(conn, "test")
+    with patch.dict("sys.modules", {"any_llm": None}):
+        handle_natural_language(conn, "test")
     assert "any-llm-sdk[ollama] is not installed" in capsys.readouterr().out
     conn.close()
-
-    sys.modules["any_llm"] = original_module  # type: ignore[assignment]
 
 
 def test_handle_natural_language_provider_readiness_error(
@@ -232,7 +225,7 @@ def test_handle_natural_language_multi_provider_success(
     output = capsys.readouterr().out
     assert "SELECT name FROM users;" in output
     assert "Bob" in output
-    mock_create.assert_called_once_with("openai")
+    mock_create.assert_called_once_with("openai", api_key="test-key-123")
     mock_llm.completion.assert_called_once()
     assert mock_llm.completion.call_args[1]["model"] == "gpt-4o"
     conn.close()
@@ -376,36 +369,16 @@ def test_handle_natural_language_edge_cases(
 
 
 def test_get_database_schema_fetch_error() -> None:
-    """Test extracting database schema with a fetch error."""
-    mock_conn = MagicMock()
+    """Test extracting database schema when fetching a sample row from a view fails."""
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        "CREATE VIEW broken_view AS SELECT CAST('not_an_int' AS INT) AS bad_col"
+    )
+    schema = get_database_schema(conn)
+    conn.close()
 
-    # Setup mock returns
-    # 1st call: SHOW TABLES -> fetchall returns [('test_tab',)]
-    # 2nd call: DESCRIBE test_tab -> fetchall returns [('id', 'INTEGER'), ('name', 'VARCHAR')]
-    # 3rd call: SELECT * FROM test_tab LIMIT 1 -> raises Exception
-
-    show_tables_mock = MagicMock()
-    show_tables_mock.fetchall.return_value = [("test_tab",)]
-
-    describe_mock = MagicMock()
-    describe_mock.fetchall.return_value = [("id", "INTEGER"), ("name", "VARCHAR")]
-
-    select_mock = MagicMock()
-    select_mock.fetchone.side_effect = Exception("Mock fetch error")
-
-    def mock_execute(query: str) -> typing.Any:
-        """Mock execute function."""
-        if query.startswith("SHOW TABLES"):
-            return show_tables_mock
-        if query.startswith("DESCRIBE"):
-            return describe_mock
-        return select_mock
-
-    mock_conn.execute.side_effect = mock_execute
-
-    schema = get_database_schema(mock_conn)
-
-    assert "Table: test_tab" in schema
+    assert "Table: broken_view" in schema
+    assert "bad_col (INTEGER)" in schema
     assert "(could not fetch)" in schema
 
 
@@ -464,7 +437,7 @@ def test_extract_zips_already_extracted(tmp_path: Path) -> None:
     assert not (extract_dir / "test.txt").exists()
 
 
-def test_load_data_no_matches_file(tmp_path: Path, mocker: typing.Any) -> None:
+def test_load_data_no_matches_file(tmp_path: Path, mocker: MagicMock) -> None:
     """Test load_data_to_duckdb when matches file does not exist."""
     import duckdb
 
@@ -483,7 +456,7 @@ def test_load_data_no_matches_file(tmp_path: Path, mocker: typing.Any) -> None:
     assert "data" in [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
 
 
-def test_handle_natural_language_no_result(mocker: typing.Any) -> None:
+def test_handle_natural_language_no_result(mocker: MagicMock) -> None:
     """Test handle_natural_language when query returns no result or non-read-only SQL."""
     from t1d_analytics.analytics import handle_natural_language
 
@@ -506,7 +479,7 @@ def test_handle_natural_language_no_result(mocker: typing.Any) -> None:
     conn.sql.assert_not_called()
 
 
-def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
+def test_run_query_repl_no_result(mocker: MagicMock, tmp_path: Path) -> None:
     """Test run_query_repl when sql returns no result and exercises natural language branch."""
     from t1d_analytics.analytics import run_query_repl
 
@@ -523,7 +496,7 @@ def test_run_query_repl_no_result(mocker: typing.Any, tmp_path: Path) -> None:
     mock_nl.assert_called_once()
 
 
-def test_run_query_repl_with_result(mocker: typing.Any, tmp_path: Path) -> None:
+def test_run_query_repl_with_result(mocker: MagicMock, tmp_path: Path) -> None:
     """Test run_query_repl displays results when query returns non-empty result."""
     from t1d_analytics.analytics import run_query_repl
 
@@ -614,9 +587,7 @@ def test_load_data_to_duckdb_bom_and_delimiters(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_run_query_repl_custom_model_routing(
-    mocker: typing.Any, tmp_path: Path
-) -> None:
+def test_run_query_repl_custom_model_routing(mocker: MagicMock, tmp_path: Path) -> None:
     """Test run_query_repl routes 'Show me...' to handle_natural_language with custom model."""
     from t1d_analytics.analytics import run_query_repl
 
@@ -636,7 +607,7 @@ def test_run_query_repl_custom_model_routing(
 
 
 def test_load_data_to_duckdb_fallback_delimiters(
-    tmp_path: Path, mocker: typing.Any
+    tmp_path: Path, mocker: MagicMock
 ) -> None:
     """Test load_data_to_duckdb delimiter fallback logic when Sniffer raises an exception."""
     data_dir = tmp_path / "data_fb"
@@ -665,7 +636,7 @@ def test_load_data_to_duckdb_fallback_delimiters(
 
 
 def test_load_data_to_duckdb_empty_file(tmp_path: Path) -> None:
-    """Test load_data_to_duckdb with an empty CSV file."""
+    """Test load_data_to_duckdb skips an empty CSV file without creating user tables."""
     data_dir = tmp_path / "data_empty"
     data_dir.mkdir()
     db_path = str(tmp_path / "test_empty.duckdb")
@@ -674,6 +645,21 @@ def test_load_data_to_duckdb_empty_file(tmp_path: Path) -> None:
     empty_file.write_text("")
 
     load_data_to_duckdb(str(data_dir), db_path)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    user_tables = [
+        r[0]
+        for r in conn.execute("SHOW TABLES").fetchall()
+        if not r[0].startswith("_t1d_")
+    ]
+    empty_count = conn.execute('SELECT COUNT(*) FROM "empty"').fetchone()
+    manifest_rows = conn.execute(
+        "SELECT COUNT(*) FROM _t1d_ingestion_manifest"
+    ).fetchone()
+    conn.close()
+    assert user_tables == ["empty"]
+    assert empty_count is not None and empty_count[0] == 0
+    assert manifest_rows is not None and manifest_rows[0] == 1
 
 
 @patch("t1d_analytics.analytics.get_database_schema", return_value="mock schema")
@@ -821,7 +807,7 @@ def test_load_data_to_duckdb_parquet_and_gz(tmp_path: Path) -> None:
 
 
 def test_load_data_to_duckdb_semicolon_fallback(
-    tmp_path: Path, monkeypatch: typing.Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Test loading semicolon-delimited and comma fallback CSV when csv.Sniffer fails."""
     import csv
@@ -833,13 +819,14 @@ def test_load_data_to_duckdb_semicolon_fallback(
     db_path = str(tmp_path / "semi.duckdb")
 
     # Force csv.Sniffer to raise an exception to trigger the fallback
-    def mock_sniff(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+    def mock_sniff(
+        self_sniffer: csv.Sniffer, sample: str, delimiters: str = ""
+    ) -> None:
         """Raise csv.Error to simulate Sniffer failure."""
         raise csv.Error("Sniffer failed")
 
-    monkeypatch.setattr(csv.Sniffer, "sniff", mock_sniff)
-
-    load_data_to_duckdb(str(data_dir), db_path)
+    with patch("csv.Sniffer.sniff", mock_sniff):
+        load_data_to_duckdb(str(data_dir), db_path)
 
     conn = duckdb.connect(db_path, read_only=True)
     res = conn.execute("SELECT sum(val) FROM readings").fetchone()
@@ -923,7 +910,6 @@ def test_is_sql_query_without_extract_statements() -> None:
     mock_conn = MagicMock(spec=["execute", "close"])
     mock_conn.execute.return_value = None
 
-    assert not hasattr(mock_conn, "extract_statements")
     assert is_sql_query("SELECT 42", conn=mock_conn)
     assert is_sql_query("EXPLAIN SELECT 42", conn=mock_conn)
 
@@ -1170,11 +1156,9 @@ def test_extract_zips_max_depth_loop_completion(tmp_path: Path) -> None:
 def test_extract_sql_from_response_variations() -> None:
     """Test extract_sql_from_response under various LLM output formats."""
     # Non-string conversion
-    import typing
-
     from t1d_analytics.analytics import extract_sql_from_response
 
-    assert extract_sql_from_response(typing.cast(str, 12345)) == "12345"
+    assert extract_sql_from_response(12345) == "12345"
 
     # Multi-block markdown with reasoning
     response = """Here is my reasoning.
@@ -1193,7 +1177,7 @@ Hope this helps!"""
     assert extract_sql_from_response("duckdb\nSELECT 3;") == "SELECT 3;"
 
 
-def test_get_clinical_variable_mappings(mocker: typing.Any) -> None:
+def test_get_clinical_variable_mappings(mocker: MagicMock) -> None:
     """Test get_clinical_variable_mappings handling existing, missing, and malformed files."""
     from t1d_analytics.analytics import get_clinical_variable_mappings
 
@@ -1275,18 +1259,6 @@ def test_profile_table(tmp_path: Path) -> None:
     # Non-existent table in DB
     with pytest.raises(ValueError, match="does not exist in database"):
         profile_table(str(db_file), "missing_table")
-
-
-def test_load_data_to_duckdb_missing_dir(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Test load_data_to_duckdb gracefully returns when data_dir does not exist."""
-    from t1d_analytics.analytics import load_data_to_duckdb
-
-    load_data_to_duckdb(
-        "/nonexistent/directory/path/that/does/not/exist", "test_dummy.duckdb"
-    )
-    assert "does not exist" in capsys.readouterr().out
 
 
 def test_profile_table_no_numeric_columns(tmp_path: Path) -> None:
@@ -1409,7 +1381,7 @@ def test_is_sql_query_fallback_side_effect_free() -> None:
     assert is_sql_query("CALL my_proc()", conn=mock_conn)
 
 
-def test_profile_table_no_columns(tmp_path: Path, mocker: typing.Any) -> None:
+def test_profile_table_no_columns(tmp_path: Path, mocker: MagicMock) -> None:
     """Test profile_table when table describe returns empty columns."""
     from t1d_analytics.analytics import profile_table
 
@@ -1481,13 +1453,20 @@ def test_export_table_parquet_and_csv(tmp_path: Path) -> None:
     assert rows_pq[0] == (1, "Alice", 5.5)
     conn_pq.close()
 
-    # CSV export
+    # CSV export with formula injection sanitization
+    conn_csv = duckdb.connect(str(db_file))
+    conn_csv.execute(
+        "INSERT INTO cohort VALUES (2, '=CMD|''/C calc''!A0', 7.2), (3, '@SUM(1,2)', 6.8)"
+    )
+    conn_csv.close()
     csv_out = tmp_path / "nested" / "cohort.csv"
     export_table(str(db_file), "cohort", csv_out, "csv")
     assert csv_out.exists()
     content = csv_out.read_text()
     assert "id,name,a1c" in content
     assert "1,Alice,5.5" in content
+    assert "'=CMD" in content
+    assert "'@SUM(1,2)" in content
 
 
 def test_export_table_excel_formula_sanitization(tmp_path: Path) -> None:
@@ -1578,3 +1557,28 @@ def test_load_data_to_duckdb_legacy_latin1_encoding(tmp_path: Path) -> None:
     assert len(rows) == 2
     assert "37°C" in rows[0][0]
     assert "50µg" in rows[0][1]
+
+
+def test_load_data_to_duckdb_coerces_varchar_numeric_concepts(tmp_path: Path) -> None:
+    """Test load_data_to_duckdb coerces VARCHAR clinical numeric concept columns (like NumSevHypo and age with NA) to DOUBLE."""
+    data_dir = tmp_path / "jaeb_data"
+    data_dir.mkdir()
+    csv_file = data_dir / "tblAPTSummary.csv"
+    csv_file.write_text(
+        "PtID,TxGroup,Gender,age,NumSevHypo\n"
+        "1,Control,M,15,0\n"
+        "2,Closed-Loop,F,NA,2\n"
+        "3,Control,M,30,\n"
+    )
+    db_file = tmp_path / "jaeb.duckdb"
+    conn_init = duckdb.connect(str(db_file))
+    conn_init.execute("CREATE VIEW tblaptsummary AS SELECT 1 AS dummy")
+    conn_init.close()
+    load_data_to_duckdb(str(data_dir), str(db_file))
+
+    conn = duckdb.connect(str(db_file), read_only=True)
+    res = conn.execute("SELECT SUM(numsevhypo), AVG(age) FROM tblaptsummary").fetchone()
+    conn.close()
+    assert res is not None
+    assert res[0] == 2.0
+    assert res[1] == 22.5

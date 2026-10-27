@@ -74,6 +74,84 @@ export function formatDate(
 }
 
 /**
+ * Primitive cell value returned by a DuckDB SQL query.
+ */
+export type SqlCellValue = string | number | boolean | null;
+
+/**
+ * Classification for an empty SQL result set.
+ */
+export interface ClassifiedSqlEmpty {
+  /** Discriminator kind for empty results. */
+  kind: "empty";
+}
+
+/**
+ * Classification for a single-row, single-column (1x1) scalar SQL result.
+ */
+export interface ClassifiedSqlScalar {
+  /** Discriminator kind for scalar results. */
+  kind: "scalar";
+  /** Column name of the scalar value. */
+  column: string;
+  /** Raw scalar cell value. */
+  value: SqlCellValue;
+  /** String-formatted representation ("NULL" when null). */
+  formattedValue: string;
+}
+
+/**
+ * Classification for a multi-column or multi-row tabular SQL result.
+ */
+export interface ClassifiedSqlTable {
+  /** Discriminator kind for tabular results. */
+  kind: "table";
+  /** Column names in display order. */
+  columns: string[];
+  /** Result rows. */
+  rows: ReadonlyArray<Record<string, SqlCellValue>>;
+}
+
+/**
+ * Discriminated union representing a classified SQL query result.
+ */
+export type ClassifiedSqlResult =
+  | ClassifiedSqlEmpty
+  | ClassifiedSqlScalar
+  | ClassifiedSqlTable;
+
+/**
+ * Classifies a SQL query result array into empty, scalar (1x1), or table variants.
+ * @param {ReadonlyArray<Record<string, SqlCellValue>> | undefined} rows - The SQL result rows to classify.
+ * @returns {ClassifiedSqlResult} The strongly-typed classification object.
+ */
+export function classifySqlResult(
+  rows: ReadonlyArray<Record<string, SqlCellValue>> | undefined,
+): ClassifiedSqlResult {
+  if (!rows || rows.length === 0) {
+    return { kind: "empty" };
+  }
+  const keys = Object.keys(rows[0]);
+  if (rows.length === 1 && keys.length === 1) {
+    const column = keys[0];
+    const value = rows[0][column];
+    const formattedValue =
+      value === null || value === undefined ? "NULL" : String(value);
+    return {
+      kind: "scalar",
+      column,
+      value: value ?? null,
+      formattedValue,
+    };
+  }
+  return {
+    kind: "table",
+    columns: keys,
+    rows,
+  };
+}
+
+/**
  * Formats a Date object or timestamp into a localized time string.
  * @param {Date | string | number} date - The date/time to format.
  * @param {Intl.DateTimeFormatOptions} [options] - Optional formatting options.

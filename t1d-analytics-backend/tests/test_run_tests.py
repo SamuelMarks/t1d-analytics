@@ -5,11 +5,99 @@ Verifies command execution, error handling, coverage gathering,
 merging, threshold evaluations, and README shield generation.
 """
 
-from typing import Any
+import collections
+import io
+from pathlib import Path
+from typing import DefaultDict, Sequence, Union
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
-from scripts.run_tests import main, run_cmd
+from scripts.run_tests import (
+    build_test_commands,
+    compute_combined_coverage,
+    main,
+    run_cmd,
+    update_readme_badges,
+)
+
+from t1d_analytics.sql_utils import SqlValue
+
+FileTarget = Union[str, Path]
+OpenReturn = Union[MagicMock, io.StringIO]
+
+
+def test_pure_orchestration_helpers() -> None:
+    """Test compute_combined_coverage, update_readme_badges, and build_test_commands directly."""
+    cov_map: DefaultDict[str, DefaultDict[int, int]] = collections.defaultdict(
+        lambda: collections.defaultdict(int)
+    )
+    cov_map["src/a.py"][1] = 2
+    cov_map["src/a.py"][2] = 0
+    total_found, total_hit, text = compute_combined_coverage(cov_map)
+    assert total_found == 2
+    assert total_hit == 1
+    assert "SF:src/a.py\nDA:1,2\nDA:2,0\nLF:2\nLH:1\nend_of_record\n" == text
+
+    raw_readme = "[![License](https://example.com/lic.svg)](#)\n# Title\n"
+    updated_green, found = update_readme_badges(raw_readme, 100, 100)
+    assert found is True
+    assert "Coverage-100%25-brightgreen.svg" in updated_green
+    assert "Docs-100%25-brightgreen.svg" in updated_green
+
+    updated_yellow, found_y = update_readme_badges("# No license\n", 75, 80)
+    assert found_y is False
+    assert updated_yellow == "# No license\n"
+
+    cmds = build_test_commands(npm_cmd="/usr/bin/npm", pytest_cmd="/usr/bin/pytest")
+    assert cmds["web_install"] == ["/usr/bin/npm", "install"]
+    assert cmds["web_build"] == ["/usr/bin/npm", "run", "build"]
+    assert "--cov-report=json" in cmds["backend_pytest"]
+
+
+def test_real_filesystem_lcov_merge_and_readme_update(tmp_path: Path) -> None:
+    """Test LCOV file aggregation and README shield updates against real files in tmp_path."""
+    lcov_a = tmp_path / "backend.lcov"
+    lcov_b = tmp_path / "frontend.lcov"
+    lcov_a.write_text(
+        "SF:src/mod.py\nDA:1,1\nDA:2,0\nend_of_record\n", encoding="utf-8"
+    )
+    lcov_b.write_text(
+        "SF:src/mod.py\nDA:1,2\nDA:2,1\nend_of_record\n", encoding="utf-8"
+    )
+
+    cov_map: DefaultDict[str, DefaultDict[int, int]] = collections.defaultdict(
+        lambda: collections.defaultdict(int)
+    )
+    for lcov_file in (lcov_a, lcov_b):
+        current_sf = ""
+        for line in lcov_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("SF:"):
+                current_sf = line[3:]
+            elif line.startswith("DA:") and current_sf:
+                line_no_str, count_str = line[3:].split(",")
+                cov_map[current_sf][int(line_no_str)] += int(count_str)
+
+    total_found, total_hit, merged_lcov = compute_combined_coverage(cov_map)
+    assert total_found == 2
+    assert total_hit == 2
+    merged_path = tmp_path / "combined-coverage.lcov"
+    merged_path.write_text(merged_lcov, encoding="utf-8")
+    assert "DA:1,3\nDA:2,1\nLF:2\nLH:2" in merged_path.read_text(encoding="utf-8")
+
+    readme_file = tmp_path / "README.md"
+    readme_file.write_text(
+        "# T1D\n[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)\n",
+        encoding="utf-8",
+    )
+    pct = int((total_hit / total_found) * 100)
+    updated_readme, found = update_readme_badges(
+        readme_file.read_text(encoding="utf-8"), pct, 100
+    )
+    assert found is True
+    readme_file.write_text(updated_readme, encoding="utf-8")
+    disk_readme = readme_file.read_text(encoding="utf-8")
+    assert "Coverage-100%25-brightgreen.svg" in disk_readme
+    assert "Docs-100%25-brightgreen.svg" in disk_readme
 
 
 def test_run_cmd_success() -> None:
@@ -64,20 +152,20 @@ def test_main_full_success() -> None:
             ]
         )
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Dispatch mocked file opening operations for success testing."""
             filename = str(file)
             if "README.md" in filename:
-                return mock_open(read_data=readme_data).return_value
+                return io.StringIO(readme_data)
             elif "coverage.json" in filename:
-                return mock_open(
-                    read_data='{"totals": {"percent_covered": "100"}}'
-                ).return_value
+                return io.StringIO('{"totals": {"percent_covered": "100"}}')
             elif "combined-coverage.lcov" in filename:
-                return mock_open().return_value
+                return io.StringIO()
             elif "lcov" in filename:
-                return mock_open(read_data=lcov_content).return_value
-            return mock_open().return_value
+                return io.StringIO(lcov_content)
+            return io.StringIO()
 
         with patch("builtins.open", side_effect=custom_open):
             main()
@@ -125,7 +213,7 @@ def test_main_frontend_fail_to_start() -> None:
         mock_frontend = MagicMock()
         mock_popen.side_effect = [mock_backend, mock_frontend]
 
-        def urlopen_side_effect(url: str) -> Any:
+        def urlopen_side_effect(url: str) -> MagicMock:
             """Handle URL open requests returning success for backend and failure for frontend."""
             if "8000" in url:
                 return MagicMock()
@@ -202,14 +290,16 @@ def test_main_lcov_not_found_and_total_found_zero() -> None:
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Simulate missing lcov files by raising FileNotFoundError."""
             filename = str(file)
             if "combined-coverage.lcov" in filename:
-                return mock_open().return_value
+                return io.StringIO()
             if "lcov" in filename:
                 raise FileNotFoundError()
-            return mock_open().return_value
+            return io.StringIO()
 
         with patch("builtins.open", side_effect=custom_open):
             with pytest.raises(SystemExit) as exc:
@@ -231,14 +321,16 @@ def test_main_lcov_lines_uncovered() -> None:
 
         lcov_content = "\n".join(["SF:some_file.py", "DA:1,0", "DA:2,0", ""])
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Return lcov contents having zero line hits."""
             filename = str(file)
             if "combined-coverage.lcov" in filename:
-                return mock_open().return_value
+                return io.StringIO()
             if "lcov" in filename:
-                return mock_open(read_data=lcov_content).return_value
-            return mock_open().return_value
+                return io.StringIO(lcov_content)
+            return io.StringIO()
 
         with patch("builtins.open", side_effect=custom_open):
             with pytest.raises(SystemExit) as exc:
@@ -260,14 +352,16 @@ def test_main_coverage_below_threshold() -> None:
 
         lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", "DA:2,0", ""])
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Return lcov contents resulting in fifty percent coverage."""
             filename = str(file)
             if "combined-coverage.lcov" in filename:
-                return mock_open().return_value
+                return io.StringIO()
             if "lcov" in filename:
-                return mock_open(read_data=lcov_content).return_value
-            return mock_open().return_value
+                return io.StringIO(lcov_content)
+            return io.StringIO()
 
         with patch("builtins.open", side_effect=custom_open):
             with pytest.raises(SystemExit) as exc:
@@ -289,16 +383,18 @@ def test_main_coverage_json_failure() -> None:
 
         lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", ""])
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Simulate corrupted coverage json by raising OSError."""
             filename = str(file)
             if "coverage.json" in filename:
                 raise OSError("Corrupt json")
             if "combined-coverage.lcov" in filename:
-                return mock_open().return_value
+                return io.StringIO()
             if "lcov" in filename:
-                return mock_open(read_data=lcov_content).return_value
-            return mock_open().return_value
+                return io.StringIO(lcov_content)
+            return io.StringIO()
 
         with patch("builtins.open", side_effect=custom_open):
             with pytest.raises(SystemExit) as exc:
@@ -317,7 +413,9 @@ def test_main_interrogate_failure() -> None:
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
 
-        def subprocess_run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        def subprocess_run(
+            cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
+        ) -> MagicMock:
             """Execute simulated command raising RuntimeError for interrogate."""
             if "interrogate" in cmd:
                 raise RuntimeError("Interrogate not found")
@@ -325,18 +423,18 @@ def test_main_interrogate_failure() -> None:
 
         lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", ""])
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Provide mocked file handlers for interrogate failure tests."""
             filename = str(file)
             if "coverage.json" in filename:
-                return mock_open(
-                    read_data='{"totals": {"percent_covered": 85}}'
-                ).return_value
+                return io.StringIO('{"totals": {"percent_covered": 85}}')
             if "combined-coverage.lcov" in filename:
-                return mock_open().return_value
+                return io.StringIO()
             if "lcov" in filename:
-                return mock_open(read_data=lcov_content).return_value
-            return mock_open().return_value
+                return io.StringIO(lcov_content)
+            return io.StringIO()
 
         with (
             patch("subprocess.run", side_effect=subprocess_run),
@@ -347,7 +445,9 @@ def test_main_interrogate_failure() -> None:
             assert exc.value.code == 1
 
 
-def test_main_badge_colors_and_no_license_shield() -> None:
+def test_main_badge_colors_and_no_license_shield(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Test shield colors (yellow, red) and case where README has no license shield."""
     with (
         patch("shutil.which", return_value=None),
@@ -358,7 +458,9 @@ def test_main_badge_colors_and_no_license_shield() -> None:
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
 
-        def subprocess_run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        def subprocess_run(
+            cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
+        ) -> MagicMock:
             """Execute simulated subprocess returning fifty percent documentation coverage."""
             if "interrogate" in cmd:
                 return MagicMock(returncode=0, stdout="actual: 50.0%")
@@ -366,28 +468,46 @@ def test_main_badge_colors_and_no_license_shield() -> None:
 
         lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", ""])
         readme_without_license = "\n".join(["# Readme", "No license shield here.", ""])
+        written_readme: list[str] = []
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        class CapturingStringIO(io.StringIO):
+            """StringIO subclass that records written content on close."""
+
+            def close(self) -> None:
+                """Store buffer value before closing."""
+                written_readme.append(self.getvalue())
+                super().close()
+
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Provide mocked open handles for badge color verification tests."""
             filename = str(file)
             if "coverage.json" in filename:
-                return mock_open(
-                    read_data='{"totals": {"percent_covered": 75}}'
-                ).return_value
+                return io.StringIO('{"totals": {"percent_covered": 75}}')
             if "README.md" in filename and mode == "r":
-                return mock_open(read_data=readme_without_license).return_value
+                return io.StringIO(readme_without_license)
+            if "README.md" in filename and mode == "w":
+                return CapturingStringIO()
             if filename.endswith("lcov") or filename.endswith("lcov.info"):
-                return mock_open(read_data=lcov_content).return_value
-            return mock_open().return_value
+                return io.StringIO(lcov_content)
+            return io.StringIO()
 
         with (
             patch("subprocess.run", side_effect=subprocess_run),
             patch("builtins.open", side_effect=custom_open),
         ):
             main()
+        out = capsys.readouterr().out
+        assert "License shield not found in README.md" in out
+        assert "Pre-commit checks passed successfully!" in out
+        assert len(written_readme) == 1
+        assert "# Readme" in written_readme[0]
 
 
-def test_main_badge_colors_red_and_interrogate_no_match() -> None:
+def test_main_badge_colors_red_and_interrogate_no_match(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Test test_cov < 70 (red) and interrogate output without matching regex."""
     with (
         patch("shutil.which", return_value=None),
@@ -398,7 +518,9 @@ def test_main_badge_colors_red_and_interrogate_no_match() -> None:
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
 
-        def subprocess_run(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        def subprocess_run(
+            cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
+        ) -> MagicMock:
             """Execute simulated subprocess returning non-matching interrogate output."""
             if "interrogate" in cmd:
                 return MagicMock(returncode=0, stdout="unknown format")
@@ -408,28 +530,44 @@ def test_main_badge_colors_red_and_interrogate_no_match() -> None:
         readme_data = "\n".join(
             ["[![License](https://img.shields.io/badge/license.svg)](#)", ""]
         )
+        written_red_readme: list[str] = []
 
-        def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        class CapturingRedStringIO(io.StringIO):
+            """StringIO subclass that records written red badge content on close."""
+
+            def close(self) -> None:
+                """Store buffer value before closing."""
+                written_red_readme.append(self.getvalue())
+                super().close()
+
+        def custom_open(
+            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+        ) -> OpenReturn:
             """Provide mock file handler for red color badges and interrogate mismatch tests."""
             filename = str(file)
             if "coverage.json" in filename:
-                return mock_open(
-                    read_data='{"totals": {"percent_covered": 60}}'
-                ).return_value
+                return io.StringIO('{"totals": {"percent_covered": 60}}')
             if "README.md" in filename and mode == "r":
-                return mock_open(read_data=readme_data).return_value
+                return io.StringIO(readme_data)
+            if "README.md" in filename and mode == "w":
+                return CapturingRedStringIO()
             if filename.endswith("lcov") or filename.endswith("lcov.info"):
-                return mock_open(read_data=lcov_content).return_value
-            return mock_open().return_value
+                return io.StringIO(lcov_content)
+            return io.StringIO()
 
         with (
             patch("subprocess.run", side_effect=subprocess_run),
             patch("builtins.open", side_effect=custom_open),
         ):
             main()
+        out = capsys.readouterr().out
+        assert "Pre-commit checks passed successfully!" in out
+        assert len(written_red_readme) == 1
+        assert "Coverage-60%25-red.svg" in written_red_readme[0]
+        assert "Docs-0%25-red.svg" in written_red_readme[0]
 
 
-def test_module_dunder_main() -> None:
+def test_module_dunder_main(capsys: pytest.CaptureFixture[str]) -> None:
     """Test execution when scripts.run_tests is invoked as __main__ via runpy."""
     import io
     import runpy
@@ -441,18 +579,22 @@ def test_module_dunder_main() -> None:
     )
     lcov_content = "SF:file1.py\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
 
-    def subprocess_run(cmd: Any, *args: Any, **kwargs: Any) -> MagicMock:
+    def subprocess_run(
+        cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
+    ) -> MagicMock:
         """Mock subprocess.run returning 100% coverage stdout."""
         res = MagicMock()
         res.returncode = 0
         res.stdout = "TOTAL: 100.0%"
         return res
 
-    def custom_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+    def custom_open(
+        file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
+    ) -> OpenReturn:
         """Mock file open returning fixture streams based on filename."""
         filename = str(file)
         if mode == "w":
-            return mock_open().return_value
+            return io.StringIO()
         if "coverage.json" in filename:
             return io.StringIO('{"totals": {"percent_covered": 100}}')
         if "README.md" in filename:
@@ -469,3 +611,4 @@ def test_module_dunder_main() -> None:
         patch("builtins.open", side_effect=custom_open),
     ):
         runpy.run_module("scripts.run_tests", run_name="__main__")
+    assert "Pre-commit checks passed successfully!" in capsys.readouterr().out

@@ -4,10 +4,52 @@
  * Manages the application state for the chat UI.
  */
 import i18next from "./i18n";
+import {
+  type TableRelationship,
+  CLINICAL_RELATIONSHIPS,
+  resolveTableJoin,
+} from "./cohort-sql";
+
+export { type TableRelationship, CLINICAL_RELATIONSHIPS, resolveTableJoin };
+
+/**
+ * Shape of the serialized ChatState payload persisted in localStorage.
+ */
+export interface PersistedChatStatePayload {
+  /** Persisted chat sessions array. */
+  chats?: Chat[];
+  /** Persisted active chat session identifier. */
+  activeChatId?: string | null;
+  /** Persisted monotonic chat counter. */
+  chatCounter?: number;
+  /** Persisted selected DuckDB database path. */
+  currentDb?: string;
+  /** Persisted discovered databases list. */
+  availableDbs?: AvailableDatabaseItem[];
+  /** Persisted server synchronization flag. */
+  serverSyncEnabled?: boolean;
+  /** Persisted SSE streaming mode flag. */
+  streamingMode?: boolean;
+  /** Persisted tombstone list of deleted session IDs. */
+  deletedChatIds?: string[];
+}
+
+/**
+ * Parses a serialized ChatState JSON string into a typed PersistedChatStatePayload.
+ * @param {string} rawJson - Serialized JSON string from localStorage.
+ * @returns {PersistedChatStatePayload} Parsed state payload object.
+ */
+export function parsePersistedChatState(
+  rawJson: string,
+): PersistedChatStatePayload {
+  const parsed: PersistedChatStatePayload = JSON.parse(rawJson);
+  return parsed;
+}
 
 /**
  * Represents a single chat message.
  */
+
 export interface Message {
   /** The role of the message sender. */
   role: "user" | "assistant";
@@ -43,145 +85,6 @@ export interface Chat {
   updatedAt?: number;
   /** Whether the chat title was locally modified and needs sync. */
   titleModified?: boolean;
-}
-
-/**
- * Relationship definition between two clinical tables.
- */
-export interface TableRelationship {
-  /** The source primary table name. */
-  fromTable: string;
-  /** The target secondary table name. */
-  toTable: string;
-  /** Primary key column in the source table. */
-  fromColumn: string;
-  /** Foreign key column in the target table. */
-  toColumn: string;
-  /** Suggested default join type. */
-  defaultJoinType: "INNER JOIN" | "LEFT JOIN";
-}
-
-/**
- * Standard clinical relational ontology mapping primary and foreign keys.
- */
-export const CLINICAL_RELATIONSHIPS: TableRelationship[] = [
-  {
-    fromTable: "patients",
-    toTable: "cgms",
-    fromColumn: "patient_id",
-    toColumn: "patient_id",
-    defaultJoinType: "INNER JOIN",
-  },
-  {
-    fromTable: "patients",
-    toTable: "dclp3",
-    fromColumn: "patient_id",
-    toColumn: "patient_id",
-    defaultJoinType: "INNER JOIN",
-  },
-  {
-    fromTable: "patients",
-    toTable: "visits",
-    fromColumn: "patient_id",
-    toColumn: "patient_id",
-    defaultJoinType: "LEFT JOIN",
-  },
-  {
-    fromTable: "patients",
-    toTable: "devices",
-    fromColumn: "patient_id",
-    toColumn: "patient_id",
-    defaultJoinType: "LEFT JOIN",
-  },
-  {
-    fromTable: "patients",
-    toTable: "labs",
-    fromColumn: "patient_id",
-    toColumn: "patient_id",
-    defaultJoinType: "LEFT JOIN",
-  },
-  {
-    fromTable: "cgms",
-    toTable: "dclp3",
-    fromColumn: "patient_id",
-    toColumn: "patient_id",
-    defaultJoinType: "INNER JOIN",
-  },
-];
-
-/**
- * Resolve foreign key join matching between two tables using known ontology or shared ID columns.
- * @param {string} table1 The primary table name.
- * @param {string} table2 The secondary table name.
- * @param {string[]} [table1Cols] Optional known columns of table 1.
- * @param {string[]} [table2Cols] Optional known columns of table 2.
- * @returns {TableRelationship | null} The resolved relationship or null if none discovered.
- */
-export function resolveTableJoin(
-  table1: string,
-  table2: string,
-  table1Cols?: string[],
-  table2Cols?: string[],
-): TableRelationship | null {
-  const t1 = table1.toLowerCase();
-  const t2 = table2.toLowerCase();
-
-  // 1. Direct match in clinical ontology
-  const found = CLINICAL_RELATIONSHIPS.find(
-    (r) =>
-      (r.fromTable.toLowerCase() === t1 && r.toTable.toLowerCase() === t2) ||
-      (r.fromTable.toLowerCase() === t2 && r.toTable.toLowerCase() === t1),
-  );
-  if (found) {
-    if (found.fromTable.toLowerCase() === t1) {
-      return found;
-    }
-    return {
-      fromTable: table1,
-      toTable: table2,
-      fromColumn: found.toColumn,
-      toColumn: found.fromColumn,
-      defaultJoinType: found.defaultJoinType,
-    };
-  }
-
-  // 2. Ontology-aware common clinical keys if columns are available
-  if (table1Cols && table2Cols) {
-    const candidateKeys = [
-      "patient_id",
-      "subject_id",
-      "pt_id",
-      "id",
-      "study_id",
-      "device_id",
-    ];
-    for (const key of candidateKeys) {
-      const match1 = table1Cols.find((c) => c.toLowerCase() === key);
-      const match2 = table2Cols.find((c) => c.toLowerCase() === key);
-      if (match1 && match2) {
-        return {
-          fromTable: table1,
-          toTable: table2,
-          fromColumn: match1,
-          toColumn: match2,
-          defaultJoinType: "INNER JOIN",
-        };
-      }
-    }
-  }
-
-  // 3. Heuristic match if table name contains patient
-  if (t1.includes("patient") || t2.includes("patient")) {
-    return {
-      fromTable: table1,
-      toTable: table2,
-      fromColumn: "patient_id",
-      toColumn: "patient_id",
-      defaultJoinType: "INNER JOIN",
-    };
-  }
-
-  return null;
 }
 
 /**
@@ -353,7 +256,7 @@ export class ChatState {
     const data = safeStorageGet("t1d_analytics_chats");
     if (!data) return;
     try {
-      const parsed = JSON.parse(data);
+      const parsed = parsePersistedChatState(data);
       this.chats = parsed.chats || [];
       this.activeChatId = parsed.activeChatId || null;
       this.chatCounter = parsed.chatCounter || 1;
@@ -734,6 +637,45 @@ export class ChatState {
       }
     }
     return keys;
+  }
+
+  /**
+   * Retrieves user-configured Mozilla any-llm model identifiers from localStorage.
+   * @returns {string[]} Array of configured 'provider/model' or 'provider:model' identifiers.
+   */
+  getConfiguredModels(): string[] {
+    const raw = safeStorageGet("t1d_configured_any_llm_models");
+    if (!raw) return [];
+    return raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * Persists user-configured Mozilla any-llm model identifiers to localStorage.
+   * @param {string} modelsCsv Comma-separated 'provider/model' or 'provider:model' string.
+   * @returns {void}
+   */
+  setConfiguredModels(modelsCsv: string): void {
+    const cleaned = modelsCsv
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(", ");
+    if (cleaned) {
+      safeStorageSet("t1d_configured_any_llm_models", cleaned);
+    } else {
+      safeStorageRemove("t1d_configured_any_llm_models");
+    }
+  }
+
+  /**
+   * Removes user-configured Mozilla any-llm model identifiers from localStorage.
+   * @returns {void}
+   */
+  removeConfiguredModels(): void {
+    safeStorageRemove("t1d_configured_any_llm_models");
   }
 
   /**

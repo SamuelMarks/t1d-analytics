@@ -1,13 +1,46 @@
 """Thread-safe asynchronous background manager for training jobs."""
 
 import datetime
-import inspect
 import threading
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import field
+from typing import Callable, Dict, List, Optional, Protocol, Union
+
+from pydantic.dataclasses import dataclass
+from typing_extensions import TypedDict
 
 from t1d_analytics.models import TrainingBackend, TrainingJobConfig
+from t1d_analytics.sql_utils import SqlValue
+
+JobMetricValue = Union[SqlValue, List[SqlValue], Dict[str, SqlValue]]
+
+
+class TrainingJobDict(TypedDict, total=False):
+    """Serialized dictionary representation of a background training job."""
+
+    job_id: str
+    status: str
+    backend: str
+    model_name: str
+    dataset_path: str
+    output_dir: str
+    created_at: str
+    started_at: Optional[str]
+    completed_at: Optional[str]
+    metrics: Dict[str, JobMetricValue]
+    error: Optional[str]
+
+
+class TrainingRunnerProtocol(Protocol):
+    """Protocol for training runner instances resolved by TrainingJobManager."""
+
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, JobMetricValue]:
+        """Execute training job for the given configuration."""
+        ...
 
 
 @dataclass
@@ -40,16 +73,16 @@ class TrainingJobState:
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
-    metrics: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, JobMetricValue] = field(default_factory=dict)
     error: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> TrainingJobDict:
         """
         Convert the job state into a plain dictionary for JSON serialization.
 
         Returns
         -------
-            Dict[str, Any]: Dictionary representation of the job state.
+            TrainingJobDict: Dictionary representation of the job state.
 
         """
         return {
@@ -72,7 +105,7 @@ class TrainingJobManager:
 
     def __init__(
         self,
-        runner_resolver: Callable[[TrainingBackend], Any],
+        runner_resolver: Callable[[TrainingBackend], TrainingRunnerProtocol],
     ) -> None:
         """
         Initialize the job manager with thread locks and registry collections.
@@ -130,11 +163,7 @@ class TrainingJobManager:
                         self._jobs[job_id].status = "cancelled"
                     return
 
-                sig = inspect.signature(runner.run_training)
-                if "cancel_event" in sig.parameters:
-                    res = runner.run_training(config, cancel_event=cancel_event)
-                else:
-                    res = runner.run_training(config)
+                res = runner.run_training(config, cancel_event=cancel_event)
                 with self._lock:
                     if cancel_event.is_set():
                         self._jobs[job_id].status = "cancelled"
@@ -155,7 +184,7 @@ class TrainingJobManager:
         t.start()
         return job_id
 
-    def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+    def get_job(self, job_id: str) -> Optional[TrainingJobDict]:
         """
         Retrieve current status and metrics of a training job.
 
@@ -165,20 +194,20 @@ class TrainingJobManager:
 
         Returns:
         -------
-            Optional[Dict[str, Any]]: Job details dictionary or None if not found.
+            Optional[TrainingJobDict]: Job details dictionary or None if not found.
 
         """
         with self._lock:
             job = self._jobs.get(job_id)
             return job.to_dict() if job else None
 
-    def list_jobs(self) -> List[Dict[str, Any]]:
+    def list_jobs(self) -> List[TrainingJobDict]:
         """
         List all tracked training jobs.
 
         Returns
         -------
-            List[Dict[str, Any]]: List of all job information dictionaries.
+            List[TrainingJobDict]: List of all job information dictionaries.
 
         """
         with self._lock:

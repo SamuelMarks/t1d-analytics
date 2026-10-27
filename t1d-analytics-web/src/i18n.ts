@@ -18,7 +18,7 @@ export type TranslationResourceMap = {
 export const enTranslations: TranslationResourceMap = {
   app: {
     title: "t1d-analytics",
-    play: "Play",
+    play: "Execute",
     chatNumber: "Chat #{{count}}",
     chatNumber_one: "Chat #{{count}}",
     chatNumber_other: "Chat #{{count}}",
@@ -114,7 +114,7 @@ export const enTranslations: TranslationResourceMap = {
     sendMessage: "Send message",
     closeModal: "Close modal",
     viewTableData: "View Table Data",
-    playQuery: "Play Query",
+    playQuery: "Execute Query",
     copyQuery: "Copy Query",
     refreshQuery: "Refresh Query",
     editChatTitle: "Edit chat title",

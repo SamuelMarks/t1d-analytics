@@ -10,6 +10,7 @@ import duckdb
 import pytest
 
 from t1d_analytics.sql_utils import (
+    coerce_numeric_aggregates_in_sql,
     extract_sql_from_response,
     extract_table_schemas,
     is_internal_table,
@@ -25,11 +26,20 @@ from t1d_analytics.sql_utils import (
 
 
 def test_normalize_sql_and_strip_comments() -> None:
-    """Test normalize_sql and strip_sql_comments_and_parens."""
+    """Test normalize_sql, coerce_numeric_aggregates_in_sql, and strip_sql_comments_and_parens."""
     assert normalize_sql("  SELECT   *  FROM  patients ; ") == "select * from patients"
+    coerced = coerce_numeric_aggregates_in_sql(
+        "SELECT SUM(NumSevHypo), AVG(DISTINCT t.AgeAsOfRandDt) FROM tblaptsummary t"
+    )
+    assert "SUM(TRY_CAST(NumSevHypo AS DOUBLE))" in coerced
+    assert "AVG(DISTINCT TRY_CAST(t.AgeAsOfRandDt AS DOUBLE))" in coerced
     assert (
         strip_sql_comments_and_parens("""-- comment
 (/* block */ (SELECT 1))""")
+        == "SELECT 1"
+    )
+    assert (
+        strip_sql_comments_and_parens("/* outer /* nested */ outer */ SELECT 1")
         == "SELECT 1"
     )
     assert (
@@ -45,12 +55,27 @@ def test_is_read_only_sql_query() -> None:
     assert is_read_only_sql_query("WITH cte AS (SELECT 1) SELECT * FROM cte") is True
     assert is_read_only_sql_query("((SELECT 1))") is True
     assert (
+        is_read_only_sql_query(
+            "SELECT REPLACE(name, 'a', 'b'), 'DROP TABLE tbl' AS msg FROM tbl"
+        )
+        is True
+    )
+    assert (
         is_read_only_sql_query("""   -- comment
 """)
         is False
     )
     assert is_read_only_sql_query("DROP TABLE tbl") is False
     assert is_read_only_sql_query("INSERT INTO tbl VALUES (1)") is False
+    assert is_read_only_sql_query("SELECT 1; DROP TABLE tbl") is False
+    assert (
+        is_read_only_sql_query("WITH d AS (DELETE FROM tbl) SELECT * FROM d") is False
+    )
+    assert is_read_only_sql_query("SELECT $$DROP TABLE tbl;$$ AS msg FROM tbl") is True
+    assert (
+        is_read_only_sql_query("SELECT * FROM read_parquet('secret.parquet')") is False
+    )
+    assert is_read_only_sql_query("SELECT * FROM read_csv_auto('secret.csv')") is False
 
 
 def test_is_sql_query_branches() -> None:
@@ -78,7 +103,7 @@ def test_is_sql_query_branches() -> None:
 
 def test_extract_sql_from_response_branches() -> None:
     """Test SQL extraction from fenced blocks, non-strings, and plain text."""
-    assert extract_sql_from_response(12345) == "12345"  # type: ignore[arg-type]
+    assert extract_sql_from_response(12345) == "12345"
     fenced = """Thought
 ```sql
 SELECT * FROM p;
@@ -180,3 +205,56 @@ def test_validate_read_only_sql() -> None:
 
     with pytest.raises(ReadOnlyViolationError):
         validate_read_only_sql("DROP TABLE patients")
+
+
+def test_execute_duckdb_batch_write_with_retry(tmp_path: Path) -> None:
+    """Test execute_duckdb_batch_write_with_retry and execute_duckdb_write_with_retry."""
+    from unittest.mock import patch
+
+    from t1d_analytics.sql_utils import (
+        execute_duckdb_batch_write_with_retry,
+        execute_duckdb_write_with_retry,
+    )
+
+    db_file = tmp_path / "batch_write.duckdb"
+    execute_duckdb_batch_write_with_retry(
+        db_file,
+        [
+            ("CREATE TABLE items (id INT, label VARCHAR)", None),
+            ("INSERT INTO items VALUES (?, ?)", [1, "alpha"]),
+        ],
+    )
+    execute_duckdb_write_with_retry(
+        db_file,
+        "INSERT INTO items VALUES (?, ?)",
+        params=[2, "beta"],
+    )
+
+    conn = duckdb.connect(str(db_file), read_only=True)
+    rows = conn.execute("SELECT id, label FROM items ORDER BY id").fetchall()
+    conn.close()
+    assert rows == [(1, "alpha"), (2, "beta")]
+
+    # Test lock retry and exhaustion
+    delays: list[float] = []
+    with patch(
+        "duckdb.connect",
+        side_effect=duckdb.IOException("Could not set lock on file"),
+    ):
+        with pytest.raises(duckdb.IOException, match="database is locked"):
+            execute_duckdb_write_with_retry(
+                db_file,
+                "SELECT 1",
+                max_attempts=2,
+                base_delay_seconds=0.01,
+                sleep_fn=delays.append,
+            )
+    assert len(delays) == 2
+
+    # Test non-lock IOException re-raises immediately
+    with patch(
+        "duckdb.connect",
+        side_effect=duckdb.IOException("Disk full error"),
+    ):
+        with pytest.raises(duckdb.IOException, match="Disk full"):
+            execute_duckdb_write_with_retry(db_file, "SELECT 1", max_attempts=2)

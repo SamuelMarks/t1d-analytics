@@ -62,6 +62,8 @@ def validate_db_path(
         env_db_fallback = os.environ.get("T1D_DB_PATH")
         if env_db_fallback and Path(env_db_fallback).exists():
             raw_path = env_db_fallback
+        elif not env_db_fallback and Path("data/t1d.duckdb").exists():
+            raw_path = "data/t1d.duckdb"
 
     if "\0" in raw_path:
         raise InvalidDatabasePathError(
@@ -100,6 +102,12 @@ def discover_workspace_databases() -> DatabaseListResponse:
 
     """
     default_db = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
+    if (
+        default_db == "t1d.duckdb"
+        and not Path(default_db).exists()
+        and Path("data/t1d.duckdb").exists()
+    ):
+        default_db = "data/t1d.duckdb"
     all_files: List[Path] = []
     if default_db:
         p_def = Path(default_db)

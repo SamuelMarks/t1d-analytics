@@ -1,176 +1,106 @@
 /**
  * @file sql-highlight.ts
  * @module sql-highlight
- * Pure helper utilities for modal focus trapping, clinical cohort SQL generation, and API error translation.
+ * SQL statement classification, syntax highlighting synchronization, and re-exported modal/cohort/API helpers.
  */
 
-import i18next from "./i18n";
+import hljs from "highlight.js";
+import sql from "highlight.js/lib/languages/sql";
+import markdown from "highlight.js/lib/languages/markdown";
+
+import { trapModalFocus } from "./modal-utils";
+import {
+  type CohortFilterParams,
+  type TableRelationship,
+  CLINICAL_RELATIONSHIPS,
+  resolveTableJoin,
+  normalizeJoinType,
+  buildCohortSql,
+} from "./cohort-sql";
+import {
+  type ApiErrorPayload,
+  type ApiErrorInput,
+  type BackendErrorResponse,
+  parseApiError,
+  parseResponseJson,
+  fetchWithBackendError,
+} from "./api-client";
+
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("markdown", markdown);
+
+export {
+  trapModalFocus,
+  type CohortFilterParams,
+  type TableRelationship,
+  CLINICAL_RELATIONSHIPS,
+  resolveTableJoin,
+  normalizeJoinType,
+  buildCohortSql,
+  type ApiErrorPayload,
+  type ApiErrorInput,
+  type BackendErrorResponse,
+  parseApiError,
+  parseResponseJson,
+  fetchWithBackendError,
+};
 
 /**
- * Parses a backend error string or detail object into a translated string.
- * @param {unknown} errorObj - The raw backend error string or structured detail object.
- * @returns {string} Localized or formatted error message string.
+ * Checks whether a user input string is a valid read-only SQL query statement.
+ * Strips SQL comments and outer parentheses before verifying the leading keyword.
+ * @param {string} text - Raw input string from the chat textarea.
+ * @returns {boolean} True if the input is a read-only SQL statement.
  */
-export function parseApiError(errorObj: unknown): string {
-  if (typeof errorObj === "string") {
-    return i18next.exists(errorObj)
-      ? (i18next.t(errorObj) as string)
-      : errorObj;
+export function isReadOnlySqlStatement(text: string): boolean {
+  let cleaned = text
+    .replace(/--.*$/gm, " ")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .trim();
+  while (cleaned.startsWith("(") && cleaned.endsWith(")")) {
+    cleaned = cleaned.slice(1, -1).trim();
   }
-  if (errorObj && typeof errorObj === "object" && "error_code" in errorObj) {
-    const key = (errorObj as { error_code: string }).error_code;
-    const params = (errorObj as { params?: Record<string, unknown> }).params;
-    return i18next.exists(key)
-      ? (i18next.t(key, params as Record<string, unknown>) as string)
-      : `${key}: ${JSON.stringify(params)}`;
+  if (!cleaned) return false;
+  if (
+    /^(?:show\s+(?:me|us|all|the|a|an)|(?:explain|describe)\s+(?:how|why|what|to|the|this|that|me|us|in|briefly|clearly))\b/i.test(
+      cleaned,
+    )
+  ) {
+    return false;
   }
-  return String(errorObj);
+  return /^(select|with|pragma|describe|show|explain|summarize|values)\b/i.test(
+    cleaned,
+  );
 }
 
 /**
- * Helper to fetch and automatically throw parsed backend errors.
- * @param {string} url - The URL to fetch.
- * @param {RequestInit} [options] - Fetch options.
- * @returns {Promise<Response>} The fetch response.
- */
-export async function fetchWithBackendError(
-  url: string,
-  options?: RequestInit,
-): Promise<Response> {
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    let errorMsg = `HTTP ${response.status}`;
-    try {
-      const errData = await response.json();
-      if (errData.detail) {
-        errorMsg = parseApiError(errData.detail);
-      }
-    } catch {
-      // Ignore JSON parse errors
-    }
-    throw new Error(errorMsg);
-  }
-  return response;
-}
-
-/**
- * Clinical cohort filter parameters for query generation.
- */
-export interface CohortFilterParams {
-  /** Target primary table name. */
-  tableName: string;
-  /** Optional secondary table name for relational join. */
-  joinTableName?: string;
-  /** Relational join condition type ('INNER JOIN' or 'LEFT JOIN'). */
-  joinType?: "INNER JOIN" | "LEFT JOIN";
-  /** Explicit ON condition for table joining. */
-  joinCondition?: string;
-  /** Minimum patient age filter. */
-  minAge?: number;
-  /** Maximum patient age filter. */
-  maxAge?: number;
-  /** Biological sex or gender. */
-  gender?: string;
-  /** Clinical treatment group (e.g. Closed-Loop, MDI). */
-  txGroup?: string;
-  /** Time in Range maximum threshold percentage. */
-  maxTIR?: number;
-  /** Minimum glycated hemoglobin (HbA1c) threshold. */
-  minHbA1c?: number;
-}
-
-/**
- * Construct an optimized DuckDB SQL query from clinician cohort filter parameters, supporting relational joins.
- * @param {CohortFilterParams} params - The selected filter criteria.
- * @returns {string} The generated DuckDB SQL query.
- */
-export function buildCohortSql(params: CohortFilterParams): string {
-  const table1 = params.tableName || "patients";
-  const table2 = params.joinTableName?.trim();
-  const joinType = params.joinType || "INNER JOIN";
-  const joinOn = params.joinCondition?.trim();
-
-  const isJoin = Boolean(table2 && table2 !== table1);
-  const prefix = isJoin ? `"${table1.replace(/"/g, '""')}".` : "";
-  const predicates: string[] = [];
-
-  if (params.minAge !== undefined && Number.isFinite(params.minAge)) {
-    predicates.push(`${prefix}age >= ${params.minAge}`);
-  }
-  if (params.maxAge !== undefined && Number.isFinite(params.maxAge)) {
-    predicates.push(`${prefix}age <= ${params.maxAge}`);
-  }
-  if (params.gender) {
-    const safeGender = params.gender.replace(/'/g, "''");
-    predicates.push(`${prefix}gender = '${safeGender}'`);
-  }
-  if (params.txGroup) {
-    const safeTx = params.txGroup.replace(/'/g, "''");
-    predicates.push(`${prefix}txgroup ILIKE '%${safeTx}%'`);
-  }
-  if (params.maxTIR !== undefined && Number.isFinite(params.maxTIR)) {
-    predicates.push(`${prefix}tir <= ${params.maxTIR}`);
-  }
-  if (params.minHbA1c !== undefined && Number.isFinite(params.minHbA1c)) {
-    predicates.push(`${prefix}hba1c >= ${params.minHbA1c}`);
-  }
-
-  let fromClause = `FROM "${table1.replace(/"/g, '""')}"`;
-  if (isJoin && table2) {
-    const defaultOn = `"${table1.replace(/"/g, '""')}".patient_id = "${table2.replace(/"/g, '""')}".patient_id`;
-    fromClause += `
-${joinType} "${table2.replace(/"/g, '""')}"
-  ON ${joinOn || defaultOn}`;
-  }
-
-  const whereClause =
-    predicates.length > 0
-      ? `\nWHERE ${predicates.join(
-          `
-  AND `,
-        )}`
-      : "";
-  return `SELECT *
-${fromClause}${whereClause};`;
-}
-
-/**
- * Traps keyboard focus within a modal dialog and handles the Escape key to close.
- * @param {KeyboardEvent} e - The keyboard event.
- * @param {HTMLElement} modal - The container element to trap focus within.
- * @param {() => void} onClose - The callback function to invoke when Escape is pressed.
+ * Synchronizes the live syntax-highlighted code backdrop and auto-resizes the chat textarea.
+ * @param {HTMLTextAreaElement} chatInput - The user textarea element.
+ * @param {HTMLElement} chatInputHighlight - The backdrop code element for highlight.js.
+ * @param {string} selectedModel - Currently selected model or 'sql' mode.
  * @returns {void}
  */
-export function trapModalFocus(
-  e: KeyboardEvent,
-  modal: HTMLElement,
-  onClose: () => void,
+export function updateInputHighlight(
+  chatInput: HTMLTextAreaElement,
+  chatInputHighlight: HTMLElement,
+  selectedModel: string,
 ): void {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    onClose();
-    return;
-  }
-  if (e.key !== "Tab") return;
-  const focusableElements = modal.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  );
-  if (focusableElements.length === 0) return;
-  const firstElement = focusableElements[0];
-  const lastElement = focusableElements[focusableElements.length - 1];
-  const activeEl = document.activeElement;
-  const isOutsideOrRoot =
-    !activeEl || !modal.contains(activeEl) || activeEl === modal;
+  let value = chatInput.value;
 
-  if (e.shiftKey) {
-    if (activeEl === firstElement || isOutsideOrRoot) {
-      e.preventDefault();
-      lastElement.focus();
-    }
-  } else {
-    if (activeEl === lastElement || isOutsideOrRoot) {
-      e.preventDefault();
-      firstElement.focus();
-    }
+  if (value.endsWith("\n")) {
+    value += " ";
   }
+
+  chatInputHighlight.textContent = value;
+
+  if (selectedModel === "sql" || isReadOnlySqlStatement(value)) {
+    chatInputHighlight.className = "language-sql";
+  } else {
+    chatInputHighlight.className = "language-markdown";
+  }
+  delete chatInputHighlight.dataset.highlighted;
+  hljs.highlightElement(chatInputHighlight);
+
+  chatInput.style.height = "auto";
+  const scrollHeight = chatInput.scrollHeight;
+  chatInput.style.height = `${scrollHeight}px`;
 }

@@ -1,465 +1,91 @@
-"""Modular training execution runners and hardware orchestration for T1D Analytics."""
+"""Training runner execution engines for CPU, GPU, Hugging Face, Gemma-4-SQL, and Cloud TPU."""
 
-import asyncio
-import base64
-import hashlib
 import json
 import logging
 import math
 import os
-import shutil
 import subprocess
 import threading
 import time
-from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from t1d_analytics.errors import (
-    InsufficientDataError as InsufficientDataError,
+from t1d_analytics.dataset_loader import (
+    StreamingJsonlDataset,
+    TokenizedPairDataset,
+    _load_raw_pairs_from_file,
+    _resolve_tokenizer,
+    _tokenize_pair_with_masking,
+    prepare_torch_dataset,
 )
 from t1d_analytics.errors import (
-    TrainingExecutionError as TrainingExecutionError,
+    GemmaToolchainError,
+    HardwareUnavailableError,
+    InsufficientDataError,
+    MissingSdkError,
+    TrainingExecutionError,
+)
+from t1d_analytics.hf_models import (
+    AcceleratorDetectorProtocol,
+    AutocastTorchProtocol,
+    AutoModelFactoryProtocol,
+    AutoTokenizerFactoryProtocol,
+    BaseCausalLMFactory,
+    BaseTrainingRunner,
+    CosineSchedulerNamespaceProtocol,
+    DeviceLike,
+    DeviceProtocol,
+    DtypeLike,
+    DtypeProtocol,
+    HuggingFaceCausalLMFactory,
+    LrSchedulerProtocol,
+    ModelForwardOutput,
+    ModelOutputWithLogitsProtocol,
+    MpsBackendProtocol,
+    MpsBackendsHolderProtocol,
+    PaddedTokenizerProtocol,
+    PretrainedSavableProtocol,
+    QuantizationConfigProtocol,
+    TensorLike,
+    TensorProtocol,
+    TinyCausalLMFactory,
+    TokenizerProtocol,
+    TorchCausalLMProtocol,
+    TorchDeviceFactoryProtocol,
+    TrainableModelProtocol,
+    TransformersModuleProtocol,
+    _extract_output_logits,
+    _is_mps_available,
+    resolve_causal_lm_factory,
+    resolve_device_telemetry,
+)
+from t1d_analytics.job_manager import (
+    JobMetricValue,
+    TrainingJobState,
 )
 from t1d_analytics.job_manager import (
     TrainingJobManager as _SharedTrainingJobManager,
 )
-from t1d_analytics.job_manager import (
-    TrainingJobState,
-)
 from t1d_analytics.models import (
-    MaxTextConfig,
     TrainingBackend,
     TrainingJobConfig,
 )
+from t1d_analytics.sql_utils import SqlValue
+from t1d_analytics.tpu_orchestrator import (
+    GcsBlobProtocol,
+    GcsBucketProtocol,
+    GcsClientProtocol,
+    Md5BlobProtocol,
+    RemoteTpuMaxTextRunner,
+    SubprocessExecutorProtocol,
+    _build_gcloud_ssh_command,
+    _build_xpk_create_command,
+    _compute_md5_base64,
+    sync_dataset_to_gcs,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class BaseTrainingRunner(ABC):
-    """Abstract base class for model fine-tuning and pretraining execution engines."""
-
-    @abstractmethod
-    def validate_environment(self) -> bool:
-        """
-        Validate that required drivers, libraries, and hardware devices are present.
-
-        Returns
-        -------
-            bool: True if execution environment is validated.
-
-        Raises
-        ------
-            RuntimeError: If mandatory execution dependencies are missing.
-
-        """
-
-    def prepare_dataset(self, config: TrainingJobConfig) -> Path:
-        """
-        Validate and prepare input dataset file for training execution.
-
-        Args:
-        ----
-            config: Structured training job configuration.
-
-        Returns:
-        -------
-            Path: Verified path to dataset.
-
-        Raises:
-        ------
-            FileNotFoundError: If dataset path does not exist on disk.
-
-        """
-        ds_path = Path(config.dataset_path)
-        if not ds_path.exists():
-            raise FileNotFoundError(f"Training dataset not found at '{ds_path}'.")
-        return ds_path
-
-    def _count_dataset_samples(self, dataset_path: Path) -> int:
-        """
-        Count readable samples in dataset file (.parquet, .jsonl, .csv).
-
-        Args:
-        ----
-            dataset_path: Path to dataset.
-
-        Returns:
-        -------
-            int: Total sample count, or 0 if unreadable or empty.
-
-        """
-        if dataset_path.suffix in (".jsonl", ".json", ".csv"):
-            try:
-                with open(dataset_path, "r", encoding="utf-8") as f:
-                    return sum(1 for line in f if line.strip())
-            except Exception as e:
-                logger.debug(f"Failed to count jsonl samples: {e}")
-                return 0
-        elif dataset_path.suffix == ".parquet":
-            try:
-                import duckdb
-
-                escaped = str(dataset_path.resolve()).replace("'", "''")
-                cnt = duckdb.execute(
-                    f"SELECT COUNT(*) FROM read_parquet('{escaped}')"
-                ).fetchone()
-                return int(cnt[0]) if cnt else 0
-            except Exception as e:
-                logger.debug(f"Failed to count parquet samples: {e}")
-                return 0
-        return 0
-
-    @abstractmethod
-    def run_training(
-        self,
-        config: TrainingJobConfig,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute training run according to configuration parameters.
-
-        Args:
-        ----
-            config: Training job configuration.
-            cancel_event: Optional threading event for cooperative cancellation.
-
-        Returns:
-        -------
-            Dict[str, Any]: Execution results containing training loss, steps, and duration.
-
-        """
-
-
-def prepare_torch_dataset(
-    dataset_path: Path,
-    max_seq_length: int = 128,
-    vocab_size: int = 1000,
-    tokenizer: Optional[Any] = None,
-    tokenizer_name: Optional[str] = None,
-) -> List[Tuple[Any, Any]]:
-    """
-    Read tabular dataset records and prepare tokenized inputs for PyTorch training.
-
-    Supports JSONL and Parquet formats, extracting prompt and SQL completion text.
-    Applies Gemma instruction formatting and loss masking on prompt prefix tokens.
-
-    Args:
-    ----
-        dataset_path: Path to the dataset file (JSONL or Parquet).
-        max_seq_length: Maximum sequence length for input padding and truncation.
-        vocab_size: Vocabulary dimension for token index mapping when using fallback tokenizer.
-        tokenizer: Optional pretrained tokenizer instance with encode() method.
-        tokenizer_name: Optional Hugging Face pretrained tokenizer identifier.
-
-    Returns:
-    -------
-        List[Tuple[Any, Any]]: List of (input_ids, labels) PyTorch tensor tuples.
-
-    Raises:
-    ------
-        FileNotFoundError: If the dataset file does not exist.
-        ValueError: If the dataset format is unsupported or contains no records.
-
-    """
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Training dataset not found at '{dataset_path}'.")
-
-    records: List[Tuple[str, str]] = []
-    suffix = dataset_path.suffix.lower()
-
-    if suffix == ".jsonl":
-        try:
-            with open(dataset_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                        if isinstance(row, dict):
-                            prompt = str(row.get("prompt") or row.get("question") or "")
-                            target = str(
-                                row.get("completion")
-                                or row.get("sql")
-                                or row.get("chosen")
-                                or ""
-                            )
-                            records.append((prompt, target))
-                    except json.JSONDecodeError as e:
-                        logger.debug(f"Skipping malformed json line: {e}")
-                    except Exception as e:
-                        logger.debug(f"Unexpected error parsing json record: {e}")
-        except Exception as e:
-            raise ValueError(f"Failed to read JSONL dataset: {e}") from e
-
-    elif suffix == ".parquet":
-        try:
-            import duckdb
-
-            conn = duckdb.connect()
-            escaped_path = str(dataset_path.resolve()).replace("'", "''")
-            rel = conn.execute(f"SELECT * FROM read_parquet('{escaped_path}')")
-            cols = [desc[0] for desc in rel.description] if rel.description else []
-            if not cols:
-                conn.close()
-                raise ValueError("Parquet file contains no schema columns.")
-            prompt_col = next(
-                (
-                    c
-                    for c in cols
-                    if c.lower() in ("prompt", "question", "text", "query")
-                ),
-                cols[0],
-            )
-            target_col = next(
-                (
-                    c
-                    for c in cols
-                    if c.lower()
-                    in ("completion", "sql", "chosen", "target", "response")
-                ),
-                cols[1] if len(cols) > 1 else cols[0],
-            )
-            p_idx = cols.index(prompt_col)
-            t_idx = cols.index(target_col)
-            for r in rel.fetchall():
-                records.append((str(r[p_idx]), str(r[t_idx])))
-            conn.close()
-        except Exception as e:
-            raise ValueError(f"Failed to read Parquet dataset: {e}") from e
-    else:
-        raise ValueError(
-            f"Unsupported dataset format '{suffix}'. Supported formats are .jsonl and .parquet."
-        )
-
-    if not records:
-        raise ValueError(
-            f"Dataset at '{dataset_path}' contains no valid training pairs."
-        )
-
-    import torch
-
-    active_tok = tokenizer
-    if active_tok is None and tokenizer_name is not None:
-        try:
-            from transformers import AutoTokenizer
-
-            tok_loader: Any = getattr(AutoTokenizer, "from_pretrained")
-            active_tok = tok_loader(tokenizer_name)
-        except Exception as e:
-            logger.warning(
-                f"Could not load Hugging Face tokenizer '{tokenizer_name}': {e}. Using fallback."
-            )
-
-    if active_tok is None:
-        raise ValueError("A valid Hugging Face tokenizer must be provided.")
-
-    tokenized_pairs: List[Tuple[Any, Any]] = []
-    nl = "\n"
-    for prompt, target in records:
-        # Gemma instruction template formatting
-        prompt_str = (
-            f"<start_of_turn>user{nl}{prompt}<end_of_turn>{nl}<start_of_turn>model{nl}"
-        )
-        full_str = f"{prompt_str}{target}<end_of_turn>"
-
-        prompt_ids = active_tok.encode(prompt_str, add_special_tokens=False)
-        full_ids = active_tok.encode(full_str, add_special_tokens=False)
-
-        # Mask prompt tokens with -100 so loss is only computed on target SQL
-        labels_list = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
-
-        if len(full_ids) > max_seq_length:
-            full_ids = full_ids[:max_seq_length]
-            labels_list = labels_list[:max_seq_length]
-        else:
-            pad_id = getattr(active_tok, "pad_token_id", 0) or 0
-            pad_len = max_seq_length - len(full_ids)
-            full_ids = full_ids + [pad_id] * pad_len
-            labels_list = labels_list + [-100] * pad_len
-
-        inp_ids = torch.tensor(full_ids[:-1], dtype=torch.long)
-        labels = torch.tensor(labels_list[1:], dtype=torch.long)
-        tokenized_pairs.append((inp_ids, labels))
-
-    return tokenized_pairs
-
-
-class TorchCausalLMProtocol(Protocol):
-    """Protocol representing a PyTorch or Hugging Face causal language model."""
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Execute forward pass."""
-
-    def parameters(self) -> Any:
-        """Return trainable parameters."""
-
-    def train(self, mode: bool = True) -> Any:
-        """Set training mode."""
-
-    def eval(self) -> Any:
-        """Set evaluation mode."""
-
-    def to(self, device: Any) -> Any:
-        """Move model to target compute device."""
-
-    def state_dict(self) -> Dict[str, Any]:
-        """Return state dictionary."""
-
-
-class BaseCausalLMFactory(ABC):
-    """Abstract factory interface for creating causal language models."""
-
-    @abstractmethod
-    def create_model(
-        self,
-        model_name: str,
-        device: str = "cpu",
-        quantization: Optional[str] = None,
-        use_lora: bool = False,
-        lora_r: int = 16,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0.05,
-    ) -> Any:
-        """
-        Create and return a causal language model instance configured for training.
-
-        Args:
-        ----
-            model_name: Name or local path of base pretrained model.
-            device: Target device string ('cpu', 'cuda:0', 'mps').
-            quantization: Quantization mode ('4bit', '8bit', or None).
-            use_lora: Whether to apply LoRA adapter weights.
-            lora_r: LoRA rank dimension.
-            lora_alpha: LoRA scaling alpha factor.
-            lora_dropout: LoRA dropout probability.
-
-        Returns:
-        -------
-            Any: Configured PyTorch nn.Module ready for training.
-
-        Raises:
-        ------
-            RuntimeError: If dependencies for model creation are missing or fail.
-
-        """
-
-
-class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
-    """Factory producing production Hugging Face transformers causal models with LoRA/quantization."""
-
-    def create_model(
-        self,
-        model_name: str,
-        device: str = "cpu",
-        quantization: Optional[str] = None,
-        use_lora: bool = False,
-        lora_r: int = 16,
-        lora_alpha: int = 32,
-        lora_dropout: float = 0.05,
-    ) -> Any:
-        """
-        Create a Hugging Face AutoModelForCausalLM instance with optional LoRA and quantization.
-
-        Args:
-        ----
-            model_name: Pretrained model name or path (e.g., 'google/gemma-4-2b').
-            device: Target compute device.
-            quantization: Quantization mode ('4bit' or '8bit').
-            use_lora: Whether to apply LoRA adapter weights.
-            lora_r: LoRA rank dimension.
-            lora_alpha: LoRA scaling alpha factor.
-            lora_dropout: LoRA dropout probability.
-
-        Returns:
-        -------
-            Any: Configured causal LM model.
-
-        Raises:
-        ------
-            RuntimeError: If transformers or peft are missing or model loading fails.
-
-        """
-        try:
-            import torch
-            from transformers import AutoModelForCausalLM
-        except ImportError as e:
-            raise RuntimeError(
-                "The 'transformers' and 'torch' libraries are required for HuggingFace models. "
-                "Install via 'pip install transformers torch'."
-            ) from e
-
-        bnb_config = None
-        if quantization in ("4bit", "8bit"):
-            try:
-                from transformers import BitsAndBytesConfig
-
-                bnb_cls: Any = BitsAndBytesConfig
-                if quantization == "4bit":
-                    bnb_config = bnb_cls(
-                        load_in_4bit=True,
-                        bnb_4bit_compute_dtype=torch.float16,
-                    )
-                else:
-                    bnb_config = bnb_cls(load_in_8bit=True)
-            except (ImportError, Exception) as e:
-                logger.warning(
-                    f"BitsAndBytesConfig failed ({e}); falling back to standard precision."
-                )
-
-        torch_dtype = torch.float16 if device.startswith("cuda") else torch.float32
-
-        model_kwargs: Dict[str, Any] = {}
-        model_kwargs["torch_dtype"] = torch_dtype
-        if bnb_config is not None:
-            model_kwargs["quantization_config"] = bnb_config
-
-        try:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                **model_kwargs,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load Hugging Face model '{model_name}': {e}"
-            ) from e
-
-        if bnb_config is None:
-            try:
-                to_fn = getattr(model, "to")
-                to_fn(torch.device(device))
-            except Exception as e:
-                logger.debug(f"Failed to move model to {device}: {e}")
-
-        if use_lora:
-            try:
-                import importlib
-
-                peft_mod = importlib.import_module("peft")
-                lora_cfg_cls: Any = getattr(peft_mod, "LoraConfig")
-                task_type_cls: Any = getattr(peft_mod, "TaskType")
-                get_peft_fn: Any = getattr(peft_mod, "get_peft_model")
-
-                peft_config = lora_cfg_cls(
-                    task_type=task_type_cls.CAUSAL_LM,
-                    r=lora_r,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-                )
-                model = get_peft_fn(model, peft_config)
-            except ImportError as e:
-                raise RuntimeError(
-                    "The 'peft' library is required for LoRA fine-tuning. "
-                    "Install via 'pip install peft'."
-                ) from e
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to apply LoRA configuration to model '{model_name}': {e}"
-                ) from e
-
-        return model
+_ = subprocess
 
 
 class BaseTorchCausalLMRunner(BaseTrainingRunner):
@@ -467,9 +93,9 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
 
     def _evaluate(
         self,
-        model: Any,
-        eval_dataset: List[Tuple[Any, Any]],
-        device: Any,
+        model: TorchCausalLMProtocol,
+        eval_dataset: Sequence[Tuple[TensorLike, TensorLike]],
+        device: DeviceLike,
         batch_size: int = 4,
     ) -> Dict[str, float]:
         """
@@ -500,7 +126,7 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
                 inps = torch.stack([b[0] for b in batch]).to(device)
                 lbls = torch.stack([b[1] for b in batch]).to(device)
                 outputs = model(inps)
-                logits = getattr(outputs, "logits", outputs)
+                logits = _extract_output_logits(outputs)
                 loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
                 total_loss += float(loss.item())
                 total_batches += 1
@@ -513,8 +139,8 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
 
     def _run_torch_optimizer_loop(
         self,
-        model: Any,
-        dataset: List[Tuple[Any, Any]],
+        model: TorchCausalLMProtocol,
+        dataset: Sequence[Tuple[TensorLike, TensorLike]],
         epochs: int,
         batch_size: int,
         total_steps: int,
@@ -522,7 +148,7 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         weight_decay: float,
         accum_steps: int,
         max_norm: float,
-        target_dev: Optional[Any] = None,
+        target_dev: Optional[DeviceLike] = None,
         mixed_precision: str = "fp32",
         ignore_index: Optional[int] = None,
         cancel_event: Optional[threading.Event] = None,
@@ -563,7 +189,11 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
             if ignore_index is not None
             else torch.nn.CrossEntropyLoss()
         )
-        sched_cls = getattr(torch.optim.lr_scheduler, "CosineAnnealingLR", None)
+        sched_cls = (
+            torch.optim.lr_scheduler.CosineAnnealingLR
+            if isinstance(torch.optim.lr_scheduler, CosineSchedulerNamespaceProtocol)
+            else None
+        )
         scheduler = (
             sched_cls(optimizer, T_max=max(1, total_steps))
             if callable(sched_cls)
@@ -572,7 +202,7 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
 
         loss_history: List[float] = []
         step_idx = 0
-        if hasattr(model, "train"):
+        if isinstance(model, TrainableModelProtocol):
             model.train()
 
         for _ in range(epochs):
@@ -588,14 +218,16 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
                     inps = inps.to(target_dev)
                     lbls = lbls.to(target_dev)
 
-                if mixed_precision == "fp16" and hasattr(torch, "autocast"):
+                if mixed_precision == "fp16" and isinstance(
+                    torch, AutocastTorchProtocol
+                ):
                     with torch.autocast(device_type="cuda", dtype=torch.float16):
                         outputs = model(inps)
-                        logits = getattr(outputs, "logits", outputs)
+                        logits = _extract_output_logits(outputs)
                         loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
                 else:
                     outputs = model(inps)
-                    logits = getattr(outputs, "logits", outputs)
+                    logits = _extract_output_logits(outputs)
                     loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
 
                 loss = loss / accum_steps
@@ -603,7 +235,8 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
 
                 if (step_idx + 1) % accum_steps == 0 or (step_idx + 1) == total_steps:
                     torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), max_norm=max_norm
+                        model.parameters(),
+                        max_norm=max_norm,
                     )
                     optimizer.step()
                     if scheduler is not None:
@@ -667,7 +300,9 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
             total_steps,
         )
 
-    def _save_model_checkpoint(self, model: Any, ckpt_dir: Path) -> None:
+    def _save_model_checkpoint(
+        self, model: TorchCausalLMProtocol, ckpt_dir: Path
+    ) -> None:
         """
         Save model weights to a checkpoint directory using save_pretrained or torch.save.
 
@@ -680,47 +315,74 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         import torch
 
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        if hasattr(model, "save_pretrained"):
+        if isinstance(model, PretrainedSavableProtocol):
             model.save_pretrained(str(ckpt_dir))
         else:
             torch.save(model.state_dict(), ckpt_dir / "model.pt")
 
-
-class LocalCpuRunner(BaseTorchCausalLMRunner):
-    """Training runner executing on host CPU using PyTorch or local execution engine."""
-
-    def validate_environment(self) -> bool:
-        """
-        Validate CPU execution environment.
-
-        Returns
-        -------
-            bool: True if environment is suitable for CPU training.
-
-        """
-        return True
-
-    def run_training(
+    def _write_training_artifacts(
         self,
-        config: TrainingJobConfig,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, Any]:
+        ckpt_dir: Path,
+        metadata_filename: str,
+        metadata_payload: Dict[str, JobMetricValue],
+        metrics_payload: Dict[str, JobMetricValue],
+    ) -> None:
         """
-        Execute training or dry-run on CPU.
+        Write training metadata and metrics JSON files to the checkpoint directory.
 
         Args:
         ----
-            config: Job configuration.
+            ckpt_dir: Destination checkpoint directory.
+            metadata_filename: Filename for configuration/device metadata JSON.
+            metadata_payload: Metadata dictionary to serialize.
+            metrics_payload: Training metrics dictionary to serialize.
+
+        """
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        with open(ckpt_dir / metadata_filename, "w", encoding="utf-8") as f:
+            json.dump(metadata_payload, f, indent=2)
+        with open(ckpt_dir / "training_metrics.json", "w", encoding="utf-8") as f:
+            json.dump(metrics_payload, f, indent=2)
+
+    def _run_local_torch_training(
+        self,
+        config: TrainingJobConfig,
+        device: str,
+        checkpoint_subdir: str,
+        metadata_filename: str,
+        error_prefix: str,
+        mixed_precision: str = "fp32",
+        device_name: Optional[str] = None,
+        peak_memory_mb: Optional[float] = None,
+        include_loss_history_in_result: bool = True,
+        include_device_in_result: bool = False,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, JobMetricValue]:
+        """
+        Execute the shared local PyTorch dataset preparation, model creation, optimization, and artifact persistence flow.
+
+        Args:
+        ----
+            config: Training job configuration.
+            device: Target PyTorch device string (e.g., `'cpu'`, `'cuda:0'`, `'mps'`).
+            checkpoint_subdir: Subdirectory name under `output_dir` for the final checkpoint.
+            metadata_filename: Filename for the metadata JSON written inside the checkpoint directory.
+            error_prefix: Prefix for `TrainingExecutionError` messages on failure.
+            mixed_precision: Precision mode (`'fp32'` or `'fp16'`).
+            device_name: Optional hardware device name for GPU metadata.
+            peak_memory_mb: Optional peak memory telemetry in MB for GPU metadata.
+            include_loss_history_in_result: Whether to include `loss_history` in the returned dictionary.
+            include_device_in_result: Whether to include `device` and `mixed_precision` in the returned dictionary.
             cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
         -------
-            Dict[str, Any]: Metrics and summary output.
+            Dict[str, JobMetricValue]: Summary dictionary of training execution metrics.
 
         Raises:
         ------
             InsufficientDataError: If training dataset has zero samples.
-            TrainingExecutionError: If training execution fails.
+            TrainingExecutionError: If dataset loading, model creation, or training fails.
 
         """
         start_time = time.time()
@@ -741,250 +403,35 @@ class LocalCpuRunner(BaseTorchCausalLMRunner):
         try:
             import torch
 
-            _ = torch
             dataset = prepare_torch_dataset(
                 ds_path,
                 tokenizer_name=config.model_name,
             )
-            model = HuggingFaceCausalLMFactory().create_model(
-                model_name=config.model_name,
-                device="cpu",
-                quantization=config.quantization,
-                use_lora=config.use_lora,
-            )
-
-            if config.dry_run:
-                inp, _ = dataset[0]
-                outputs = model(inp.unsqueeze(0))
-                _ = getattr(outputs, "logits", outputs)
-                loss_history = [0.0] * total_steps
-                final_loss = 0.0
-            else:
-                loss_history, final_loss = self._run_torch_optimizer_loop(
-                    model=model,
-                    dataset=dataset,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    total_steps=total_steps,
-                    lr=lr,
-                    weight_decay=hparams.weight_decay if hparams else 0.01,
-                    accum_steps=accum_steps,
-                    max_norm=max_norm,
-                    cancel_event=cancel_event,
-                )
-                self._save_model_checkpoint(model, out_path / "checkpoint-final")
-        except Exception as e:
-            raise TrainingExecutionError(f"CPU training execution failed: {e}") from e
-
-        if not config.dry_run:
-            ckpt_dir = out_path / "checkpoint-final"
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            with open(ckpt_dir / "training_args.json", "w") as f:
-                json.dump(
-                    {
-                        "model_name": config.model_name,
-                        "batch_size": batch_size,
-                        "epochs": epochs,
-                        "learning_rate": lr,
-                        "backend": config.backend.value,
-                    },
-                    f,
-                    indent=2,
-                )
-            with open(ckpt_dir / "training_metrics.json", "w") as f:
-                json.dump(
-                    {
-                        "loss_history": loss_history,
-                        "final_loss": final_loss,
-                        "total_steps": total_steps,
-                        "epochs": epochs,
-                        "batch_size": batch_size,
-                        "learning_rate": lr,
-                        "samples": sample_count,
-                    },
-                    f,
-                    indent=2,
-                )
-
-        elapsed = time.time() - start_time
-        return {
-            "status": "dry_run_completed" if config.dry_run else "completed",
-            "backend": config.backend.value,
-            "model_name": config.model_name,
-            "total_steps": total_steps,
-            "final_loss": final_loss,
-            "loss_history": loss_history,
-            "runtime_seconds": round(elapsed, 4),
-            "output_dir": str(out_path),
-        }
-
-
-def resolve_device_telemetry(device: str) -> Tuple[str, float]:
-    """
-    Resolve descriptive hardware identifier and total memory for the active execution device.
-
-    Args:
-    ----
-        device: Target hardware device string ('cuda:0', 'mps', 'cpu', etc.).
-
-    Returns:
-    -------
-        Tuple[str, float]: (device_name, total_memory_mb).
-
-    """
-    if device.startswith("cuda"):
-        try:
-            import torch
-
-            idx = int(device.split(":", 1)[1]) if ":" in device else 0
-            if torch.cuda.is_available():
-                dev_name = str(torch.cuda.get_device_name(idx))
-                _, total_vram = torch.cuda.mem_get_info(idx)
-                return dev_name, round(total_vram / (1024 * 1024), 2)
-        except Exception as e:
-            logger.debug(f"Failed to gather CUDA telemetry: {e}")
-        return "NVIDIA CUDA Device", 0.0
-
-    if device == "mps":
-        dev_name = "Apple Silicon GPU (MPS)"
-        try:
-            import subprocess
-
-            res = subprocess.run(
-                ["sysctl", "-n", "machdep.cpu.brand_string"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                dev_name = f"Apple Silicon ({res.stdout.strip()})"
-        except Exception as e:
-            logger.debug(f"Failed to gather MPS telemetry: {e}")
-        return dev_name, 0.0
-
-    cpu_name = "Host CPU"
-    try:
-        import platform
-
-        proc = platform.processor()
-        if proc:
-            cpu_name = f"Host CPU ({proc})"
-        elif Path("/proc/cpuinfo").exists():
-            content = Path("/proc/cpuinfo").read_text(encoding="utf-8")
-            for line in content.splitlines():
-                if "model name" in line:
-                    cpu_name = line.split(":", 1)[1].strip()
-                    break
-    except Exception as e:
-        logger.debug(f"Failed to gather CPU telemetry: {e}")
-
-    return cpu_name, 0.0
-
-
-class LocalGpuRunner(BaseTorchCausalLMRunner):
-    """Training runner executing on local GPU (CUDA / Apple MPS)."""
-
-    def validate_environment(self) -> bool:
-        """
-        Validate that a local GPU device (CUDA or MPS) is accessible.
-
-        Returns
-        -------
-            bool: True if GPU hardware is available.
-
-        Raises
-        ------
-            RuntimeError: If no compatible GPU accelerator is detected.
-
-        """
-        if os.environ.get("CUDA_VISIBLE_DEVICES"):
-            return True
-
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                return True
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return True
-        except ImportError as e:
-            logger.debug(f"PyTorch is not installed or available: {e}")
-
-        raise RuntimeError(
-            "No compatible GPU device (NVIDIA CUDA or Apple Silicon MPS) detected. "
-            "Use --backend local-cpu or ensure drivers and PyTorch GPU builds are installed."
-        )
-
-    def run_training(
-        self,
-        config: TrainingJobConfig,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute training or dry-run on local GPU.
-
-        Args:
-        ----
-            config: Job configuration.
-            cancel_event: Optional threading event for cooperative cancellation.
-
-        Returns:
-        -------
-            Dict[str, Any]: Metrics, GPU telemetry, and summary output.
-
-        Raises:
-        ------
-            InsufficientDataError: If training dataset has zero samples.
-            TrainingExecutionError: If training execution fails.
-
-        """
-        start_time = time.time()
-        (
-            ds_path,
-            out_path,
-            batch_size,
-            epochs,
-            lr,
-            accum_steps,
-            max_norm,
-            _,
-            total_steps,
-        ) = self._prepare_execution_context(config)
-        hparams = config.hyperparameters
-        loss_history: List[float] = []
-
-        device = "cpu"
-        peak_memory_mb = 0.0
-        mixed_precision = "fp32"
-
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                device = "cuda:0"
-                mixed_precision = "fp16"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = "mps"
-                mixed_precision = "fp32"
-
-            device_name, peak_memory_mb = resolve_device_telemetry(device)
-
-            dataset = prepare_torch_dataset(
-                ds_path,
-                tokenizer_name=config.model_name,
-            )
-            model = HuggingFaceCausalLMFactory().create_model(
+            factory = resolve_causal_lm_factory(config)
+            model = factory.create_model(
                 model_name=config.model_name,
                 device=device,
                 quantization=config.quantization,
                 use_lora=config.use_lora,
             )
 
-            target_dev = torch.device(device) if hasattr(torch, "device") else "cpu"
+            target_dev: Optional[DeviceLike] = None
+            if include_device_in_result:
+                target_dev = (
+                    torch.device(device)
+                    if isinstance(torch, TorchDeviceFactoryProtocol)
+                    else "cpu"
+                )
+
             if config.dry_run:
                 inp, _ = dataset[0]
-                outputs = model(inp.unsqueeze(0).to(target_dev))
-                _ = getattr(outputs, "logits", outputs)
+                dry_input = (
+                    inp.unsqueeze(0).to(target_dev)
+                    if target_dev is not None
+                    else inp.unsqueeze(0)
+                )
+                outputs = model(dry_input)
+                _ = _extract_output_logits(outputs)
                 loss_history = [0.0] * total_steps
                 final_loss = 0.0
             else:
@@ -1002,54 +449,222 @@ class LocalGpuRunner(BaseTorchCausalLMRunner):
                     mixed_precision=mixed_precision,
                     cancel_event=cancel_event,
                 )
-                self._save_model_checkpoint(model, out_path / "checkpoint-gpu-final")
+                self._save_model_checkpoint(model, out_path / checkpoint_subdir)
         except Exception as e:
-            raise TrainingExecutionError(f"GPU training execution failed: {e}") from e
+            raise TrainingExecutionError(f"{error_prefix}: {e}") from e
 
+        loss_vals: List[SqlValue] = list(loss_history)
         if not config.dry_run:
-            ckpt_dir = out_path / "checkpoint-gpu-final"
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            with open(ckpt_dir / "gpu_metadata.json", "w") as f:
-                json.dump(
-                    {
-                        "model_name": config.model_name,
-                        "backend": config.backend.value,
-                        "device": device,
-                        "device_name": device_name,
-                        "mixed_precision": mixed_precision,
-                        "peak_memory_mb": peak_memory_mb,
-                    },
-                    f,
-                    indent=2,
-                )
-            with open(ckpt_dir / "training_metrics.json", "w") as f:
-                json.dump(
-                    {
-                        "loss_history": loss_history,
-                        "final_loss": final_loss,
-                        "total_steps": total_steps,
-                        "epochs": epochs,
-                        "batch_size": batch_size,
-                        "learning_rate": lr,
-                        "device": device,
-                        "mixed_precision": mixed_precision,
-                    },
-                    f,
-                    indent=2,
-                )
+            if include_device_in_result:
+                metadata_payload: Dict[str, JobMetricValue] = {
+                    "model_name": config.model_name,
+                    "backend": config.backend.value,
+                    "device": device,
+                    "device_name": device_name or device,
+                    "mixed_precision": mixed_precision,
+                    "peak_memory_mb": peak_memory_mb or 0.0,
+                }
+                metrics_payload: Dict[str, JobMetricValue] = {
+                    "loss_history": loss_vals,
+                    "final_loss": final_loss,
+                    "total_steps": total_steps,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "learning_rate": lr,
+                    "device": device,
+                    "mixed_precision": mixed_precision,
+                }
+            else:
+                metadata_payload = {
+                    "model_name": config.model_name,
+                    "batch_size": batch_size,
+                    "epochs": epochs,
+                    "learning_rate": lr,
+                    "backend": config.backend.value,
+                }
+                metrics_payload = {
+                    "loss_history": loss_vals,
+                    "final_loss": final_loss,
+                    "total_steps": total_steps,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "learning_rate": lr,
+                    "samples": sample_count,
+                }
+            self._write_training_artifacts(
+                ckpt_dir=out_path / checkpoint_subdir,
+                metadata_filename=metadata_filename,
+                metadata_payload=metadata_payload,
+                metrics_payload=metrics_payload,
+            )
 
         elapsed = time.time() - start_time
-        return {
+        result: Dict[str, JobMetricValue] = {
             "status": "dry_run_completed" if config.dry_run else "completed",
             "backend": config.backend.value,
             "model_name": config.model_name,
             "total_steps": total_steps,
             "final_loss": final_loss,
-            "device": device,
-            "mixed_precision": mixed_precision,
             "runtime_seconds": round(elapsed, 4),
             "output_dir": str(out_path),
         }
+        if include_loss_history_in_result:
+            result["loss_history"] = loss_vals
+        if include_device_in_result:
+            result["device"] = device
+            result["mixed_precision"] = mixed_precision
+        return result
+
+
+class LocalCpuRunner(BaseTorchCausalLMRunner):
+    """Training runner executing on host CPU using PyTorch or local execution engine."""
+
+    def validate_environment(self) -> bool:
+        """
+        Validate CPU execution environment.
+
+        Returns
+        -------
+            bool: True if environment is suitable for CPU training.
+
+        """
+        return True
+
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, JobMetricValue]:
+        """
+        Execute training or dry-run on CPU.
+
+        Args:
+        ----
+            config: Job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
+
+        Returns:
+        -------
+            Dict[str, JobMetricValue]: Metrics and summary output.
+
+        Raises:
+        ------
+            InsufficientDataError: If training dataset has zero samples.
+            TrainingExecutionError: If training execution fails.
+
+        """
+        return self._run_local_torch_training(
+            config=config,
+            device="cpu",
+            checkpoint_subdir="checkpoint-final",
+            metadata_filename="training_args.json",
+            error_prefix="CPU training execution failed",
+            include_loss_history_in_result=True,
+            include_device_in_result=False,
+            cancel_event=cancel_event,
+        )
+
+
+class LocalGpuRunner(BaseTorchCausalLMRunner):
+    """Training runner executing on local GPU (CUDA / Apple MPS)."""
+
+    def validate_environment(
+        self,
+        detector: Optional[AcceleratorDetectorProtocol] = None,
+    ) -> bool:
+        """
+        Validate that a local GPU device (CUDA or MPS) is accessible.
+
+        Args:
+        ----
+            detector: Optional injectable accelerator detector.
+
+        Returns:
+        -------
+            bool: True if GPU hardware is available.
+
+        Raises:
+        ------
+            HardwareUnavailableError: If no compatible GPU accelerator is detected.
+
+        """
+        if detector is not None:
+            if detector.is_cuda_available() or detector.is_mps_available():
+                return True
+            raise HardwareUnavailableError(
+                "No compatible GPU device (NVIDIA CUDA or Apple Silicon MPS) detected. "
+                "Use --backend local-cpu or ensure drivers and PyTorch GPU builds are installed."
+            )
+
+        if os.environ.get("CUDA_VISIBLE_DEVICES"):
+            return True
+
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return True
+            if _is_mps_available(torch.backends):
+                return True
+        except ImportError as e:
+            logger.debug(f"PyTorch is not installed or available: {e}")
+
+        raise HardwareUnavailableError(
+            "No compatible GPU device (NVIDIA CUDA or Apple Silicon MPS) detected. "
+            "Use --backend local-cpu or ensure drivers and PyTorch GPU builds are installed."
+        )
+
+    def run_training(
+        self,
+        config: TrainingJobConfig,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, JobMetricValue]:
+        """
+        Execute training or dry-run on local GPU.
+
+        Args:
+        ----
+            config: Job configuration.
+            cancel_event: Optional threading event for cooperative cancellation.
+
+        Returns:
+        -------
+            Dict[str, JobMetricValue]: Metrics, GPU telemetry, and summary output.
+
+        Raises:
+        ------
+            InsufficientDataError: If training dataset has zero samples.
+            TrainingExecutionError: If training execution fails.
+
+        """
+        device = "cpu"
+        mixed_precision = "fp32"
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                device = "cuda:0"
+                mixed_precision = "fp16"
+            elif _is_mps_available(torch.backends):
+                device = "mps"
+                mixed_precision = "fp32"
+            device_name, peak_memory_mb = resolve_device_telemetry(device)
+        except Exception as e:
+            raise TrainingExecutionError(f"GPU training execution failed: {e}") from e
+
+        return self._run_local_torch_training(
+            config=config,
+            device=device,
+            checkpoint_subdir="checkpoint-gpu-final",
+            metadata_filename="gpu_metadata.json",
+            error_prefix="GPU training execution failed",
+            mixed_precision=mixed_precision,
+            device_name=device_name,
+            peak_memory_mb=peak_memory_mb,
+            include_loss_history_in_result=False,
+            include_device_in_result=True,
+            cancel_event=cancel_event,
+        )
 
 
 class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
@@ -1078,7 +693,7 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
 
             return True
         except ImportError as e:
-            raise RuntimeError(
+            raise MissingSdkError(
                 f"HuggingFace execution requires 'transformers' and 'torch': {e}"
             ) from e
 
@@ -1086,7 +701,7 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
         self,
         config: TrainingJobConfig,
         cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, JobMetricValue]:
         """
         Execute training run using Hugging Face causal LM architecture.
 
@@ -1097,7 +712,7 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
 
         Returns:
         -------
-            Dict[str, Any]: Metrics and summary output.
+            Dict[str, JobMetricValue]: Metrics and summary output.
 
         Raises:
         ------
@@ -1127,7 +742,7 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
 
             if torch.cuda.is_available():
                 device = "cuda:0"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            elif _is_mps_available(torch.backends):
                 device = "mps"
 
             target_dev = torch.device(device)
@@ -1146,12 +761,11 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
                 use_lora=config.use_lora,
             )
             try:
-                to_fn = getattr(model, "to")
-                model = to_fn(target_dev)
+                model = model.to(target_dev)
             except Exception as e:
                 logger.debug(f"Failed to move HF model to device: {e}")
 
-            eval_dataset: Optional[List[Tuple[Any, Any]]] = None
+            eval_dataset: Optional[List[Tuple[TensorLike, TensorLike]]] = None
             if config.validation_dataset_path:
                 val_path = Path(config.validation_dataset_path)
                 if val_path.exists():
@@ -1164,7 +778,7 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
             if config.dry_run:
                 inp, _ = dataset[0]
                 outputs = model(inp.unsqueeze(0).to(target_dev))
-                _ = getattr(outputs, "logits", outputs)
+                _ = _extract_output_logits(outputs)
                 loss_history = [0.0] * total_steps
                 final_loss = 0.0
             else:
@@ -1184,7 +798,10 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
                 )
                 if eval_dataset:
                     eval_metrics = self._evaluate(
-                        model, eval_dataset, target_dev, batch_size=batch_size
+                        model,
+                        eval_dataset,
+                        target_dev,
+                        batch_size=batch_size,
                     )
                 self._save_model_checkpoint(model, out_path / "checkpoint-hf-final")
 
@@ -1193,37 +810,31 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
                 f"Hugging Face training execution failed: {e}"
             ) from e
 
+        loss_history_vals: List[SqlValue] = list(loss_history)
+        eval_metrics_vals: Dict[str, SqlValue] = dict(eval_metrics)
         if not config.dry_run:
-            ckpt_dir = out_path / "checkpoint-hf-final"
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            with open(ckpt_dir / "training_args.json", "w") as f:
-                json.dump(
-                    {
-                        "model_name": config.model_name,
-                        "batch_size": batch_size,
-                        "epochs": epochs,
-                        "learning_rate": lr,
-                        "backend": config.backend.value,
-                        "use_lora": config.use_lora,
-                        "quantization": config.quantization,
-                    },
-                    f,
-                    indent=2,
-                )
-            with open(ckpt_dir / "training_metrics.json", "w") as f:
-                json.dump(
-                    {
-                        "loss_history": loss_history,
-                        "final_loss": final_loss,
-                        "total_steps": total_steps,
-                        "epochs": epochs,
-                        "batch_size": batch_size,
-                        "learning_rate": lr,
-                        "eval_metrics": eval_metrics,
-                    },
-                    f,
-                    indent=2,
-                )
+            self._write_training_artifacts(
+                ckpt_dir=out_path / "checkpoint-hf-final",
+                metadata_filename="training_args.json",
+                metadata_payload={
+                    "model_name": config.model_name,
+                    "batch_size": batch_size,
+                    "epochs": epochs,
+                    "learning_rate": lr,
+                    "backend": config.backend.value,
+                    "use_lora": config.use_lora,
+                    "quantization": config.quantization,
+                },
+                metrics_payload={
+                    "loss_history": loss_history_vals,
+                    "final_loss": final_loss,
+                    "total_steps": total_steps,
+                    "epochs": epochs,
+                    "batch_size": batch_size,
+                    "learning_rate": lr,
+                    "eval_metrics": eval_metrics_vals,
+                },
+            )
 
         elapsed = time.time() - start_time
         return {
@@ -1232,674 +843,11 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
             "model_name": config.model_name,
             "total_steps": total_steps,
             "final_loss": final_loss,
-            "loss_history": loss_history,
-            "eval_metrics": eval_metrics,
+            "loss_history": loss_history_vals,
+            "eval_metrics": eval_metrics_vals,
             "runtime_seconds": round(elapsed, 4),
             "output_dir": str(out_path),
         }
-
-
-class RemoteTpuMaxTextRunner(BaseTrainingRunner):
-    """Training runner orchestrating MaxText jobs on Google Cloud TPU clusters."""
-
-    def validate_environment(self) -> bool:
-        """
-        Validate that Google Cloud CLI or Libscript toolchain is installed.
-
-        Returns
-        -------
-            bool: True if remote TPU environment tools are present.
-
-        Raises
-        ------
-            RuntimeError: If gcloud or xpk CLI is missing.
-
-        """
-        has_gcloud = shutil.which("gcloud") is not None
-        has_libscript = (
-            Path(os.environ.get("LIBSCRIPT_ROOT_DIR", "~/repos/libscript"))
-            .expanduser()
-            .exists()
-        )
-        if not (has_gcloud or has_libscript):
-            raise RuntimeError(
-                "Google Cloud CLI (gcloud) or Libscript orchestrator not found. "
-                "Install Google Cloud CLI or set LIBSCRIPT_ROOT_DIR."
-            )
-        return True
-
-    def generate_maxtext_yaml(self, config: TrainingJobConfig) -> str:
-        """
-        Generate MaxText YAML configuration file content for Cloud TPU execution.
-
-        Args:
-        ----
-            config: Structured training configuration.
-
-        Returns:
-        -------
-            str: Generated YAML configuration content.
-
-        """
-        max_cfg: MaxTextConfig = config.maxtext_config or MaxTextConfig(
-            project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp")
-        )
-        max_cfg.validate_tfrc_alignment()
-
-        hparams = config.hyperparameters
-        batch_size = hparams.batch_size if hparams else 4
-        lr = hparams.learning_rate if hparams else 2e-5
-        steps = (hparams.num_epochs if hparams else 3) * 50
-
-        full_params = max_cfg.build_full_maxtext_parameters()
-        lines = [
-            f"# Generated MaxText Configuration for {config.model_name}",
-            f"model_name: {config.model_name}",
-            f"base_output_directory: '{max_cfg.bucket_url}/models/{config.model_name}'",
-            f"dataset_path: '{config.dataset_path}'",
-            f"learning_rate: {lr}",
-            f"per_device_batch_size: {batch_size}",
-            f"steps: {steps}",
-            f"hardware: '{max_cfg.accelerator_type.value}'",
-            f"zone: '{max_cfg.zone}'",
-            f"num_slices: {max_cfg.num_slices}",
-        ]
-        for k, v in full_params.items():
-            if k not in (
-                "model_name",
-                "base_output_directory",
-                "dataset_path",
-                "learning_rate",
-                "per_device_batch_size",
-                "steps",
-                "hardware",
-                "zone",
-                "num_slices",
-            ):
-                lines.append(f"{k}: {v}")
-        return "\n".join(lines) + "\n"
-
-    def _dispatch_xpk_workload(
-        self,
-        config: TrainingJobConfig,
-        max_cfg: MaxTextConfig,
-        config_path: Path,
-    ) -> subprocess.CompletedProcess[str]:
-        """
-        Dispatch MaxText workload to GKE TPU cluster using XPK toolchain.
-
-        Args:
-        ----
-            config: Training job configuration.
-            max_cfg: MaxText infrastructure and hardware parameters.
-            config_path: Path to the generated MaxText YAML configuration file.
-
-        Returns:
-        -------
-            subprocess.CompletedProcess[str]: Process execution record.
-
-        Raises:
-        ------
-            RuntimeError: If dispatch fails or returns non-zero code.
-
-        """
-        workload_name = f"t1d-{config.model_name.replace('/', '-').replace(':', '-')}"
-        cluster_name = f"tpu-cluster-{max_cfg.accelerator_type.value}"
-
-        xpk_bin = shutil.which("xpk")
-        if not xpk_bin:
-            gcloud_bin = shutil.which("gcloud")
-            if not gcloud_bin:
-                raise RuntimeError("Neither 'xpk' nor 'gcloud' CLI is installed.")
-            cmd = [
-                gcloud_bin,
-                "compute",
-                "tpus",
-                "tpu-vm",
-                "ssh",
-                workload_name,
-                f"--zone={max_cfg.zone}",
-                f"--command=maxtext {config_path.name}",
-            ]
-        else:
-            cmd = [
-                xpk_bin,
-                "workload",
-                "create",
-                f"--workload={workload_name}",
-                f"--cluster={cluster_name}",
-                f"--tpu-type={max_cfg.accelerator_type.value}",
-                f"--num-slices={max_cfg.num_slices}",
-                f"--zone={max_cfg.zone}",
-            ]
-
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(f"TPU dispatch failed: {proc.stderr.strip()}")
-        return proc
-
-    async def _poll_gcloud_tpu_status(
-        self,
-        workload_name: str,
-        zone: str,
-        timeout_seconds: float = 30.0,
-    ) -> str:
-        """
-        Poll TPU VM workload status using Google Cloud CLI (gcloud).
-
-        Args:
-        ----
-            workload_name: Identifier of the TPU VM instance.
-            zone: GCP availability zone of the TPU VM instance.
-            timeout_seconds: Timeout threshold in seconds.
-
-        Returns:
-        -------
-            str: Normalized lifecycle status ('SUCCESS', 'RUNNING', 'FAILED', or 'PENDING').
-
-        Raises:
-        ------
-            RuntimeError: If gcloud CLI is missing, instance is not found, or preemption occurs.
-            TimeoutError: If polling exceeds timeout threshold.
-
-        """
-        gcloud_bin = shutil.which("gcloud")
-        if not gcloud_bin:
-            raise RuntimeError("Google Cloud CLI (gcloud) is not installed.")
-
-        cmd = [
-            gcloud_bin,
-            "compute",
-            "tpus",
-            "tpu-vm",
-            "describe",
-            workload_name,
-            f"--zone={zone}",
-            "--format=json",
-        ]
-        start = time.time()
-        while time.time() - start < timeout_seconds:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode == 0:
-                try:
-                    data = json.loads(res.stdout)
-                    state = str(data.get("state", "")).upper()
-                    health_desc = str(data.get("healthDescription", "")).upper()
-                    if state == "PREEMPTED" or "PREEMPTED" in health_desc:
-                        raise RuntimeError(
-                            f"Workload '{workload_name}' was PREEMPTED on spot TPU capacity."
-                        )
-                    if "ERROR" in health_desc or state == "FAILED":
-                        raise RuntimeError(
-                            f"Workload '{workload_name}' encountered fatal error: {data.get('healthDescription')}"
-                        )
-                    if state in ("READY", "ACTIVE", "RUNNING", "STOPPED", "TERMINATED"):
-                        return "SUCCESS"
-                except json.JSONDecodeError:
-                    if "READY" in res.stdout.upper():
-                        return "SUCCESS"
-            else:
-                if "NOT_FOUND" in res.stderr.upper():
-                    raise RuntimeError(
-                        f"Workload '{workload_name}' not found in zone '{zone}'."
-                    )
-            await asyncio.sleep(2.0)
-
-        raise TimeoutError(
-            f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
-        )
-
-    async def _reclaim_gcloud_tpu_workload(
-        self,
-        workload_name: str,
-        zone: str,
-        max_retries: int = 3,
-    ) -> bool:
-        """
-        Reclaim and delete TPU VM instance using Google Cloud CLI (gcloud).
-
-        Args:
-        ----
-            workload_name: Identifier of the TPU VM instance to delete.
-            zone: GCP availability zone of the TPU VM.
-            max_retries: Maximum deletion retry attempts upon failure.
-
-        Returns:
-        -------
-            bool: True if workload resource was successfully deleted.
-
-        Raises:
-        ------
-            RuntimeError: If deletion fails after maximum retries or gcloud CLI is missing.
-
-        """
-        gcloud_bin = shutil.which("gcloud")
-        if not gcloud_bin:
-            raise RuntimeError("Google Cloud CLI (gcloud) is not installed.")
-
-        cmd = [
-            gcloud_bin,
-            "compute",
-            "tpus",
-            "tpu-vm",
-            "delete",
-            workload_name,
-            f"--zone={zone}",
-            "--quiet",
-        ]
-        last_error = ""
-        for attempt in range(1, max_retries + 1):
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode == 0:
-                return True
-            last_error = res.stderr.strip()
-            if attempt < max_retries:
-                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-
-        raise RuntimeError(
-            f"Failed to reclaim TPU VM workload '{workload_name}' via gcloud: {last_error}"
-        )
-
-    async def poll_workload_status(
-        self,
-        workload_name: str,
-        max_cfg: MaxTextConfig,
-        timeout_seconds: float = 30.0,
-    ) -> str:
-        """
-        Poll workload execution status from XPK or Google Cloud TPU API.
-
-        Args:
-        ----
-            workload_name: Identifier of the dispatched training workload.
-            max_cfg: MaxText infrastructure configuration.
-            timeout_seconds: Timeout threshold in seconds.
-
-        Returns:
-        -------
-            str: Lifecycle status string ('SUCCESS', 'RUNNING', 'FAILED', or 'PENDING').
-
-        Raises:
-        ------
-            TimeoutError: If polling exceeds specified timeout duration.
-            RuntimeError: If workload is preempted or encounters an execution failure.
-
-        """
-        override_status = os.environ.get("T1D_TPU_STATUS_OVERRIDE")
-        if override_status:
-            if override_status == "PREEMPTED":
-                raise RuntimeError(
-                    f"Workload '{workload_name}' was PREEMPTED on spot TPU capacity."
-                )
-            if override_status in ("FAILED", "XLA_ERROR"):
-                raise RuntimeError(
-                    f"Workload '{workload_name}' encountered fatal XLA compilation error."
-                )
-            return override_status
-
-        xpk_bin = shutil.which("xpk")
-        if not xpk_bin:
-            return await self._poll_gcloud_tpu_status(
-                workload_name=workload_name,
-                zone=max_cfg.zone,
-                timeout_seconds=timeout_seconds,
-            )
-
-        cmd = [
-            xpk_bin,
-            "workload",
-            "describe",
-            f"--workload={workload_name}",
-            f"--cluster=tpu-cluster-{max_cfg.accelerator_type.value}",
-        ]
-        start = time.time()
-        while time.time() - start < timeout_seconds:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode == 0:
-                stdout_upper = res.stdout.upper()
-                if "PREEMPTED" in stdout_upper:
-                    raise RuntimeError(
-                        f"Workload '{workload_name}' was PREEMPTED on spot TPU capacity."
-                    )
-                if "XLA" in stdout_upper and "ERROR" in stdout_upper:
-                    raise RuntimeError(
-                        f"Workload '{workload_name}' encountered fatal XLA compilation error."
-                    )
-                if (
-                    "SUCCESS" in stdout_upper
-                    or "FINISHED" in stdout_upper
-                    or "COMPLETED" in stdout_upper
-                ):
-                    return "SUCCESS"
-                if "FAILED" in stdout_upper or "ERROR" in stdout_upper:
-                    return "FAILED"
-            await asyncio.sleep(2.0)
-
-        raise TimeoutError(
-            f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
-        )
-
-    async def reclaim_tpu_workload(
-        self,
-        workload_name: str,
-        max_cfg: MaxTextConfig,
-    ) -> bool:
-        """
-        Reclaim and delete queued or terminated TPU workload resources.
-
-        Args:
-        ----
-            workload_name: Identifier of the workload to reclaim.
-            max_cfg: MaxText infrastructure parameters.
-
-        Returns:
-        -------
-            bool: True if resources were reclaimed.
-
-        Raises:
-        ------
-            RuntimeError: If reclamation command returns non-zero error.
-
-        """
-        xpk_bin = shutil.which("xpk")
-        if not xpk_bin:
-            return await self._reclaim_gcloud_tpu_workload(
-                workload_name=workload_name,
-                zone=max_cfg.zone,
-            )
-
-        cluster_name = f"tpu-cluster-{max_cfg.accelerator_type.value}"
-        cmd = [
-            xpk_bin,
-            "workload",
-            "delete",
-            f"--workload={workload_name}",
-            f"--cluster={cluster_name}",
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if res.returncode != 0:
-            raise RuntimeError(f"Failed to reclaim TPU workload: {res.stderr.strip()}")
-        return True
-
-    async def download_checkpoints_from_gcs(
-        self,
-        bucket_url: str,
-        output_dir: Path,
-        max_retries: int = 3,
-        validate_checksum: bool = True,
-    ) -> Path:
-        """
-        Download trained model checkpoints from Google Cloud Storage to local directory.
-
-        Args:
-        ----
-            bucket_url: GCS bucket URI containing model checkpoints.
-            output_dir: Destination local directory path.
-            max_retries: Maximum download retry attempts.
-            validate_checksum: Whether to verify download checksum against manifest.
-
-        Returns:
-        -------
-            Path: Path to the local directory containing downloaded checkpoints.
-
-        Raises:
-        ------
-            ValueError: If bucket URI is invalid or checksum mismatches.
-            RuntimeError: If gcloud storage copy command fails after retries.
-
-        """
-        if not bucket_url.startswith("gs://"):
-            raise ValueError(
-                f"Invalid GCS bucket URI '{bucket_url}'. Must start with 'gs://'."
-            )
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            import importlib
-
-            gcs_pkg = importlib.import_module("google.cloud.storage")
-        except ImportError as e:
-            raise RuntimeError(
-                "The 'google-cloud-storage' Python package is required. "
-                "Install via 'pip install google-cloud-storage'."
-            ) from e
-
-        client_cls: Any = getattr(gcs_pkg, "Client")
-        client = client_cls()
-        bucket_name = bucket_url[5:].rstrip("/").split("/")[0]
-        prefix = "/".join(bucket_url[5:].rstrip("/").split("/")[1:])
-
-        last_err: Optional[Exception] = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                bucket = client.bucket(bucket_name)
-                blobs = list(client.list_blobs(bucket, prefix=prefix))
-                if not blobs:
-                    raise RuntimeError(f"No checkpoint files found at '{bucket_url}'.")
-                for blob in blobs:
-                    rel_name = blob.name[len(prefix) :].lstrip("/")
-                    dest_file = output_dir / rel_name
-                    dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    blob.download_to_filename(str(dest_file))
-                    remote_md5 = (
-                        getattr(blob, "md5_hash", None) if validate_checksum else None
-                    )
-                    if (
-                        isinstance(remote_md5, str)
-                        and remote_md5
-                        and dest_file.exists()
-                    ):
-                        local_md5 = base64.b64encode(
-                            hashlib.md5(dest_file.read_bytes()).digest()
-                        ).decode("ascii")
-                        if local_md5 != remote_md5:
-                            raise ValueError(
-                                f"Checksum mismatch for '{dest_file.name}': expected {remote_md5}, got {local_md5}"
-                            )
-                return output_dir
-            except ValueError:
-                raise
-            except Exception as e:
-                last_err = e
-                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-
-        raise RuntimeError(
-            f"Checkpoint download failed after {max_retries} attempts: {last_err}"
-        ) from last_err
-
-    def run_training(
-        self,
-        config: TrainingJobConfig,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, Any]:
-        """
-        Dispatch MaxText workload to Cloud TPU cluster.
-
-        Args:
-        ----
-            config: Training job configuration.
-            cancel_event: Optional threading event for cooperative cancellation.
-
-        Returns:
-        -------
-            Dict[str, Any]: Remote workload launch details and generated configuration.
-
-        """
-        self.prepare_dataset(config)
-        out_path = Path(config.output_dir)
-        out_path.mkdir(parents=True, exist_ok=True)
-
-        if (
-            config.maxtext_config
-            and config.maxtext_config.bucket_url
-            and os.environ.get("T1D_AUTO_SYNC_GCS") == "1"
-            and not config.dry_run
-        ):
-            sync_dataset_to_gcs(
-                Path(config.dataset_path), config.maxtext_config.bucket_url
-            )
-
-        yaml_content = self.generate_maxtext_yaml(config)
-        config_path = out_path / "maxtext_config.yml"
-        with open(config_path, "w") as f:
-            f.write(yaml_content)
-
-        workload_name = f"t1d-{config.model_name.replace('/', '-').replace(':', '-')}"
-        tpu_cluster = (
-            config.maxtext_config.accelerator_type.value
-            if config.maxtext_config
-            else "v4-8"
-        )
-
-        status_str = "dispatched"
-        if not config.dry_run:
-            if os.environ.get("T1D_EXECUTE_TPU_DISPATCH") == "1":
-                max_cfg_dispatch = config.maxtext_config or MaxTextConfig(
-                    project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp")
-                )
-                self._dispatch_xpk_workload(config, max_cfg_dispatch, config_path)
-                try:
-                    status_str = asyncio.run(
-                        self.poll_workload_status(
-                            workload_name, max_cfg_dispatch, timeout_seconds=5
-                        )
-                    )
-                except RuntimeError as e:
-                    if "PREEMPTED" in str(e):
-                        status_str = "PREEMPTED_RETRY_EXHAUSTED"
-                        for _ in range(max_cfg_dispatch.max_preemption_retries):
-                            self._dispatch_xpk_workload(
-                                config, max_cfg_dispatch, config_path
-                            )
-                            try:
-                                status_str = asyncio.run(
-                                    self.poll_workload_status(
-                                        workload_name,
-                                        max_cfg_dispatch,
-                                        timeout_seconds=2,
-                                    )
-                                )
-                                break
-                            except RuntimeError:
-                                continue
-                        if status_str == "PREEMPTED_RETRY_EXHAUSTED":
-                            asyncio.run(
-                                self.reclaim_tpu_workload(
-                                    workload_name, max_cfg_dispatch
-                                )
-                            )
-                            raise
-                    else:
-                        asyncio.run(
-                            self.reclaim_tpu_workload(workload_name, max_cfg_dispatch)
-                        )
-                        raise
-
-            manifest_path = out_path / "job_manifest.json"
-            with open(manifest_path, "w") as mf:
-                json.dump(
-                    {
-                        "workload_name": workload_name,
-                        "tpu_cluster": tpu_cluster,
-                        "config_file": str(config_path),
-                        "output_dir": str(out_path),
-                        "model_name": config.model_name,
-                        "dispatched_at": time.time(),
-                        "status": status_str,
-                    },
-                    mf,
-                    indent=2,
-                )
-
-        return {
-            "status": "dry_run_completed" if config.dry_run else status_str,
-            "backend": config.backend.value,
-            "model_name": config.model_name,
-            "config_file": str(config_path),
-            "output_dir": str(out_path),
-            "tpu_cluster": tpu_cluster,
-            "workload_name": workload_name,
-        }
-
-
-def sync_dataset_to_gcs(
-    local_path: Path,
-    gcs_bucket: str,
-    max_retries: int = 3,
-    validate_checksum: bool = True,
-    sleep_fn: Optional[Callable[[float], None]] = None,
-) -> str:
-    """
-    Synchronize exported dataset file to Google Cloud Storage bucket with retries and checksums.
-
-    Args:
-    ----
-        local_path: Local dataset filepath.
-        gcs_bucket: Destination GCS bucket URL (e.g., 'gs://bucket-name').
-        max_retries: Number of upload retry attempts.
-        validate_checksum: Whether to compute and verify MD5 checksum.
-        sleep_fn: Optional injectable sleep function for retry backoff.
-
-    Returns:
-    -------
-        str: Remote GCS target URI.
-
-    Raises:
-    ------
-        ValueError: If bucket URL is invalid or checksum verification fails.
-        FileNotFoundError: If local dataset file does not exist.
-        RuntimeError: If gcloud storage upload fails after retries.
-
-    """
-    if not gcs_bucket.startswith("gs://"):
-        raise ValueError(
-            f"Invalid GCS bucket URI '{gcs_bucket}'. Must start with 'gs://'."
-        )
-
-    if not local_path.exists():
-        raise FileNotFoundError(f"Local file not found at '{local_path}'.")
-
-    bucket_clean = gcs_bucket.rstrip("/")
-    dest_uri = f"{bucket_clean}/{local_path.name}"
-
-    try:
-        import importlib
-
-        gcs_pkg = importlib.import_module("google.cloud.storage")
-    except ImportError as e:
-        raise RuntimeError(
-            "The 'google-cloud-storage' Python package is required. "
-            "Install via 'pip install google-cloud-storage'."
-        ) from e
-
-    client_cls: Any = getattr(gcs_pkg, "Client")
-    client = client_cls()
-    bucket_name = gcs_bucket[5:].rstrip("/").split("/")[0]
-    blob_prefix = "/".join(gcs_bucket[5:].rstrip("/").split("/")[1:])
-    blob_name = f"{blob_prefix}/{local_path.name}".lstrip("/")
-
-    local_md5 = (
-        base64.b64encode(hashlib.md5(local_path.read_bytes()).digest()).decode("ascii")
-        if validate_checksum
-        else None
-    )
-
-    backoff_sleep = sleep_fn or time.sleep
-    last_err: Optional[Exception] = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            bucket = client.bucket(bucket_name)
-            blob = bucket.blob(blob_name)
-            blob.md5_hash = local_md5
-            blob.upload_from_filename(str(local_path))
-            return dest_uri
-        except Exception as e:
-            last_err = e
-            backoff_sleep(0.05 * (2 ** (attempt - 1)))
-
-    raise RuntimeError(
-        f"GCS upload failed after {max_retries} attempts: {last_err}"
-    ) from last_err
 
 
 def get_training_runner(backend: TrainingBackend) -> BaseTrainingRunner:
@@ -1939,13 +887,13 @@ class Gemma4SqlRunner(BaseTrainingRunner):
 
         Raises
         ------
-            RuntimeError: If gemma-4-sql CLI or Python module is missing.
+            GemmaToolchainError: If gemma-4-sql CLI or Python module is missing.
 
         """
         from t1d_analytics.gemma_bridge import check_gemma_sql_installed
 
         if not check_gemma_sql_installed():
-            raise RuntimeError(
+            raise GemmaToolchainError(
                 "gemma-4-sql toolchain is not installed. Install via pip install -e /path/to/gemma-4-sql[all]"
             )
         return True
@@ -1954,7 +902,7 @@ class Gemma4SqlRunner(BaseTrainingRunner):
         self,
         config: TrainingJobConfig,
         cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, JobMetricValue]:
         """
         Execute pretrain or fine-tuning workflow via gemma-4-sql CLI.
 
@@ -1965,13 +913,14 @@ class Gemma4SqlRunner(BaseTrainingRunner):
 
         Returns:
         -------
-            Dict[str, Any]: Training run metadata and output paths.
+            Dict[str, JobMetricValue]: Training run metadata and output paths.
 
         Raises:
         ------
             RuntimeError: If gemma-4-sql execution fails.
 
         """
+        _ = cancel_event
         from t1d_analytics.gemma_bridge import run_gemma_sql_train
 
         self.prepare_dataset(config)
@@ -2000,8 +949,9 @@ class Gemma4SqlRunner(BaseTrainingRunner):
             f"epochs: {epochs}",
             f"stage: {stage}",
         ]
+        nl = chr(10)
         with open(config_file, "w") as f:
-            f.write("\n".join(yaml_lines) + "\n")
+            f.write(nl.join(yaml_lines) + nl)
 
         if config.dry_run:
             return {
@@ -2030,28 +980,6 @@ class Gemma4SqlRunner(BaseTrainingRunner):
         }
 
 
-__all__ = [
-    "BaseCausalLMFactory",
-    "BaseTorchCausalLMRunner",
-    "BaseTrainingRunner",
-    "Gemma4SqlRunner",
-    "HuggingFaceCausalLMFactory",
-    "HuggingFaceCausalLMRunner",
-    "InsufficientDataError",
-    "LocalCpuRunner",
-    "LocalGpuRunner",
-    "RemoteTpuMaxTextRunner",
-    "TrainingExecutionError",
-    "TrainingJobManager",
-    "TrainingJobState",
-    "get_training_runner",
-    "global_training_job_manager",
-    "prepare_torch_dataset",
-    "resolve_device_telemetry",
-    "sync_dataset_to_gcs",
-]
-
-
 class TrainingJobManager(_SharedTrainingJobManager):
     """Thread-safe asynchronous background manager for training jobs."""
 
@@ -2061,3 +989,66 @@ class TrainingJobManager(_SharedTrainingJobManager):
 
 
 global_training_job_manager = TrainingJobManager()
+
+
+__all__ = [
+    "AcceleratorDetectorProtocol",
+    "AutocastTorchProtocol",
+    "AutoModelFactoryProtocol",
+    "AutoTokenizerFactoryProtocol",
+    "BaseCausalLMFactory",
+    "BaseTorchCausalLMRunner",
+    "BaseTrainingRunner",
+    "CosineSchedulerNamespaceProtocol",
+    "DeviceLike",
+    "DeviceProtocol",
+    "DtypeLike",
+    "DtypeProtocol",
+    "GcsBlobProtocol",
+    "GcsBucketProtocol",
+    "GcsClientProtocol",
+    "Gemma4SqlRunner",
+    "HuggingFaceCausalLMFactory",
+    "HuggingFaceCausalLMRunner",
+    "InsufficientDataError",
+    "LocalCpuRunner",
+    "LocalGpuRunner",
+    "LrSchedulerProtocol",
+    "Md5BlobProtocol",
+    "ModelForwardOutput",
+    "ModelOutputWithLogitsProtocol",
+    "MpsBackendProtocol",
+    "MpsBackendsHolderProtocol",
+    "PaddedTokenizerProtocol",
+    "PretrainedSavableProtocol",
+    "QuantizationConfigProtocol",
+    "RemoteTpuMaxTextRunner",
+    "StreamingJsonlDataset",
+    "SubprocessExecutorProtocol",
+    "TensorLike",
+    "TensorProtocol",
+    "TinyCausalLMFactory",
+    "TokenizedPairDataset",
+    "TokenizerProtocol",
+    "TorchCausalLMProtocol",
+    "TorchDeviceFactoryProtocol",
+    "TrainableModelProtocol",
+    "TrainingExecutionError",
+    "TrainingJobManager",
+    "TrainingJobState",
+    "TransformersModuleProtocol",
+    "_build_gcloud_ssh_command",
+    "_build_xpk_create_command",
+    "_compute_md5_base64",
+    "_extract_output_logits",
+    "_is_mps_available",
+    "_load_raw_pairs_from_file",
+    "_resolve_tokenizer",
+    "_tokenize_pair_with_masking",
+    "get_training_runner",
+    "global_training_job_manager",
+    "prepare_torch_dataset",
+    "resolve_causal_lm_factory",
+    "resolve_device_telemetry",
+    "sync_dataset_to_gcs",
+]

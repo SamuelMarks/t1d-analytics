@@ -2,7 +2,6 @@
 
 import os
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -268,8 +267,8 @@ def test_generate_training_data_subcommand(
     """Test successful CLI execution for generate-training-data."""
     mock_generator = MagicMock()
     mock_generator_class.return_value = mock_generator
-    mock_generator._extract_schema.return_value = {"table1": "schema1"}
-    mock_generator._generate_pairs.return_value = [("prompt", "chosen", "rejected")]
+    mock_generator.extract_schema.return_value = {"table1": "schema1"}
+    mock_generator.generate_pairs.return_value = [("prompt", "chosen", "rejected")]
 
     with patch(
         "sys.argv",
@@ -290,8 +289,8 @@ def test_generate_training_data_subcommand(
     mock_generator_class.assert_called_once_with(
         mock_connect.return_value, "test_model", provider="ollama"
     )
-    mock_generator._extract_schema.assert_called_once()
-    mock_generator._generate_pairs.assert_called_once_with("schema1", 5)
+    mock_generator.extract_schema.assert_called_once()
+    mock_generator.generate_pairs.assert_called_once_with("schema1", 5)
     mock_generator.write_to_db.assert_called_once_with(
         [("prompt", "chosen", "rejected")], split_ratios=None
     )
@@ -305,8 +304,8 @@ def test_generate_training_data_with_provider_and_ratios(
     """Test generate-training-data with custom provider and split ratios."""
     mock_generator = MagicMock()
     mock_generator_class.return_value = mock_generator
-    mock_generator._extract_schema.return_value = {"table1": "schema1"}
-    mock_generator._generate_pairs.return_value = [("prompt", "chosen", "rejected")]
+    mock_generator.extract_schema.return_value = {"table1": "schema1"}
+    mock_generator.generate_pairs.return_value = [("prompt", "chosen", "rejected")]
 
     with patch(
         "sys.argv",
@@ -438,8 +437,8 @@ def test_generate_training_data_invalid_ratios_fallback(
     """Test generate-training-data ignores split ratios that do not contain 3 parts."""
     mock_generator = MagicMock()
     mock_generator_class.return_value = mock_generator
-    mock_generator._extract_schema.return_value = {"table1": "schema1"}
-    mock_generator._generate_pairs.return_value = []
+    mock_generator.extract_schema.return_value = {"table1": "schema1"}
+    mock_generator.generate_pairs.return_value = []
 
     with patch(
         "sys.argv",
@@ -460,12 +459,18 @@ def test_generate_training_data_invalid_ratios_fallback(
 
 
 def test_cli_main_invalid_command(mocker: MagicMock) -> None:
-    """Test CLI invalid command."""
-    from t1d_analytics.cli import main
+    """Test CLI invalid command and parse_cli_options with standard Namespace."""
+    import argparse
+
+    from t1d_analytics.cli import CliNamespace, main, parse_cli_options
+
+    raw_ns = argparse.Namespace(command="query", db="custom.db", unknown_extra=123)
+    parsed_opts = parse_cli_options(raw_ns)
+    assert parsed_opts.db == "custom.db"
 
     # Passing an invalid command. argparse might catch it if it's restricted by subparsers,
     # but we can mock args to bypass argparse validation and reach the branch.
-    mock_args = mocker.MagicMock()
+    mock_args = CliNamespace()
     mock_args.command = "invalid_cmd"
     mocker.patch("argparse.ArgumentParser.parse_args", return_value=mock_args)
 
@@ -689,10 +694,11 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     db_file = tmp_path / "watch.duckdb"
     conn_init = duckdb.connect(str(db_file))
     conn_init.execute(
-        "CREATE TABLE _t1d_ingestion_manifest (file_path VARCHAR, table_name VARCHAR, file_hash VARCHAR, ingested_at TIMESTAMP)"
+        "CREATE TABLE _t1d_ingestion_manifest (source_file VARCHAR PRIMARY KEY, table_name VARCHAR, sha256 VARCHAR, row_count BIGINT, ingested_at TIMESTAMP)"
     )
     conn_init.execute(
-        "INSERT INTO _t1d_ingestion_manifest VALUES ('sample', 'tbl', 'hash', CURRENT_TIMESTAMP)"
+        "INSERT INTO _t1d_ingestion_manifest VALUES (?, 'tbl', 'hash', 1, CURRENT_TIMESTAMP)",
+        (str(sample_file.resolve()),),
     )
     conn_init.close()
 
@@ -701,10 +707,22 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
 
     orig_load = analytics.load_data_to_duckdb
 
-    def side_effect_load(*args: Any, **kwargs: Any) -> None:
+    def side_effect_load(
+        data_dir: str,
+        db_path: str,
+        include_sas: bool = False,
+        include_spss: bool = False,
+        prefix_subdirs: bool = False,
+    ) -> None:
         """Unlink sample_file and delegate to original load_data_to_duckdb."""
         sample_file.unlink()
-        orig_load(*args, **kwargs)
+        orig_load(
+            data_dir,
+            db_path,
+            include_sas=include_sas,
+            include_spss=include_spss,
+            prefix_subdirs=prefix_subdirs,
+        )
 
     with patch(
         "t1d_analytics.analytics.load_data_to_duckdb", side_effect=side_effect_load
@@ -1260,6 +1278,10 @@ def test_load_auth_plugin_errors() -> None:
     with pytest.raises(ValueError, match="has no attribute"):
         load_auth_plugin("os.path:nonexistent_func_xyz")
 
+    # Non-identifier expression rejected safely
+    with pytest.raises(ValueError, match="has no attribute"):
+        load_auth_plugin("os:getcwd()")
+
     # Not callable error
     with pytest.raises(ValueError, match="is not callable"):
         load_auth_plugin("sys:version")
@@ -1544,10 +1566,9 @@ def test_cli_bridge_gemma_sql_train(capsys: CaptureFixture[str]) -> None:
 def test_cli_main_block() -> None:
     """Test the __main__ block of the CLI script."""
     import runpy
-    import sys
     from unittest.mock import patch
 
-    with patch.object(sys, "argv", ["t1d-analytics", "--help"]):
+    with patch("sys.argv", ["t1d-analytics", "--help"]):
         try:
             runpy.run_module("t1d_analytics.cli", run_name="__main__")
         except SystemExit as e:
@@ -1558,7 +1579,11 @@ def test_seed_subcommand_and_doctor_thresholds(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     """Test seed subcommand execution, overwrite flag, and doctor threshold flags."""
-    from t1d_analytics.seed import seed_database
+    from t1d_analytics.seed import ensure_canonical_clinical_views, seed_database
+
+    empty_db = tmp_path / "empty_views.duckdb"
+    duckdb.connect(str(empty_db)).close()
+    ensure_canonical_clinical_views(str(empty_db))
 
     data_dir = tmp_path / "seed_data"
     db_file = tmp_path / "seeded.duckdb"
@@ -1594,6 +1619,78 @@ def test_seed_subcommand_and_doctor_thresholds(
     )
     assert counts["patients"] == 100
 
+    # Test _connect_duckdb_with_retry lock retry and non-lock error propagation
+    from t1d_analytics.seed import _connect_duckdb_with_retry
+
+    call_cnt = 0
+    orig_connect = duckdb.connect
+
+    def _flaky_connect(path: str, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+        """Simulate transient DuckDB file lock failures before succeeding."""
+        nonlocal call_cnt
+        call_cnt += 1
+        if call_cnt < 3:
+            raise duckdb.IOException("Could not set lock on file")
+        return orig_connect(path, read_only=read_only)
+
+    with patch("t1d_analytics.seed.duckdb.connect", side_effect=_flaky_connect):
+        retry_conn = _connect_duckdb_with_retry(str(db_file), sleep_fn=lambda _: None)
+        retry_conn.close()
+    assert call_cnt == 3
+
+    with patch(
+        "t1d_analytics.seed.duckdb.connect",
+        side_effect=duckdb.IOException("Disk full"),
+    ):
+        with pytest.raises(duckdb.IOException, match="Disk full"):
+            _connect_duckdb_with_retry(str(db_file), sleep_fn=lambda _: None)
+
+    with patch(
+        "t1d_analytics.seed.duckdb.connect",
+        side_effect=duckdb.IOException("Could not set lock"),
+    ):
+        with pytest.raises(duckdb.IOException, match="Could not set lock"):
+            _connect_duckdb_with_retry(str(db_file), sleep_fn=lambda _: None)
+
+    # Test ensure_canonical_clinical_views when tblaptsummary is an existing BASE TABLE
+    # (1) Empty base table -> dropped and replaced by view
+    # (2) Non-empty base table -> preserved without Catalog Error
+    tbl_vs_view_db = tmp_path / "tbl_vs_view.duckdb"
+    c_tv = duckdb.connect(str(tbl_vs_view_db))
+    c_tv.execute(
+        "CREATE TABLE patients (subject_id INT, gender VARCHAR, age INT, numhospdka INT, hba1c DOUBLE, tir DOUBLE)"
+    )
+    c_tv.execute("INSERT INTO patients VALUES (1, 'F', 25, 0, 7.1, 70.0)")
+    c_tv.execute("CREATE TABLE tblaptsummary (PtID INT)")
+    c_tv.execute("CREATE TABLE subjects (PtID INT)")
+    c_tv.execute("INSERT INTO subjects VALUES (999)")
+    c_tv.close()
+    ensure_canonical_clinical_views(str(tbl_vs_view_db))
+    c_tv2 = duckdb.connect(str(tbl_vs_view_db), read_only=True)
+    assert c_tv2.execute("SELECT PtID FROM tblaptsummary").fetchone() == (1,)
+    assert c_tv2.execute("SELECT PtID FROM subjects").fetchone() == (999,)
+    c_tv2.close()
+
+    # Test load_data_to_duckdb drops existing compatibility view when real CSV for that stem arrives
+    from t1d_analytics.analytics import load_data_to_duckdb
+
+    (data_dir / "tblaptsummary.csv").write_text(
+        "PtID,TxGroup\n501,RealTable\n", encoding="utf-8"
+    )
+    load_data_to_duckdb(str(data_dir), str(db_file))
+    ensure_canonical_clinical_views(str(db_file))
+    c_real = duckdb.connect(str(db_file), read_only=True)
+    assert c_real.execute("SELECT COUNT(*) FROM tblaptsummary").fetchone() == (1,)
+    c_real.close()
+    (data_dir / "tblaptsummary.csv").unlink()
+    c_cleanup = duckdb.connect(str(db_file))
+    c_cleanup.execute("DROP TABLE IF EXISTS tblaptsummary")
+    c_cleanup.execute(
+        "DELETE FROM _t1d_ingestion_manifest WHERE table_name = 'tblaptsummary'"
+    )
+    c_cleanup.close()
+    ensure_canonical_clinical_views(str(db_file))
+
     # Doctor with satisfied --min-tables and --min-rows succeeds
     with patch(
         "sys.argv",
@@ -1609,6 +1706,22 @@ def test_seed_subcommand_and_doctor_thresholds(
         ],
     ):
         main()
+    capsys.readouterr()
+
+    # Doctor with --json emits JSON report
+    with patch(
+        "sys.argv",
+        [
+            "t1d-analytics",
+            "doctor",
+            "--db",
+            str(db_file),
+            "--json",
+        ],
+    ):
+        main()
+    json_out = capsys.readouterr().out
+    assert '"table_count": 4' in json_out
 
     # Doctor with unsatisfied --min-tables fails
     with patch(
@@ -1665,8 +1778,8 @@ def test_cli_works_without_torch_installed(tmp_path: Path) -> None:
     import t1d_analytics.cli
     import t1d_analytics.training_runner
 
-    assert "torch" not in vars(t1d_analytics.training_runner)
-    assert "training_runner" not in vars(t1d_analytics.cli)
+    assert "torch" not in dir(t1d_analytics.training_runner)
+    assert "training_runner" not in dir(t1d_analytics.cli)
 
     data_dir = tmp_path / "no_torch_data"
     db_file = tmp_path / "no_torch.duckdb"

@@ -1,10 +1,9 @@
 """Integration tests for the CLI."""
 
-import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Generator
-from unittest.mock import patch
+from typing import Generator
+from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
@@ -26,7 +25,11 @@ def temp_workspace() -> Generator[Path, None, None]:
         yield Path(tmpdir)
 
 
-def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
+def test_cli_integration_flow(
+    requests_mock: MagicMock,
+    temp_workspace: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Test the complete CLI integration flow: download, load, and query."""
     # Setup mock for parser
     requests_mock.get(
@@ -57,7 +60,7 @@ def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
         "-o",
         str(data_dir),
     ]
-    with patch.object(sys, "argv", test_args_download):
+    with patch("sys.argv", test_args_download):
         main()
 
     # Verify download created folders and files
@@ -79,7 +82,7 @@ def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
         "--db",
         str(db_path),
     ]
-    with patch.object(sys, "argv", test_args_load):
+    with patch("sys.argv", test_args_load):
         main()
 
     # Verify DuckDB database
@@ -92,12 +95,15 @@ def test_cli_integration_flow(requests_mock: Any, temp_workspace: Path) -> None:
     conn.close()
 
     # Test Query (Mocking input)
+    capsys.readouterr()
     test_args_query = ["t1d-analytics", "query", "--db", str(db_path)]
     with (
-        patch.object(sys, "argv", test_args_query),
+        patch("sys.argv", test_args_query),
         patch("builtins.input", side_effect=["SELECT count(*) FROM test_data", "exit"]),
     ):
         main()
+    query_out = capsys.readouterr().out
+    assert "2" in query_out
 
 
 def test_cli_extract_integration(temp_workspace: Path) -> None:
@@ -109,7 +115,7 @@ def test_cli_extract_integration(temp_workspace: Path) -> None:
         zf.writestr("inner.csv", "colA,colB\n1,2\n")
 
     test_args = ["t1d-analytics", "extract", "-d", str(temp_workspace)]
-    with patch.object(sys, "argv", test_args):
+    with patch("sys.argv", test_args):
         main()
 
     extracted_file = temp_workspace / "sample" / "inner.csv"
@@ -117,7 +123,9 @@ def test_cli_extract_integration(temp_workspace: Path) -> None:
     assert extracted_file.read_text().startswith("colA,colB")
 
 
-def test_cli_manifest_integration(temp_workspace: Path) -> None:
+def test_cli_manifest_integration(
+    temp_workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Test CLI manifest subcommand integration."""
     db_path = temp_workspace / "manifest.duckdb"
     conn = duckdb.connect(str(db_path))
@@ -139,12 +147,16 @@ def test_cli_manifest_integration(temp_workspace: Path) -> None:
     conn.close()
 
     test_args = ["t1d-analytics", "manifest", "--db", str(db_path)]
-    with patch.object(sys, "argv", test_args):
+    with patch("sys.argv", test_args):
         main()
+    manifest_out = capsys.readouterr().out
+    assert "data/file.csv" in manifest_out
+    assert "2048" in manifest_out
+    assert "100" in manifest_out
 
 
 def test_cli_generate_training_data_integration(
-    temp_workspace: Path, mocker: Any
+    temp_workspace: Path, mocker: MagicMock
 ) -> None:
     """Test CLI generate-training-data subcommand integration."""
     db_path = temp_workspace / "gen.duckdb"
@@ -174,7 +186,7 @@ def test_cli_generate_training_data_integration(
         "--split-ratios",
         "0.8,0.1,0.1",
     ]
-    with patch.object(sys, "argv", test_args):
+    with patch("sys.argv", test_args):
         main()
 
     conn = duckdb.connect(str(db_path))
@@ -212,7 +224,7 @@ def test_cli_export_training_data_jsonl_and_parquet_integration(
         "--output-file",
         str(jsonl_out),
     ]
-    with patch.object(sys, "argv", test_args_jsonl):
+    with patch("sys.argv", test_args_jsonl):
         main()
     assert jsonl_out.exists()
     assert "What is avg?" in jsonl_out.read_text()
@@ -231,12 +243,12 @@ def test_cli_export_training_data_jsonl_and_parquet_integration(
         "--output-file",
         str(parquet_out),
     ]
-    with patch.object(sys, "argv", test_args_parquet):
+    with patch("sys.argv", test_args_parquet):
         main()
     assert parquet_out.exists()
 
 
-def test_cli_evaluate_integration(temp_workspace: Path, mocker: Any) -> None:
+def test_cli_evaluate_integration(temp_workspace: Path, mocker: MagicMock) -> None:
     """Test CLI evaluate subcommand integration."""
     import json
 
@@ -266,14 +278,16 @@ def test_cli_evaluate_integration(temp_workspace: Path, mocker: Any) -> None:
         "--output",
         str(report_out),
     ]
-    with patch.object(sys, "argv", test_args):
+    with patch("sys.argv", test_args):
         main()
 
     assert report_out.exists()
     assert "Text-to-SQL Benchmark Report" in report_out.read_text()
 
 
-def test_cli_doctor_integration(temp_workspace: Path) -> None:
+def test_cli_doctor_integration(
+    temp_workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Test CLI doctor subcommand integration."""
     db_path = temp_workspace / "doctor.duckdb"
     conn = duckdb.connect(str(db_path))
@@ -282,11 +296,15 @@ def test_cli_doctor_integration(temp_workspace: Path) -> None:
     conn.close()
 
     test_args = ["t1d-analytics", "doctor", "--db", str(db_path)]
-    with patch.object(sys, "argv", test_args):
+    with patch("sys.argv", test_args):
         main()
+    doctor_out = capsys.readouterr().out
+    assert "System Diagnostics" in doctor_out or "Database" in doctor_out
 
 
-def test_cli_profile_integration(temp_workspace: Path) -> None:
+def test_cli_profile_integration(
+    temp_workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Test CLI profile subcommand integration."""
     db_path = temp_workspace / "profile.duckdb"
     conn = duckdb.connect(str(db_path))
@@ -302,5 +320,8 @@ def test_cli_profile_integration(temp_workspace: Path) -> None:
         "--table",
         "clinical_data",
     ]
-    with patch.object(sys, "argv", test_args):
+    with patch("sys.argv", test_args):
         main()
+    profile_out = capsys.readouterr().out
+    assert "clinical_data" in profile_out
+    assert "reading" in profile_out

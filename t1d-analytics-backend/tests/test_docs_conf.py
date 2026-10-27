@@ -44,3 +44,21 @@ def test_docs_conf_variables_and_extensions() -> None:
     assert "_build" in mod_dict["exclude_patterns"]
     assert mod_dict["html_theme"] == "alabaster"
     assert mod_dict["html_static_path"] == []
+
+    # Verify every automodule directive in docs_src/modules.rst is importable via conf.py's sys.path
+    modules_rst = (conf_path.parent / "modules.rst").read_text(encoding="utf-8")
+    documented_modules = {
+        line.split("::")[1].strip()
+        for line in modules_rst.splitlines()
+        if line.strip().startswith(".. automodule::")
+    }
+    src_pkg_dir = conf_path.parent.parent / "src" / "t1d_analytics"
+    expected_modules = {"t1d_analytics"} | {
+        f"t1d_analytics.{p.stem}"
+        for p in src_pkg_dir.glob("*.py")
+        if p.stem != "__init__"
+    }
+    assert documented_modules == expected_modules
+    for mod_name in sorted(documented_modules):
+        imported = importlib.import_module(mod_name)
+        assert imported.__doc__ is not None and len(imported.__doc__.strip()) > 0

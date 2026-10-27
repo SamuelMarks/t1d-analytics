@@ -9,9 +9,21 @@ import re
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional
+from types import TracebackType
+from typing import (
+    Callable,
+    Dict,
+    Hashable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 
 import duckdb
+from pydantic import TypeAdapter
+from typing_extensions import TypedDict
 
 from t1d_analytics.errors import (
     LlmProviderError,
@@ -23,6 +35,7 @@ from t1d_analytics.llm_client import (
     normalize_ollama_host,
 )
 from t1d_analytics.sql_utils import (
+    SqlValue,
     extract_table_schemas,
 )
 from t1d_analytics.sql_utils import (
@@ -30,6 +43,38 @@ from t1d_analytics.sql_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+HashableInput = Union[
+    SqlValue,
+    Tuple["HashableInput", ...],
+    List["HashableInput"],
+    Set["HashableInput"],
+    Dict[str, "HashableInput"],
+]
+HashableResult = Union[SqlValue, Tuple[Hashable, ...]]
+
+
+class EvalItemResultDict(TypedDict):
+    """Per-question evaluation metrics for Text-to-SQL benchmarking."""
+
+    question: str
+    gold_sql: str
+    pred_sql: str
+    exact_match: bool
+    execution_accuracy: bool
+    syntax_error: bool
+
+
+class TextToSqlEvalReportDict(TypedDict):
+    """Aggregated evaluation summary and reports for Text-to-SQL benchmarking."""
+
+    total_samples: int
+    exact_match_rate: float
+    execution_accuracy: float
+    syntax_failure_rate: float
+    results: List[EvalItemResultDict]
+    markdown_report: str
+    csv_report: str
 
 
 def normalize_sql(sql: str) -> str:
@@ -48,29 +93,36 @@ def normalize_sql(sql: str) -> str:
     return _shared_normalize_sql(sql)
 
 
-def _make_hashable(val: Any) -> Any:
+def _make_hashable(val: HashableInput) -> HashableResult:
     """
     Recursively convert unhashable types into immutable hashable equivalents.
 
     Args:
     ----
-        val: Any Python value (lists, dicts, tuples, primitives).
+        val: Python value (lists, dicts, tuples, primitives).
 
     Returns:
     -------
-        Any: An immutable, hashable version of the input value.
+        HashableResult: An immutable, hashable version of the input value.
 
     """
     if isinstance(val, (list, tuple)):
         return tuple(_make_hashable(x) for x in val)
     if isinstance(val, dict):
-        return tuple(sorted((k, _make_hashable(v)) for k, v in val.items()))
+        items_map = [(str(k), _make_hashable(v)) for k, v in val.items()]
+        items_map.sort(key=lambda pair: pair[0])
+        return tuple(items_map)
     if isinstance(val, set):
-        return tuple(sorted(_make_hashable(x) for x in val))
+        items_set = [_make_hashable(x) for x in val]
+        items_set.sort(key=lambda item: str(item))
+        return tuple(items_set)
     return val
 
 
-def _parse_llm_json_array(content_str: str) -> Optional[list[object]]:
+_SQL_VALUE_LIST_ADAPTER: TypeAdapter[list[SqlValue]] = TypeAdapter(list[SqlValue])
+
+
+def _parse_llm_json_array(content_str: str) -> Optional[list[SqlValue]]:
     """
     Parse a JSON array from LLM response text, stripping markdown blocks if present.
 
@@ -80,7 +132,7 @@ def _parse_llm_json_array(content_str: str) -> Optional[list[object]]:
 
     Returns:
     -------
-        Optional[list[object]]: Parsed list of objects if successful, otherwise None.
+        Optional[list[SqlValue]]: Parsed list of values if successful, otherwise None.
 
     """
     cleaned = content_str.strip()
@@ -92,7 +144,7 @@ def _parse_llm_json_array(content_str: str) -> Optional[list[object]]:
     try:
         data = json.loads(cleaned)
         if isinstance(data, list):
-            return data
+            return _SQL_VALUE_LIST_ADAPTER.validate_python(data)
     except json.JSONDecodeError as e:
         logger.debug(f"Failed to decode exact JSON list: {e}")
     except Exception as e:
@@ -100,7 +152,8 @@ def _parse_llm_json_array(content_str: str) -> Optional[list[object]]:
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if match:
         try:
-            return list(json.loads(match.group(0)))
+            extracted = list(json.loads(match.group(0)))
+            return _SQL_VALUE_LIST_ADAPTER.validate_python(extracted)
         except json.JSONDecodeError as e:
             logger.debug(f"Failed to decode extracted JSON list: {e}")
         except Exception as e:
@@ -194,7 +247,7 @@ class TrainingDataGenerator:
         self,
         exc_type: Optional[type[BaseException]],
         exc_val: Optional[BaseException],
-        exc_tb: Optional[Any],
+        exc_tb: Optional[TracebackType],
     ) -> None:
         """
         Exit the runtime context and close the underlying DuckDB connection.
@@ -208,16 +261,56 @@ class TrainingDataGenerator:
         """
         self.conn.close()
 
-    def _extract_schema(self) -> dict[str, str]:
+    def extract_schema(self) -> dict[str, str]:
         """
         Extract the database schema using SHOW TABLES and DESCRIBE.
 
         Returns
         -------
-            A dictionary mapping table names to their textual schema descriptions.
+            dict[str, str]: A dictionary mapping table names to their textual schema descriptions.
 
         """
         return extract_table_schemas(self.conn, exclude_training_tables=True)
+
+    def _extract_schema(self) -> dict[str, str]:
+        """
+        Extract the database schema using SHOW TABLES and DESCRIBE (alias for extract_schema).
+
+        Returns
+        -------
+            dict[str, str]: A dictionary mapping table names to their textual schema descriptions.
+
+        """
+        return self.extract_schema()
+
+    def build_generation_prompt(
+        self,
+        schema: str,
+        custom_prompt_template: Optional[str] = None,
+    ) -> str:
+        """
+        Build the prompt for generating synthetic (Question, Chosen SQL, Rejected SQL) triples.
+
+        Args:
+        ----
+            schema: Textual representation of the table's schema.
+            custom_prompt_template: Optional custom template containing `{schema}`.
+
+        Returns:
+        -------
+            str: Formatted generation prompt string.
+
+        """
+        if custom_prompt_template:
+            return custom_prompt_template.format(schema=schema)
+        return (
+            f"Given the following database schema:\n{schema}\n"
+            "Generate a natural language question, a correct SQL query to answer it, "
+            "and an incorrect SQL query with a subtle mistake. "
+            "Output as a JSON array with exactly three strings: "
+            '["Question", "Correct SQL", "Incorrect SQL"]. '
+            "Do not include any other text."
+        )
 
     def _is_valid_sql(self, sql_query: str) -> bool:
         """
@@ -241,6 +334,44 @@ class TrainingDataGenerator:
         except Exception as e:
             logger.debug(f"Unexpected error in SQL validation: {e}")
             return False
+
+    def generate_pairs(
+        self,
+        schema: str,
+        count: int,
+        validate_sql: bool = True,
+        temperature: float = 0.7,
+        max_tokens: int = 512,
+        checkpoint_path: Optional[Path] = None,
+        custom_prompt_template: Optional[str] = None,
+    ) -> list[tuple[str, str, str]]:
+        """
+        Generate (prompt, chosen_sql, rejected_sql) pairs using the LLM.
+
+        Args:
+        ----
+            schema: The textual representation of the table's schema.
+            count: The number of pairs to generate.
+            validate_sql: Whether to validate chosen SQL queries against DuckDB schema.
+            temperature: Sampling temperature for generation.
+            max_tokens: Maximum tokens per generation request.
+            checkpoint_path: Optional path to save intermediate progress and resume.
+            custom_prompt_template: Optional custom prompt template string containing {schema}.
+
+        Returns:
+        -------
+            list[tuple[str, str, str]]: Generated (prompt, chosen_sql, rejected_sql) triples.
+
+        """
+        return self._generate_pairs(
+            schema=schema,
+            count=count,
+            validate_sql=validate_sql,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            checkpoint_path=checkpoint_path,
+            custom_prompt_template=custom_prompt_template,
+        )
 
     def _generate_pairs(
         self,
@@ -312,19 +443,12 @@ class TrainingDataGenerator:
 
         while len(pairs) < count and attempts < max_attempts:
             attempts += 1
-            if custom_prompt_template:
-                prompt = custom_prompt_template.format(schema=schema)
-            else:
-                prompt = (
-                    f"Given the following database schema:\n{schema}\n"
-                    "Generate a natural language question, a correct SQL query to answer it, "
-                    "and an incorrect SQL query with a subtle mistake. "
-                    "Output as a JSON array with exactly three strings: "
-                    '["Question", "Correct SQL", "Incorrect SQL"]. '
-                    "Do not include any other text."
-                )
+            prompt = self.build_generation_prompt(
+                schema=schema,
+                custom_prompt_template=custom_prompt_template,
+            )
 
-            parsed: Optional[list[object]] = None
+            parsed: Optional[list[SqlValue]] = None
 
             if use_any_llm and llm_instance is not None:
                 try:
@@ -509,7 +633,8 @@ def evaluate_text_to_sql(
     db_path: str,
     test_data: list[dict[str, str]],
     model: str = "gemma4",
-) -> dict[str, Any]:
+    translate_fn: Optional[Callable[..., tuple[str, str]]] = None,
+) -> TextToSqlEvalReportDict:
     """
     Evaluate Text-to-SQL generation accuracy against a holdout test set.
 
@@ -520,20 +645,23 @@ def evaluate_text_to_sql(
         db_path: Path to DuckDB instance.
         test_data: List of test cases with 'prompt'/'question' and 'gold_sql'/'chosen'.
         model: Model identifier.
+        translate_fn: Optional injectable NL-to-SQL translation callable.
 
     Returns:
     -------
-        dict[str, Any]: Evaluation summary metrics and generated markdown/CSV reports.
+        TextToSqlEvalReportDict: Evaluation summary metrics and generated markdown/CSV reports.
 
     """
-    from t1d_analytics.api import generate_sql_from_nl
+    from t1d_analytics.chat_service import generate_sql_from_nl
+
+    active_translate = translate_fn or generate_sql_from_nl
 
     conn = duckdb.connect(db_path, read_only=True)
     total = len(test_data)
     em_count = 0
     ex_count = 0
     syntax_error_count = 0
-    results: list[dict[str, Any]] = []
+    results: list[EvalItemResultDict] = []
 
     for item in test_data:
         question = item.get("prompt") or item.get("question") or ""
@@ -542,7 +670,7 @@ def evaluate_text_to_sql(
         )
 
         try:
-            _, pred_sql = generate_sql_from_nl(db_path, question, model_name=model)
+            _, pred_sql = active_translate(db_path, question, model_name=model)
         except Exception as e:
             logger.debug(f"SQL generation failed for question '{question}': {e}")
             pred_sql = ""

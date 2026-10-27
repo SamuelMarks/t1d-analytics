@@ -430,9 +430,12 @@ def test_evaluate_text_to_sql_benchmark(tmp_path: Path, mocker: MagicMock) -> No
         else:
             return "resp3", "SELECT FROM users WHERE"
 
-    mocker.patch("t1d_analytics.api.generate_sql_from_nl", side_effect=mock_generate)
-
-    metrics = evaluate_text_to_sql(str(db_file), test_data, model="gemma4")
+    metrics = evaluate_text_to_sql(
+        str(db_file),
+        test_data,
+        model="gemma4",
+        translate_fn=mock_generate,
+    )
     assert metrics["total_samples"] == 5
     assert metrics["exact_match_rate"] > 0
     assert metrics["execution_accuracy"] > 0
@@ -540,8 +543,7 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
             return "ok", "SELECT val FROM tbl ORDER BY val DESC"
         return "ok", "SELECT val FROM tbl"
 
-    mocker.patch("t1d_analytics.api.generate_sql_from_nl", side_effect=mock_gen)
-    res = evaluate_text_to_sql(str(db_file), test_cases)
+    res = evaluate_text_to_sql(str(db_file), test_cases, translate_fn=mock_gen)
     assert res["execution_accuracy"] == 50.0
 
 
@@ -573,22 +575,25 @@ def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> 
 
     # 3. evaluate_text_to_sql exceptions
     test_cases = [{"prompt": "q", "gold_sql": "SELECT 1"}]
-    with patch("t1d_analytics.api.generate_sql_from_nl", return_value=("", "SELECT 2")):
-        # Mock conn.execute to throw Exception for both gold and pred
-        with patch(
-            "duckdb.DuckDBPyConnection.execute",
-            side_effect=Exception("Generic Execute Error"),
-        ):
-            res = evaluate_text_to_sql(str(db_file), test_cases)
-            assert res["execution_accuracy"] == 0.0
-            assert res["syntax_failure_rate"] > 0
+    # Mock conn.execute to throw Exception for both gold and pred
+    with patch(
+        "duckdb.DuckDBPyConnection.execute",
+        side_effect=Exception("Generic Execute Error"),
+    ):
+        res = evaluate_text_to_sql(
+            str(db_file),
+            test_cases,
+            translate_fn=lambda db_p, q, model_name="gemma4": ("", "SELECT 2"),
+        )
+        assert res["execution_accuracy"] == 0.0
+        assert res["syntax_failure_rate"] > 0
 
 
 def test_make_hashable() -> None:
     """Test _make_hashable converts nested unhashable structures into hashable immutable tuples."""
-    from t1d_analytics.training_data import _make_hashable
+    from t1d_analytics.training_data import HashableInput, _make_hashable
 
-    data = {
+    data: HashableInput = {
         "a": [1, 2, {"k": "v"}],
         "b": {3, 4},
         "c": (5, [6, 7]),
@@ -599,6 +604,7 @@ def test_make_hashable() -> None:
     # Verify it can be hashed and stored in set/Counter
     hash_set = {hashable}
     assert hashable in hash_set
+    assert _make_hashable([1, 2]) == (1, 2)
 
 
 def test_evaluate_text_to_sql_nested_complex_types(
@@ -622,11 +628,14 @@ def test_evaluate_text_to_sql_nested_complex_types(
         }
     ]
 
-    mocker.patch(
-        "t1d_analytics.api.generate_sql_from_nl",
-        return_value=("ok", "SELECT items, info FROM complex_tbl"),
+    res = evaluate_text_to_sql(
+        str(db_file),
+        test_cases,
+        translate_fn=lambda db_p, q, model_name="gemma4": (
+            "ok",
+            "SELECT items, info FROM complex_tbl",
+        ),
     )
-    res = evaluate_text_to_sql(str(db_file), test_cases)
     assert res["execution_accuracy"] == 100.0
 
 

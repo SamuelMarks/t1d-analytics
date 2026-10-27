@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
-    "docs": "typedoc --out ../docs/web src/main.ts src/ui.ts src/state.ts src/chart.ts src/i18n.ts src/formatters.ts src/clinical-dates.ts src/sql-highlight.ts",
+    "format:check": "prettier --check .",
+    "docs": "typedoc --out ../docs/web src/main.ts src/ui.ts src/state.ts src/chart.ts src/cgm-metrics.ts src/i18n.ts src/formatters.ts src/clinical-dates.ts src/sql-highlight.ts src/modal-utils.ts src/cohort-sql.ts src/api-client.ts src/exporters.ts src/sse-stream.ts src/controllers/system-status-controller.ts src/controllers/cohort-modal-controller.ts src/controllers/provider-modal-controller.ts src/controllers/table-modal-controller.ts",
     "test:e2e": "playwright test --config=playwright.config.ts",
     "test:e2e:full": "playwright test --config=playwright.full.config.ts",
     "test:e2e:all": "npm run test:e2e && npm run test:e2e:full"
@@ -27,6 +28,8 @@
       "@default",
       "@param",
       "@returns",
+      "@template",
+      "@typeParam",
       "@module",
       "@file",
       "@fileoverview",

@@ -3,13 +3,14 @@
 import concurrent.futures
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 from unittest.mock import MagicMock, patch
 
 import duckdb
 from fastapi.testclient import TestClient
 
 from t1d_analytics.api import app
+from t1d_analytics.sql_utils import SqlValue
 
 client = TestClient(app)
 
@@ -25,9 +26,9 @@ def test_concurrent_chat_api_key_isolation(tmp_path: Path) -> None:
     recorded_keys: Dict[int, str] = {}
     lock = threading.Lock()
 
-    def mock_create(provider: str, **kwargs: Any) -> MagicMock:
+    def mock_create(provider: str, **kwargs: SqlValue) -> MagicMock:
         """Create a mock AnyLLM instance that echoes the supplied API key."""
-        api_key = kwargs.get("api_key", "")
+        api_key = str(kwargs.get("api_key", ""))
         mock_instance = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = (

@@ -1,17 +1,22 @@
 """Pydantic request and response schemas for the T1D Analytics REST API."""
 
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
 from t1d_analytics.sql_utils import SqlValue
+
+JsonScalar = SqlValue
+JsonLevel1 = Union[SqlValue, List[SqlValue]]
+JsonLevel2 = Union[JsonLevel1, Dict[str, JsonLevel1]]
+JsonNestedValue = Union[JsonLevel2, Dict[str, JsonLevel2]]
 
 
 class ApiError(BaseModel):
     """Structured API error format."""
 
     error_code: str
-    params: Dict[str, Any] = {}
+    params: Dict[str, SqlValue] = {}
 
 
 class ChatMessageModel(BaseModel):
@@ -40,6 +45,7 @@ class ChatRequest(BaseModel):
         db_path: Optional path to the DuckDB database.
         session_id: Optional ID of the active chat session.
         history: Optional list of prior conversation messages.
+        auto_execute: Whether to automatically execute generated SQL for natural language queries.
 
     """
 
@@ -50,6 +56,7 @@ class ChatRequest(BaseModel):
     db_path: Optional[str] = None
     session_id: Optional[str] = None
     history: Optional[List[ChatMessageModel]] = None
+    auto_execute: bool = True
 
 
 class ChatResponse(BaseModel):
@@ -192,11 +199,52 @@ class TableInfo(BaseModel):
     columns: List[ColumnInfo]
 
 
+class TableSchemaModel(BaseModel):
+    """
+    Structured representation of a DuckDB table schema for LLM prompt construction and RAG pruning.
+
+    Attributes
+    ----------
+        table_name: Name of the database table.
+        columns: Ordered list of column metadata (name and SQL data type).
+        sample_row: Optional formatted sample row string from the table.
+
+    """
+
+    table_name: str
+    columns: List[ColumnInfo] = []
+    sample_row: Optional[str] = None
+
+    def column_names(self) -> List[str]:
+        """
+        Return the list of column names for this table.
+
+        Returns
+        -------
+            List[str]: Ordered column names.
+
+        """
+        return [col.name for col in self.columns]
+
+    def to_prompt_block(self) -> str:
+        """
+        Format the table schema into the canonical multi-line prompt representation.
+
+        Returns
+        -------
+            str: Formatted `Table: ... / Columns: ... / Sample row: ...` block.
+
+        """
+        col_desc = ", ".join([f"{c.name} ({c.type})" for c in self.columns])
+        sample_desc = self.sample_row or "Sample row: (empty table)"
+        return f"Table: {self.table_name}\nColumns: {col_desc}\n{sample_desc}"
+
+
 class SchemaResponse(BaseModel):
     """Response model for database schema."""
 
     tables: List[TableInfo]
-    database: Optional[Dict[str, Any]] = None
+    database: Optional[Dict[str, JsonLevel2]] = None
 
 
 class DatabaseItem(BaseModel):
@@ -225,7 +273,22 @@ class TrainingJobRequest(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    """Response model for the /api/status endpoint."""
+    """
+    Canonical service status summary model for the `/api/status` endpoint and diagnostics.
+
+    Attributes
+    ----------
+        status: High-level service readiness status ('ready', 'healthy', 'degraded', or 'error').
+        tables_count: Total number of clinical tables in the database.
+        total_rows: Total number of rows across all clinical tables.
+        required_tables_present: Whether expected T1D clinical tables are present.
+        backend_accessible: Whether the FastAPI backend is reachable.
+        version: Backend application version string.
+        database: Dictionary with detailed database diagnostics.
+        ollama: Dictionary with Ollama LLM service diagnostics.
+        providers: Dictionary with cloud LLM provider diagnostics.
+
+    """
 
     status: str = "ready"
     tables_count: int = 0
@@ -233,6 +296,37 @@ class StatusResponse(BaseModel):
     required_tables_present: bool = False
     backend_accessible: bool = True
     version: str = "0.1.0"
-    database: Dict[str, Any] = {}
-    ollama: Dict[str, Any] = {}
-    providers: Dict[str, Any] = {}
+    database: Dict[str, JsonLevel2] = {}
+    ollama: Dict[str, JsonLevel2] = {}
+    providers: Dict[str, Dict[str, JsonLevel2]] = {}
+
+    def to_dict(
+        self,
+    ) -> Dict[
+        str,
+        Union[
+            SqlValue,
+            Dict[str, JsonLevel2],
+            Dict[str, Dict[str, JsonLevel2]],
+        ],
+    ]:
+        """
+        Convert StatusResponse to a dictionary representation.
+
+        Returns
+        -------
+            Dict[str, Union[SqlValue, Dict[str, JsonLevel2], Dict[str, Dict[str, JsonLevel2]]]]:
+                Dictionary payload of status fields.
+
+        """
+        return {
+            "status": self.status,
+            "tables_count": self.tables_count,
+            "total_rows": self.total_rows,
+            "required_tables_present": self.required_tables_present,
+            "backend_accessible": self.backend_accessible,
+            "version": self.version,
+            "database": self.database or {},
+            "ollama": self.ollama or {},
+            "providers": self.providers or {},
+        }

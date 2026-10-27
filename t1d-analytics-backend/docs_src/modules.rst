@@ -6,6 +6,11 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.analytics
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.api
    :members:
    :undoc-members:
@@ -21,7 +26,17 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.chat_service
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.cli
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.dataset_loader
    :members:
    :undoc-members:
    :show-inheritance:
@@ -51,7 +66,17 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.hf_models
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.i18n
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.ingestion
    :members:
    :undoc-members:
    :show-inheritance:
@@ -91,7 +116,22 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.sql_agent
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.sql_executor
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.sql_utils
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.tpu_orchestrator
    :members:
    :undoc-members:
    :show-inheritance:

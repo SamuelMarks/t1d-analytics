@@ -1,8 +1,47 @@
 """Data models for T1D analytics, downloader, and training orchestration."""
 
-from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional, Set
+from typing import Dict, Optional, Set, Union
+
+from pydantic.dataclasses import dataclass
+from typing_extensions import TypedDict
+
+from t1d_analytics.api_schemas import (
+    ColumnInfo,
+    JsonLevel2,
+    StatusResponse,
+    TableSchemaModel,
+)
+from t1d_analytics.errors import CliValidationError
+from t1d_analytics.sql_utils import SqlValue
+
+__all__ = [
+    "ColumnInfo",
+    "DatasetInfo",
+    "GrainDatasetConfig",
+    "JaxFlaxModelConfig",
+    "JsonLevel2",
+    "MaxTextConfig",
+    "MaxTextParamValue",
+    "SqlValue",
+    "StatusResponse",
+    "TableSchemaModel",
+    "TfrcZoneAllocationDict",
+    "TpuAcceleratorType",
+    "TpuSchedulingType",
+    "TrainingBackend",
+    "TrainingHyperparameters",
+    "TrainingJobConfig",
+]
+
+MaxTextParamValue = Union[str, int, float, bool]
+
+
+class TfrcZoneAllocationDict(TypedDict):
+    """Authorized TFRC hardware accelerators and scheduling types for a GCP zone."""
+
+    accelerators: Set["TpuAcceleratorType"]
+    schedulings: Set["TpuSchedulingType"]
 
 
 @dataclass
@@ -82,13 +121,13 @@ class JaxFlaxModelConfig:
     dcn_data_parallelism: int = 1
     remat_policy: str = "minimal"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, MaxTextParamValue]:
         """
         Convert JAX/Flax configuration to dictionary mapping.
 
         Returns
         -------
-            Dict[str, Any]: Key-value configuration mapping for MaxText.
+            Dict[str, MaxTextParamValue]: Key-value configuration mapping for MaxText.
 
         """
         return {
@@ -125,13 +164,13 @@ class GrainDatasetConfig:
     shuffle_buffer_size: int = 10000
     seed: int = 42
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, MaxTextParamValue]:
         """
         Convert Grain configuration to dictionary mapping.
 
         Returns
         -------
-            Dict[str, Any]: MaxText dataset dictionary structure.
+            Dict[str, MaxTextParamValue]: MaxText dataset dictionary structure.
 
         """
         return {
@@ -178,16 +217,16 @@ class MaxTextConfig:
     grain_config: Optional[GrainDatasetConfig] = None
     max_preemption_retries: int = 3
 
-    def build_full_maxtext_parameters(self) -> Dict[str, Any]:
+    def build_full_maxtext_parameters(self) -> Dict[str, MaxTextParamValue]:
         """
         Assemble comprehensive MaxText YAML dictionary combining cluster and model parameters.
 
         Returns
         -------
-            Dict[str, Any]: Full MaxText parameter dictionary ready for export.
+            Dict[str, MaxTextParamValue]: Full MaxText parameter dictionary ready for export.
 
         """
-        params: Dict[str, Any] = {
+        params: Dict[str, MaxTextParamValue] = {
             "project_id": self.project_id,
             "zone": self.zone,
             "base_output_directory": self.base_output_directory
@@ -220,7 +259,7 @@ class MaxTextConfig:
             ValueError: If zone and accelerator type combination violates TFRC grant.
 
         """
-        valid_allocations: Dict[str, Dict[str, Set[Any]]] = {
+        valid_allocations: Dict[str, TfrcZoneAllocationDict] = {
             "us-central2-b": {
                 "accelerators": {
                     TpuAcceleratorType.V4_8,
@@ -254,18 +293,18 @@ class MaxTextConfig:
         }
 
         if self.zone not in valid_allocations:
-            raise ValueError(
+            raise CliValidationError(
                 f"Zone '{self.zone}' is not an authorized TFRC allocation zone."
             )
 
         spec = valid_allocations[self.zone]
         if self.accelerator_type not in spec["accelerators"]:
-            raise ValueError(
+            raise CliValidationError(
                 f"Accelerator '{self.accelerator_type.value}' is not authorized in zone '{self.zone}'."
             )
 
         if self.scheduling_type not in spec["schedulings"]:
-            raise ValueError(
+            raise CliValidationError(
                 f"Scheduling '{self.scheduling_type.value}' is not authorized in zone '{self.zone}'."
             )
 
@@ -338,47 +377,3 @@ class TrainingJobConfig:
     validation_dataset_path: Optional[str] = None
     use_tiny_model: bool = False
     model_architecture: str = "auto"
-
-
-@dataclass
-class StatusResponse:
-    """
-    Service status summary model including table count and row population status.
-
-    Attributes
-    ----------
-        status: High-level service readiness status ('ready', 'healthy', 'degraded', or 'error').
-        tables_count: Total number of clinical tables in the database.
-        total_rows: Total number of rows across all clinical tables.
-        required_tables_present: Whether expected T1D clinical tables are present.
-        backend_accessible: Whether the FastAPI backend is reachable.
-        version: Backend application version string.
-        database: Optional dictionary with detailed database diagnostics.
-        ollama: Optional dictionary with Ollama LLM service diagnostics.
-        providers: Optional dictionary with cloud LLM provider diagnostics.
-
-    """
-
-    status: str = "ready"
-    tables_count: int = 0
-    total_rows: int = 0
-    required_tables_present: bool = False
-    backend_accessible: bool = True
-    version: str = "0.1.0"
-    database: Optional[Dict[str, Any]] = None
-    ollama: Optional[Dict[str, Any]] = None
-    providers: Optional[Dict[str, Any]] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert StatusResponse to dictionary representation."""
-        return {
-            "status": self.status,
-            "tables_count": self.tables_count,
-            "total_rows": self.total_rows,
-            "required_tables_present": self.required_tables_present,
-            "backend_accessible": self.backend_accessible,
-            "version": self.version,
-            "database": self.database or {},
-            "ollama": self.ollama or {},
-            "providers": self.providers or {},
-        }

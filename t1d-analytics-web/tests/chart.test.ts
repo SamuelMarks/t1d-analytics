@@ -166,9 +166,8 @@ describe("CGM Charting Module", () => {
     expect(card?.querySelectorAll("svg").length).toBe(3); // TIR bar, AGP curve, and Histogram
 
     // Test print button click
-    const printBtn = card?.querySelector(
-      ".print-report-btn",
-    ) as HTMLButtonElement | null;
+    const printBtn =
+      card?.querySelector<HTMLButtonElement>(".print-report-btn");
     expect(printBtn).not.toBeNull();
     let printed = false;
     window.print = () => {
@@ -280,9 +279,7 @@ describe("CGM Charting Module", () => {
     expect(card?.getAttribute("dir")).toBe("rtl");
     parent.appendChild(card!);
 
-    const select = card?.querySelector(
-      ".agp-window-select",
-    ) as HTMLSelectElement | null;
+    const select = card?.querySelector<HTMLSelectElement>(".agp-window-select");
     expect(select).not.toBeNull();
     if (select && select.onchange) {
       select.value = "30";
@@ -292,9 +289,8 @@ describe("CGM Charting Module", () => {
 
     // Test onchange when container is unattached (container.parentNode is null)
     const unattached = renderCgmCard(sampleRows);
-    const unattachedSelect = unattached?.querySelector(
-      ".agp-window-select",
-    ) as HTMLSelectElement | null;
+    const unattachedSelect =
+      unattached?.querySelector<HTMLSelectElement>(".agp-window-select");
     if (unattachedSelect && unattachedSelect.onchange) {
       unattachedSelect.onchange.call(unattachedSelect, new Event("change"));
     }
@@ -847,9 +843,8 @@ describe("CGM Charting Module", () => {
       const card = renderCgmCard(rows);
       expect(card).not.toBeNull();
 
-      const windowSelect = card!.querySelector(
-        ".agp-window-select",
-      ) as HTMLSelectElement;
+      const windowSelect =
+        card!.querySelector<HTMLSelectElement>(".agp-window-select")!;
       expect(windowSelect).not.toBeNull();
       expect(windowSelect.getAttribute("aria-label")).toBe(
         i18next.t("cgm.obsWindow"),

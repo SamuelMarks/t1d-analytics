@@ -13,7 +13,116 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import DefaultDict, Dict, List, Optional
+from typing import DefaultDict, Dict, List, Optional, Sequence, Tuple
+
+
+def compute_combined_coverage(
+    cov_data: DefaultDict[str, DefaultDict[int, int]],
+) -> Tuple[int, int, str]:
+    """
+    Format merged LCOV coverage records and compute total found and hit line counts.
+
+    Args:
+    ----
+        cov_data: Mapping from source filepath to `{line_number: hit_count}`.
+
+    Returns:
+    -------
+        Tuple[int, int, str]: `(total_found, total_hit, formatted_lcov_text)`.
+
+    """
+    total_found = 0
+    total_hit = 0
+    lines_out: List[str] = []
+
+    for filename, lines in cov_data.items():
+        lines_out.append(f"SF:{filename}\n")
+        lf = len(lines)
+        lh = 0
+        for line_num, hits in sorted(lines.items()):
+            lines_out.append(f"DA:{line_num},{hits}\n")
+            if hits > 0:
+                lh += 1
+        lines_out.append(f"LF:{lf}\n")
+        lines_out.append(f"LH:{lh}\n")
+        lines_out.append("end_of_record\n")
+
+        total_found += lf
+        total_hit += lh
+
+    return total_found, total_hit, "".join(lines_out)
+
+
+def update_readme_badges(
+    content: str,
+    test_cov: int,
+    doc_cov: int,
+) -> Tuple[str, bool]:
+    """
+    Update Coverage and Docs shields in `README.md` content.
+
+    Args:
+    ----
+        content: Existing `README.md` markdown content.
+        test_cov: Integer test coverage percentage (0–100).
+        doc_cov: Integer docstring coverage percentage (0–100).
+
+    Returns:
+    -------
+        Tuple[str, bool]: `(updated_content, license_shield_found)`.
+
+    """
+    test_color = (
+        "brightgreen" if test_cov >= 90 else "yellow" if test_cov >= 70 else "red"
+    )
+    test_shield = f"[![Coverage](https://img.shields.io/badge/Coverage-{test_cov}%25-{test_color}.svg)](#)"
+
+    doc_color = "brightgreen" if doc_cov >= 90 else "yellow" if doc_cov >= 70 else "red"
+    doc_shield = (
+        f"[![Docs](https://img.shields.io/badge/Docs-{doc_cov}%25-{doc_color}.svg)](#)"
+    )
+
+    cleaned = re.sub(r"\[!\[Coverage\].*\n?", "", content)
+    cleaned = re.sub(r"\[!\[Docs\].*\n?", "", cleaned)
+
+    license_pattern = r"(\[!\[License\][^\n]+\n)"
+    replacement = rf"\1{test_shield}\n{doc_shield}\n"
+
+    if re.search(license_pattern, cleaned):
+        return re.sub(license_pattern, replacement, cleaned), True
+    return cleaned, False
+
+
+def build_test_commands(
+    npm_cmd: str,
+    pytest_cmd: str,
+) -> Dict[str, Sequence[str]]:
+    """
+    Construct the standard CLI command vectors used by the test runner.
+
+    Args:
+    ----
+        npm_cmd: Resolved `npm` executable path.
+        pytest_cmd: Resolved `pytest` executable path.
+
+    Returns:
+    -------
+        Dict[str, Sequence[str]]: Named command vectors for web and backend test stages.
+
+    """
+    return {
+        "web_install": [npm_cmd, "install"],
+        "web_build": [npm_cmd, "run", "build"],
+        "backend_pytest": [
+            pytest_cmd,
+            "-c",
+            "t1d-analytics-backend/pyproject.toml",
+            "t1d-analytics-backend/tests/",
+            "--cov-report=json",
+            "--cov-report=lcov",
+        ],
+        "web_coverage": [npm_cmd, "run", "coverage"],
+    }
 
 
 def run_cmd(
@@ -44,30 +153,25 @@ def main() -> None:
     """
     print("Running web install and build...")
     npm_cmd = shutil.which("npm") or "npm"
-    run_cmd([npm_cmd, "install"], cwd="t1d-analytics-web")
-    run_cmd([npm_cmd, "run", "build"], cwd="t1d-analytics-web")
-
-    print("Running python tests and coverage...")
     env = os.environ.copy()
     python_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
     env["PATH"] = f"{python_bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["PYTHONPATH"] = os.path.abspath(os.path.join("t1d-analytics-backend", "src"))
 
     pytest_cmd = shutil.which("pytest", path=env["PATH"]) or "pytest"
+    cmds = build_test_commands(npm_cmd=npm_cmd, pytest_cmd=pytest_cmd)
+
+    run_cmd(list(cmds["web_install"]), cwd="t1d-analytics-web")
+    run_cmd(list(cmds["web_build"]), cwd="t1d-analytics-web")
+
+    print("Running python tests and coverage...")
     run_cmd(
-        [
-            pytest_cmd,
-            "-c",
-            "t1d-analytics-backend/pyproject.toml",
-            "t1d-analytics-backend/tests/",
-            "--cov-report=json",
-            "--cov-report=lcov",
-        ],
+        list(cmds["backend_pytest"]),
         env=env,
     )
 
     print("Running frontend tests...")
-    run_cmd([npm_cmd, "run", "coverage"], cwd="t1d-analytics-web")
+    run_cmd(list(cmds["web_coverage"]), cwd="t1d-analytics-web")
 
     print("Running e2e tests...")
     os.makedirs("t1d-analytics-backend/tests/test_data", exist_ok=True)
@@ -97,6 +201,7 @@ def main() -> None:
 
     backend_env = env.copy()
     backend_env["T1D_DB_PATH"] = "ci_test.duckdb"
+    env["T1D_API_PORT"] = "8000"
 
     print("Starting backend server...")
     backend_proc = subprocess.Popen(
@@ -173,6 +278,7 @@ def main() -> None:
     lcov_files = [
         "coverage.lcov",
         os.path.join("t1d-analytics-web", "coverage", "lcov.info"),
+        os.path.join("t1d-analytics-web", "coverage", "e2e", "lcov.info"),
     ]
 
     for lcov_file in lcov_files:
@@ -193,24 +299,9 @@ def main() -> None:
         except FileNotFoundError:
             print(f"Warning: {lcov_file} not found.")
 
-    total_found = 0
-    total_hit = 0
-
+    total_found, total_hit, combined_lcov_text = compute_combined_coverage(cov_data)
     with open("combined-coverage.lcov", "w") as out:
-        for filename, lines in cov_data.items():
-            out.write(f"SF:{filename}\n")
-            lf = len(lines)
-            lh = 0
-            for line_num, hits in sorted(lines.items()):
-                out.write(f"DA:{line_num},{hits}\n")
-                if hits > 0:
-                    lh += 1
-            out.write(f"LF:{lf}\n")
-            out.write(f"LH:{lh}\n")
-            out.write("end_of_record\n")
-
-            total_found += lf
-            total_hit += lh
+        out.write(combined_lcov_text)
 
     if total_found == 0:
         print("No lines found in coverage report.")
@@ -231,11 +322,6 @@ def main() -> None:
         print(f"Failed to read coverage.json: {e}")
         sys.exit(1)
 
-    test_color = (
-        "brightgreen" if test_cov >= 90 else "yellow" if test_cov >= 70 else "red"
-    )
-    test_shield = f"[![Coverage](https://img.shields.io/badge/Coverage-{test_cov}%25-{test_color}.svg)](#)"
-
     try:
         interrogate_cmd = shutil.which("interrogate", path=env["PATH"]) or "interrogate"
         result = subprocess.run(
@@ -250,28 +336,20 @@ def main() -> None:
         print(f"Failed to run interrogate: {e}")
         sys.exit(1)
 
-    doc_color = "brightgreen" if doc_cov >= 90 else "yellow" if doc_cov >= 70 else "red"
-    doc_shield = (
-        f"[![Docs](https://img.shields.io/badge/Docs-{doc_cov}%25-{doc_color}.svg)](#)"
-    )
-
     readme_path = "README.md"
     with open(readme_path, "r") as f:
         content = f.read()
 
-    content = re.sub(r"\[!\[Coverage\].*\n?", "", content)
-    content = re.sub(r"\[!\[Docs\].*\n?", "", content)
-
-    license_pattern = r"(\[!\[License\][^\n]+\n)"
-    replacement = rf"\1{test_shield}\n{doc_shield}\n"
-
-    if re.search(license_pattern, content):
-        content = re.sub(license_pattern, replacement, content)
-    else:
+    updated_content, license_found = update_readme_badges(
+        content=content,
+        test_cov=test_cov,
+        doc_cov=doc_cov,
+    )
+    if not license_found:
         print("License shield not found in README.md")
 
     with open(readme_path, "w") as f:
-        f.write(content)
+        f.write(updated_content)
 
     print("Pre-commit checks passed successfully!")
 

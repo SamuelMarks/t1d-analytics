@@ -1,6 +1,5 @@
 """FastAPI application for the T1D Analytics web interface."""
 
-import json
 import logging
 import os
 import threading
@@ -8,28 +7,31 @@ import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager, contextmanager
 from typing import (
-    Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
+    Callable,
     Dict,
     Iterator,
     List,
     Optional,
+    Union,
 )
 
 import duckdb
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from t1d_analytics.analytics import (
-    extract_sql_from_response as _extract_sql_from_response,
+    TableProfileResult,
+    get_database_schema,
+    load_data_to_duckdb,
+    profile_table,
 )
 from t1d_analytics.analytics import (
-    get_database_schema,
-    load_all_to_duckdb,
-    profile_table,
+    extract_sql_from_response as _extract_sql_from_response,
 )
 from t1d_analytics.api_exports import (
     fetch_paginated_table_data,
@@ -102,6 +104,18 @@ from t1d_analytics.api_schemas import (
 from t1d_analytics.api_schemas import (
     TrainingJobRequest as TrainingJobRequest,
 )
+from t1d_analytics.chat_service import (
+    build_sql_prompt_with_history,
+    execute_chat_turn,
+    generate_sse_chat_events,
+    stream_llm_completion_tokens,
+)
+from t1d_analytics.chat_service import (
+    generate_sql_from_nl as generate_sql_from_nl,
+)
+from t1d_analytics.chat_service import (
+    stream_nl_to_sql_events as stream_nl_to_sql_events,
+)
 from t1d_analytics.db_security import (
     discover_workspace_databases,
     get_allowed_db_dirs,
@@ -109,31 +123,26 @@ from t1d_analytics.db_security import (
 )
 from t1d_analytics.diagnostics import (
     HealthStatus,
+    SystemHealthDict,
     check_database_health,
     get_system_health,
     log_startup_diagnostics,
     run_system_diagnostics,
 )
 from t1d_analytics.errors import (
-    DatabaseNotFoundError,
     InvalidDatabasePathError,
-    LlmTranslationError,
-    MissingSdkError,
-    ProviderNotConfiguredError,
-    SchemaReadError,
-    SqlExecutionError,
+    InvalidTrainingBackendError,
     T1DError,
     TrainingJobNotFoundError,
 )
 from t1d_analytics.i18n import get_translator
+from t1d_analytics.job_manager import TrainingJobDict, TrainingJobManager
 from t1d_analytics.llm_client import (
     CLOUD_MODEL_CATALOG,
-    PROVIDER_ENV_KEYS,
-    build_clinical_sql_prompt,
     extract_stream_delta,
-    get_effective_api_key,
+    fetch_available_models,
     is_provider_configured,
-    normalize_ollama_host,
+    probe_providers_status,
     resolve_provider_and_model,
 )
 from t1d_analytics.rate_limiter import (
@@ -162,8 +171,10 @@ from t1d_analytics.rate_limiter import (
 )
 from t1d_analytics.seed import seed_database
 from t1d_analytics.session_store import SessionStore, open_sessions_db_conn
+from t1d_analytics.sql_executor import execute_duckdb_query
 from t1d_analytics.sql_utils import (
     SqlValue,
+    escape_sql_identifier,
     sanitize_spreadsheet_cell,
     sanitize_sql_value,
 )
@@ -299,13 +310,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         None upon server startup.
 
     """
-    db_path = os.environ.get("T1D_DB_PATH", "data/t1d.duckdb")
-    data_dir = os.environ.get("T1D_DATA_DIR", "data")
+    db_path = os.environ.get("T1D_DB_PATH") or "data/t1d.duckdb"
+    data_dir = os.environ.get("T1D_DATA_DIR") or "data"
+    sessions_db_path = os.environ.get("T1D_SESSIONS_DB_PATH") or "data/sessions.duckdb"
     db_health = check_database_health(db_path=db_path)
-    if not db_health.exists or db_health.table_count == 0:
+    if (
+        not db_health.exists
+        or db_health.table_count == 0
+        or db_health.total_rows == 0
+        or not db_health.has_initial_data
+    ):
         try:
-            seed_database(data_dir=data_dir, db_path=db_path)
-            load_all_to_duckdb(data_dir, db_path)
+            seed_database(
+                data_dir=data_dir,
+                db_path=db_path,
+                sessions_db_path=sessions_db_path,
+            )
+            load_data_to_duckdb(data_dir, db_path)
         except Exception as e:
             logger.warning(f"Startup auto-ingestion failed for {db_path}: {e}")
     run_system_diagnostics(db_path=db_path)
@@ -316,6 +337,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 _lifespan = lifespan
 
 
+def get_cors_origins() -> List[str]:
+    """
+    Resolve allowed CORS origins from T1D_CORS_ORIGINS environment variable.
+
+    Returns
+    -------
+        List[str]: List of allowed origin URLs for cross-origin requests.
+
+    """
+    raw = os.environ.get(
+        "T1D_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000",
+    )
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
 app = FastAPI(
     title="T1D Analytics API",
     description="API for querying T1D datasets.",
@@ -324,7 +361,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -332,7 +369,10 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def auth_and_rate_limit_middleware(request: Request, call_next: Any) -> Any:
+async def auth_and_rate_limit_middleware(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
     """
     Global middleware enforcing API key verification when T1D_API_KEY is configured.
 
@@ -371,6 +411,7 @@ async def t1d_error_exception_handler(request: Request, exc: T1DError) -> JSONRe
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.to_dict()},
+        headers=exc.headers,
     )
 
 
@@ -434,56 +475,13 @@ def execute_sql(
         DatabaseNotFoundError: If database file cannot be opened.
 
     """
-    logger.info(f"Executing SQL query against database at {db_path}:\n{query}")
-    conn = None
-    is_closed = False
-    lock = threading.Lock()
-
-    def safe_interrupt() -> None:
-        """Interrupt the DuckDB connection safely from another thread."""
-        with lock:
-            if not is_closed and conn is not None:
-                conn.interrupt()
-
-    try:
-        try:
-            conn = duckdb.connect(db_path, read_only=True)
-        except duckdb.IOException as io_err:
-            raise DatabaseNotFoundError(params={"error": str(io_err)}) from io_err
-        conn.execute("SET enable_external_access = false")
-        timer = threading.Timer(timeout_seconds, safe_interrupt)
-        timer.start()
-        try:
-            result = conn.execute(query)
-            columns = (
-                [desc[0] for desc in result.description] if result.description else []
-            )
-            rows = result.fetchmany(max_rows)
-        finally:
-            timer.cancel()
-
-        output = [
-            {col: sanitize_sql_value(val) for col, val in zip(columns, row)}
-            for row in rows
-        ]
-        logger.info(f"SQL query executed successfully. Returned {len(output)} rows.")
-        return output
-    except duckdb.InterruptException as ie:
-        logger.error(f"SQL execution timed out: {ie}")
-        raise SqlExecutionError(
-            error_code="backend.queryTimeout",
-            params={"error": "Query execution timed out."},
-        ) from ie
-    except DatabaseNotFoundError:
-        raise
-    except Exception as e:
-        logger.error(f"SQL execution error: {e}")
-        raise SqlExecutionError(params={"error": str(e)}) from e
-    finally:
-        with lock:
-            is_closed = True
-            if conn is not None:
-                conn.close()
+    return execute_duckdb_query(
+        db_path=db_path,
+        query=query,
+        max_rows=max_rows,
+        timeout_seconds=timeout_seconds,
+        connect_fn=duckdb.connect,
+    )
 
 
 def _get_sessions_db_conn(
@@ -537,194 +535,34 @@ _session_store = SessionStore(
 )
 
 
-def _build_sql_prompt(
-    schema: str,
-    nl_query: str,
-    history: Optional[List[ChatMessageModel]] = None,
-) -> str:
+def get_session_store() -> SessionStore:
     """
-    Construct the clinical Text-to-SQL system prompt for an LLM.
+    FastAPI dependency provider returning the active SessionStore instance.
 
-    Args:
-    ----
-        schema: The database schema text.
-        nl_query: The clinician or user query.
-        history: Optional list of prior conversation messages for multi-turn context.
-
-    Returns:
+    Returns
     -------
-        str: Formatted system and user prompt.
+        SessionStore: Active conversation session store.
 
     """
-    history_context = ""
-    if history:
-        turns: List[str] = []
-        for msg in history[-6:]:
-            role = "User" if msg.role == "user" else "Assistant"
-            content = msg.content.strip()
-            sql_info = f" (SQL: {msg.sqlQuery})" if msg.sqlQuery else ""
-            turns.append(f"{role}: {content}{sql_info}")
-        history_context = "Prior Conversation History:\n" + "\n".join(turns) + "\n\n"
-
-    return build_clinical_sql_prompt(
-        schema=schema,
-        nl_query=nl_query,
-        history_context=history_context,
-        require_markdown_fence=True,
-    )
+    return _session_store
 
 
-def stream_llm_tokens(
-    prompt: str,
-    model_name: str,
-    api_key: Optional[str] = None,
-    provider: Optional[str] = None,
-) -> Iterator[str]:
+def get_training_job_manager() -> TrainingJobManager:
     """
-    Stream tokens from LLM using any-llm, falling back gracefully to single labeled completion block.
+    FastAPI dependency provider returning the active TrainingJobManager instance.
 
-    Args:
-    ----
-        prompt: The full prompt string.
-        model_name: The LLM model name or provider/model string.
-        api_key: Optional API key for external cloud provider.
-        provider: Optional provider name override.
-
-    Yields:
-    ------
-        str: Streamed token chunks.
-
-    """
-    from any_llm import AnyLLM
-
-    resolved_provider, actual_model = resolve_provider_and_model(model_name, provider)
-    effective_api_key = get_effective_api_key(resolved_provider, api_key)
-
-    if resolved_provider.lower() in PROVIDER_ENV_KEYS and not effective_api_key:
-        env_var = PROVIDER_ENV_KEYS[resolved_provider.lower()]
-        raise ProviderNotConfiguredError(
-            params={"provider": resolved_provider, "env_var": env_var},
-        )
-
-    llm_kwargs: Dict[str, Any] = {}
-    if effective_api_key:
-        llm_kwargs["api_key"] = effective_api_key
-
-    llm = AnyLLM.create(resolved_provider, **llm_kwargs)
-    try:
-        stream_resp = llm.completion(
-            model=actual_model,
-            messages=[{"role": "user", "content": prompt}],
-            stream=True,
-        )
-        if hasattr(stream_resp, "__iter__"):
-            for chunk in stream_resp:
-                delta = extract_stream_delta(chunk, resolved_provider)
-                if delta:
-                    yield delta
-            return
-    except Exception as e:
-        logger.warning(
-            f"Native streaming failed for provider '{resolved_provider}': {e}. Falling back to non-streaming completion."
-        )
-
-    response = llm.completion(
-        model=actual_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    full_text = extract_stream_delta(response, resolved_provider) or str(response)
-    yield full_text
-
-
-def generate_sql_from_nl(
-    db_path: str,
-    nl_query: str,
-    model_name: str = "gemma4",
-    history: Optional[List[ChatMessageModel]] = None,
-    api_key: Optional[str] = None,
-    provider: Optional[str] = None,
-) -> tuple[str, str]:
-    """
-    Translate natural language to SQL using any-llm.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        nl_query: Natural language question.
-        model_name: The model to use or provider/model (e.g. 'gemma4', 'openai/gpt-4o').
-        history: Optional list of prior conversation messages for multi-turn context.
-        api_key: Optional API key for cloud provider.
-        provider: Optional provider override name.
-
-    Returns:
+    Returns
     -------
-        The generated full response and extracted SQL query string.
-
-    Raises:
-    ------
-        MissingSdkError: If any-llm-sdk is missing.
-        ProviderNotConfiguredError: If API key is missing.
-        LlmTranslationError: If LLM API fails.
-        DatabaseNotFoundError: If database file is missing.
-        SchemaReadError: If reading schema fails.
+        TrainingJobManager: Active background training job manager.
 
     """
-    resolved_provider, actual_model = resolve_provider_and_model(model_name, provider)
+    from t1d_analytics.training_runner import global_training_job_manager
 
-    logger.info(
-        f"Translating natural language to SQL: '{nl_query}' using provider '{resolved_provider}' and model '{actual_model}'"
-    )
-    try:
-        from any_llm import AnyLLM
-    except ImportError as e:
-        logger.error(f"any-llm-sdk[{resolved_provider}] is not installed.")
-        raise MissingSdkError(
-            params={"error": f"any-llm-sdk[{resolved_provider}]"},
-        ) from e
+    return global_training_job_manager
 
-    effective_api_key = get_effective_api_key(resolved_provider, api_key)
 
-    if resolved_provider.lower() in PROVIDER_ENV_KEYS and not effective_api_key:
-        env_var = PROVIDER_ENV_KEYS[resolved_provider.lower()]
-        raise ProviderNotConfiguredError(
-            params={"provider": resolved_provider, "env_var": env_var},
-        )
-
-    try:
-        try:
-            conn = duckdb.connect(db_path, read_only=True)
-        except duckdb.IOException as io_err:
-            raise DatabaseNotFoundError(params={"error": str(io_err)}) from io_err
-        schema = get_database_schema(conn)
-        conn.close()
-        logger.debug(f"Retrieved schema: {schema[:200]}... (truncated)")
-    except DatabaseNotFoundError as dnf:
-        logger.error(f"Failed to read schema: {dnf}")
-        raise
-    except Exception as e:
-        logger.error(f"Failed to read schema: {e}")
-        raise SchemaReadError(params={"error": str(e)}) from e
-
-    prompt = _build_sql_prompt(schema, nl_query, history=history)
-
-    try:
-        logger.info(f"Sending prompt to LLM ({resolved_provider}/{actual_model})...")
-        llm_kwargs: Dict[str, Any] = {}
-        if effective_api_key:
-            llm_kwargs["api_key"] = effective_api_key
-        llm = AnyLLM.create(resolved_provider, **llm_kwargs)
-        response = llm.completion(
-            model=actual_model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw_choice = response.choices[0].message.content
-        full_response = (raw_choice or "").strip()
-        logger.info(f"LLM response:\n{full_response}")
-        sql_query = _extract_sql_from_response(full_response)
-        return full_response, sql_query
-    except Exception as e:
-        logger.error(f"LLM translation error: {e}")
-        raise LlmTranslationError(params={"error": str(e)}) from e
+_build_sql_prompt = build_sql_prompt_with_history
+stream_llm_tokens = stream_llm_completion_tokens
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -760,57 +598,16 @@ def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
             status_code=400, detail={"error_code": "backend.emptyMessage", "params": {}}
         )
 
-    try:
-        logger.info(
-            f"Received chat request: model='{request.model}', message='{request.message}'"
-        )
-        db_path = validate_db_path(request.db_path)
-        if request.model == "sql":
-            sql_query = request.message
-            content_prefix = "backend.literalSql"
-            results = execute_sql(db_path, sql_query)
-            return ChatResponse(
-                content=content_prefix, sqlResult=results, sqlQuery=sql_query
-            )
-        else:
-            full_response, sql_query = generate_sql_from_nl(
-                db_path,
-                request.message,
-                model_name=request.model,
-                history=request.history,
-                api_key=request.api_key,
-                provider=request.provider,
-            )
-            results = None
-            sql_error = None
-            if sql_query:
-                try:
-                    results = execute_sql(db_path, sql_query)
-                except (T1DError, ValueError, RuntimeError) as e:
-                    sql_error = parse_error(e)
-
-            return ChatResponse(
-                content=full_response,
-                sqlQuery=sql_query,
-                sqlResult=results,
-                error=sql_error,
-            )
-    except (HTTPException, InvalidDatabasePathError):
-        raise
-    except ValueError as ve:
-        logger.error(f"Database error during chat request: {ve}")
-        return ChatResponse(content="backend.errorDbExecution", error=parse_error(ve))
-    except RuntimeError as re:
-        logger.error(f"NLP error during chat request: {re}")
-        return ChatResponse(
-            content="backend.errorNlpTranslation", error=parse_error(re)
-        )
-    except Exception as e:
-        logger.exception("Unexpected error during chat request.")
-        return ChatResponse(content="backend.errorUnexpected", error=parse_error(e))
+    return execute_chat_turn(
+        request=request,
+        db_validator=validate_db_path,
+        execute_fn=execute_sql,
+        translate_fn=generate_sql_from_nl,
+        error_parser=parse_error,
+    )
 
 
-async def stream_chat_events(
+def stream_chat_events(
     request: ChatRequest,
     req: Optional[Request] = None,
 ) -> AsyncIterator[str]:
@@ -822,105 +619,21 @@ async def stream_chat_events(
         request: The incoming ChatRequest.
         req: Optional FastAPI Request object to detect client disconnection.
 
-    Yields:
-    ------
-        SSE data lines formatted as JSON strings.
+    Returns:
+    -------
+        AsyncIterator[str]: SSE data lines formatted as JSON strings.
 
     """
-    if req is not None and await req.is_disconnected():
-        logger.info("Client disconnected before stream generation.")
-        return
-
-    if not request.message.strip():
-        payload = json.dumps({"event": "error", "error": "backend.emptyMessage"})
-        yield f"data: {payload}\n\n"
-        return
-
-    try:
-        db_path = validate_db_path(request.db_path)
-    except (HTTPException, InvalidDatabasePathError):
-        payload = json.dumps({"event": "error", "error": "backend.invalidDatabasePath"})
-        yield f"data: {payload}\n\n"
-        return
-
-    if request.model == "sql":
-        exec_payload = json.dumps(
-            {"event": "token", "token": "Executing SQL query...\n"}
-        )
-        yield f"data: {exec_payload}\n\n"
-        yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}\n\n"
-        try:
-            results = execute_sql(db_path, request.message)
-            res_dict = {
-                "content": "backend.literalSql",
-                "sqlQuery": request.message,
-                "sqlResult": results,
-                "error": None,
-            }
-            yield f"data: {json.dumps({'event': 'done', **res_dict})}\n\n"
-            yield f"data: {json.dumps({'event': 'result', **res_dict})}\n\n"
-        except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
-            err_dict = parse_error(e).model_dump()
-            err_dict_payload = {
-                "content": "backend.errorDbExecution",
-                "sqlQuery": request.message,
-                "sqlResult": None,
-                "error": err_dict,
-            }
-            yield f"data: {json.dumps({'event': 'done', **err_dict_payload})}\n\n"
-            yield f"data: {json.dumps({'event': 'result', **err_dict_payload})}\n\n"
-        return
-
-    try:
-        conn = duckdb.connect(db_path, read_only=True)
-        schema = get_database_schema(conn)
-        conn.close()
-
-        prompt = _build_sql_prompt(schema, request.message, history=request.history)
-        full_parts: List[str] = []
-        for token in stream_llm_tokens(
-            prompt,
-            request.model,
-            api_key=request.api_key,
-            provider=request.provider,
-        ):
-            if req is not None and await req.is_disconnected():
-                logger.info("Client disconnected during SSE token streaming.")
-                return
-            full_parts.append(token)
-            tok_payload = json.dumps({"event": "token", "token": token})
-            yield f"data: {tok_payload}\n\n"
-        full_response = "".join(full_parts)
-        sql_query = _extract_sql_from_response(full_response)
-
-        sql_results: Optional[List[Dict[str, SqlValue]]] = None
-        sql_err_dict = None
-        if sql_query:
-            yield f"data: {json.dumps({'event': 'sql_generated', 'sqlQuery': sql_query})}\n\n"
-            yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}\n\n"
-            try:
-                sql_results = execute_sql(db_path, sql_query)
-            except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
-                sql_err_dict = parse_error(e).model_dump()
-
-        nl_res_dict: Dict[str, Any] = {
-            "content": full_response,
-            "sqlQuery": sql_query,
-            "sqlResult": sql_results,
-            "error": sql_err_dict,
-        }
-        yield f"data: {json.dumps({'event': 'done', **nl_res_dict})}\n\n"
-        yield f"data: {json.dumps({'event': 'result', **nl_res_dict})}\n\n"
-    except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
-        err_dict = parse_error(e).model_dump()
-        nl_err_payload: Dict[str, Any] = {
-            "content": "backend.errorNlpTranslation",
-            "sqlQuery": None,
-            "sqlResult": None,
-            "error": err_dict,
-        }
-        yield f"data: {json.dumps({'event': 'done', **nl_err_payload})}\n\n"
-        yield f"data: {json.dumps({'event': 'result', **nl_err_payload})}\n\n"
+    return generate_sse_chat_events(
+        request=request,
+        req=req,
+        db_validator=validate_db_path,
+        execute_fn=execute_sql,
+        connect_fn=duckdb.connect,
+        schema_fn=get_database_schema,
+        stream_fn=stream_llm_tokens,
+        error_parser=parse_error,
+    )
 
 
 @app.post("/api/chat/stream")
@@ -957,26 +670,35 @@ async def chat_stream_endpoint(request: ChatRequest, req: Request) -> StreamingR
     )
 
 
-@app.get("/api/sessions", response_model=SessionListResponse)
-def list_sessions(db_path: Optional[str] = None) -> SessionListResponse:
+sessions_router = APIRouter()
+
+
+@sessions_router.get("/api/sessions", response_model=SessionListResponse)
+def list_sessions(
+    db_path: Optional[str] = None,
+    store: SessionStore = Depends(get_session_store),
+) -> SessionListResponse:
     """
     List all persistent conversation sessions.
 
     Args:
     ----
         db_path: Optional path to the sessions database.
+        store: Injected SessionStore dependency.
 
     Returns:
     -------
         SessionListResponse: List of stored conversation sessions sorted by updated_at.
 
     """
-    return _session_store.list_sessions(db_path=db_path)
+    return store.list_sessions(db_path=db_path)
 
 
-@app.post("/api/sessions", response_model=SessionModel)
+@sessions_router.post("/api/sessions", response_model=SessionModel)
 def save_session(
-    request: CreateSessionRequest, db_path: Optional[str] = None
+    request: CreateSessionRequest,
+    db_path: Optional[str] = None,
+    store: SessionStore = Depends(get_session_store),
 ) -> SessionModel:
     """
     Create or update a persistent conversation session.
@@ -985,17 +707,22 @@ def save_session(
     ----
         request: The session creation or update payload.
         db_path: Optional path to the sessions database.
+        store: Injected SessionStore dependency.
 
     Returns:
     -------
         SessionModel: The saved conversation session.
 
     """
-    return _session_store.upsert_session(request=request, db_path=db_path)
+    return store.upsert_session(request=request, db_path=db_path)
 
 
-@app.get("/api/sessions/{session_id}", response_model=SessionModel)
-def get_session(session_id: str, db_path: Optional[str] = None) -> SessionModel:
+@sessions_router.get("/api/sessions/{session_id}", response_model=SessionModel)
+def get_session(
+    session_id: str,
+    db_path: Optional[str] = None,
+    store: SessionStore = Depends(get_session_store),
+) -> SessionModel:
     """
     Retrieve a specific conversation session by ID.
 
@@ -1003,6 +730,7 @@ def get_session(session_id: str, db_path: Optional[str] = None) -> SessionModel:
     ----
         session_id: The ID of the session to retrieve.
         db_path: Optional path to the sessions database.
+        store: Injected SessionStore dependency.
 
     Returns:
     -------
@@ -1013,11 +741,15 @@ def get_session(session_id: str, db_path: Optional[str] = None) -> SessionModel:
         HTTPException: 404 if session not found.
 
     """
-    return _session_store.get_session(session_id=session_id, db_path=db_path)
+    return store.get_session(session_id=session_id, db_path=db_path)
 
 
-@app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: str, db_path: Optional[str] = None) -> Dict[str, str]:
+@sessions_router.delete("/api/sessions/{session_id}")
+def delete_session(
+    session_id: str,
+    db_path: Optional[str] = None,
+    store: SessionStore = Depends(get_session_store),
+) -> Dict[str, str]:
     """
     Delete a conversation session.
 
@@ -1025,6 +757,7 @@ def delete_session(session_id: str, db_path: Optional[str] = None) -> Dict[str, 
     ----
         session_id: The ID of the session to delete.
         db_path: Optional path to the sessions database.
+        store: Injected SessionStore dependency.
 
     Returns:
     -------
@@ -1035,7 +768,10 @@ def delete_session(session_id: str, db_path: Optional[str] = None) -> Dict[str, 
         HTTPException: 404 if session not found.
 
     """
-    return _session_store.delete_session(session_id=session_id, db_path=db_path)
+    return store.delete_session(session_id=session_id, db_path=db_path)
+
+
+app.include_router(sessions_router)
 
 
 def parse_error(e: Exception) -> ApiError:
@@ -1134,7 +870,9 @@ def get_table_data(
 
 
 @app.get("/api/table/{table_name}/profile")
-def get_table_profile(table_name: str, db_path: Optional[str] = None) -> Dict[str, Any]:
+def get_table_profile(
+    table_name: str, db_path: Optional[str] = None
+) -> TableProfileResult:
     """
     Profile a table to return data quality, completeness, and column statistics.
 
@@ -1145,7 +883,7 @@ def get_table_profile(table_name: str, db_path: Optional[str] = None) -> Dict[st
 
     Returns:
     -------
-        Dict[str, Any]: Profiling summary dictionary.
+        TableProfileResult: Profiling summary dictionary.
 
     """
     return fetch_table_profile(
@@ -1258,7 +996,7 @@ def get_status(
     request: Request,
     db_path: Optional[str] = None,
     require_ready: bool = False,
-) -> Any:
+) -> Union[StatusResponse, JSONResponse]:
     """
     Return comprehensive system status, table counts, row counts, and LLM availability.
 
@@ -1304,8 +1042,10 @@ def get_status(
     return resp
 
 
-@app.get("/api/ready")
-def get_ready(request: Request, db_path: Optional[str] = None) -> Any:
+@app.get("/api/ready", response_model=None)
+def get_ready(
+    request: Request, db_path: Optional[str] = None
+) -> Union[StatusResponse, JSONResponse]:
     """
     Readiness probe endpoint returning HTTP 200 when database is populated or HTTP 503 otherwise.
 
@@ -1322,8 +1062,10 @@ def get_ready(request: Request, db_path: Optional[str] = None) -> Any:
     return get_status(request=request, db_path=db_path, require_ready=True)
 
 
-@app.get("/api/health")
-def get_health(request: Request, db_path: Optional[str] = None) -> Any:
+@app.get("/api/health", response_model=None)
+def get_health(
+    request: Request, db_path: Optional[str] = None
+) -> Union[SystemHealthDict, JSONResponse]:
     """
     Deep health check endpoint returning HTTP 503 if the DuckDB database is missing or empty.
 
@@ -1353,6 +1095,43 @@ def get_health(request: Request, db_path: Optional[str] = None) -> Any:
     return payload
 
 
+def _build_schema_response(target_db: str, lang: str = "en") -> SchemaResponse:
+    """
+    Inspect a DuckDB database and build a SchemaResponse with table columns and health status.
+
+    Args:
+    ----
+        target_db: Validated path to the DuckDB database file.
+        lang: Localization language code for database health messages.
+
+    Returns:
+    -------
+        SchemaResponse: Structured table and column metadata with database health dictionary.
+
+    """
+    db_health = check_database_health(target_db, lang=lang)
+
+    conn = None
+    try:
+        conn = duckdb.connect(target_db, read_only=True)
+        tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+
+        schema_data = []
+        for table in tables:
+            escaped_table = escape_sql_identifier(table)
+            columns = conn.execute(f'DESCRIBE "{escaped_table}"').fetchall()
+            col_info = [ColumnInfo(name=c[0], type=c[1]) for c in columns]
+            schema_data.append(TableInfo(name=table, columns=col_info))
+
+        return SchemaResponse(tables=schema_data, database=db_health.to_dict())
+    except Exception as e:
+        logger.error(f"Error fetching schema: {e}")
+        return SchemaResponse(tables=[], database=db_health.to_dict())
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 @app.get("/api/schema", response_model=SchemaResponse)
 def get_schema(request: Request, db_path: Optional[str] = None) -> SchemaResponse:
     """
@@ -1371,27 +1150,7 @@ def get_schema(request: Request, db_path: Optional[str] = None) -> SchemaRespons
     target_db = validate_db_path(db_path)
     lang_header = request.headers.get("accept-language", "en")
     lang = lang_header.split(",")[0].split("-")[0].split(";")[0]
-    db_health = check_database_health(target_db, lang=lang)
-
-    conn = None
-    try:
-        conn = duckdb.connect(target_db, read_only=True)
-        tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
-
-        schema_data = []
-        for table in tables:
-            escaped_table = table.replace('"', '""')
-            columns = conn.execute(f'DESCRIBE "{escaped_table}"').fetchall()
-            col_info = [ColumnInfo(name=c[0], type=c[1]) for c in columns]
-            schema_data.append(TableInfo(name=table, columns=col_info))
-
-        return SchemaResponse(tables=schema_data, database=db_health.to_dict())
-    except Exception as e:
-        logger.error(f"Error fetching schema: {e}")
-        return SchemaResponse(tables=[], database=db_health.to_dict())
-    finally:
-        if conn is not None:
-            conn.close()
+    return _build_schema_response(target_db=target_db, lang=lang)
 
 
 @app.get("/api/providers/status", response_model=ProvidersStatusResponse)
@@ -1404,131 +1163,33 @@ def get_providers_status() -> ProvidersStatusResponse:
         ProvidersStatusResponse containing status for ollama, openai, anthropic, google.
 
     """
-    statuses: List[ProviderStatus] = []
-
-    ollama_healthy = False
-    ollama_details = "Ollama service unavailable"
-    ollama_base = normalize_ollama_host(default_host="http://localhost:11434")
-    try:
-        req = urllib.request.Request(f"{ollama_base}/api/tags")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            if resp.status == 200:
-                ollama_healthy = True
-                ollama_details = "Ollama service online"
-    except Exception as e:
-        ollama_details = f"Ollama unreachable: {e}"
-
-    statuses.append(
-        ProviderStatus(
-            provider="ollama",
-            configured=True,
-            healthy=ollama_healthy,
-            details=ollama_details,
-            reachable=ollama_healthy,
-            error_code="PROVIDER_ONLINE" if ollama_healthy else "PROVIDER_OFFLINE",
-        )
-    )
-
-    openai_conf = is_provider_configured("openai")
-    statuses.append(
-        ProviderStatus(
-            provider="openai",
-            configured=openai_conf,
-            healthy=openai_conf,
-            details="Configured via OPENAI_API_KEY"
-            if openai_conf
-            else "Missing OPENAI_API_KEY",
-            reachable=openai_conf,
-            error_code="PROVIDER_ONLINE" if openai_conf else "MISSING_API_KEY",
-        )
-    )
-
-    anthropic_conf = is_provider_configured("anthropic")
-    statuses.append(
-        ProviderStatus(
-            provider="anthropic",
-            configured=anthropic_conf,
-            healthy=anthropic_conf,
-            details="Configured via ANTHROPIC_API_KEY"
-            if anthropic_conf
-            else "Missing ANTHROPIC_API_KEY",
-            reachable=anthropic_conf,
-            error_code="PROVIDER_ONLINE" if anthropic_conf else "MISSING_API_KEY",
-        )
-    )
-
-    google_conf = is_provider_configured("google")
-    statuses.append(
-        ProviderStatus(
-            provider="google",
-            configured=google_conf,
-            healthy=google_conf,
-            details="Configured via GEMINI_API_KEY/GOOGLE_API_KEY"
-            if google_conf
-            else "Missing GEMINI_API_KEY",
-            reachable=google_conf,
-            error_code="PROVIDER_ONLINE" if google_conf else "MISSING_API_KEY",
-        )
-    )
-
-    return ProvidersStatusResponse(providers=statuses)
+    return probe_providers_status(urlopen_fn=urllib.request.urlopen)
 
 
 @app.get("/api/models", response_model=ModelsResponse)
-def list_models(include_cloud: bool = True) -> ModelsResponse:
+def list_models(
+    include_cloud: bool = True,
+    configured_models: Optional[str] = None,
+) -> ModelsResponse:
     """
-    List available local Ollama models and configured cloud LLM providers.
+    List available local Ollama models and configured any-llm cloud providers.
 
     Args:
     ----
-        include_cloud: Whether to include standard cloud provider models.
+        include_cloud: Whether to include cloud and configured any-llm provider models.
+        configured_models: Optional comma-separated list of custom configured provider/model IDs.
 
     Returns:
     -------
         ModelsResponse: List of available local and cloud models.
 
     """
-    base_url = normalize_ollama_host()
-
-    models: List[ModelInfo] = []
-    try:
-        req = urllib.request.Request(f"{base_url}/api/tags")
-        with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode())
-
-        for model in data.get("models", []):
-            models.append(
-                ModelInfo(
-                    name=model.get("name"),
-                    size=model.get("size"),
-                    provider="ollama",
-                    configured=True,
-                    requires_key=False,
-                    available=True,
-                    reachable=True,
-                    error_code=None,
-                )
-            )
-    except Exception as e:
-        logger.error(f"Error fetching models from local Ollama instance: {e}")
-
-    if include_cloud:
-        for prov, prov_models in CLOUD_PROVIDER_MODELS.items():
-            conf = is_provider_configured(prov)
-            for m in prov_models:
-                models.append(
-                    ModelInfo(
-                        name=m,
-                        provider=prov,
-                        configured=conf,
-                        requires_key=True,
-                        available=conf,
-                        reachable=conf,
-                        error_code=None if conf else "MISSING_API_KEY",
-                    )
-                )
-
-    return ModelsResponse(models=models)
+    return fetch_available_models(
+        include_cloud=include_cloud,
+        configured_models=configured_models,
+        cloud_catalog=CLOUD_PROVIDER_MODELS,
+        urlopen_fn=urllib.request.urlopen,
+    )
 
 
 @app.get("/api/databases", response_model=DatabaseListResponse)
@@ -1544,11 +1205,15 @@ def list_databases() -> DatabaseListResponse:
     return discover_workspace_databases()
 
 
-@app.post("/api/training/jobs")
+training_router = APIRouter()
+
+
+@training_router.post("/api/training/jobs")
 def submit_training_job(
     job_req: TrainingJobRequest,
     req: Request,
-) -> Dict[str, Any]:
+    job_manager: TrainingJobManager = Depends(get_training_job_manager),
+) -> TrainingJobDict:
     """
     Submit a background training job using the configured accelerator backend.
 
@@ -1556,14 +1221,18 @@ def submit_training_job(
     ----
         job_req: Training job specification.
         req: Incoming FastAPI request.
+        job_manager: Injected TrainingJobManager dependency.
 
     Returns:
     -------
-        Dict[str, Any]: Job ID and initial status.
+        TrainingJobDict: Job ID and initial status.
+
+    Raises:
+    ------
+        InvalidTrainingBackendError: If requested training backend is unsupported.
 
     """
     from t1d_analytics.models import TrainingBackend, TrainingJobConfig
-    from t1d_analytics.training_runner import global_training_job_manager
 
     validated_dataset_path = validate_db_path(job_req.dataset_path)
     validated_output_dir = validate_db_path(job_req.output_dir)
@@ -1578,14 +1247,10 @@ def submit_training_job(
 
     try:
         backend_enum = TrainingBackend(backend_val)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error_code": "backend.invalidBackend",
-                "params": {"backend": job_req.backend},
-            },
-        )
+    except ValueError as exc:
+        raise InvalidTrainingBackendError(
+            params={"backend": job_req.backend},
+        ) from exc
 
     config = TrainingJobConfig(
         dataset_path=validated_dataset_path,
@@ -1594,32 +1259,38 @@ def submit_training_job(
         model_name=job_req.model_name,
         dry_run=job_req.dry_run,
     )
-    job_id = global_training_job_manager.submit_job(config)
-    job = global_training_job_manager.get_job(job_id)
+    job_id = job_manager.submit_job(config)
+    job = job_manager.get_job(job_id)
     return job if job else {"job_id": job_id, "status": "pending"}
 
 
-@app.get("/api/training/jobs")
-def list_training_jobs(req: Request) -> Dict[str, Any]:
+@training_router.get("/api/training/jobs")
+def list_training_jobs(
+    req: Request,
+    job_manager: TrainingJobManager = Depends(get_training_job_manager),
+) -> Dict[str, List[TrainingJobDict]]:
     """
     List all tracked background training jobs.
 
     Args:
     ----
         req: Incoming FastAPI request.
+        job_manager: Injected TrainingJobManager dependency.
 
     Returns:
     -------
-        Dict[str, Any]: Dictionary containing list of training jobs.
+        Dict[str, List[TrainingJobDict]]: Dictionary containing list of training jobs.
 
     """
-    from t1d_analytics.training_runner import global_training_job_manager
-
-    return {"jobs": global_training_job_manager.list_jobs()}
+    return {"jobs": job_manager.list_jobs()}
 
 
-@app.get("/api/training/jobs/{job_id}")
-def get_training_job(job_id: str, req: Request) -> Dict[str, Any]:
+@training_router.get("/api/training/jobs/{job_id}")
+def get_training_job(
+    job_id: str,
+    req: Request,
+    job_manager: TrainingJobManager = Depends(get_training_job_manager),
+) -> TrainingJobDict:
     """
     Retrieve details and execution metrics for a specific background training job.
 
@@ -1627,26 +1298,29 @@ def get_training_job(job_id: str, req: Request) -> Dict[str, Any]:
     ----
         job_id: Unique job identifier string.
         req: Incoming FastAPI request.
+        job_manager: Injected TrainingJobManager dependency.
 
     Returns:
     -------
-        Dict[str, Any]: Job status and execution results.
+        TrainingJobDict: Job status and execution results.
 
     Raises:
     ------
         TrainingJobNotFoundError: 404 if the job ID is not found.
 
     """
-    from t1d_analytics.training_runner import global_training_job_manager
-
-    job = global_training_job_manager.get_job(job_id)
+    job = job_manager.get_job(job_id)
     if not job:
         raise TrainingJobNotFoundError(params={"job_id": job_id})
     return job
 
 
-@app.delete("/api/training/jobs/{job_id}")
-def cancel_training_job(job_id: str, req: Request) -> Dict[str, Any]:
+@training_router.delete("/api/training/jobs/{job_id}")
+def cancel_training_job(
+    job_id: str,
+    req: Request,
+    job_manager: TrainingJobManager = Depends(get_training_job_manager),
+) -> TrainingJobDict:
     """
     Request cancellation of a running background training job.
 
@@ -1654,23 +1328,25 @@ def cancel_training_job(job_id: str, req: Request) -> Dict[str, Any]:
     ----
         job_id: Unique job identifier string.
         req: Incoming FastAPI request.
+        job_manager: Injected TrainingJobManager dependency.
 
     Returns:
     -------
-        Dict[str, Any]: Cancellation outcome.
+        TrainingJobDict: Cancellation outcome.
 
     Raises:
     ------
         TrainingJobNotFoundError: 404 if the job ID is not found.
 
     """
-    from t1d_analytics.training_runner import global_training_job_manager
-
-    cancelled = global_training_job_manager.cancel_job(job_id)
+    cancelled = job_manager.cancel_job(job_id)
     if not cancelled:
         raise TrainingJobNotFoundError(params={"job_id": job_id})
-    job = global_training_job_manager.get_job(job_id)
+    job = job_manager.get_job(job_id)
     return job if job else {"job_id": job_id, "status": "cancelled"}
+
+
+app.include_router(training_router)
 
 
 def _setup_debug() -> None:
