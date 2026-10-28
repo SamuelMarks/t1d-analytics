@@ -307,3 +307,136 @@ def test_complete_llm_prompt_and_stream_llm_factory() -> None:
         )
     )
     assert tokens_without_key == ["  SELECT 1;  "]
+
+
+def test_llm_client_protocol_stubs() -> None:
+    """Test protocol stub properties and methods in t1d_analytics.llm_client."""
+    from typing import Mapping, Union
+
+    import pytest
+
+    from t1d_analytics.llm_client import (
+        AnthropicStreamChunkProtocol,
+        AnyLlmFactoryProtocol,
+        DirectTextChunkProtocol,
+        GeminiStreamChunkProtocol,
+        LlmCompletionChoiceProtocol,
+        LlmCompletionMessageProtocol,
+        LlmCompletionResponseProtocol,
+        LlmTransportProtocol,
+        OpenAiStreamChunkProtocol,
+        _AnyLlmListModelsFn,
+        _AnyLlmModelProtocol,
+        _CandidateContentProtocol,
+        _CandidateProtocol,
+        _ChoiceWithDeltaProtocol,
+        _ChoiceWithMessageProtocol,
+        _DeltaContentProtocol,
+        _DeltaProtocol,
+        _DeltaTextProtocol,
+        _TextPartProtocol,
+        _UrlResponseProtocol,
+    )
+
+    dummy_obj = object()
+    for proto_cls, prop_name in (
+        (_TextPartProtocol, "text"),
+        (_CandidateContentProtocol, "parts"),
+        (_CandidateProtocol, "content"),
+        (_DeltaTextProtocol, "text"),
+        (_DeltaContentProtocol, "content"),
+        (_DeltaProtocol, "text"),
+        (_DeltaProtocol, "content"),
+        (DirectTextChunkProtocol, "text"),
+        (_ChoiceWithDeltaProtocol, "delta"),
+        (_ChoiceWithMessageProtocol, "message"),
+        (OpenAiStreamChunkProtocol, "choices"),
+        (GeminiStreamChunkProtocol, "candidates"),
+        (AnthropicStreamChunkProtocol, "delta"),
+        (_UrlResponseProtocol, "status"),
+        (_AnyLlmModelProtocol, "id"),
+        (LlmCompletionMessageProtocol, "content"),
+        (LlmCompletionChoiceProtocol, "message"),
+        (LlmCompletionResponseProtocol, "choices"),
+    ):
+        prop = getattr(proto_cls, prop_name)
+        assert isinstance(prop, property)
+        assert prop.fget is not None
+        with pytest.raises(NotImplementedError):
+            prop.fget(dummy_obj)
+
+    class _ConcreteUrlResponse:
+        """Helper satisfying _UrlResponseProtocol."""
+
+        status = 200
+
+        def read(self) -> bytes:
+            """Return empty bytes."""
+            return b""
+
+        def __enter__(self) -> "_ConcreteUrlResponse":
+            """Enter context."""
+            return self
+
+        def __exit__(
+            self,
+            exc_type: Optional[type],
+            exc_val: Optional[BaseException],
+            exc_tb: Optional[Union[str, int, float, bool]],
+        ) -> Optional[bool]:
+            """Exit context."""
+            return None
+
+    class _ConcreteTransport:
+        """Helper satisfying LlmTransportProtocol."""
+
+        def completion(
+            self,
+            *,
+            model: str,
+            messages: Sequence[Mapping[str, str]],
+            stream: bool = False,
+        ) -> str:
+            """Return empty completion."""
+            return ""
+
+    class _ConcreteListModels:
+        """Helper satisfying _AnyLlmListModelsFn."""
+
+        def __call__(
+            self, provider: str, api_key: Optional[str] = None
+        ) -> Sequence[_AnyLlmModelProtocol]:
+            """Return empty sequence."""
+            return []
+
+    class _ConcreteFactory:
+        """Helper satisfying AnyLlmFactoryProtocol."""
+
+        def __call__(
+            self, provider: str, api_key: Optional[str] = None
+        ) -> LlmTransportProtocol:
+            """Return concrete transport."""
+            return _ConcreteTransport()
+
+    resp = _ConcreteUrlResponse()
+    transport = _ConcreteTransport()
+    list_models = _ConcreteListModels()
+    factory = _ConcreteFactory()
+    assert resp.read() == b""
+    with resp as entered:
+        assert entered is resp
+    assert transport.completion(model="m", messages=[], stream=False) == ""
+    assert list_models("openai") == []
+    assert isinstance(factory("openai"), _ConcreteTransport)
+    with pytest.raises(NotImplementedError):
+        _UrlResponseProtocol.read(resp)
+    with pytest.raises(NotImplementedError):
+        _UrlResponseProtocol.__enter__(resp)
+    with pytest.raises(NotImplementedError):
+        _UrlResponseProtocol.__exit__(resp, None, None, None)
+    with pytest.raises(NotImplementedError):
+        _AnyLlmListModelsFn.__call__(list_models, "openai")
+    with pytest.raises(NotImplementedError):
+        LlmTransportProtocol.completion(transport, model="m", messages=[], stream=False)
+    with pytest.raises(NotImplementedError):
+        AnyLlmFactoryProtocol.__call__(factory, "openai")

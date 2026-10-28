@@ -37,6 +37,7 @@ class BaseRateLimiter(ABC):
             bool: True if allowed, False if rate-limited.
 
         """
+        raise NotImplementedError
 
     @abstractmethod
     def get_retry_after(self, client_ip: str, window_seconds: float = 60.0) -> int:
@@ -53,10 +54,12 @@ class BaseRateLimiter(ABC):
             int: Seconds until the rate limit expires.
 
         """
+        raise NotImplementedError
 
     @abstractmethod
     def reset(self) -> None:
         """Reset rate limiter state."""
+        raise NotImplementedError
 
 
 class MemoryRateLimiter(BaseRateLimiter):

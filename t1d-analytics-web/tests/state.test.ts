@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ChatState, resolveTableJoin } from "../src/state";
+import {
+  ChatState,
+  decodeLegacyHtmlEntities,
+  parsePersistedChatState,
+  resolveTableJoin,
+} from "../src/state";
 
 describe("ChatState", () => {
   let state: ChatState;
@@ -671,5 +676,33 @@ describe("ChatState", () => {
     expect(state.getConfiguredModels()).toEqual(["deepseek/deepseek-chat"]);
     state.removeConfiguredModels();
     expect(state.getConfiguredModels()).toEqual([]);
+  });
+
+  it("decodes legacy HTML entities in persisted chat messages on load", () => {
+    const encodedMsg =
+      "Error details: SQL execution error: &#39;sum(VARCHAR)&#39; -&gt; DECIMAL (arg, &#x2F;) &quot;test&quot; &lt;tag&gt; &amp; &#x27; &#34; &#x2f; &#47; &apos;";
+    expect(decodeLegacyHtmlEntities(encodedMsg)).toBe(
+      `Error details: SQL execution error: 'sum(VARCHAR)' -> DECIMAL (arg, /) "test" <tag> & ' " / / '`,
+    );
+
+    const payload = JSON.stringify({
+      chats: [
+        {
+          id: "c1",
+          title: "Chat 1",
+          model: "sql",
+          messages: [{ role: "assistant", content: encodedMsg, isError: true }],
+        },
+        {
+          id: "c2",
+          title: "Chat without messages array",
+          model: "sql",
+        },
+      ],
+    });
+    const parsed = parsePersistedChatState(payload);
+    expect(parsed.chats?.[0].messages[0].content).toContain("'sum(VARCHAR)'");
+    expect(parsed.chats?.[0].messages[0].content).toContain("-> DECIMAL");
+    expect(parsed.chats?.[0].messages[0].content).toContain("(arg, /)");
   });
 });

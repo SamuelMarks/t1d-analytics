@@ -81,5 +81,11 @@
     "NumHospDKA",
     "num_hosp_dka",
     "hosp_dka_count"
+  ],
+  "numsevhypo": [
+    "NumSevHypo",
+    "Pt_NumSevHypo",
+    "num_sev_hypo",
+    "sev_hypo_count"
   ]
 }

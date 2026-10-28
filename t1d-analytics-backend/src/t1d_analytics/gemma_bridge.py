@@ -123,7 +123,7 @@ class _GemmaEtlModuleProtocol(Protocol):
     @property
     def run_etl(self) -> Callable[..., EtlPayloadDict]:
         """Return run_etl callable."""
-        ...
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -133,7 +133,7 @@ class _GemmaSftModuleProtocol(Protocol):
     @property
     def run_sft(self) -> Callable[..., Dict[str, JobMetricValue]]:
         """Return run_sft callable."""
-        ...
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -143,7 +143,7 @@ class _GemmaDpoModuleProtocol(Protocol):
     @property
     def run_dpo(self) -> Callable[..., Dict[str, JobMetricValue]]:
         """Return run_dpo callable."""
-        ...
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -155,7 +155,7 @@ class _GemmaEvalModuleProtocol(Protocol):
         self,
     ) -> Callable[..., Union[EvalAccuracyDict, float]]:
         """Return evaluate_sql callable."""
-        ...
+        raise NotImplementedError
 
 
 class _GemmaLibraryProtocol(

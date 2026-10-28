@@ -40,7 +40,7 @@ class TrainingRunnerProtocol(Protocol):
         cancel_event: Optional[threading.Event] = None,
     ) -> Dict[str, JobMetricValue]:
         """Execute training job for the given configuration."""
-        ...
+        raise NotImplementedError
 
 
 @dataclass

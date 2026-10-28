@@ -1567,7 +1567,7 @@ def test_load_data_to_duckdb_coerces_varchar_numeric_concepts(tmp_path: Path) ->
         "PtID,TxGroup,Gender,age,NumSevHypo\n"
         "1,Control,M,15,0\n"
         "2,Closed-Loop,F,NA,2\n"
-        "3,Control,M,30,\n"
+        "3,Control,M,30,>3\n"
     )
     db_file = tmp_path / "jaeb.duckdb"
     conn_init = duckdb.connect(str(db_file))
@@ -1576,7 +1576,7 @@ def test_load_data_to_duckdb_coerces_varchar_numeric_concepts(tmp_path: Path) ->
     load_data_to_duckdb(str(data_dir), str(db_file))
 
     conn = duckdb.connect(str(db_file), read_only=True)
-    res = conn.execute("SELECT SUM(numsevhypo), AVG(age) FROM tblaptsummary").fetchone()
+    res = conn.execute("SELECT SUM(NumSevHypo), AVG(age) FROM tblaptsummary").fetchone()
     conn.close()
     assert res is not None
     assert res[0] == 2.0

@@ -872,3 +872,95 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             runner._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync)
         with pytest.raises(RuntimeError):
             runner._invoke_reclaim_sync("wl-sync", max_cfg_sync)
+
+
+def test_tpu_orchestrator_protocol_stubs() -> None:
+    """Test protocol stub methods and properties in tpu_orchestrator."""
+    from typing import Iterable, Sequence, Union
+
+    from t1d_analytics.tpu_orchestrator import (
+        GcsBlobProtocol,
+        GcsBucketProtocol,
+        GcsClientProtocol,
+        Md5BlobProtocol,
+        SubprocessExecutorProtocol,
+    )
+
+    class _ConcreteBlob:
+        """Concrete blob satisfying GcsBlobProtocol and Md5BlobProtocol."""
+
+        name = "blob"
+        md5_hash: Optional[str] = None
+
+        def download_to_filename(self, filename: str) -> None:
+            """No-op download."""
+
+        def upload_from_filename(self, filename: str) -> None:
+            """No-op upload."""
+
+    class _ConcreteBucket:
+        """Concrete bucket satisfying GcsBucketProtocol."""
+
+        def blob(self, blob_name: str) -> GcsBlobProtocol:
+            """Return concrete blob."""
+            return _ConcreteBlob()
+
+    class _ConcreteClient:
+        """Concrete client satisfying GcsClientProtocol."""
+
+        def bucket(self, bucket_name: str) -> GcsBucketProtocol:
+            """Return concrete bucket."""
+            return _ConcreteBucket()
+
+        def list_blobs(
+            self, bucket_or_name: Union[GcsBucketProtocol, str], prefix: str = ""
+        ) -> Iterable[GcsBlobProtocol]:
+            """Return empty blob list."""
+            return []
+
+    class _ConcreteExecutor:
+        """Concrete executor satisfying SubprocessExecutorProtocol."""
+
+        def __call__(
+            self,
+            cmd: Sequence[str],
+            capture_output: bool = True,
+            text: bool = True,
+            check: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            """Return completed process."""
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+    blob = _ConcreteBlob()
+    bucket = _ConcreteBucket()
+    client = _ConcreteClient()
+    executor = _ConcreteExecutor()
+    blob.download_to_filename("f.txt")
+    blob.upload_from_filename("f.txt")
+    assert isinstance(bucket.blob("b"), _ConcreteBlob)
+    assert isinstance(client.bucket("bkt"), _ConcreteBucket)
+    assert list(client.list_blobs("bkt")) == []
+    assert executor(["echo"]).returncode == 0
+    passthrough_proc = subprocess.run(
+        ["echo", "passthrough"], capture_output=True, text=True
+    )
+    assert passthrough_proc.returncode == 0
+    with pytest.raises(NotImplementedError):
+        GcsBlobProtocol.download_to_filename(blob, "f.txt")
+    with pytest.raises(NotImplementedError):
+        GcsBlobProtocol.upload_from_filename(blob, "f.txt")
+    md5_prop = getattr(Md5BlobProtocol, "md5_hash")
+    assert isinstance(md5_prop, property)
+    assert md5_prop.fget is not None
+    with pytest.raises(NotImplementedError):
+        md5_prop.fget(blob)
+    with pytest.raises(NotImplementedError):
+        GcsBucketProtocol.blob(bucket, "b")
+    with pytest.raises(NotImplementedError):
+        GcsClientProtocol.bucket(client, "bkt")
+    with pytest.raises(NotImplementedError):
+        GcsClientProtocol.list_blobs(client, "bkt")
+    with pytest.raises(NotImplementedError):
+        SubprocessExecutorProtocol.__call__(executor, ["echo"])

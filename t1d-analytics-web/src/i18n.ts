@@ -1229,6 +1229,9 @@ const initialLang = getInitialLang();
 await i18next.init({
   lng: initialLang,
   fallbackLng: "en",
+  interpolation: {
+    escapeValue: false,
+  },
   resources: {
     en: {
       translation: enTranslations,

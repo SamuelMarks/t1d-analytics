@@ -47,11 +47,11 @@ class GcsBlobProtocol(Protocol):
 
     def download_to_filename(self, filename: str) -> None:
         """Download blob contents to local file."""
-        ...
+        raise NotImplementedError
 
     def upload_from_filename(self, filename: str) -> None:
         """Upload local file contents to blob."""
-        ...
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -61,7 +61,7 @@ class Md5BlobProtocol(Protocol):
     @property
     def md5_hash(self) -> Optional[str]:
         """Return base64-encoded MD5 hash string."""
-        ...
+        raise NotImplementedError
 
 
 class GcsBucketProtocol(Protocol):
@@ -69,7 +69,7 @@ class GcsBucketProtocol(Protocol):
 
     def blob(self, blob_name: str) -> GcsBlobProtocol:
         """Create a blob reference within this bucket."""
-        ...
+        raise NotImplementedError
 
 
 class GcsClientProtocol(Protocol):
@@ -77,13 +77,13 @@ class GcsClientProtocol(Protocol):
 
     def bucket(self, bucket_name: str) -> GcsBucketProtocol:
         """Return bucket reference by name."""
-        ...
+        raise NotImplementedError
 
     def list_blobs(
         self, bucket_or_name: Union[GcsBucketProtocol, str], prefix: str = ""
     ) -> Iterable[GcsBlobProtocol]:
         """List blobs in bucket matching prefix."""
-        ...
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -98,7 +98,7 @@ class SubprocessExecutorProtocol(Protocol):
         check: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Execute a command and return a CompletedProcess record."""
-        ...
+        raise NotImplementedError
 
 
 def _compute_md5_base64(payload: bytes) -> str:

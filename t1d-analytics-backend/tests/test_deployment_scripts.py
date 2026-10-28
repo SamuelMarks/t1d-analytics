@@ -16,17 +16,27 @@ DOTENV_SECRETS_TPL_PATH = REPO_ROOT / ".env.secrets.tpl"
 DOTENV_SECRETS_PATH = REPO_ROOT / ".env.secrets"
 
 
-def load_dotenv_dict() -> dict[str, str]:
+def load_dotenv_dict(
+    paths: tuple[Path, ...] = (
+        DOTENV_PATH,
+        DOTENV_SECRETS_TPL_PATH,
+        DOTENV_SECRETS_PATH,
+    ),
+) -> dict[str, str]:
     """
     Parse the repository .env, .env.secrets.tpl, and .env.secrets files into a dictionary.
 
-    Returns
+    Args:
+    ----
+        paths: Tuple of dotenv file paths to read in order.
+
+    Returns:
     -------
         dict[str, str]: Parsed environment variables.
 
     """
     env_map: dict[str, str] = {}
-    for env_path in (DOTENV_PATH, DOTENV_SECRETS_TPL_PATH, DOTENV_SECRETS_PATH):
+    for env_path in paths:
         if env_path.is_file():
             for raw_line in env_path.read_text(encoding="utf-8").splitlines():
                 line = raw_line.strip()
@@ -694,3 +704,20 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert "./_lib/ml-training/setup.sh" in report_md
     assert "./libscript.sh train" in report_md
     assert "./stacks/" not in report_md
+
+    sample_env = (
+        REPO_ROOT
+        / "t1d-analytics-backend"
+        / "tests"
+        / "test_data"
+        / "sample_dotenv.env"
+    )
+    sample_env.parent.mkdir(parents=True, exist_ok=True)
+    sample_env.write_text(
+        '# comment\n\nNO_EQUALS\nSAMPLE_KEY="sample_val"\n', encoding="utf-8"
+    )
+    try:
+        parsed = load_dotenv_dict((sample_env, sample_env.parent / "nonexistent.env"))
+        assert parsed == {"SAMPLE_KEY": "sample_val"}
+    finally:
+        sample_env.unlink(missing_ok=True)

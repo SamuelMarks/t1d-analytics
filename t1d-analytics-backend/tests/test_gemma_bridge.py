@@ -794,3 +794,26 @@ def test_classify_sql_error_hint_and_execute_agentic_nl_to_sql() -> None:
     assert res_fail["success"] is False
     assert res_fail["attempts"] == 2
     assert res_fail["error"] is not None
+
+
+def test_gemma_module_protocols_stubs() -> None:
+    """Test protocol stub properties on _Gemma*ModuleProtocol classes."""
+    from t1d_analytics.gemma_bridge import (
+        _GemmaDpoModuleProtocol,
+        _GemmaEtlModuleProtocol,
+        _GemmaEvalModuleProtocol,
+        _GemmaSftModuleProtocol,
+    )
+
+    fake_mod = _FakeGemmaLibraryModule()
+    for proto_cls, attr_name in (
+        (_GemmaEtlModuleProtocol, "run_etl"),
+        (_GemmaSftModuleProtocol, "run_sft"),
+        (_GemmaDpoModuleProtocol, "run_dpo"),
+        (_GemmaEvalModuleProtocol, "evaluate_sql"),
+    ):
+        prop = getattr(proto_cls, attr_name)
+        assert isinstance(prop, property)
+        assert prop.fget is not None
+        with pytest.raises(NotImplementedError):
+            prop.fget(fake_mod)

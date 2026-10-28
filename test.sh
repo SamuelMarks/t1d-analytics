@@ -15,7 +15,6 @@ if [ "${SCRIPT_NAME-}" ]; then
 elif [ "${BASH_SOURCE-}" ]; then
     THIS_FILE="${BASH_SOURCE}"
 elif [ "${ZSH_VERSION-}" ]; then
-    # libscript-allow-eval
     # shellcheck disable=SC2296
     THIS_FILE="${(%):-%x}"
 else
@@ -44,8 +43,7 @@ for env_file in "$REPO_DIR/.env" "$REPO_DIR/.env.secrets"; do
             esac
             val="${val#$DQ}"
             val="${val%$DQ}"
-            eval "cur=\${$key:-}" # libscript-allow-eval
-            if [ -z "$cur" ]; then
+            if ! export -p | grep -q "^export ${key}="; then
                 export "$key=$val"
             fi
         done < "$env_file"
@@ -82,12 +80,12 @@ for arg in "$@"; do
             ;;
         --help|-h)
             echo "Usage: $0 [--unit-mock|--mock-cloud] [--live-cloud] [--local|-l] [--run-remote-tests|-t] [args]"
-            echo "Options:"
-            echo "  --unit-mock, --mock-cloud  Simulate cloud operations locally without cloud resources."
-            echo "  --live-cloud               Force live cloud provisioning and execution; fails if auth missing."
-            echo "  --local, -l                Run tests locally using installed pytest/npm."
-            echo "  --run-remote-tests, -t     Run pytest directly on remote compute instance after provisioning."
-            echo "Environment variables:"
+            echo 'Options:'
+            echo '  --unit-mock, --mock-cloud  Simulate cloud operations locally without cloud resources.'
+            echo '  --live-cloud               Force live cloud provisioning and execution; fails if auth missing.'
+            echo '  --local, -l                Run tests locally using installed pytest/npm.'
+            echo '  --run-remote-tests, -t     Run pytest directly on remote compute instance after provisioning.'
+            echo 'Environment variables:'
             echo "  CLOUD_PROVIDER     Cloud provider (${DEFAULT_CLOUD_PROVIDER:-azure}, gcp, aws). Default: ${DEFAULT_CLOUD_PROVIDER:-azure}"
             echo "  LIBSCRIPT_ROOT_DIR Path to Libscript repo. Default: \$HOME/repos/libscript"
             echo "  NODE_NAME          Name of compute node. Default: $NODE_NAME"
@@ -100,10 +98,10 @@ for arg in "$@"; do
 done
 
 if [ "$MOCK_CLOUD" -eq 1 ]; then
-    echo "=========================================================="
-    echo "Running in Mock Cloud mode (--mock-cloud specified)..."
+    echo '=========================================================='
+    echo 'Running in Mock Cloud mode (--mock-cloud specified)...'
     echo "Simulating provisioning on $CLOUD_PROVIDER ($NODE_NAME)..."
-    echo "=========================================================="
+    echo '=========================================================='
     MOCK_CLEANED_UP=0
     # ## mock_cleanup
     # Simulates cloud resource teardown on exit or signal in mock mode.
@@ -111,39 +109,39 @@ if [ "$MOCK_CLOUD" -eq 1 ]; then
         if [ "$MOCK_CLEANED_UP" -eq 0 ]; then
             MOCK_CLEANED_UP=1
             echo "Mock deprovisioning cloud resources on $CLOUD_PROVIDER ($NODE_NAME)..."
-            echo "Deprovisioning complete."
+            echo 'Deprovisioning complete.'
         fi
     }
     trap mock_cleanup EXIT INT TERM
 
-    echo "Verifying remote execution..."
-    echo "Deployment test successful"
-    echo "Verifying backend API health status on remote host..."
+    echo 'Verifying remote execution...'
+    echo 'Deployment test successful'
+    echo 'Verifying backend API health status on remote host...'
     echo '{"status": "ready", "tables_count": 4, "total_rows": 475, "version": "0.1.0"}'
-    echo "Verifying frontend web service on remote host..."
-    echo "HTTP/1.1 200 OK"
+    echo 'Verifying frontend web service on remote host...'
+    echo 'HTTP/1.1 200 OK'
     if [ "$RUN_REMOTE_TESTS" -eq 1 ]; then
-        echo "Running test suite on mock remote instance..."
+        echo 'Running test suite on mock remote instance...'
         pytest -q
     fi
-    echo "Deployment and remote health verification passed successfully."
+    echo 'Deployment and remote health verification passed successfully.'
     exit 0
 fi
 
 if [ "$RUN_LOCAL" -eq 1 ] || [ ! -x "$LIBSCRIPT_CLI" ]; then
-    echo "=========================================================="
+    echo '=========================================================='
     if [ "$RUN_LOCAL" -eq 1 ]; then
-        echo "Running test suite locally (--local specified)..."
+        echo 'Running test suite locally (--local specified)...'
     else
         echo "Libscript CLI not found at '$LIBSCRIPT_CLI'."
-        echo "Falling back to local test suite..."
+        echo 'Falling back to local test suite...'
     fi
-    echo "=========================================================="
+    echo '=========================================================='
     pytest
     if [ -d "t1d-analytics-web" ]; then
         (cd t1d-analytics-web && npm test)
     fi
-    echo "Local test suite completed successfully."
+    echo 'Local test suite completed successfully.'
     exit 0
 fi
 
@@ -154,8 +152,8 @@ cleanup() {
     if [ "$CLEANED_UP" -eq 0 ]; then
         CLEANED_UP=1
         echo "Cleaning up cloud resources on $CLOUD_PROVIDER ($NODE_NAME)..."
-        "$LIBSCRIPT_CLI" deprovision "$CLOUD_PROVIDER" "$NODE_NAME" "$RG_NAME" "$LOCATION" "$REPO_DIR" "$REMOTE_DEST" || echo "Cleanup failed, but continuing."
-        echo "Deprovisioning complete."
+        "$LIBSCRIPT_CLI" deprovision "$CLOUD_PROVIDER" "$NODE_NAME" "$RG_NAME" "$LOCATION" "$REPO_DIR" "$REMOTE_DEST" || echo 'Cleanup failed, but continuing.'
+        echo 'Deprovisioning complete.'
     fi
 }
 
@@ -185,7 +183,7 @@ check_cloud_credentials() {
                 if ! gcloud auth print-access-token >/dev/null 2>&1; then
                     echo "WARNING: Google Cloud CLI not authenticated. Run 'gcloud auth login'." >&2
                     if [ "$LIVE_CLOUD" -eq 1 ]; then
-                        echo "ERROR: --live-cloud requires authenticated GCP credentials." >&2
+                        echo 'ERROR: --live-cloud requires authenticated GCP credentials.' >&2
                         exit 1
                     fi
                 fi
@@ -199,7 +197,7 @@ check_cloud_credentials() {
                 if ! aws sts get-caller-identity >/dev/null 2>&1; then
                     echo "WARNING: AWS CLI not authenticated. Run 'aws configure'." >&2
                     if [ "$LIVE_CLOUD" -eq 1 ]; then
-                        echo "ERROR: --live-cloud requires authenticated AWS credentials." >&2
+                        echo 'ERROR: --live-cloud requires authenticated AWS credentials.' >&2
                         exit 1
                     fi
                 fi
@@ -236,36 +234,36 @@ remote_exec() {
 }
 
 # 1. Verify remote node execution connectivity
-echo "Verifying remote execution..."
+echo 'Verifying remote execution...'
 if ! remote_exec "echo 'Deployment test successful'"; then
     echo "ERROR: Remote connectivity test failed on $CLOUD_PROVIDER ($NODE_NAME)." >&2
     exit 1
 fi
 
 # 2. Verify backend API health endpoint
-echo "Verifying backend API health status on remote host..."
+echo 'Verifying backend API health status on remote host...'
 if ! remote_exec "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"; then
-    echo "WARNING: Backend API health endpoint check failed. Gathering diagnostic logs..."
+    echo 'WARNING: Backend API health endpoint check failed. Gathering diagnostic logs...'
     remote_exec "journalctl -u t1d-api -n 30 --no-pager 2>/dev/null || docker logs --tail 30 t1d-backend 2>/dev/null || true"
     exit 1
 fi
 
 # 3. Verify frontend response
-echo "Verifying frontend web service on remote host..."
+echo 'Verifying frontend web service on remote host...'
 if ! remote_exec "curl -sf -I http://localhost:3000/ || curl -sf -I http://127.0.0.1:3000/"; then
-    echo "WARNING: Frontend check failed. Gathering diagnostic logs..."
+    echo 'WARNING: Frontend check failed. Gathering diagnostic logs...'
     remote_exec "journalctl -u t1d-web -n 30 --no-pager 2>/dev/null || docker logs --tail 30 t1d-frontend 2>/dev/null || true"
     exit 1
 fi
 
 # 4. Optional: Run full test suite on remote compute instance
 if [ "$RUN_REMOTE_TESTS" -eq 1 ]; then
-    echo "Running test suite on remote instance..."
+    echo 'Running test suite on remote instance...'
     if ! remote_exec "cd $REMOTE_DEST && pytest -q"; then
-        echo "ERROR: Remote test suite failed." >&2
+        echo 'ERROR: Remote test suite failed.' >&2
         exit 1
     fi
-    echo "Remote test suite passed."
+    echo 'Remote test suite passed.'
 fi
 
 END_TIME=$(date +%s)

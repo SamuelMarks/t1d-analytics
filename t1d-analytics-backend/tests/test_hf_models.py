@@ -296,3 +296,224 @@ def test_domain_invariants_prompt_masking_and_lora_freezing(tmp_path: Path) -> N
         not torch.equal(p.detach(), before)
         for p, before in zip(params_list[1:], trainable_before)
     )
+
+
+def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
+    """Test protocol and abstract method/property stubs in t1d_analytics.hf_models."""
+    from contextlib import nullcontext
+    from typing import ContextManager, Optional, Sequence, Union
+
+    from t1d_analytics.hf_models import (
+        AcceleratorDetectorProtocol,
+        AutocastTorchProtocol,
+        AutoModelFactoryProtocol,
+        AutoTokenizerFactoryProtocol,
+        BaseCausalLMFactory,
+        BaseTrainingRunner,
+        CosineSchedulerNamespaceProtocol,
+        DeviceProtocol,
+        DtypeLike,
+        LrSchedulerProtocol,
+        ModelOutputWithLogitsProtocol,
+        MpsBackendProtocol,
+        MpsBackendsHolderProtocol,
+        PaddedTokenizerProtocol,
+        PretrainedSavableProtocol,
+        QuantizationConfigProtocol,
+        TensorLike,
+        TensorProtocol,
+        TokenizerProtocol,
+        TorchCausalLMProtocol,
+        TorchDeviceFactoryProtocol,
+        TrainableModelProtocol,
+    )
+
+    dummy_obj = object()
+    for proto_cls, prop_name in (
+        (DeviceProtocol, "type"),
+        (TensorProtocol, "shape"),
+        (PaddedTokenizerProtocol, "pad_token_id"),
+        (ModelOutputWithLogitsProtocol, "logits"),
+        (CosineSchedulerNamespaceProtocol, "CosineAnnealingLR"),
+        (MpsBackendProtocol, "is_available"),
+        (MpsBackendsHolderProtocol, "mps"),
+    ):
+        prop = getattr(proto_cls, prop_name)
+        assert isinstance(prop, property)
+        assert prop.fget is not None
+        with pytest.raises(NotImplementedError):
+            prop.fget(dummy_obj)
+
+    class _ConcreteTensor:
+        """Helper satisfying TensorProtocol for direct stub invocation."""
+
+        @property
+        def shape(self) -> Sequence[int]:
+            """Return shape."""
+            return (1,)
+
+        def size(self, dim: int = -1) -> int:
+            """Return size."""
+            return 1
+
+        def view(self, *shape: int) -> TensorProtocol:
+            """Return view."""
+            return self
+
+        def unsqueeze(self, dim: int) -> TensorProtocol:
+            """Return unsqueezed tensor."""
+            return self
+
+        def to(self, device: Union[str, DeviceProtocol]) -> TensorProtocol:
+            """Return device-moved tensor."""
+            return self
+
+        def clamp(self, min_val: int, max_val: int) -> TensorProtocol:
+            """Return clamped tensor."""
+            return self
+
+        def item(self) -> float:
+            """Return scalar float."""
+            return 0.0
+
+        def backward(self) -> None:
+            """No-op backward."""
+
+        def __truediv__(self, other: Union[int, float]) -> TensorProtocol:
+            """Return divided tensor."""
+            return self
+
+    fake_tensor = _ConcreteTensor()
+    assert fake_tensor.shape == (1,)
+    assert fake_tensor.size() == 1
+    assert fake_tensor.view(1) is fake_tensor
+    assert fake_tensor.unsqueeze(0) is fake_tensor
+    assert fake_tensor.to("cpu") is fake_tensor
+    assert fake_tensor.clamp(0, 1) is fake_tensor
+    assert fake_tensor.item() == 0.0
+    fake_tensor.backward()
+    assert (fake_tensor / 2) is fake_tensor
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.size(fake_tensor)
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.view(fake_tensor, 1)
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.unsqueeze(fake_tensor, 0)
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.to(fake_tensor, "cpu")
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.clamp(fake_tensor, 0, 1)
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.item(fake_tensor)
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.backward(fake_tensor)
+    with pytest.raises(NotImplementedError):
+        TensorProtocol.__truediv__(fake_tensor, 2)
+
+    tensor = torch.zeros(1)
+    tiny_factory = TinyCausalLMFactory()
+    tiny_model = tiny_factory.create_model("tiny")
+
+    class _ConcreteExtras:
+        """Helper satisfying remaining protocol signatures for direct stub invocation."""
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            """No-op encode."""
+            return []
+
+        def from_pretrained(
+            self,
+            pretrained_model_name_or_path: str,
+            torch_dtype: Optional[DtypeLike] = None,
+            quantization_config: Optional[QuantizationConfigProtocol] = None,
+        ) -> TorchCausalLMProtocol:
+            """No-op from_pretrained."""
+            return tiny_model
+
+        def step(self) -> None:
+            """No-op step."""
+
+        def autocast(self, device_type: str, dtype: TensorLike) -> ContextManager[None]:
+            """No-op autocast."""
+            return nullcontext()
+
+        def device(self, dev: str) -> str:
+            """No-op device."""
+            return dev
+
+        def is_cuda_available(self) -> bool:
+            """No-op cuda check."""
+            return False
+
+        def is_mps_available(self) -> bool:
+            """No-op mps check."""
+            return False
+
+    class _ConcreteAutoTok:
+        """Helper satisfying AutoTokenizerFactoryProtocol."""
+
+        def from_pretrained(
+            self, pretrained_model_name_or_path: str
+        ) -> TokenizerProtocol:
+            """Return concrete tokenizer."""
+            return _ConcreteExtras()
+
+    extras = _ConcreteExtras()
+    auto_tok = _ConcreteAutoTok()
+    assert extras.encode("hi") == []
+    assert extras.from_pretrained("m") is tiny_model
+    extras.step()
+    with extras.autocast("cpu", tensor):
+        pass
+    assert extras.device("cpu") == "cpu"
+    assert extras.is_cuda_available() is False
+    assert extras.is_mps_available() is False
+    assert isinstance(auto_tok.from_pretrained("m"), _ConcreteExtras)
+    with pytest.raises(NotImplementedError):
+        TokenizerProtocol.encode(extras, "hi")
+    with pytest.raises(NotImplementedError):
+        AutoTokenizerFactoryProtocol.from_pretrained(auto_tok, "m")
+    with pytest.raises(NotImplementedError):
+        AutoModelFactoryProtocol.from_pretrained(extras, "m")
+
+    with pytest.raises(NotImplementedError):
+        TorchCausalLMProtocol.__call__(tiny_model, tensor)
+    with pytest.raises(NotImplementedError):
+        TorchCausalLMProtocol.parameters(tiny_model)
+    with pytest.raises(NotImplementedError):
+        TorchCausalLMProtocol.train(tiny_model)
+    with pytest.raises(NotImplementedError):
+        TorchCausalLMProtocol.eval(tiny_model)
+    with pytest.raises(NotImplementedError):
+        TorchCausalLMProtocol.to(tiny_model, "cpu")
+    with pytest.raises(NotImplementedError):
+        TorchCausalLMProtocol.state_dict(tiny_model)
+    with pytest.raises(NotImplementedError):
+        TorchCausalLMProtocol.save_pretrained(tiny_model, "out")
+
+    with pytest.raises(NotImplementedError):
+        TrainableModelProtocol.train(tiny_model)
+    with pytest.raises(NotImplementedError):
+        PretrainedSavableProtocol.save_pretrained(tiny_model, "out")
+    with pytest.raises(NotImplementedError):
+        LrSchedulerProtocol.step(extras)
+    with pytest.raises(NotImplementedError):
+        AutocastTorchProtocol.autocast(extras, "cpu", tensor)
+    with pytest.raises(NotImplementedError):
+        TorchDeviceFactoryProtocol.device(extras, "cpu")
+    with pytest.raises(NotImplementedError):
+        AcceleratorDetectorProtocol.is_cuda_available(extras)
+    with pytest.raises(NotImplementedError):
+        AcceleratorDetectorProtocol.is_mps_available(extras)
+
+    runner = LocalCpuRunner()
+    cfg = TrainingJobConfig(
+        model_name="tiny",
+        dataset_path=str(tmp_path / "ds.jsonl"),
+    )
+    with pytest.raises(NotImplementedError):
+        BaseTrainingRunner.validate_environment(runner)
+    with pytest.raises(NotImplementedError):
+        BaseTrainingRunner.run_training(runner, cfg)
+    with pytest.raises(NotImplementedError):
+        BaseCausalLMFactory.create_model(tiny_factory, "tiny")

@@ -37,6 +37,7 @@ class _TextPartProtocol(Protocol):
     @property
     def text(self) -> Optional[str]:
         """Return text fragment."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -46,6 +47,7 @@ class _CandidateContentProtocol(Protocol):
     @property
     def parts(self) -> Optional[Sequence[_TextPartProtocol]]:
         """Return sequence of content parts."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -55,6 +57,7 @@ class _CandidateProtocol(Protocol):
     @property
     def content(self) -> Optional[_CandidateContentProtocol]:
         """Return candidate content block."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -64,6 +67,7 @@ class _DeltaTextProtocol(Protocol):
     @property
     def text(self) -> Optional[str]:
         """Return delta or choice text."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -73,6 +77,7 @@ class _DeltaContentProtocol(Protocol):
     @property
     def content(self) -> Optional[str]:
         """Return delta or message content."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -82,10 +87,12 @@ class _DeltaProtocol(Protocol):
     @property
     def text(self) -> Optional[str]:
         """Return delta text."""
+        raise NotImplementedError
 
     @property
     def content(self) -> Optional[str]:
         """Return delta content."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -95,6 +102,7 @@ class DirectTextChunkProtocol(Protocol):
     @property
     def text(self) -> Optional[str]:
         """Return direct text attribute."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -106,6 +114,7 @@ class _ChoiceWithDeltaProtocol(Protocol):
         self,
     ) -> Optional[Union[_DeltaProtocol, _DeltaContentProtocol, _DeltaTextProtocol]]:
         """Return choice delta."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -115,6 +124,7 @@ class _ChoiceWithMessageProtocol(Protocol):
     @property
     def message(self) -> Optional[Union[_DeltaProtocol, _DeltaContentProtocol]]:
         """Return choice message."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -134,6 +144,7 @@ class OpenAiStreamChunkProtocol(Protocol):
         ]
     ]:
         """Return sequence of streaming or completion choices."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -143,6 +154,7 @@ class GeminiStreamChunkProtocol(Protocol):
     @property
     def candidates(self) -> Optional[Sequence[_CandidateProtocol]]:
         """Return sequence of streaming candidates."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -154,6 +166,7 @@ class AnthropicStreamChunkProtocol(Protocol):
         self,
     ) -> Optional[Union[_DeltaProtocol, _DeltaTextProtocol, _DeltaContentProtocol]]:
         """Return top-level streaming delta."""
+        raise NotImplementedError
 
 
 LlmStreamChunkProtocol = OpenAiStreamChunkProtocol
@@ -169,12 +182,15 @@ class _UrlResponseProtocol(Protocol):
     @property
     def status(self) -> int:
         """Return HTTP status code."""
+        raise NotImplementedError
 
     def read(self) -> bytes:
         """Read response body bytes."""
+        raise NotImplementedError
 
     def __enter__(self) -> "_UrlResponseProtocol":
         """Enter context manager."""
+        raise NotImplementedError
 
     def __exit__(
         self,
@@ -191,6 +207,7 @@ class _UrlResponseProtocol(Protocol):
         ],
     ) -> Optional[bool]:
         """Exit context manager."""
+        raise NotImplementedError
 
 
 class _AnyLlmModelProtocol(Protocol):
@@ -199,6 +216,7 @@ class _AnyLlmModelProtocol(Protocol):
     @property
     def id(self) -> str:
         """Return model identifier."""
+        raise NotImplementedError
 
 
 class _AnyLlmListModelsFn(Protocol):
@@ -208,6 +226,7 @@ class _AnyLlmListModelsFn(Protocol):
         self, provider: str, api_key: Optional[str] = None
     ) -> Sequence[_AnyLlmModelProtocol]:
         """Return models for the specified provider."""
+        raise NotImplementedError
 
 
 StreamScalar = Union[str, int, float, bool, None]
@@ -253,6 +272,7 @@ class LlmCompletionMessageProtocol(Protocol):
     @property
     def content(self) -> Optional[str]:
         """Return message text content."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -262,6 +282,7 @@ class LlmCompletionChoiceProtocol(Protocol):
     @property
     def message(self) -> LlmCompletionMessageProtocol:
         """Return completion message."""
+        raise NotImplementedError
 
 
 @runtime_checkable
@@ -271,6 +292,7 @@ class LlmCompletionResponseProtocol(Protocol):
     @property
     def choices(self) -> Sequence[LlmCompletionChoiceProtocol]:
         """Return completion choices."""
+        raise NotImplementedError
 
 
 ObjectChunkInput = Union[
@@ -300,6 +322,7 @@ class LlmTransportProtocol(Protocol):
         stream: bool = False,
     ) -> Union[LlmCompletionResponseProtocol, StreamChunkInput]:
         """Execute a chat completion call."""
+        raise NotImplementedError
 
 
 class AnyLlmFactoryProtocol(Protocol):
@@ -309,6 +332,7 @@ class AnyLlmFactoryProtocol(Protocol):
         self, provider: str, api_key: Optional[str] = None
     ) -> LlmTransportProtocol:
         """Create and return an LLM transport instance."""
+        raise NotImplementedError
 
 
 PROVIDER_ENV_KEYS: Dict[str, str] = {

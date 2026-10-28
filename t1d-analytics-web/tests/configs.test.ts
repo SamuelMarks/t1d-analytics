@@ -9,10 +9,12 @@
 import fs from "fs";
 import path from "path";
 import { describe, it, expect } from "vitest";
-import viteConfig from "../vite.config";
-import vitestConfig from "../vitest.config";
-import playwrightConfig from "../playwright.config";
-import playwrightFullConfig from "../playwright.full.config";
+import viteConfig, { createViteConfig } from "../vite.config";
+import vitestConfig, { createVitestConfig } from "../vitest.config";
+import playwrightConfig, { createPlaywrightConfig } from "../playwright.config";
+import playwrightFullConfig, {
+  createPlaywrightFullConfig,
+} from "../playwright.full.config";
 
 describe("Frontend configuration modules", () => {
   const pkgPath = path.resolve(__dirname, "../package.json");
@@ -21,7 +23,7 @@ describe("Frontend configuration modules", () => {
   );
 
   /**
-   * Tests Vite development and build configuration values.
+   * Tests Vite development and build configuration values across default and custom environments.
    */
   it("validates vite.config.ts configuration", () => {
     const expectedTarget =
@@ -42,12 +44,39 @@ describe("Frontend configuration modules", () => {
     });
     expect(Array.isArray(viteConfig.plugins)).toBe(true);
     expect(viteConfig.plugins?.length).toBeGreaterThan(0);
+
+    const fallbackCfg = createViteConfig({});
+    expect(fallbackCfg.server?.proxy?.["/api"]).toEqual({
+      target: "http://127.0.0.1:8000",
+      changeOrigin: true,
+    });
+    expect(fallbackCfg.preview?.port).toBe(3000);
+
+    const portOverrideCfg = createViteConfig({
+      T1D_API_PORT: "8080",
+      T1D_WEB_PORT: "4173",
+    });
+    expect(portOverrideCfg.server?.proxy?.["/api"]).toEqual({
+      target: "http://127.0.0.1:8080",
+      changeOrigin: true,
+    });
+    expect(portOverrideCfg.preview?.port).toBe(4173);
+
+    const proxyTargetOverrideCfg = createViteConfig({
+      VITE_API_PROXY_TARGET: "http://127.0.0.1:9000",
+    });
+    expect(proxyTargetOverrideCfg.server?.proxy?.["/api"]).toEqual({
+      target: "http://127.0.0.1:9000",
+      changeOrigin: true,
+    });
   });
 
   /**
    * Tests Vitest configuration, coverage settings, and exclusions.
    */
   it("validates vitest.config.ts configuration and setup file existence", () => {
+    const freshVitestCfg = createVitestConfig();
+    expect(freshVitestCfg).toEqual(vitestConfig);
     expect(vitestConfig).toBeDefined();
     expect(vitestConfig.build?.target).toBe("esnext");
     expect(vitestConfig.test?.environment).toBe("jsdom");
@@ -80,7 +109,13 @@ describe("Frontend configuration modules", () => {
         expect.arrayContaining(["text", "html", "lcov", "json"]),
       );
       expect(coverage.exclude).toEqual(
-        expect.arrayContaining(["docs/**", "coverage/**", "tests/**"]),
+        expect.arrayContaining([
+          "docs/**",
+          "coverage/**",
+          "tests/**",
+          "!vite.config.ts",
+          "!vitest.config.ts",
+        ]),
       );
     }
   });
@@ -89,6 +124,7 @@ describe("Frontend configuration modules", () => {
    * Tests standard Playwright end-to-end configuration.
    */
   it("validates playwright.config.ts standard configuration and directory invariants", () => {
+    expect(createPlaywrightConfig()).toEqual(playwrightConfig);
     expect(playwrightConfig).toBeDefined();
     expect(playwrightConfig.testDir).toBe("./tests-e2e");
     expect(
@@ -119,6 +155,7 @@ describe("Frontend configuration modules", () => {
    * Tests full Playwright matrix configuration including backend web server.
    */
   it("validates playwright.full.config.ts full matrix configuration and directory invariants", () => {
+    expect(createPlaywrightFullConfig()).toEqual(playwrightFullConfig);
     expect(playwrightFullConfig).toBeDefined();
     expect(playwrightFullConfig.testDir).toBe("./tests-e2e-full");
     expect(

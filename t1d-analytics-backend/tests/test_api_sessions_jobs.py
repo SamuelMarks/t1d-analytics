@@ -468,3 +468,28 @@ def test_training_job_endpoints(tmp_path: Path, mocker: MagicMock) -> None:
     resp_cancel = client.delete(f"/api/training/jobs/{job_id}")
     assert resp_cancel.status_code == 200
     assert resp_cancel.json()["status"] in ["cancelled", "completed"]
+
+
+def test_rate_limiter_abstract_stubs() -> None:
+    """Test abstract and protocol stub methods on BaseRateLimiter and TrainingRunnerProtocol."""
+    from t1d_analytics.job_manager import TrainingRunnerProtocol
+    from t1d_analytics.models import TrainingBackend, TrainingJobConfig
+    from t1d_analytics.rate_limiter import BaseRateLimiter, MemoryRateLimiter
+    from t1d_analytics.training_runner import LocalCpuRunner
+
+    limiter = MemoryRateLimiter()
+    with pytest.raises(NotImplementedError):
+        BaseRateLimiter.is_allowed(limiter, "127.0.0.1")
+    with pytest.raises(NotImplementedError):
+        BaseRateLimiter.get_retry_after(limiter, "127.0.0.1")
+    with pytest.raises(NotImplementedError):
+        BaseRateLimiter.reset(limiter)
+
+    cfg = TrainingJobConfig(
+        model_name="gemma4-sql",
+        backend=TrainingBackend.LOCAL_CPU,
+        dataset_path="ds.jsonl",
+        output_dir="out",
+    )
+    with pytest.raises(NotImplementedError):
+        TrainingRunnerProtocol.run_training(LocalCpuRunner(), cfg)

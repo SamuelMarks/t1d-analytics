@@ -11,11 +11,6 @@ if (typeof document === "undefined") {
   const mockDoc = {
     /** Root html element stub. */
     documentElement: { lang: "en", dir: "ltr" },
-    /**
-     * Stubbed querySelectorAll returning an empty list.
-     * @returns {never[]} Empty array.
-     */
-    querySelectorAll: (): never[] => [],
   };
   vi.stubGlobal("document", mockDoc);
 }

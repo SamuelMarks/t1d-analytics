@@ -35,6 +35,35 @@ export interface PersistedChatStatePayload {
 }
 
 /**
+ * Mapping of legacy i18next HTML entities to their unescaped literal characters.
+ */
+const LEGACY_HTML_ENTITY_MAP: Readonly<Record<string, string>> = {
+  "&#39;": "'",
+  "&#x27;": "'",
+  "&apos;": "'",
+  "&quot;": '"',
+  "&#34;": '"',
+  "&#x2F;": "/",
+  "&#x2f;": "/",
+  "&#47;": "/",
+  "&gt;": ">",
+  "&lt;": "<",
+  "&amp;": "&",
+};
+
+/**
+ * Decodes legacy i18next HTML character entities in persisted message text.
+ * @param {string} text - Raw persisted message content string.
+ * @returns {string} Decoded string with HTML entities restored to literal characters.
+ */
+export function decodeLegacyHtmlEntities(text: string): string {
+  return text.replace(
+    /&(?:#39|#x27|apos|quot|#34|#x2[Ff]|#47|gt|lt|amp);/g,
+    (entity) => LEGACY_HTML_ENTITY_MAP[entity],
+  );
+}
+
+/**
  * Parses a serialized ChatState JSON string into a typed PersistedChatStatePayload.
  * @param {string} rawJson - Serialized JSON string from localStorage.
  * @returns {PersistedChatStatePayload} Parsed state payload object.
@@ -43,6 +72,15 @@ export function parsePersistedChatState(
   rawJson: string,
 ): PersistedChatStatePayload {
   const parsed: PersistedChatStatePayload = JSON.parse(rawJson);
+  if (Array.isArray(parsed.chats)) {
+    for (const chat of parsed.chats) {
+      if (Array.isArray(chat.messages)) {
+        for (const msg of chat.messages) {
+          msg.content = decodeLegacyHtmlEntities(msg.content);
+        }
+      }
+    }
+  }
   return parsed;
 }
 

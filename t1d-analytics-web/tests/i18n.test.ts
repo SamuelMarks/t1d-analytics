@@ -289,4 +289,17 @@ describe("i18n.ts", () => {
 
     await setLanguage("en");
   });
+
+  it("interpolates error details without HTML-escaping special characters", () => {
+    const rawError =
+      "SQL execution error: Binder Error: No function matches 'sum(VARCHAR)' -> HUGEINT (arg BOOLEAN, /)";
+    const formatted = i18next.t("ui.errorDetails", {
+      error: rawError,
+      lng: "en",
+    });
+    expect(formatted).toBe(`Error details: ${rawError}`);
+    expect(formatted).not.toContain("&#39;");
+    expect(formatted).not.toContain("&gt;");
+    expect(formatted).not.toContain("&#x2F;");
+  });
 });
