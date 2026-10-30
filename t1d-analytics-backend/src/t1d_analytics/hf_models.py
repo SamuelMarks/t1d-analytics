@@ -4,6 +4,7 @@ import importlib
 import logging
 import platform
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import (
@@ -86,16 +87,12 @@ class TensorProtocol(Protocol):
 
 
 if TYPE_CHECKING:
-    import threading
-
     import torch
 
     TensorLike = torch.Tensor
     DeviceLike = Union[str, torch.device]
     DtypeLike = Union[str, torch.dtype]
 else:
-    import threading
-
     TensorLike = TensorProtocol
     DeviceLike = Union[str, DeviceProtocol]
     DtypeLike = Union[str, DtypeProtocol]

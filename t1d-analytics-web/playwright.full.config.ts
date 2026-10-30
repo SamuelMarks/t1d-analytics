@@ -39,10 +39,16 @@ export function createPlaywrightFullConfig(): PlaywrightTestConfig {
     webServer: [
       {
         command:
-          "python -m uvicorn t1d_analytics.api:app --port 8000 || python3 -m uvicorn t1d_analytics.api:app --port 8000",
-        url: "http://127.0.0.1:8000/api/models",
+          "python3 -m uvicorn t1d_analytics.api:app --port 8000 || python -m uvicorn t1d_analytics.api:app --port 8000",
+        url: "http://127.0.0.1:8000/api/ready",
         reuseExistingServer: true,
         timeout: 120000,
+        env: {
+          PYTHONPATH: "../t1d-analytics-backend/src",
+          T1D_DB_PATH: "../ci_test.duckdb",
+          T1D_SESSIONS_DB_PATH:
+            "../t1d-analytics-backend/tests/test_data/sessions.duckdb",
+        },
       },
       {
         command: "npm run dev",

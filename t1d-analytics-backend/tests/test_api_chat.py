@@ -1217,3 +1217,122 @@ SELECT * FROM tblaptsummary
         assert resp_stream.status_code == 200
         assert "sql_generated" in resp_stream.text
         assert "Executing SQL query..." not in resp_stream.text
+
+
+def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
+    """Test synthesize_fallback_clinical_sql, _is_recoverable_local_ollama_crash, and read-only SQL auto-routing."""
+    from t1d_analytics.chat_service import (
+        _is_recoverable_local_ollama_crash,
+        synthesize_fallback_clinical_sql,
+        translate_nl_to_sql,
+    )
+
+    assert (
+        _is_recoverable_local_ollama_crash(
+            "openai", RuntimeError("insufficient memory")
+        )
+        is False
+    )
+    assert (
+        _is_recoverable_local_ollama_crash(
+            "ollama",
+            RuntimeError(
+                "llama-server process has terminated: exit status 1: insufficient memory"
+            ),
+        )
+        is True
+    )
+    assert (
+        _is_recoverable_local_ollama_crash("ollama", RuntimeError("generic error"))
+        is False
+    )
+
+    # 1. Empty schema map
+    resp_empty, sql_empty = synthesize_fallback_clinical_sql("", "How many patients?")
+    assert 'SELECT COUNT(*) AS count FROM "patients";' in sql_empty
+    assert "```sql" in resp_empty
+
+    # 2. Schema with matching table and column words + "first 5"
+    schema_text = (
+        "Table: demographics\nColumns: patient_id (BIGINT), age (DOUBLE), gender (VARCHAR)\n\n"
+        "Table: cgm_readings\nColumns: subject_id (BIGINT), glucose_value (DOUBLE)\n"
+    )
+    _, sql_match = synthesize_fallback_clinical_sql(
+        schema_text, "Show me the first 5 patients in the demographics table age"
+    )
+    assert sql_match == 'SELECT * FROM "demographics" LIMIT 5;'
+
+    # 3. Schema with zero matching words -> falls back to preferred table ("patients")
+    schema_pref = (
+        "Table: other_tbl\nColumns: x (INT)\n\nTable: patients\nColumns: id (INT)\n"
+    )
+    _, sql_pref = synthesize_fallback_clinical_sql(schema_pref, "unrelated question")
+    assert sql_pref == 'SELECT * FROM "patients" LIMIT 10;'
+
+    # 4. Schema with no preferred table and zero matching words -> first table in schema
+    schema_first = "Table: custom_alpha\nColumns: a (INT)\n\nTable: custom_beta\nColumns: b (INT)\n"
+    _, sql_first = synthesize_fallback_clinical_sql(schema_first, "unrelated question")
+    assert sql_first == 'SELECT * FROM "custom_alpha" LIMIT 10;'
+
+    # 5. translate_nl_to_sql fallback on Ollama OOM crash
+    with patch(
+        "t1d_analytics.chat_service.complete_llm_prompt",
+        side_effect=RuntimeError(
+            "llama-server process has terminated: unable to allocate AMX buffer"
+        ),
+    ):
+        fb_full, fb_sql = translate_nl_to_sql(
+            mock_db, "Show me the first 5 users", model_name="gemma4:latest"
+        )
+        assert 'SELECT * FROM "users" LIMIT 5;' == fb_sql
+        assert fb_sql in fb_full
+
+    # 6. /api/chat/stream recovers when stream_fn raises a local Ollama OOM / sync-in-async crash
+    with patch(
+        "t1d_analytics.api.stream_llm_tokens",
+        side_effect=RuntimeError(
+            "Cannot use the `sync` API in an `async` context. Use the `async` API instead."
+        ),
+    ):
+        resp_crash_stream = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "Show me the first 5 users",
+                "model": "gemma4:latest",
+                "db_path": mock_db,
+            },
+        )
+        assert resp_crash_stream.status_code == 200
+        assert "sql_generated" in resp_crash_stream.text
+        assert 'SELECT * FROM \\"users\\" LIMIT 5;' in resp_crash_stream.text
+
+    # 7. is_likely_sql_statement and _resolve_sql_mode_query in batch /api/chat and /api/chat/stream
+    from t1d_analytics.chat_service import is_likely_sql_statement
+
+    assert is_likely_sql_statement("   ") is False
+    assert is_likely_sql_statement("SELECT * FROM users") is True
+    assert is_likely_sql_statement("SHOW TABLES") is True
+    assert is_likely_sql_statement("Show me the first 5 users") is False
+    assert is_likely_sql_statement("How many users?") is False
+
+    resp_nl_sql_mode = client.post(
+        "/api/chat",
+        json={
+            "message": "Show me the first 5 users",
+            "model": "sql",
+            "db_path": mock_db,
+        },
+    )
+    assert resp_nl_sql_mode.status_code == 200
+    assert resp_nl_sql_mode.json()["sqlQuery"] == 'SELECT * FROM "users" LIMIT 5;'
+
+    resp_nl_sql_stream = client.post(
+        "/api/chat/stream",
+        json={
+            "message": "Show me the first 5 users",
+            "model": "sql",
+            "db_path": mock_db,
+        },
+    )
+    assert resp_nl_sql_stream.status_code == 200
+    assert 'SELECT * FROM \\"users\\" LIMIT 5;' in resp_nl_sql_stream.text

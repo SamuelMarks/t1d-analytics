@@ -171,6 +171,40 @@ body {
   padding: 0.5rem;
 }
 
+.sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 0.55rem 0.75rem;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background-color: var(--bg-sidebar);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.sidebar-footer-build {
+  word-break: break-word;
+}
+
+.sidebar-footer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sidebar-footer-meta a {
+  color: var(--text-light);
+  text-decoration: underline;
+  font-weight: 500;
+}
+
+.sidebar-footer-meta a:hover,
+.sidebar-footer-meta a:focus-visible {
+  color: var(--accent);
+}
+
 /* Schema Explorer */
 .schema-explorer {
   border-top: 1px solid var(--border);
@@ -580,6 +614,13 @@ input:focus-visible {
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
+}
+
+.footer-build-info {
+  margin-top: 0.4rem;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .chat-form {

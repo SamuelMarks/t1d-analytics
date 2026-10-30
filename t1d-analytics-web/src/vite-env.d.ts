@@ -35,6 +35,9 @@ export interface IstanbulFileCoverage {
 }
 
 declare global {
+  /** Compile-time UTC build timestamp injected by Vite. */
+  const __BUILD_TIMESTAMP_UTC__: string;
+
   /** Global browser Window extensions for code coverage instrumentation and XSS test assertions. */
   interface Window {
     /** Istanbul/NYC coverage map injected during instrumented builds. */

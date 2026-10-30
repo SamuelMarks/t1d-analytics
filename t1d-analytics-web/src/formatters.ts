@@ -11,13 +11,7 @@ import i18next from "i18next";
  * @returns {string} The active locale tag (e.g. 'en', 'ja', 'ar', 'he').
  */
 export function getCurrentLocale(): string {
-  if (i18next && i18next.language) {
-    return i18next.language;
-  }
-  if (typeof document !== "undefined" && document.documentElement.lang) {
-    return document.documentElement.lang;
-  }
-  return "en";
+  return i18next.language;
 }
 
 /**
@@ -54,23 +48,6 @@ export function formatPercent(
     minimumFractionDigits: 0,
     maximumFractionDigits: decimals,
   }).format(value / 100);
-}
-
-/**
- * Formats a Date object or timestamp into a localized date string.
- * @param {Date | string | number} date - The date to format.
- * @param {Intl.DateTimeFormatOptions} [options] - Optional formatting options.
- * @param {string} [locale] - Optional explicit BCP 47 language tag override.
- * @returns {string} The localized date representation.
- */
-export function formatDate(
-  date: Date | string | number,
-  options?: Intl.DateTimeFormatOptions,
-  locale?: string,
-): string {
-  const targetLocale = locale || getCurrentLocale();
-  const d = date instanceof Date ? date : new Date(date);
-  return new Intl.DateTimeFormat(targetLocale, options).format(d);
 }
 
 /**
@@ -134,13 +111,12 @@ export function classifySqlResult(
   const keys = Object.keys(rows[0]);
   if (rows.length === 1 && keys.length === 1) {
     const column = keys[0];
-    const value = rows[0][column];
-    const formattedValue =
-      value === null || value === undefined ? "NULL" : String(value);
+    const value = rows[0][column] ?? null;
+    const formattedValue = value === null ? "NULL" : String(value);
     return {
       kind: "scalar",
       column,
-      value: value ?? null,
+      value,
       formattedValue,
     };
   }
@@ -152,23 +128,12 @@ export function classifySqlResult(
 }
 
 /**
- * Formats a Date object or timestamp into a localized time string.
- * @param {Date | string | number} date - The date/time to format.
- * @param {Intl.DateTimeFormatOptions} [options] - Optional formatting options.
- * @param {string} [locale] - Optional explicit BCP 47 language tag override.
- * @returns {string} The localized time representation.
+ * Resolves the UTC build timestamp injected at compile time.
+ * @param {string} [injectedTimestamp] - Optional injected timestamp override.
+ * @returns {string} Formatted UTC timestamp string (e.g., '2026-10-29T08:00:00Z UTC').
  */
-export function formatTime(
-  date: Date | string | number,
-  options?: Intl.DateTimeFormatOptions,
-  locale?: string,
+export function getBuildTimestampUtc(
+  injectedTimestamp: string = __BUILD_TIMESTAMP_UTC__,
 ): string {
-  const targetLocale = locale || getCurrentLocale();
-  const d = date instanceof Date ? date : new Date(date);
-  const defaultOpts: Intl.DateTimeFormatOptions = {
-    hour: "numeric",
-    minute: "numeric",
-    ...options,
-  };
-  return new Intl.DateTimeFormat(targetLocale, defaultOpts).format(d);
+  return injectedTimestamp.trim();
 }

@@ -75,7 +75,7 @@ omit = ["tests/*", "*/tests/*"]
 [tool.coverage.report]
 show_missing = true
 fail_under = 100
-exclude_lines = []
+exclude_lines = ["if TYPE_CHECKING:"]
 
 [tool.interrogate]
 ignore-init-method = false

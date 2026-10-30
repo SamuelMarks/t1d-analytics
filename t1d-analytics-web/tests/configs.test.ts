@@ -9,7 +9,10 @@
 import fs from "fs";
 import path from "path";
 import { describe, it, expect } from "vitest";
-import viteConfig, { createViteConfig } from "../vite.config";
+import viteConfig, {
+  createViteConfig,
+  getDefaultViteEnv,
+} from "../vite.config";
 import vitestConfig, { createVitestConfig } from "../vitest.config";
 import playwrightConfig, { createPlaywrightConfig } from "../playwright.config";
 import playwrightFullConfig, {
@@ -64,10 +67,26 @@ describe("Frontend configuration modules", () => {
 
     const proxyTargetOverrideCfg = createViteConfig({
       VITE_API_PROXY_TARGET: "http://127.0.0.1:9000",
+      BUILD_TIMESTAMP_UTC: "2026-10-29T12:00:00Z UTC",
     });
     expect(proxyTargetOverrideCfg.server?.proxy?.["/api"]).toEqual({
       target: "http://127.0.0.1:9000",
       changeOrigin: true,
+    });
+    expect(proxyTargetOverrideCfg.define?.__BUILD_TIMESTAMP_UTC__).toBe(
+      JSON.stringify("2026-10-29T12:00:00Z UTC"),
+    );
+
+    expect(getDefaultViteEnv()).toBe(process.env);
+    const origProcess = globalThis.process;
+    Object.defineProperty(globalThis, "process", {
+      value: undefined,
+      configurable: true,
+    });
+    expect(getDefaultViteEnv()).toEqual({});
+    Object.defineProperty(globalThis, "process", {
+      value: origProcess,
+      configurable: true,
     });
   });
 
@@ -174,10 +193,16 @@ describe("Frontend configuration modules", () => {
       const webServers = playwrightFullConfig.webServer;
       expect(webServers.length).toBe(2);
       expect(webServers[0].command).toBe(
-        "python -m uvicorn t1d_analytics.api:app --port 8000 || python3 -m uvicorn t1d_analytics.api:app --port 8000",
+        "python3 -m uvicorn t1d_analytics.api:app --port 8000 || python -m uvicorn t1d_analytics.api:app --port 8000",
       );
-      expect(webServers[0].url).toBe("http://127.0.0.1:8000/api/models");
+      expect(webServers[0].url).toBe("http://127.0.0.1:8000/api/ready");
       expect(webServers[0].reuseExistingServer).toBe(true);
+      expect(webServers[0].env).toEqual({
+        PYTHONPATH: "../t1d-analytics-backend/src",
+        T1D_DB_PATH: "../ci_test.duckdb",
+        T1D_SESSIONS_DB_PATH:
+          "../t1d-analytics-backend/tests/test_data/sessions.duckdb",
+      });
       expect(webServers[1].command).toBe("npm run dev");
       expect(pkgRaw.scripts?.dev).toBeDefined();
       expect(webServers[1].url).toBe("http://localhost:5173");

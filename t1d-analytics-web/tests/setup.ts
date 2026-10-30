@@ -78,6 +78,13 @@ export function mountChatUiTestDom(): void {
         <button id="new-chat-btn">New Chat</button>
         <button id="close-sidebar-btn">Close</button>
         <ul id="chat-list"></ul>
+        <footer id="sidebar-footer" class="sidebar-footer">
+          <div id="build-timestamp" class="sidebar-footer-build"></div>
+          <div class="sidebar-footer-meta">
+            <span id="sidebar-copyright">© 2026 Samuel Marks (Offscale.io)</span>
+            <a id="sidebar-github-link" href="https://github.com/SamuelMarks/t1d-analytics" target="_blank" rel="noopener noreferrer">GitHub</a>
+          </div>
+        </footer>
         <div id="schema-explorer">
           <div class="schema-header">
             <button id="toggle-schema-btn"></button>

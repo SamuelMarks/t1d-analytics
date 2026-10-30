@@ -17,7 +17,7 @@ export const test = baseTest.extend<{ page: Page }>({
   page: async ({ page }, use) => {
     // Provide default mocks for backend status and schema endpoints so that
     // mocked E2E tests run reliably without an active FastAPI backend process.
-    await page.route("**/api/status", async (route) => {
+    await page.route("**/api/status*", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -34,6 +34,23 @@ export const test = baseTest.extend<{ page: Page }>({
           ollama: {
             accessible: true,
           },
+        },
+      });
+    });
+
+    await page.route("**/api/providers/status*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        json: {
+          providers: [
+            {
+              provider: "ollama",
+              configured: true,
+              reachable: true,
+              status: "healthy",
+            },
+          ],
         },
       });
     });

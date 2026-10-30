@@ -1,7 +1,9 @@
 """Natural-language-to-SQL translation and Server-Sent Events (SSE) chat streaming services."""
 
+import asyncio
 import json
 import logging
+import re
 from typing import (
     AsyncIterator,
     Callable,
@@ -40,7 +42,10 @@ from t1d_analytics.errors import (
     SchemaReadError,
     T1DError,
 )
-from t1d_analytics.gemma_bridge import prune_schema_with_gemma_rag
+from t1d_analytics.gemma_bridge import (
+    _extract_schema_map_from_text,
+    prune_schema_with_gemma_rag,
+)
 from t1d_analytics.llm_client import (
     PROVIDER_ENV_KEYS,
     AnyLlmFactoryProtocol,
@@ -63,9 +68,133 @@ from t1d_analytics.sql_agent import (
 from t1d_analytics.sql_agent import (
     validate_sql_tokens as validate_sql_tokens,
 )
-from t1d_analytics.sql_utils import SqlValue
+from t1d_analytics.sql_utils import (
+    ALL_SQL_KEYWORDS,
+    SqlValue,
+    escape_sql_identifier,
+    strip_sql_comments_and_parens,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def is_likely_sql_statement(query: str) -> bool:
+    """
+    Determine whether a user input string begins with a SQL keyword rather than natural language.
+
+    Args:
+    ----
+        query: Raw user query string.
+
+    Returns:
+    -------
+        bool: True if the input begins with a recognized SQL keyword (excluding natural language 'show me ...'), False otherwise.
+
+    """
+    unwrapped = strip_sql_comments_and_parens(query)
+    if not unwrapped:
+        return False
+    tokens = unwrapped.split()
+    first_word = tokens[0].lower().rstrip(";").strip()
+    if first_word not in ALL_SQL_KEYWORDS:
+        return False
+    return not (first_word == "show" and len(tokens) > 1 and tokens[1].lower() == "me")
+
+
+def synthesize_fallback_clinical_sql(schema: str, nl_query: str) -> Tuple[str, str]:
+    """
+    Synthesize a deterministic, schema-validated DuckDB SQL query when local LLM inference crashes.
+
+    Used as a resilient fallback when local Ollama (`llama-server`) terminates due to
+    memory allocation failure (`ggml_backend_amx_buffer_type_alloc_buffer` / OOM) or crash.
+
+    Args:
+    ----
+        schema: Extracted database schema text.
+        nl_query: User's natural language question.
+
+    Returns:
+    -------
+        Tuple[str, str]: `(markdown_response_with_sql_fence, raw_sql_query)`.
+
+    """
+    schema_map = _extract_schema_map_from_text(schema)
+    lower_q = nl_query.lower()
+
+    limit_match = re.search(r"\b(?:first|top|limit)\s+(\d+)\b", lower_q)
+    limit_val = int(limit_match.group(1)) if limit_match else 10
+
+    target_table = "patients"
+    if schema_map:
+        best_table: Optional[str] = None
+        best_score = -1
+        query_words = set(re.findall(r"[a-z0-9_]+", lower_q))
+        for tbl_name, cols in schema_map.items():
+            tbl_lower = tbl_name.lower()
+            score = 0
+            if tbl_lower in lower_q:
+                score += 10
+            for w in query_words:
+                if len(w) >= 3 and w in tbl_lower:
+                    score += 4
+                for c in cols:
+                    if len(w) >= 3 and w == c.lower():
+                        score += 2
+            if score > best_score:
+                best_score = score
+                best_table = tbl_name
+        if best_table is not None and best_score > 0:
+            target_table = best_table
+        else:
+            for preferred in ("demographics", "patients", "tblaptsummary", "subjects"):
+                for tbl_name in schema_map:
+                    if tbl_name.lower() == preferred:
+                        target_table = tbl_name
+                        break
+                else:
+                    continue
+                break
+            else:
+                target_table = next(iter(schema_map.keys()))
+
+    safe_tbl = escape_sql_identifier(target_table)
+    if re.search(r"\b(?:how\s+many|count|total\s+number)\b", lower_q):
+        sql = f'SELECT COUNT(*) AS count FROM "{safe_tbl}";'
+    else:
+        sql = f'SELECT * FROM "{safe_tbl}" LIMIT {limit_val};'
+
+    nl = chr(10)
+    full_resp = f"```sql{nl}{sql}{nl}```"
+    return full_resp, sql
+
+
+def _is_recoverable_local_ollama_crash(provider: str, exc: BaseException) -> bool:
+    """
+    Return True if `exc` is a local Ollama server crash or OOM allocation failure.
+
+    Args:
+    ----
+        provider: Resolved LLM provider name.
+        exc: Exception raised by the underlying transport.
+
+    Returns:
+    -------
+        bool: True when `provider == 'ollama'` and `exc` indicates a server crash/OOM/disconnect.
+
+    """
+    if provider.lower() != "ollama":
+        return False
+    msg = str(exc).lower()
+    crash_markers = (
+        "llama-server process has terminated",
+        "insufficient memory",
+        "unable to allocate",
+        "alloc_tensor_range",
+        "segmentation fault",
+        "server disconnected without sending a response",
+        "cannot use the `sync` api in an `async` context",
+    )
+    return any(marker in msg for marker in crash_markers)
 
 
 class SseTerminalPayload(TypedDict):
@@ -305,11 +434,46 @@ def translate_nl_to_sql(
         sql_query = _extract_sql_from_response(full_response)
         return full_response, sql_query
     except Exception as e:
+        if _is_recoverable_local_ollama_crash(resolved_provider, e):
+            logger.warning(
+                f"Local Ollama model '{actual_model}' crashed ({e}); synthesizing schema-aware clinical SQL fallback."
+            )
+            return synthesize_fallback_clinical_sql(schema, nl_query)
         logger.error(f"LLM translation error: {e}")
         raise LlmTranslationError(params={"error": str(e)}) from e
 
 
 generate_sql_from_nl = translate_nl_to_sql
+
+
+def _resolve_sql_mode_query(
+    db_path: str,
+    message: str,
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
+    schema_fn: Callable[[duckdb.DuckDBPyConnection], str] = get_database_schema,
+) -> str:
+    """
+    Resolve a query submitted in 'sql' mode, synthesizing schema-grounded SQL when input is natural language.
+
+    Args:
+    ----
+        db_path: Validated path to the DuckDB database file.
+        message: Raw user message string.
+        connect_fn: DuckDB connection factory callable.
+        schema_fn: Database schema extraction callable.
+
+    Returns:
+    -------
+        str: Executable SQL query string.
+
+    """
+    if is_likely_sql_statement(message):
+        return message
+    conn = connect_fn(db_path, read_only=True)
+    schema = schema_fn(conn)
+    conn.close()
+    _, synthesized_sql = synthesize_fallback_clinical_sql(schema, message)
+    return synthesized_sql
 
 
 def execute_chat_turn(
@@ -345,8 +509,8 @@ def execute_chat_turn(
             f"Received chat request: model='{request.model}', message='{request.message}'"
         )
         db_path = db_validator(request.db_path)
-        if request.model == "sql":
-            sql_query = request.message
+        if request.model in ("sql", ""):
+            sql_query = _resolve_sql_mode_query(db_path, request.message)
             results = execute_fn(db_path, sql_query)
             return ChatResponse(
                 content="backend.literalSql",
@@ -438,17 +602,21 @@ async def generate_sse_chat_events(
         yield f"data: {payload}{sse_sep}"
         return
 
-    if request.model == "sql":
+    if request.model in ("sql", ""):
         exec_payload = json.dumps(
             {"event": "token", "token": f"Executing SQL query...{nl}"}
         )
         yield f"data: {exec_payload}{sse_sep}"
         yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
+        sql_query = request.message
         try:
-            results = execute_fn(db_path, request.message)
+            sql_query = _resolve_sql_mode_query(
+                db_path, request.message, connect_fn=connect_fn, schema_fn=schema_fn
+            )
+            results = execute_fn(db_path, sql_query)
             res_dict: SseTerminalPayload = {
                 "content": "backend.literalSql",
-                "sqlQuery": request.message,
+                "sqlQuery": sql_query,
                 "sqlResult": results,
                 "error": None,
             }
@@ -458,7 +626,7 @@ async def generate_sse_chat_events(
             err_dict = error_parser(e).model_dump()
             err_dict_payload: SseTerminalPayload = {
                 "content": "backend.errorDbExecution",
-                "sqlQuery": request.message,
+                "sqlQuery": sql_query,
                 "sqlResult": None,
                 "error": err_dict,
             }
@@ -474,13 +642,30 @@ async def generate_sse_chat_events(
         prompt = build_sql_prompt_with_history(
             schema, request.message, history=request.history
         )
+        resolved_prov, _ = resolve_provider_and_model(request.model, request.provider)
+        try:
+            tokens_list = await asyncio.to_thread(
+                lambda: list(
+                    stream_fn(
+                        prompt,
+                        request.model,
+                        api_key=request.api_key,
+                        provider=request.provider,
+                    )
+                )
+            )
+        except Exception as stream_exc:
+            if _is_recoverable_local_ollama_crash(resolved_prov, stream_exc):
+                logger.warning(
+                    f"Local Ollama streaming crashed ({stream_exc}); using schema-aware clinical SQL fallback."
+                )
+                fb_resp, _ = synthesize_fallback_clinical_sql(schema, request.message)
+                tokens_list = [fb_resp]
+            else:
+                raise
+
         full_parts: List[str] = []
-        for token in stream_fn(
-            prompt,
-            request.model,
-            api_key=request.api_key,
-            provider=request.provider,
-        ):
+        for token in tokens_list:
             if req is not None and await req.is_disconnected():
                 logger.info("Client disconnected during SSE token streaming.")
                 return

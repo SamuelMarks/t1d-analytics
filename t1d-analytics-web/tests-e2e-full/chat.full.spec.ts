@@ -324,3 +324,70 @@ test("Cloud provider settings modal and model selection", async ({ page }) => {
   await page.click("#close-provider-modal-btn");
   await expect(modal).toBeHidden();
 });
+
+test("Default chat loads without error against live backend and executes SQL queries without manual model switch", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  // Verify zero errors on initial default chat load
+  await expect(page.locator(".message.error")).toHaveCount(0);
+  await expect(page.locator("#chat-input")).toBeEnabled({ timeout: 10000 });
+  const sidebarFooter = page.locator("#sidebar #sidebar-footer");
+  await expect(sidebarFooter).toBeVisible();
+  await expect(sidebarFooter.locator("#build-timestamp")).toContainText(
+    "built on ",
+  );
+  await expect(sidebarFooter.locator("#build-timestamp")).toContainText("UTC");
+  await expect(sidebarFooter.locator("#sidebar-copyright")).toContainText(
+    "© 2026 Samuel Marks",
+  );
+  await expect(sidebarFooter.locator("#sidebar-github-link")).toHaveAttribute(
+    "href",
+    "https://github.com/SamuelMarks/t1d-analytics",
+  );
+
+  // Send a read-only SQL query directly in the default chat without manually changing #model-select
+  await page.fill("#chat-input", "SELECT COUNT(*) AS cnt FROM tiny;");
+  await page.click("#send-btn");
+
+  const assistantMsg = page.locator(".message.assistant").first();
+  await expect(assistantMsg).toBeVisible({ timeout: 10000 });
+  await expect(assistantMsg.locator(".sql-table td").first()).toHaveText("2");
+  await expect(page.locator(".message.error")).toHaveCount(0);
+});
+
+test("Queries canonical clinical tables, compatibility views, and enforces read-only SQL guard against live DuckDB", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.selectOption("#model-select", "sql");
+
+  // 1. Query canonical clinical table (hba1c_labs)
+  await page.fill("#chat-input", "SELECT COUNT(*) AS lab_cnt FROM hba1c_labs;");
+  await page.click("#send-btn");
+  const msg1 = page.locator(".message.assistant").nth(0);
+  await expect(msg1.locator(".sql-table")).toBeVisible({ timeout: 10000 });
+
+  // 2. Query clinical compatibility view (demographics)
+  await page.fill(
+    "#chat-input",
+    "SELECT patient_id, gender, treatment_group FROM demographics LIMIT 3;",
+  );
+  await page.click("#send-btn");
+  const msg2 = page.locator(".message.assistant").nth(1);
+  await expect(msg2.locator(".sql-table")).toBeVisible({ timeout: 10000 });
+  await expect(msg2.locator(".sql-table tbody tr")).toHaveCount(3);
+
+  // 3. Query non-existent table -> renders structured error alert
+  await page.fill("#chat-input", "SELECT * FROM non_existent_table_xyz_999;");
+  await page.click("#send-btn");
+  const msg3 = page.locator(".message.assistant").nth(2);
+  await expect(msg3.locator('[role="alert"]')).toBeVisible({ timeout: 10000 });
+
+  // 4. Attempt destructive SQL -> rejected by read-only guard without damaging table
+  await page.fill("#chat-input", "DROP TABLE tiny;");
+  await page.click("#send-btn");
+  const msg4 = page.locator(".message.assistant").nth(3);
+  await expect(msg4.locator('[role="alert"]')).toBeVisible({ timeout: 10000 });
+});

@@ -233,6 +233,8 @@ export class ChatState {
   public activeChatId: string | null = null;
   /** Counter used for auto-generating chat titles. */
   public chatCounter: number = 1;
+  /** Monotonic sequence counter preventing same-millisecond chat ID collisions. */
+  private idSequence: number = 0;
   /** Diagnostic health status of backend and database. */
   public systemStatus: SystemStatus = {
     backendOnline: true,
@@ -476,7 +478,7 @@ export class ChatState {
    */
   createChat(title?: string, isTemporary: boolean = false): Chat {
     const chat: Chat = {
-      id: `chat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: `chat-${Date.now()}-${++this.idSequence}-${Math.floor(Math.random() * 1000)}`,
       title:
         title || i18next.t("app.chatNumber", { count: this.chatCounter++ }),
       messages: [],
@@ -577,7 +579,7 @@ export class ChatState {
     }
 
     const duplicate: Chat = {
-      id: `chat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: `chat-${Date.now()}-${++this.idSequence}-${Math.floor(Math.random() * 1000)}`,
       title: i18next.t("app.copyOf", { title: original.title }),
       messages: JSON.parse(JSON.stringify(original.messages)), // Deep copy
       model: original.model,

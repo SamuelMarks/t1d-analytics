@@ -328,7 +328,10 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
         TrainableModelProtocol,
     )
 
-    dummy_obj = object()
+    class _DummyProtoInstance:
+        """Minimal dummy instance for invoking protocol property getters."""
+
+    dummy_obj = _DummyProtoInstance()
     for proto_cls, prop_name in (
         (DeviceProtocol, "type"),
         (TensorProtocol, "shape"),

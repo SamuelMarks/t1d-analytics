@@ -115,7 +115,11 @@ def discover_workspace_databases() -> DatabaseListResponse:
             all_files.append(p_def)
     for s_dir in (Path("."), Path("./data")):
         if s_dir.exists():
-            all_files.extend(s_dir.glob("*.duckdb"))
+            all_files.extend(
+                p
+                for p in s_dir.glob("*.duckdb")
+                if p.name not in ("sessions.duckdb", "t1d_sessions.duckdb")
+            )
 
     found_dbs: List[DatabaseItem] = []
     seen_paths = set()

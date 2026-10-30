@@ -29,8 +29,7 @@ export function trapModalFocus(
   const firstElement = focusableElements[0];
   const lastElement = focusableElements[focusableElements.length - 1];
   const activeEl = document.activeElement;
-  const isOutsideOrRoot =
-    !activeEl || !modal.contains(activeEl) || activeEl === modal;
+  const isOutsideOrRoot = !modal.contains(activeEl) || activeEl === modal;
 
   if (e.shiftKey) {
     if (activeEl === firstElement || isOutsideOrRoot) {

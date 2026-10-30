@@ -117,27 +117,6 @@ describe("i18n.ts", () => {
     vi.stubGlobal("navigator", originalNavigator);
   });
 
-  it("determines initial language correctly when falling back to navigator, no navigator available", () => {
-    localStorage.clear();
-
-    const originalNavigator = window.navigator;
-    vi.stubGlobal("navigator", undefined);
-
-    expect(getInitialLang()).toBe("en");
-
-    // restore
-    vi.stubGlobal("navigator", originalNavigator);
-  });
-
-  it("determines initial language correctly when localStorage is undefined", () => {
-    const originalLocalStorage = window.localStorage;
-    vi.stubGlobal("localStorage", undefined);
-
-    expect(getInitialLang()).toBe("en");
-
-    vi.stubGlobal("localStorage", originalLocalStorage);
-  });
-
   it("sets document dir based on initial language correctly", () => {
     setDocumentDir("ar");
     expect(document.documentElement.dir).toBe("rtl");

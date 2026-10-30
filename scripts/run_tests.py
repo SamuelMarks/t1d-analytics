@@ -180,7 +180,7 @@ def main() -> None:
         f.write("id,name,age\n1,Alice,30\n2,Bob,40\n")
 
     with open("t1d-analytics-backend/tests/test_data/tiny.csv", "w") as f:
-        f.write("id,value\n1,100\n2,200\n")
+        f.write("id,name,value\n1,Test A,100\n2,Test B,200\n")
 
     for db_artifact in ("ci_test.duckdb", "ci_test.duckdb.wal"):
         if os.path.exists(db_artifact):
@@ -191,7 +191,10 @@ def main() -> None:
         [
             system_python,
             "-c",
-            "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('t1d-analytics-backend/tests/test_data/', 'ci_test.duckdb')",
+            (
+                "from t1d_analytics.seed import seed_database; "
+                "seed_database(data_dir='t1d-analytics-backend/tests/test_data/', db_path='ci_test.duckdb', sessions_db_path='t1d-analytics-backend/tests/test_data/sessions.duckdb', overwrite_csvs=True)"
+            ),
         ],
         env=env,
     )
@@ -201,6 +204,9 @@ def main() -> None:
 
     backend_env = env.copy()
     backend_env["T1D_DB_PATH"] = "ci_test.duckdb"
+    backend_env["T1D_SESSIONS_DB_PATH"] = (
+        "t1d-analytics-backend/tests/test_data/sessions.duckdb"
+    )
     env["T1D_API_PORT"] = "8000"
 
     print("Starting backend server...")
@@ -220,7 +226,7 @@ def main() -> None:
     backend_ready = False
     for _ in range(30):
         try:
-            urllib.request.urlopen("http://127.0.0.1:8000/api/schema")
+            urllib.request.urlopen("http://127.0.0.1:8000/api/ready")
             backend_ready = True
             break
         except Exception:

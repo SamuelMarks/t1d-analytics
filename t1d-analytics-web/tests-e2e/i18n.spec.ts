@@ -16,10 +16,48 @@ test.describe("i18n and RTL E2E", () => {
     await page.goto("/");
   });
 
-  test("Switches language to Arabic and verifies dir=rtl", async ({ page }) => {
+  test("Switches language to Arabic and verifies dir=rtl, and falls back to en for unsupported browser locale", async ({
+    page,
+    browser,
+  }) => {
     await page.selectOption("#lang-select", "ar");
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
     await expect(page.locator("html")).toHaveAttribute("lang", "ar");
+
+    const frContext = await browser.newContext({ locale: "fr-FR" });
+    const frPage = await frContext.newPage();
+    await frPage.route("**/api/models", async (route) => {
+      await route.fulfill({ json: { models: [{ name: "gemma4" }] } });
+    });
+    await frPage.goto("/");
+    await expect(frPage.locator("html")).toHaveAttribute("lang", "en");
+    const cov = await frPage.evaluate(() => window.__coverage__);
+    if (cov) {
+      await page.evaluate(
+        (
+          frCov: Record<string, import("../src/vite-env").IstanbulFileCoverage>,
+        ) => {
+          if (!window.__coverage__) return;
+          for (const [k, v] of Object.entries(frCov)) {
+            const target = window.__coverage__[k];
+            if (!target) continue;
+            for (const [sk, sv] of Object.entries(v.s)) {
+              target.s[sk] = (target.s[sk] || 0) + sv;
+            }
+            for (const [fk, fv] of Object.entries(v.f)) {
+              target.f[fk] = (target.f[fk] || 0) + fv;
+            }
+            for (const [bk, bv] of Object.entries(v.b)) {
+              target.b[bk] = bv.map(
+                (cnt: number, idx: number) => (target.b[bk]?.[idx] || 0) + cnt,
+              );
+            }
+          }
+        },
+        cov,
+      );
+    }
+    await frContext.close();
   });
 
   test("Switches language to Hebrew and verifies dir=rtl", async ({ page }) => {

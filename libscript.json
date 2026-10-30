@@ -177,9 +177,12 @@
   ],
   "frontends": {
     "web": {
+      "framework": "vite",
+      "working_dir": "t1d-analytics-web",
       "source_dir": "t1d-analytics-web",
       "output_dir": "dist",
-      "build_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && npm run build"
+      "artifact_check": "t1d-analytics-web/dist/index.html",
+      "build_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-}:${SERVICE_EXTRA_PATH:-}:$PATH\" VOLTA_HOME=\"${VOLTA_HOME:-}\" && npm run build"
     }
   },
   "ingress": {
@@ -264,7 +267,8 @@
       },
       {
         "name": "upsert-and-confirm-t1d-duckdb",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\"; _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"; _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\"; _tcnt=0; if [ -f \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); fi; if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then printf '[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into \"%s\"...\\n' \"$_db\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; fi; if command -v duckdb >/dev/null 2>&1 && [ -f \"$_db\" ]; then _tcnt=$(duckdb \"$_db\" -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); _sz=$(du -sh \"$_db\" 2>/dev/null | awk '{print $1}'); printf '[UPSERT:DUCKDB] [CONFIRM] T1D DuckDB \"%s\" verified (%s, %s tables); sessions DB \"%s\" verified.\\n' \"$_db\" \"${_sz:-0B}\" \"${_tcnt:-0}\" \"$_sdb\"; fi",
+        "condition": "unless_env LIBSCRIPT_DB_DUCKDB_POPULATED=1",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; [ -f .env.libscript ] && . ./.env.libscript; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\"; _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"; _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\"; _tcnt=0; if [ -f \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); fi; if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then printf '[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into \"%s\"...\\n' \"$_db\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; fi; if command -v duckdb >/dev/null 2>&1 && [ -f \"$_db\" ]; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); _sz=$(du -sh \"$_db\" 2>/dev/null | awk '{print $1}'); printf '[UPSERT:DUCKDB] [CONFIRM] T1D DuckDB \"%s\" verified (%s, %s tables); sessions DB \"%s\" verified.\\n' \"$_db\" \"${_sz:-0B}\" \"${_tcnt:-0}\" \"$_sdb\"; fi",
         "cmd_windows": "echo [UPSERT:DUCKDB] Verifying and upserting T1D DuckDB datasets... && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe doctor --db \"%T1D_DB_PATH%\" --min-tables 4 --min-rows 400 || (t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe seed --data-dir data --db \"%T1D_DB_PATH%\" --sessions-db \"%T1D_SESSIONS_DB_PATH%\" && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe load --data-dir data --db \"%T1D_DB_PATH%\")"
       },
       {
@@ -336,6 +340,8 @@
     },
     "t1d-web": {
       "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
+      "production_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
+      "dev_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
       "working_dir": "t1d-analytics-web",
       "user": "${SERVICE_USER:-ubuntu}",
       "port": 3000,

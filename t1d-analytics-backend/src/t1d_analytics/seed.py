@@ -28,6 +28,7 @@ COMPATIBILITY_CLINICAL_VIEWS = (
     "subjects",
     "hba1c",
     "demographics",
+    "cgm_data",
 )
 
 
@@ -81,11 +82,13 @@ def generate_baseline_patients() -> List[Dict[str, SeedValue]]:
         tar = round(max(0.0, 100.0 - tir - tbr), 1)
         mean_cgm = round(95.0 + (hba1c - 5.0) * 28.5, 1)
         num_dka = 1 if (hba1c >= 9.0 and i % 3 == 0) else (2 if i == 99 else 0)
+        tx_group = "Closed-Loop" if i % 2 == 0 else "Control"
         rows.append(
             {
                 "PtID": i,
                 "Age": age,
                 "Gender": gender,
+                "TxGroup": tx_group,
                 "HbA1c": hba1c,
                 "TIR": tir,
                 "TBR": tbr,
@@ -306,12 +309,31 @@ def ensure_canonical_clinical_views(db_path: str) -> None:
                 CREATE OR REPLACE VIEW demographics AS
                 SELECT
                     TRY_CAST(subject_id AS BIGINT) AS patient_id,
+                    TRY_CAST(subject_id AS BIGINT) AS subject_id,
                     TRY_CAST(age AS DOUBLE) AS age,
                     CAST(gender AS VARCHAR) AS gender,
                     CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END AS treatment_group,
+                    CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END AS txgroup,
                     TRY_CAST(hba1c AS DOUBLE) AS hba1c,
                     TRY_CAST(tir AS DOUBLE) AS tir
                 FROM patients
+                """,
+                base_tables,
+            )
+        if "cgm_readings" in all_objects:
+            _create_compat_view_if_safe(
+                conn,
+                "cgm_data",
+                """
+                CREATE OR REPLACE VIEW cgm_data AS
+                SELECT
+                    TRY_CAST(subject_id AS BIGINT) AS patient_id,
+                    TRY_CAST(subject_id AS BIGINT) AS subject_id,
+                    timestamp,
+                    timestamp AS cgm_datetime,
+                    TRY_CAST(glucose_value AS DOUBLE) AS glucose_value,
+                    TRY_CAST(glucose_value AS DOUBLE) AS glucose
+                FROM cgm_readings
                 """,
                 base_tables,
             )

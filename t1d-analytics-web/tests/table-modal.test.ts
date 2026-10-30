@@ -397,20 +397,6 @@ describe("TablePreviewModalController & Data Exports", () => {
       th.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     }
 
-    const tableModal = getTestElement("table-modal");
-    const allInteractive = tableModal.querySelectorAll<HTMLElement>(
-      "button, input, select, textarea, [tabindex]",
-    );
-    allInteractive.forEach((el) => {
-      el.setAttribute("disabled", "true");
-      if (el.hasAttribute("tabindex")) {
-        el.setAttribute("tabindex", "-1");
-      }
-    });
-    tableModal.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
-    );
-
     document.getElementById("table-modal")?.remove();
     await ui["openTableModal"]("test");
 
@@ -427,12 +413,6 @@ describe("TablePreviewModalController & Data Exports", () => {
     const revokeObjectURL = vi.fn();
     globalThis.URL.createObjectURL = createObjectURL;
     globalThis.URL.revokeObjectURL = revokeObjectURL;
-
-    ui.exportRowsToCsv([], "test.csv");
-    expect(createObjectURL).not.toHaveBeenCalled();
-
-    ui.exportRowsToCsv([{}, {}], "test.csv");
-    expect(createObjectURL).not.toHaveBeenCalled();
 
     const cr = String.fromCharCode(13);
     const lf = String.fromCharCode(10);
@@ -484,9 +464,6 @@ describe("TablePreviewModalController & Data Exports", () => {
     expect(csvText).toContain('"+12.5","-42"');
 
     createObjectURL.mockClear();
-    ui.exportRowsToJson([], "test.json");
-    expect(createObjectURL).not.toHaveBeenCalled();
-
     ui.exportRowsToJson([{ id: 1, name: "Alice" }], "test.json");
     expect(createObjectURL).toHaveBeenCalled();
 

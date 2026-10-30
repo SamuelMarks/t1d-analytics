@@ -17,6 +17,7 @@ import {
   type SqlCellValue,
   classifySqlResult,
   formatNumber,
+  getBuildTimestampUtc,
 } from "./formatters";
 import { renderCgmCard } from "./chart";
 import {
@@ -663,6 +664,9 @@ export class ChatUI {
     this.streamingEnabled = this.state.streamingMode;
     this.updateStreamingToggleUi();
 
+    const buildTimestampEl = requireElementById<HTMLElement>("build-timestamp");
+    buildTimestampEl.textContent = `built on ${getBuildTimestampUtc()}`;
+
     this.bindEvents();
     this.loadModels();
     this.loadSchema();
@@ -924,6 +928,10 @@ export class ChatUI {
         );
         if (this.modelSelect && this.modelSelect.value !== "sql") {
           this.modelSelect.value = "sql";
+          const currentChat = this.state.getActiveChat();
+          if (currentChat && currentChat.messages.length === 0) {
+            this.state.setActiveChatModel("sql");
+          }
         }
       } else {
         this.hideBanner();
@@ -1202,7 +1210,7 @@ export class ChatUI {
 
           viewBtn.addEventListener("click", (e) => {
             e.stopPropagation();
-            this.openTableModal(table.name);
+            void this.tableModalController.open(table.name);
           });
           const columnsList = document.createElement("ul");
           columnsList.className = "schema-columns";
@@ -1340,6 +1348,7 @@ export class ChatUI {
         const option = document.createElement("option");
         option.value = model.name;
         option.setAttribute("data-provider", prov);
+        option.setAttribute("data-configured", isConfigured ? "true" : "false");
         option.textContent = `${model.name} ${badge}`;
         if (!isAvailable && model.error_code) {
           option.title = `${model.name} (${model.error_code})`;
@@ -1359,6 +1368,19 @@ export class ChatUI {
         }
       }
 
+      const hasReachableOllama = modelsList.some((m) => {
+        const prov =
+          m.provider ||
+          (m.name.includes("/") ? m.name.split("/")[0] : "ollama");
+        return (
+          prov === "ollama" &&
+          m.available !== false &&
+          m.reachable !== false &&
+          m.configured !== false
+        );
+      });
+      this.state.setSystemStatus({ ollamaOnline: hasReachableOllama });
+
       // Reset the current model to match the active chat
       const activeChat = this.state.getActiveChat();
       if (activeChat) {
@@ -1368,8 +1390,27 @@ export class ChatUI {
         if (exists) {
           this.modelSelect.value = activeChat.model;
         } else if (modelsList.length > 0) {
-          this.modelSelect.value = modelsList[0].name;
-          this.state.setActiveChatModel(modelsList[0].name);
+          const firstReady = modelsList.find((m) => {
+            const prov =
+              m.provider ||
+              (m.name.includes("/") ? m.name.split("/")[0] : "ollama");
+            return (
+              m.available !== false &&
+              m.reachable !== false &&
+              ((prov === "ollama" && m.configured !== false) ||
+                Boolean(this.state.getApiKey(prov)))
+            );
+          });
+          const fallbackModel = firstReady
+            ? firstReady.name
+            : activeChat.messages.length === 0
+              ? "sql"
+              : modelsList[0].name;
+          this.modelSelect.value = fallbackModel;
+          this.state.setActiveChatModel(fallbackModel);
+        } else {
+          this.modelSelect.value = "sql";
+          this.state.setActiveChatModel("sql");
         }
       }
       this.updateProviderBadgeStatus();
@@ -1401,7 +1442,9 @@ export class ChatUI {
       this.providerStatusDot.title = statusText;
       this.providerStatusDot.setAttribute("aria-label", statusText);
     } else {
-      const hasKey = Boolean(this.state.getApiKey(prov));
+      const hasKey =
+        Boolean(this.state.getApiKey(prov)) ||
+        selectedOption?.getAttribute("data-configured") === "true";
       if (hasKey) {
         const statusText = i18next.t("provider.providerActive", {
           provider: prov,
@@ -1478,6 +1521,15 @@ export class ChatUI {
 
     this.newChatBtn.addEventListener("click", () => {
       this.state.createChat();
+      const hasCloudKeys = Boolean(
+        this.state.getApiKey("openai") ||
+        this.state.getApiKey("anthropic") ||
+        this.state.getApiKey("google") ||
+        this.state.getConfiguredModels().length > 0,
+      );
+      if (!this.state.systemStatus.ollamaOnline && !hasCloudKeys) {
+        this.state.setActiveChatModel("sql");
+      }
       this.render();
       this.closeMobileSidebar();
       this.chatInput.focus();
@@ -1513,7 +1565,7 @@ export class ChatUI {
         if (selectedDb) {
           this.state.setCurrentDb(selectedDb);
           void this.loadSchema(selectedDb);
-          void this.checkSystemStatus(true, selectedDb);
+          void this.systemStatusController.check(true, selectedDb);
           this.announce(i18next.t("ui.databaseSwitched", { db: selectedDb }));
         }
       });
@@ -1527,13 +1579,13 @@ export class ChatUI {
 
     if (this.providerSettingsBtn) {
       this.providerSettingsBtn.addEventListener("click", () => {
-        void this.openProviderModal();
+        void this.providerModalController.open();
       });
     }
 
     if (this.closeProviderModalBtn) {
       this.closeProviderModalBtn.addEventListener("click", () => {
-        this.closeProviderModal();
+        this.providerModalController.close();
       });
     }
 
@@ -1552,27 +1604,27 @@ export class ChatUI {
     if (this.providerModal) {
       this.providerModal.addEventListener("click", (e) => {
         if (e.target === this.providerModal) {
-          this.closeProviderModal();
+          this.providerModalController.close();
         }
       });
     }
 
     if (this.cohortFilterBtn) {
       this.cohortFilterBtn.addEventListener("click", () => {
-        this.openCohortModal();
+        this.cohortModalController.open();
       });
     }
 
     if (this.closeCohortModalBtn) {
       this.closeCohortModalBtn.addEventListener("click", () => {
-        this.closeCohortModal();
+        this.cohortModalController.close();
       });
     }
 
     if (this.cohortModal) {
       this.cohortModal.addEventListener("click", (e) => {
         if (e.target === this.cohortModal) {
-          this.closeCohortModal();
+          this.cohortModalController.close();
         }
       });
     }
@@ -1661,7 +1713,7 @@ export class ChatUI {
         void this.fetchTableData();
       }
       // Re-render UI components that generate dynamic text
-      this.checkSystemStatus();
+      void this.systemStatusController.check();
       this.render();
     });
 
@@ -1680,7 +1732,7 @@ export class ChatUI {
     // Status banner & chip interactions
     if (this.bannerRetryBtn) {
       this.bannerRetryBtn.addEventListener("click", () => {
-        this.checkSystemStatus(true);
+        void this.systemStatusController.check(true);
         this.loadModels();
         this.loadSchema();
       });
@@ -1705,7 +1757,7 @@ export class ChatUI {
 
     if (this.systemStatusChip) {
       this.systemStatusChip.addEventListener("click", () => {
-        this.checkSystemStatus(true);
+        void this.systemStatusController.check(true);
       });
     }
 
@@ -1931,6 +1983,7 @@ export class ChatUI {
     });
 
     if (text === undefined) {
+      this.state.setActiveChatModel(this.modelSelect.value);
       this.chatInput.value = "";
       this.syncHighlight(); // Reset height and highlight block
     }
@@ -2220,7 +2273,7 @@ export class ChatUI {
    * @returns {string} The generated DuckDB SQL statement.
    */
   public getCohortSql(): string {
-    const tableName = this.cohortTableSelect?.value || "patients";
+    const tableName = this.cohortTableSelect?.value || "";
     const joinTableName = this.cohortJoinTableSelect?.value || undefined;
     const joinType = normalizeJoinType(this.cohortJoinTypeSelect?.value);
     const joinCondition = this.cohortJoinOnInput?.value?.trim() || undefined;
@@ -2265,7 +2318,22 @@ export class ChatUI {
       return;
     }
 
-    const rel = resolveTableJoin(table1, table2);
+    const extractTableCols = (tName: string): string[] => {
+      const listEl = document.getElementById(`schema-table-${tName}`);
+      return listEl
+        ? Array.from(
+            listEl.querySelectorAll(".schema-column span:first-child"),
+            (s) => s.textContent!,
+          )
+        : [];
+    };
+
+    const rel = resolveTableJoin(
+      table1,
+      table2,
+      extractTableCols(table1),
+      extractTableCols(table2),
+    );
     if (this.cohortJoinOnInput) {
       this.cohortJoinOnInput.value = rel
         ? `"${table1}".${rel.fromColumn} = "${table2}".${rel.toColumn}`
@@ -2650,7 +2718,7 @@ export class ChatUI {
         const newTitle = prompt(i18next.t("ui.newChatTitle"), chat.title);
         if (newTitle !== null) {
           this.state.renameChat(chat.id, newTitle);
-          this.renderSidebar();
+          this.render();
         }
       });
 
@@ -2793,7 +2861,11 @@ export class ChatUI {
     }
 
     this.modelSelect.disabled = false;
-    this.modelSelect.value = activeChat.model;
+    const hasActiveModelOption = Array.from(this.modelSelect.options).some(
+      (opt) => opt.value === activeChat.model,
+    );
+    this.modelSelect.value = hasActiveModelOption ? activeChat.model : "sql";
+    this.updateProviderBadgeStatus();
 
     // Ensure input field and highlight blocks accurately reflect all saved state or empty initial load
     this.syncHighlight();
@@ -2881,8 +2953,12 @@ export class ChatUI {
         chip.textContent = item.label;
         chip.addEventListener("click", () => {
           this.chatInput.value = item.query;
-          this.modelSelect.value = item.mode;
-          this.state.setActiveChatModel(item.mode);
+          const hasChipModeOption = Array.from(this.modelSelect.options).some(
+            (opt) => opt.value === item.mode,
+          );
+          const targetChipMode = hasChipModeOption ? item.mode : "sql";
+          this.modelSelect.value = targetChipMode;
+          this.state.setActiveChatModel(targetChipMode);
           this.chatInput.focus();
 
           this.syncHighlight();

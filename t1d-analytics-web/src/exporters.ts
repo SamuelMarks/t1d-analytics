@@ -67,7 +67,6 @@ export function exportRowsToCsv(
   rows: Array<Record<string, ExportableCellValue>>,
   filename: string,
 ): void {
-  if (!rows || rows.length === 0) return;
   const columnSet = new Set<string>();
   for (const r of rows) {
     for (const k of Object.keys(r)) {
@@ -75,7 +74,6 @@ export function exportRowsToCsv(
     }
   }
   const columns = Array.from(columnSet);
-  if (columns.length === 0) return;
 
   const headerLine = columns
     .map((col) => `"${col.replace(/"/g, '""')}"`)
@@ -107,7 +105,6 @@ export function exportRowsToJson(
   rows: Array<Record<string, ExportableCellValue>>,
   filename: string,
 ): void {
-  if (!rows || rows.length === 0) return;
   const jsonContent = JSON.stringify(rows, null, 2);
   const blob = new Blob([jsonContent], {
     type: "application/json;charset=utf-8;",

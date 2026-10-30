@@ -368,6 +368,7 @@ def check_database_health(
             "subjects",
             "hba1c",
             "demographics",
+            "cgm_data",
         }
         primary_tables = [
             t for t in all_tables if not t.startswith("_t1d_") and t not in compat_views

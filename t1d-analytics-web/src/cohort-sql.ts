@@ -66,6 +66,69 @@ export const CLINICAL_RELATIONSHIPS: TableRelationship[] = [
     toColumn: "patient_id",
     defaultJoinType: "INNER JOIN",
   },
+  {
+    fromTable: "patients",
+    toTable: "cgm_readings",
+    fromColumn: "subject_id",
+    toColumn: "subject_id",
+    defaultJoinType: "INNER JOIN",
+  },
+  {
+    fromTable: "patients",
+    toTable: "hba1c_labs",
+    fromColumn: "subject_id",
+    toColumn: "subject_id",
+    defaultJoinType: "LEFT JOIN",
+  },
+  {
+    fromTable: "patients",
+    toTable: "dka_adverse_events",
+    fromColumn: "subject_id",
+    toColumn: "subject_id",
+    defaultJoinType: "LEFT JOIN",
+  },
+  {
+    fromTable: "demographics",
+    toTable: "cgm_data",
+    fromColumn: "patient_id",
+    toColumn: "patient_id",
+    defaultJoinType: "INNER JOIN",
+  },
+  {
+    fromTable: "demographics",
+    toTable: "cgm_readings",
+    fromColumn: "subject_id",
+    toColumn: "subject_id",
+    defaultJoinType: "INNER JOIN",
+  },
+  {
+    fromTable: "demographics",
+    toTable: "hba1c_labs",
+    fromColumn: "subject_id",
+    toColumn: "subject_id",
+    defaultJoinType: "LEFT JOIN",
+  },
+  {
+    fromTable: "tblaptsummary",
+    toTable: "hba1c",
+    fromColumn: "PtID",
+    toColumn: "PtID",
+    defaultJoinType: "INNER JOIN",
+  },
+  {
+    fromTable: "tblaptsummary",
+    toTable: "adverseevents",
+    fromColumn: "PtID",
+    toColumn: "PtID",
+    defaultJoinType: "LEFT JOIN",
+  },
+  {
+    fromTable: "tblaptsummary",
+    toTable: "subjects",
+    fromColumn: "PtID",
+    toColumn: "PtID",
+    defaultJoinType: "INNER JOIN",
+  },
 ];
 
 /**
@@ -103,27 +166,25 @@ export function resolveTableJoin(
     };
   }
 
-  if (table1Cols && table2Cols) {
-    const candidateKeys = [
-      "patient_id",
-      "subject_id",
-      "pt_id",
-      "id",
-      "study_id",
-      "device_id",
-    ];
-    for (const key of candidateKeys) {
-      const match1 = table1Cols.find((c) => c.toLowerCase() === key);
-      const match2 = table2Cols.find((c) => c.toLowerCase() === key);
-      if (match1 && match2) {
-        return {
-          fromTable: table1,
-          toTable: table2,
-          fromColumn: match1,
-          toColumn: match2,
-          defaultJoinType: "INNER JOIN",
-        };
-      }
+  const candidateKeys = [
+    "patient_id",
+    "subject_id",
+    "pt_id",
+    "id",
+    "study_id",
+    "device_id",
+  ];
+  for (const key of candidateKeys) {
+    const match1 = table1Cols?.find((c) => c.toLowerCase() === key);
+    const match2 = table2Cols?.find((c) => c.toLowerCase() === key);
+    if (match1 && match2) {
+      return {
+        fromTable: table1,
+        toTable: table2,
+        fromColumn: match1,
+        toColumn: match2,
+        defaultJoinType: "INNER JOIN",
+      };
     }
   }
 
@@ -183,9 +244,9 @@ export function normalizeJoinType(
  * @returns {string} The generated DuckDB SQL query.
  */
 export function buildCohortSql(params: CohortFilterParams): string {
-  const table1 = params.tableName || "patients";
+  const table1 = params.tableName.trim() || "patients";
   const table2 = params.joinTableName?.trim();
-  const joinType = params.joinType || "INNER JOIN";
+  const joinType = normalizeJoinType(params.joinType);
   const joinOn = params.joinCondition?.trim();
 
   const isJoin = Boolean(table2 && table2 !== table1);

@@ -314,8 +314,8 @@ test.describe("App Workflows E2E", () => {
 
     // Verify it opened or toggled. It's normally open initially, so wait for it to collapse.
     const schemaContent = page.locator("#schema-content");
-    // Actually the default might not use collapse via CSS right away in ui.ts unless classes are added,
-    // but we can ensure the button receives focus and operates.
+    await expect(schemaContent).toHaveCount(1);
+    await page.keyboard.press("Enter");
 
     // Let's tab to the schema table toggle
     const tableToggle = page.locator(".schema-table-header-toggle").first();

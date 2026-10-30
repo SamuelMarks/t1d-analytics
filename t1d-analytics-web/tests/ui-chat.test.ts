@@ -60,6 +60,33 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     document.getElementById("new-chat-btn")?.click();
     expect(state.chats.length).toBe(1);
 
+    // When Ollama is offline and no cloud keys exist, clicking newChatBtn sets model to 'sql'
+    state.setSystemStatus({ ollamaOnline: false });
+    document.getElementById("new-chat-btn")?.click();
+    expect(state.getActiveChat()?.model).toBe("sql");
+
+    // When Ollama is offline but a cloud key or configured model is present, newChatBtn keeps 'gemma4'
+    state.setApiKey("openai", "sk-test");
+    document.getElementById("new-chat-btn")?.click();
+    expect(state.getActiveChat()?.model).toBe("gemma4");
+    state.removeApiKey("openai");
+    state.setApiKey("anthropic", "sk-ant");
+    document.getElementById("new-chat-btn")?.click();
+    expect(state.getActiveChat()?.model).toBe("gemma4");
+    state.removeApiKey("anthropic");
+    state.setApiKey("google", "sk-goog");
+    document.getElementById("new-chat-btn")?.click();
+    expect(state.getActiveChat()?.model).toBe("gemma4");
+    state.removeApiKey("google");
+    state.setConfiguredModels("groq:llama3");
+    document.getElementById("new-chat-btn")?.click();
+    expect(state.getActiveChat()?.model).toBe("gemma4");
+    state.removeConfiguredModels();
+    state.setSystemStatus({ ollamaOnline: true });
+    state.chats = [state.chats[0]!];
+    state.activeChatId = state.chats[0]!.id;
+    ui.render();
+
     const list = document.getElementById("chat-list");
     expect(list?.children.length).toBe(1);
     expect(list?.innerHTML).toContain("Chat #1");
@@ -626,6 +653,116 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     });
     await ui["loadModels"]();
     expect(ui["modelSelect"].value).toBe("gemma4");
+
+    // Unconfigured cloud model when chat is empty -> falls back to "sql"
+    chat.model = "missing_model";
+    chat.messages = [];
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          models: [
+            {
+              name: "openai/gpt-4o",
+              configured: false,
+              available: false,
+              reachable: false,
+            },
+          ],
+        }),
+    });
+    await ui["loadModels"]();
+    expect(ui["modelSelect"].value).toBe("sql");
+    expect(chat.model).toBe("sql");
+
+    // Unconfigured cloud model when chat has messages -> falls back to modelsList[0].name
+    chat.model = "missing_model";
+    chat.messages = [{ role: "user", content: "hi" }];
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          models: [
+            {
+              name: "openai/gpt-4o",
+              configured: false,
+              available: true,
+              reachable: true,
+            },
+          ],
+        }),
+    });
+    await ui["loadModels"]();
+    expect(ui["modelSelect"].value).toBe("openai/gpt-4o");
+
+    // Unconfigured cloud model on server but localStorage key exists -> treated as ready
+    state.setApiKey("openai", "sk-test");
+    chat.model = "missing_model";
+    chat.messages = [];
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          models: [
+            {
+              name: "openai/gpt-4o",
+              configured: false,
+              available: true,
+              reachable: true,
+            },
+            {
+              name: "local-unconfigured",
+              configured: false,
+              available: true,
+              reachable: true,
+            },
+          ],
+        }),
+    });
+    await ui["loadModels"]();
+    expect(ui["modelSelect"].value).toBe("openai/gpt-4o");
+    state.removeApiKey("openai");
+
+    // Unconfigured local model without slash when no API key is set
+    chat.model = "missing_model";
+    chat.messages = [];
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          models: [
+            {
+              name: "local-only",
+              configured: false,
+              available: true,
+              reachable: true,
+            },
+          ],
+        }),
+    });
+    await ui["loadModels"]();
+    expect(ui["modelSelect"].value).toBe("sql");
+
+    // Empty modelsList when chat.model is not in options -> falls back to "sql"
+    chat.model = "missing_model";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ models: [] }),
+    });
+    await ui["loadModels"]();
+    expect(ui["modelSelect"].value).toBe("sql");
+    expect(chat.model).toBe("sql");
+
+    // renderActiveChat and NLP chip click when "gemma4" option is absent from #model-select
+    chat.model = "gemma4";
+    chat.messages = [];
+    ui.render();
+    expect(ui["modelSelect"].value).toBe("sql");
+    const nlpChipOffline =
+      document.querySelectorAll<HTMLButtonElement>(".empty-state .chip")[4];
+    nlpChipOffline?.click();
+    expect(ui["modelSelect"].value).toBe("sql");
+    expect(chat.model).toBe("sql");
 
     chat.model = "gemma4";
     mockFetch.mockResolvedValueOnce({

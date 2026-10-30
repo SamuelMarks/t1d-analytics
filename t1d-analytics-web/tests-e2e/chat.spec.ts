@@ -522,7 +522,7 @@ test("Topbar language chooser and chat bubbles remain strictly within viewport a
     const userBubble = page.locator(".message.user").last();
     const assistantBubble = page.locator(".message.assistant").last();
     await expect(userBubble).toBeVisible();
-    await expect(assistantBubble).toBeVisible();
+    await expect(assistantBubble.locator("table")).toBeVisible();
 
     const userBox = await userBubble.boundingBox();
     const assistantBox = await assistantBubble.boundingBox();
@@ -549,4 +549,231 @@ test("Topbar language chooser and chat bubbles remain strictly within viewport a
     expect(overflowCheck.mainOverflow).toBe(false);
     expect(overflowCheck.msgOverflow).toBe(false);
   }
+});
+
+test("Initial chat window loads cleanly with zero errors and falls back to sql mode when Ollama is offline", async ({
+  page,
+}) => {
+  await page.route("**/api/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      json: {
+        status: "healthy",
+        database: {
+          status_code: "healthy",
+          configured_path: "t1d.duckdb",
+          exists: true,
+          connected: true,
+          table_count: 4,
+          has_initial_data: true,
+        },
+        ollama: {
+          accessible: true,
+        },
+      },
+    });
+  });
+
+  await page.goto("/");
+
+  // Verify zero error messages and hidden status banner on healthy initial load
+  await expect(page.locator(".message.error")).toHaveCount(0);
+  await expect(page.locator("#system-status-banner")).toHaveClass(/hidden/);
+  await expect(page.locator("#system-status-chip")).toHaveClass(
+    /status-healthy/,
+  );
+
+  // Verify initial default chat (Chat #1) is active with aria-current="page"
+  const activeChatTitle = page.locator(
+    "#chat-list .chat-item.active .chat-item-title",
+  );
+  await expect(activeChatTitle).toHaveText("Chat #1");
+  await expect(activeChatTitle).toHaveAttribute("aria-current", "page");
+  await expect(page.locator(".empty-state")).toBeVisible();
+  await expect(page.locator("#chat-input")).toBeEnabled();
+
+  // Now simulate initial load when local Ollama is offline and no cloud keys are configured
+  await page.route("**/api/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      json: {
+        status: "degraded",
+        database: {
+          status_code: "healthy",
+          configured_path: "t1d.duckdb",
+          exists: true,
+          connected: true,
+          table_count: 4,
+          has_initial_data: true,
+        },
+        ollama: {
+          accessible: false,
+        },
+      },
+    });
+  });
+  await page.route("**/api/models", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      json: {
+        models: [
+          {
+            name: "openai/gpt-4o",
+            provider: "openai",
+            configured: false,
+            requires_key: true,
+            available: false,
+            reachable: false,
+            error_code: "MISSING_API_KEY",
+          },
+        ],
+      },
+    });
+  });
+
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+
+  // Default untouched chat should automatically fall back to "sql" mode so queries succeed without LLM error
+  await expect(page.locator("#model-select")).toHaveValue("sql");
+  const sidebarFooter = page.locator("#sidebar #sidebar-footer");
+  await expect(sidebarFooter).toBeVisible();
+  await expect(sidebarFooter.locator("#build-timestamp")).toContainText(
+    "built on ",
+  );
+  await expect(sidebarFooter.locator("#build-timestamp")).toContainText("UTC");
+  await expect(sidebarFooter.locator("#sidebar-copyright")).toContainText(
+    "© 2026 Samuel Marks",
+  );
+  await expect(sidebarFooter.locator("#sidebar-github-link")).toHaveAttribute(
+    "href",
+    "https://github.com/SamuelMarks/t1d-analytics",
+  );
+  await page.fill("#chat-input", "SELECT 1 AS ok;");
+  await page.click("#send-btn");
+  await expect(page.locator(".message.assistant")).toBeVisible();
+  await expect(page.locator(".message.error")).toHaveCount(0);
+});
+
+test("Chat session lifecycle: create, keyboard/mouse switch, dropdown keyboard nav, rename, duplicate, delete, and hash deep-linking", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  // Create Chat #2 and Chat #3
+  await page.click("#new-chat-btn");
+  await page.click("#new-chat-btn");
+  const chatItems = page.locator("#chat-list .chat-item");
+  await expect(chatItems).toHaveCount(3);
+
+  // Switch to Chat #1 via mouse click
+  await chatItems.nth(0).locator(".chat-item-title").click();
+  await expect(chatItems.nth(0)).toHaveClass(/active/);
+
+  // Switch to Chat #2 via keyboard Enter and Chat #3 via Space
+  const chat2Btn = chatItems.nth(1).locator(".chat-item-title");
+  await chat2Btn.focus();
+  await page.keyboard.press("Enter");
+  await expect(chatItems.nth(1)).toHaveClass(/active/);
+
+  const chat3Btn = chatItems.nth(2).locator(".chat-item-title");
+  await chat3Btn.focus();
+  await page.keyboard.press(" ");
+  await expect(chatItems.nth(2)).toHaveClass(/active/);
+
+  // Test dropdown keyboard navigation (ArrowDown, ArrowUp, Home, End, Escape)
+  const dropdownBtn = chatItems.nth(2).locator(".dropdown-btn");
+  await dropdownBtn.focus();
+  await page.keyboard.press("ArrowDown");
+  const menu = chatItems.nth(2).locator(".dropdown-menu");
+  await expect(menu).toHaveClass(/show/);
+
+  const menuItems = menu.locator('[role="menuitem"]');
+  await expect(menuItems.nth(0)).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(menuItems.nth(1)).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(menuItems.nth(2)).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(menuItems.nth(0)).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(menuItems.nth(2)).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).not.toHaveClass(/show/);
+  await expect(dropdownBtn).toBeFocused();
+
+  // Rename Chat #3 -> cancelled prompt keeps title, accepted prompt renames
+  await dropdownBtn.click();
+  page.once("dialog", async (dialog) => {
+    await dialog.dismiss();
+  });
+  await menuItems.nth(0).click();
+  await expect(chat3Btn).toHaveText("Chat #3");
+
+  await dropdownBtn.click();
+  page.once("dialog", async (dialog) => {
+    await dialog.accept("Clinical Cohort Review");
+  });
+  await menuItems.nth(0).click();
+  await expect(chat3Btn).toHaveText("Clinical Cohort Review");
+  await expect(page).toHaveTitle(/Clinical Cohort Review/);
+
+  // Duplicate Chat #3
+  await dropdownBtn.click();
+  await menuItems.nth(1).click();
+  await expect(chatItems).toHaveCount(4);
+  await expect(chatItems.nth(3).locator(".chat-item-title")).toHaveText(
+    "Clinical Cohort Review (Copy)",
+  );
+
+  // Delete chats: dismiss confirm keeps chat, accept confirm deletes chat
+  const copyDropdown = chatItems.nth(3).locator(".dropdown-btn");
+  await copyDropdown.click();
+  page.once("dialog", async (dialog) => {
+    await dialog.dismiss();
+  });
+  await chatItems
+    .nth(3)
+    .locator('.dropdown-menu [role="menuitem"]')
+    .nth(2)
+    .click();
+  await expect(chatItems).toHaveCount(4);
+
+  // Delete all 4 chats to verify Temporary chat fallback and conversion on message send
+  for (let remaining = 4; remaining >= 1; remaining--) {
+    const targetItem = chatItems.nth(0);
+    await targetItem.locator(".dropdown-btn").click();
+    page.once("dialog", async (dialog) => {
+      await dialog.accept();
+    });
+    await targetItem.locator('.dropdown-menu [role="menuitem"]').nth(2).click();
+  }
+
+  await expect(chatItems).toHaveCount(1);
+  await expect(chatItems.nth(0).locator(".chat-item-title")).toHaveText(
+    "Temporary chat",
+  );
+
+  // Sending a message in Temporary chat converts it to a regular numbered chat
+  await page.fill("#chat-input", "SELECT 1;");
+  await page.click("#send-btn");
+  await expect(chatItems.nth(0).locator(".chat-item-title")).not.toHaveText(
+    "Temporary chat",
+  );
+
+  // Test URL hash navigation between chats
+  await page.click("#new-chat-btn");
+  const ids = await page.evaluate(() => {
+    const raw = localStorage.getItem("t1d_analytics_chats");
+    if (!raw) return [] as string[];
+    const parsed = JSON.parse(raw) as { chats: Array<{ id: string }> };
+    return parsed.chats.map((c) => c.id);
+  });
+  expect(ids.length).toBe(2);
+
+  await page.goto(`/#${ids[0]}`);
+  await expect(chatItems.nth(0)).toHaveClass(/active/);
 });

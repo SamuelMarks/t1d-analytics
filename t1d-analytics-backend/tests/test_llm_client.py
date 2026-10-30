@@ -338,7 +338,10 @@ def test_llm_client_protocol_stubs() -> None:
         _UrlResponseProtocol,
     )
 
-    dummy_obj = object()
+    class _DummyProtocolTarget:
+        """Minimal class instance used to invoke unbound protocol property getters."""
+
+    dummy_obj = _DummyProtocolTarget()
     for proto_cls, prop_name in (
         (_TextPartProtocol, "text"),
         (_CandidateContentProtocol, "parts"),

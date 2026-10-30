@@ -224,6 +224,11 @@ FROM "patients";`);
       "cohort-join-on-input",
     );
 
+    const mockColList = document.createElement("ul");
+    mockColList.id = "schema-table-patients";
+    mockColList.innerHTML = `<li class="schema-column"><span>patient_id</span></li>`;
+    document.body.appendChild(mockColList);
+
     tableSelect.innerHTML = `<option value="patients">patients</option><option value="cgms">cgms</option>`;
     joinTableSelect.innerHTML = `<option value="">None (Single Table)</option><option value="cgms">cgms</option><option value="visits">visits</option>`;
 
@@ -233,6 +238,7 @@ FROM "patients";`);
     ui.handleCohortJoinTableChange();
     expect(joinOnInput.value).toBe('"patients".patient_id = "cgms".patient_id');
     expect(joinTypeSelect.value).toBe("INNER JOIN");
+    mockColList.remove();
 
     joinTableSelect.value = "visits";
     ui.handleCohortJoinTableChange();

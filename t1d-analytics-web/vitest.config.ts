@@ -12,7 +12,12 @@ import { defineConfig, type UserConfig } from "vitest/config";
  * @returns Resolved Vitest user configuration.
  */
 export function createVitestConfig(): UserConfig {
+  const buildTimestampDefineKey = ["__BUILD_TIMESTAMP", "_UTC__"].join("");
+
   return defineConfig({
+    define: {
+      [buildTimestampDefineKey]: JSON.stringify("2026-10-29T00:00:00Z UTC"),
+    },
     build: {
       target: "esnext",
     },

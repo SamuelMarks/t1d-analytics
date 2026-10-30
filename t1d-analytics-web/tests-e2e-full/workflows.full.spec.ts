@@ -252,8 +252,8 @@ test.describe("App Workflows Full E2E", () => {
 
     // Verify it opened or toggled. It's normally open initially, so wait for it to collapse.
     const schemaContent = page.locator("#schema-content");
-    // Actually the default might not use collapse via CSS right away in ui.ts unless classes are added,
-    // but we can ensure the button receives focus and operates.
+    await expect(schemaContent).toHaveCount(1);
+    await page.keyboard.press("Enter");
 
     // Let's tab to the schema table toggle
     const tableToggle = page.locator(".schema-table-header-toggle").first();
@@ -340,5 +340,328 @@ test.describe("App Workflows Full E2E", () => {
     await expect(
       assistantMsgs.nth(1).locator(".sql-table td").first(),
     ).toHaveText("2");
+  });
+
+  /**
+   * Tests live Clinical CGM Analytics card rendering when querying cgm_readings from DuckDB.
+   */
+  test("Clinical CGM Analytics: renders live TIR, AGP, and Histogram SVGs from cgm_readings", async ({
+    page,
+  }) => {
+    await page.selectOption("#model-select", "sql");
+    await page.fill(
+      "#chat-input",
+      "SELECT subject_id, timestamp, glucose_value FROM cgm_readings LIMIT 50;",
+    );
+    await page.click("#send-btn");
+
+    const cgmCard = page.locator(".cgm-analytics-card").first();
+    await expect(cgmCard).toBeVisible({ timeout: 10000 });
+    const svgCount = await cgmCard.locator("svg").count();
+    expect(svgCount).toBeGreaterThanOrEqual(2);
+  });
+
+  /**
+   * Tests Visual Cohort Query Builder executing a live DuckDB query against seeded tables.
+   */
+  test("Visual Cohort Builder: builds and executes live cohort query against DuckDB", async ({
+    page,
+  }) => {
+    await expect(page.locator(".schema-table").first()).toBeVisible({
+      timeout: 10000,
+    });
+
+    await page.click("#cohort-filter-btn");
+    const cohortModal = page.locator("#cohort-modal");
+    await expect(cohortModal).toBeVisible();
+
+    await page.selectOption("#cohort-table-select", "patients");
+    await page.fill("#cohort-min-age", "20");
+
+    const previewSql = await page.locator("#cohort-sql-preview").textContent();
+    expect(previewSql).toContain('FROM "patients"');
+    expect(previewSql).toContain("age >= 20");
+
+    await page.click("#cohort-execute-btn");
+    await expect(cohortModal).toBeHidden();
+
+    const assistantMsg = page.locator(".message.assistant").first();
+    await expect(assistantMsg.locator(".sql-table")).toBeVisible({
+      timeout: 10000,
+    });
+  });
+
+  /**
+   * Tests live sorting, searching, and JSON export in the Table Preview Modal against /api/table/tiny.
+   */
+  test("Table Modal Live Controls: sorts, searches, and exports JSON from live backend", async ({
+    page,
+  }) => {
+    const schemaTable = page
+      .locator(".schema-table")
+      .filter({ hasText: "tiny" })
+      .first();
+    await expect(schemaTable).toBeVisible({ timeout: 10000 });
+
+    await schemaTable.locator(".table-view-btn").click();
+    const modal = page.locator("#table-modal");
+    await expect(modal).toBeVisible();
+    await expect(page.locator("#modal-table-body tr")).toHaveCount(2);
+
+    // Sort by id DESC
+    await page.selectOption("#modal-table-sort-col", "id");
+    await page.click("#modal-table-sort-order");
+    await expect(
+      page.locator("#modal-table-body tr").first().locator("td").first(),
+    ).toHaveText("2");
+
+    // Search for "Test A"
+    await page.fill("#modal-table-search", "Test A");
+    await expect(page.locator("#modal-table-body tr")).toHaveCount(1);
+    await expect(
+      page.locator("#modal-table-body tr").first().locator("td").first(),
+    ).toHaveText("1");
+
+    // Export JSON page
+    const jsonDownloadPromise = page.waitForEvent("download");
+    await page.click("#modal-export-json-btn");
+    const jsonDownload = await jsonDownloadPromise;
+    expect(jsonDownload.suggestedFilename()).toContain(".json");
+
+    await page.click("#close-modal-btn");
+    await expect(modal).not.toBeVisible();
+  });
+
+  /**
+   * Tests live SSE streaming execution of literal SQL via /api/chat/stream.
+   */
+  test("Live SSE Streaming: streams SQL execution results via /api/chat/stream", async ({
+    page,
+  }) => {
+    await page.click("#streaming-toggle-btn");
+    await expect(page.locator("#streaming-toggle-btn")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await page.selectOption("#model-select", "sql");
+    await page.fill("#chat-input", "SELECT * FROM tiny;");
+    await page.click("#send-btn");
+
+    const assistantMsg = page.locator(".message.assistant").first();
+    await expect(assistantMsg.locator(".sql-table")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(assistantMsg.locator(".sql-table tbody tr")).toHaveCount(2);
+  });
+
+  /**
+   * Tests live server-side full CSV, Excel (.xlsx), and Parquet (.parquet) downloads from the Table Preview Modal
+   * as well as live table profiling endpoint (/api/table/patients/profile).
+   */
+  test("Live Server Exports & Table Profiling: downloads CSV, Excel, and Parquet and verifies /api/table/patients/profile", async ({
+    page,
+  }) => {
+    // 1. Verify live /api/table/patients/profile endpoint returns column completeness metrics
+    const profileResp = await page.request.get("/api/table/patients/profile");
+    expect(profileResp.ok()).toBe(true);
+    const profileJson = (await profileResp.json()) as {
+      table_name: string;
+      total_rows: number;
+      columns: Array<{ column_name: string; null_percentage: number }>;
+    };
+    expect(profileJson.table_name).toBe("patients");
+    expect(profileJson.total_rows).toBeGreaterThan(0);
+    expect(profileJson.columns.length).toBeGreaterThan(0);
+
+    // 2. Open Table Preview Modal on tiny and trigger full CSV, Excel, and Parquet server exports
+    await page.evaluate(() => {
+      const openedUrls: string[] = [];
+      (
+        window as Window & { __openedExportUrls?: string[] }
+      ).__openedExportUrls = openedUrls;
+      window.open = (url?: string | URL): WindowProxy | null => {
+        if (url) openedUrls.push(String(url));
+        return null;
+      };
+    });
+
+    const schemaTable = page
+      .locator(".schema-table")
+      .filter({ hasText: "tiny" })
+      .first();
+    await expect(schemaTable).toBeVisible({ timeout: 10000 });
+    await schemaTable.locator(".table-view-btn").click();
+    await expect(page.locator("#table-modal")).toBeVisible();
+    await expect(page.locator("#modal-export-full-csv-btn")).toBeEnabled();
+
+    await page.click("#modal-export-full-csv-btn");
+    await page.click("#modal-export-excel-btn");
+    await page.click("#modal-export-parquet-btn");
+
+    const openedUrls = await page.evaluate(
+      () =>
+        (window as Window & { __openedExportUrls?: string[] })
+          .__openedExportUrls || [],
+    );
+    expect(openedUrls.length).toBe(3);
+    expect(openedUrls[0]).toContain("/api/export/csv?table_name=tiny");
+    expect(openedUrls[1]).toContain("/api/export/excel?table_name=tiny");
+    expect(openedUrls[2]).toContain("/api/export/parquet?table_name=tiny");
+
+    // Verify each export URL returns HTTP 200 with non-empty content from the live FastAPI backend
+    for (const exportUrl of openedUrls) {
+      const exportResp = await page.request.get(exportUrl);
+      expect(exportResp.ok()).toBe(true);
+      const bodyBytes = await exportResp.body();
+      expect(bodyBytes.byteLength).toBeGreaterThan(0);
+    }
+  });
+
+  /**
+   * Tests persistent server session synchronization (/api/sessions) across browser reloads and session deletion.
+   */
+  test("Persistent Server Sessions: syncs chat sessions to DuckDB, restores across reload, and deletes cleanly", async ({
+    page,
+  }) => {
+    await page.selectOption("#model-select", "sql");
+    await page.fill("#chat-input", "SELECT COUNT(*) AS total FROM patients;");
+    await page.click("#send-btn");
+    await expect(page.locator(".message.assistant .sql-table")).toBeVisible({
+      timeout: 10000,
+    });
+
+    // Rename the active chat
+    const firstChat = page.locator("#chat-list .chat-item").first();
+    await firstChat.locator(".dropdown-btn").click();
+    page.once("dialog", async (dialog) => {
+      await dialog.accept("Persisted Clinical Session");
+    });
+    await firstChat.locator('.dropdown-menu [role="menuitem"]').first().click();
+    await expect(firstChat.locator(".chat-item-title")).toHaveText(
+      "Persisted Clinical Session",
+    );
+
+    // Explicitly sync with server via #sync-sessions-btn
+    await page.click("#sync-sessions-btn");
+
+    // Verify /api/sessions contains the session on the backend
+    const sessionsResp = await page.request.get("/api/sessions");
+    expect(sessionsResp.ok()).toBe(true);
+    const sessionsPayload = (await sessionsResp.json()) as {
+      sessions: Array<{
+        session_id: string;
+        title: string;
+      }>;
+    };
+    expect(
+      sessionsPayload.sessions.some(
+        (s) => s.title === "Persisted Clinical Session",
+      ),
+    ).toBe(true);
+
+    // Reload page and verify session title and result table are restored
+    await page.reload();
+    await expect(page.locator("#chat-list")).toContainText(
+      "Persisted Clinical Session",
+    );
+    await expect(page.locator(".message.assistant .sql-table")).toBeVisible();
+  });
+
+  /**
+   * Tests the Visual Cohort Query Builder modal with txgroup filtering, relational joins,
+   * and live CGM SVG clinical visualization against the seeded DuckDB backend.
+   */
+  test("Live Visual Cohort Query Builder & CGM Visualization: executes joined cohort query and renders CGM SVG charts", async ({
+    page,
+  }) => {
+    // Wait for schema tables to populate
+    await expect(page.locator(".schema-table").first()).toBeVisible({
+      timeout: 10000,
+    });
+
+    // Open Visual Cohort Query Builder
+    await page.click("#cohort-filter-btn");
+    const cohortModal = page.locator("#cohort-modal");
+    await expect(cohortModal).toBeVisible();
+
+    // Select patients and join with cgm_readings, filter by Min Age 18, Female, Closed-Loop
+    await page.selectOption("#cohort-table-select", "patients");
+    await page.selectOption("#cohort-join-table-select", "cgm_readings");
+    await page.fill("#cohort-min-age", "18");
+    await page.selectOption("#cohort-gender-select", "F");
+    await page.fill("#cohort-txgroup", "Closed-Loop");
+
+    const preview = page.locator("#cohort-sql-preview");
+    await expect(preview).toContainText('FROM "patients"');
+    await expect(preview).toContainText('INNER JOIN "cgm_readings"');
+    await expect(preview).toContainText(
+      'ON "patients".subject_id = "cgm_readings".subject_id',
+    );
+    await expect(preview).toContainText(
+      "\"patients\".txgroup ILIKE '%Closed-Loop%'",
+    );
+
+    // Execute cohort query directly against live DuckDB
+    await page.click("#cohort-execute-btn");
+    await expect(cohortModal).not.toBeVisible();
+
+    const assistantMsg = page.locator(".message.assistant").first();
+    await expect(assistantMsg.locator(".sql-table")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(assistantMsg.locator('[role="alert"]')).toHaveCount(0);
+
+    // Verify CGM SVG clinical chart (Time-in-Range / AGP / Histogram) renders on live cgm_readings query
+    await page.fill(
+      "#chat-input",
+      "SELECT subject_id, timestamp, glucose_value FROM cgm_readings WHERE subject_id = 1;",
+    );
+    await page.click("#send-btn");
+    const cgmMsg = page.locator(".message.assistant").nth(1);
+    const cgmCard = cgmMsg.locator(".cgm-analytics-card");
+    await expect(cgmCard).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(cgmCard.locator("svg").first()).toBeVisible();
+
+    // Change observation window dropdown (.agp-window-select) to "0" (All Available Data) and verify card re-renders
+    const windowSelect = cgmCard.locator(".agp-window-select");
+    await expect(windowSelect).toBeVisible();
+    await windowSelect.selectOption("0");
+    await expect(
+      cgmMsg.locator(".cgm-analytics-card svg").first(),
+    ).toBeVisible();
+  });
+
+  /**
+   * Tests executing all built-in clinical SQL and NLP example chips in the empty state against the live seeded DuckDB backend.
+   */
+  test("Live Built-in Clinical Example SQL Chips: executes all 5 clinical trial chips cleanly against live DuckDB", async ({
+    page,
+  }) => {
+    for (let chipIdx = 0; chipIdx < 5; chipIdx++) {
+      // Create a fresh chat for each chip so the empty state chips are visible
+      if (chipIdx > 0) {
+        await page.click("#new-chat-btn");
+      }
+      const chip = page.locator(".empty-state .chip").nth(chipIdx);
+      await expect(chip).toBeVisible({ timeout: 10000 });
+      await chip.click();
+
+      const inputVal = await page.locator("#chat-input").inputValue();
+      if (chipIdx < 4) {
+        expect(inputVal.toUpperCase()).toContain("SELECT");
+      } else {
+        expect(inputVal.toLowerCase()).toContain("demographics");
+      }
+
+      await page.click("#send-btn");
+      const assistantMsg = page.locator(".message.assistant").first();
+      await expect(assistantMsg.locator(".sql-table")).toBeVisible({
+        timeout: 10000,
+      });
+      await expect(assistantMsg.locator('[role="alert"]')).toHaveCount(0);
+    }
   });
 });

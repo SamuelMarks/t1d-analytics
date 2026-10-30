@@ -1211,12 +1211,8 @@ export const heTranslations: TranslationResourceMap = {
  * @returns {string} The resolved ISO 639-1 language code.
  */
 export function getInitialLang(): string {
-  const savedLang =
-    typeof localStorage !== "undefined"
-      ? localStorage.getItem("app-lang")
-      : null;
-  const browserLang =
-    typeof navigator !== "undefined" ? navigator.language.split("-")[0] : "en";
+  const savedLang = localStorage.getItem("app-lang");
+  const browserLang = navigator.language.split("-")[0];
   return (
     savedLang ||
     (["en", "ja", "ar", "he"].includes(browserLang) ? browserLang : "en")
@@ -1275,31 +1271,23 @@ setDocumentDir(initialLang);
  */
 export function translateDocument(): void {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
-    const key = el.getAttribute("data-i18n");
-    if (key) {
-      el.textContent = i18next.t(key);
-    }
+    const key = el.getAttribute("data-i18n")!;
+    el.textContent = i18next.t(key);
   });
 
   document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
-    const key = el.getAttribute("data-i18n-placeholder");
-    if (key) {
-      el.setAttribute("placeholder", i18next.t(key));
-    }
+    const key = el.getAttribute("data-i18n-placeholder")!;
+    el.setAttribute("placeholder", i18next.t(key));
   });
 
   document.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
-    const key = el.getAttribute("data-i18n-aria-label");
-    if (key) {
-      el.setAttribute("aria-label", i18next.t(key));
-    }
+    const key = el.getAttribute("data-i18n-aria-label")!;
+    el.setAttribute("aria-label", i18next.t(key));
   });
 
   document.querySelectorAll("[data-i18n-title]").forEach((el) => {
-    const key = el.getAttribute("data-i18n-title");
-    if (key) {
-      el.setAttribute("title", i18next.t(key));
-    }
+    const key = el.getAttribute("data-i18n-title")!;
+    el.setAttribute("title", i18next.t(key));
   });
 }
 

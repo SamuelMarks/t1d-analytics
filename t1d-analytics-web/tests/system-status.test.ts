@@ -166,6 +166,26 @@ describe("SystemStatusController & Health Diagnostics", () => {
     expect(banner?.classList.contains("hidden")).toBe(false);
     expect(banner?.classList.contains("banner-info")).toBe(true);
     expect(modelSelect.value).toBe("sql");
+
+    // Also test when an untouched empty active chat exists so its model is updated to 'sql'
+    const chat = state.createChat();
+    expect(chat.model).toBe("gemma4");
+    modelSelect.value = "gemma4";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          status: "degraded",
+          database: {
+            status_code: "healthy",
+            table_count: 5,
+            has_initial_data: true,
+          },
+          ollama: { accessible: false },
+        }),
+    });
+    await ui.checkSystemStatus();
+    expect(chat.model).toBe("sql");
   });
 
   it("checks system status and handles fully healthy state", async () => {
