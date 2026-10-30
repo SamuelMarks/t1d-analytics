@@ -270,7 +270,7 @@ def test_remote_tpu_maxtext_runner_auto_sync_gcs_and_manifest(
         dry_run=False,
     )
 
-    with patch("t1d_analytics.training_runner.sync_dataset_to_gcs") as mock_sync:
+    with patch("t1d_analytics.tpu_orchestrator.sync_dataset_to_gcs") as mock_sync:
         mock_sync.return_value = "gs://test-bucket/dataset.parquet"
         res = runner.run_training(config)
         mock_sync.assert_called_once_with(ds, "gs://test-bucket")
@@ -359,7 +359,7 @@ def test_remote_tpu_poll_workload_status_branches() -> None:
     )
 
     with patch("shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="Google Cloud CLI .* is not installed"):
+        with pytest.raises(RuntimeError, match=r"Google Cloud CLI .* is not installed"):
             asyncio.run(runner.poll_workload_status("t1d-test", max_cfg))
 
     def mock_gcloud_only(cmd: str) -> Optional[str]:
@@ -567,7 +567,7 @@ def test_tpu_workload_reclamation() -> None:
     max_cfg = MaxTextConfig(project_id="p1")
 
     with patch("shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="Google Cloud CLI .* is not installed"):
+        with pytest.raises(RuntimeError, match=r"Google Cloud CLI .* is not installed"):
             asyncio.run(runner.reclaim_tpu_workload("workload-1", max_cfg))
 
     def mock_gcloud_reclaim(cmd: str) -> Optional[str]:
@@ -657,14 +657,39 @@ def test_remote_tpu_run_training_preemption_and_retries(tmp_path: Path) -> None:
                 is True
             )
 
+        async def _fake_async_poll(
+            w_name: str, m_cfg: MaxTextConfig, timeout_seconds: float = 5.0
+        ) -> str:
+            """Return SUCCESS from async coroutine."""
+            _ = (w_name, m_cfg, timeout_seconds)
+            return "SUCCESS"
+
+        async def _fake_async_reclaim(w_name: str, m_cfg: MaxTextConfig) -> bool:
+            """Return True from async coroutine."""
+            _ = (w_name, m_cfg)
+            return True
+
+        with patch.object(runner, "poll_workload_status", new=_fake_async_poll):
+            assert (
+                runner._invoke_status_poll_sync(
+                    "wl-1", MaxTextConfig(project_id="p1"), timeout_seconds=1.0
+                )
+                == "SUCCESS"
+            )
+        with patch.object(runner, "reclaim_tpu_workload", new=_fake_async_reclaim):
+            assert (
+                runner._invoke_reclaim_sync("wl-1", MaxTextConfig(project_id="p1"))
+                is True
+            )
+
 
 def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
     """Test _poll_gcloud_tpu_status, _reclaim_gcloud_tpu_workload, and synchronous helpers."""
     runner = RemoteTpuMaxTextRunner()
     with patch("shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="Google Cloud CLI .* is not installed"):
+        with pytest.raises(RuntimeError, match=r"Google Cloud CLI .* is not installed"):
             asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
-        with pytest.raises(RuntimeError, match="Google Cloud CLI .* is not installed"):
+        with pytest.raises(RuntimeError, match=r"Google Cloud CLI .* is not installed"):
             asyncio.run(runner._reclaim_gcloud_tpu_workload("node-1", "us-central2-b"))
 
     with patch("shutil.which", return_value="/usr/bin/gcloud"):
@@ -881,7 +906,6 @@ def test_tpu_orchestrator_protocol_stubs() -> None:
     from t1d_analytics.tpu_orchestrator import (
         GcsBlobProtocol,
         GcsBucketProtocol,
-        GcsClientProtocol,
         Md5BlobProtocol,
         SubprocessExecutorProtocol,
     )
@@ -939,28 +963,13 @@ def test_tpu_orchestrator_protocol_stubs() -> None:
     executor = _ConcreteExecutor()
     blob.download_to_filename("f.txt")
     blob.upload_from_filename("f.txt")
+    assert isinstance(blob, Md5BlobProtocol)
     assert isinstance(bucket.blob("b"), _ConcreteBlob)
     assert isinstance(client.bucket("bkt"), _ConcreteBucket)
     assert list(client.list_blobs("bkt")) == []
+    assert isinstance(executor, SubprocessExecutorProtocol)
     assert executor(["echo"]).returncode == 0
     passthrough_proc = subprocess.run(
         ["echo", "passthrough"], capture_output=True, text=True
     )
     assert passthrough_proc.returncode == 0
-    with pytest.raises(NotImplementedError):
-        GcsBlobProtocol.download_to_filename(blob, "f.txt")
-    with pytest.raises(NotImplementedError):
-        GcsBlobProtocol.upload_from_filename(blob, "f.txt")
-    md5_prop = getattr(Md5BlobProtocol, "md5_hash")
-    assert isinstance(md5_prop, property)
-    assert md5_prop.fget is not None
-    with pytest.raises(NotImplementedError):
-        md5_prop.fget(blob)
-    with pytest.raises(NotImplementedError):
-        GcsBucketProtocol.blob(bucket, "b")
-    with pytest.raises(NotImplementedError):
-        GcsClientProtocol.bucket(client, "bkt")
-    with pytest.raises(NotImplementedError):
-        GcsClientProtocol.list_blobs(client, "bkt")
-    with pytest.raises(NotImplementedError):
-        SubprocessExecutorProtocol.__call__(executor, ["echo"])

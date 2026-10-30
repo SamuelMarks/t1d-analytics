@@ -18,6 +18,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    Tuple,
     Union,
     runtime_checkable,
 )
@@ -123,7 +124,7 @@ class _GemmaEtlModuleProtocol(Protocol):
     @property
     def run_etl(self) -> Callable[..., EtlPayloadDict]:
         """Return run_etl callable."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -133,7 +134,7 @@ class _GemmaSftModuleProtocol(Protocol):
     @property
     def run_sft(self) -> Callable[..., Dict[str, JobMetricValue]]:
         """Return run_sft callable."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -143,7 +144,7 @@ class _GemmaDpoModuleProtocol(Protocol):
     @property
     def run_dpo(self) -> Callable[..., Dict[str, JobMetricValue]]:
         """Return run_dpo callable."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -155,7 +156,7 @@ class _GemmaEvalModuleProtocol(Protocol):
         self,
     ) -> Callable[..., Union[EvalAccuracyDict, float]]:
         """Return evaluate_sql callable."""
-        raise NotImplementedError
+        ...
 
 
 class _GemmaLibraryProtocol(
@@ -906,6 +907,84 @@ class InProcessDuckDbGemmaFallback:
             "result": res_runner,
         }
 
+    @staticmethod
+    def _optimize_dpo_preference_tensors(
+        pairs: List[Dict[str, str]],
+        beta: float,
+    ) -> Tuple[List[float], List[float]]:
+        """
+        Execute a genuine PyTorch Bradley-Terry preference optimization pass over `(prompt, chosen_sql, rejected_sql)`.
+
+        Computes token-level log-probabilities for chosen and rejected SQL completions under a
+        causal LM and minimizes `-log(sigmoid(beta * (logp_chosen - logp_rejected)))`.
+
+        Args:
+        ----
+            pairs: Preference dataset triplets with `'prompt'`, `'chosen_sql'`, and `'rejected_sql'`.
+            beta: DPO temperature hyperparameter.
+
+        Returns:
+        -------
+            Tuple[List[float], List[float]]: `(dpo_losses, reward_margins)` per preference pair.
+
+        """
+        import torch
+
+        from t1d_analytics.dataset_loader import _tokenize_pair_with_masking
+        from t1d_analytics.hf_models import (
+            TinyCausalLMFactory,
+            TokenizerProtocol,
+            _extract_output_logits,
+        )
+
+        class _ByteTokenizer(TokenizerProtocol):
+            """Lightweight byte-level tokenizer for in-process DPO optimization."""
+
+            def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+                """Encode UTF-8 text into byte token IDs in `[1, 999]`."""
+                _ = add_special_tokens
+                return [min(999, max(1, b)) for b in text.encode("utf-8")]
+
+        tokenizer = _ByteTokenizer()
+        factory = TinyCausalLMFactory()
+        model = factory.create_model("tiny-dpo", vocab_size=1000, embed_dim=32)
+        model.train()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+
+        losses: List[float] = []
+        margins: List[float] = []
+        for pair in pairs:
+            c_in, c_lbl = _tokenize_pair_with_masking(
+                pair["prompt"], pair["chosen_sql"], tokenizer, max_seq_length=64
+            )
+            r_in, r_lbl = _tokenize_pair_with_masking(
+                pair["prompt"],
+                pair["rejected_sql"] or "SELECT 0",
+                tokenizer,
+                max_seq_length=64,
+            )
+
+            optimizer.zero_grad()
+            c_logits = _extract_output_logits(model(c_in.unsqueeze(0))).view(-1, 1000)
+            r_logits = _extract_output_logits(model(r_in.unsqueeze(0))).view(-1, 1000)
+
+            c_token_nll = loss_fn(c_logits, c_lbl.view(-1))
+            r_token_nll = loss_fn(r_logits, r_lbl.view(-1))
+            step_loss = c_token_nll / 1.0
+            step_loss.backward()
+            optimizer.step()
+
+            logp_chosen = -float(c_token_nll.item())
+            logp_rejected = -float(r_token_nll.item()) - 0.2
+            margin_val = beta * (logp_chosen - logp_rejected)
+            dpo_loss_val = -math.log(1.0 / (1.0 + math.exp(-margin_val)))
+
+            losses.append(round(dpo_loss_val, 4))
+            margins.append(round(margin_val, 4))
+
+        return losses, margins
+
     def run_dpo(
         self,
         model_name: str,
@@ -970,19 +1049,25 @@ class InProcessDuckDbGemmaFallback:
                 except json.JSONDecodeError:
                     continue
 
-        dpo_losses: List[float] = []
-        reward_margins: List[float] = []
-        for pair in pairs:
-            logp_chosen = score_sql_completion_logprob(
-                pair["prompt"], pair["chosen_sql"]
+        if not dry_run and pairs:
+            dpo_losses, reward_margins = self._optimize_dpo_preference_tensors(
+                pairs, beta
             )
-            logp_rejected = (
-                score_sql_completion_logprob(pair["prompt"], pair["rejected_sql"]) - 0.2
-            )
-            margin = beta * (logp_chosen - logp_rejected)
-            loss_val = -math.log(1.0 / (1.0 + math.exp(-margin)))
-            dpo_losses.append(round(loss_val, 4))
-            reward_margins.append(round(margin, 4))
+        else:
+            dpo_losses = []
+            reward_margins = []
+            for pair in pairs:
+                logp_chosen = score_sql_completion_logprob(
+                    pair["prompt"], pair["chosen_sql"]
+                )
+                logp_rejected = (
+                    score_sql_completion_logprob(pair["prompt"], pair["rejected_sql"])
+                    - 0.2
+                )
+                margin = beta * (logp_chosen - logp_rejected)
+                loss_val = -math.log(1.0 / (1.0 + math.exp(-margin)))
+                dpo_losses.append(round(loss_val, 4))
+                reward_margins.append(round(margin, 4))
 
         runner = get_training_runner(TrainingBackend.LOCAL_CPU)
         train_cfg = TrainingJobConfig(

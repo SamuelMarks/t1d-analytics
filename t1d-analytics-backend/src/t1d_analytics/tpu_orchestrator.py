@@ -47,11 +47,11 @@ class GcsBlobProtocol(Protocol):
 
     def download_to_filename(self, filename: str) -> None:
         """Download blob contents to local file."""
-        raise NotImplementedError
+        ...
 
     def upload_from_filename(self, filename: str) -> None:
         """Upload local file contents to blob."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -61,7 +61,7 @@ class Md5BlobProtocol(Protocol):
     @property
     def md5_hash(self) -> Optional[str]:
         """Return base64-encoded MD5 hash string."""
-        raise NotImplementedError
+        ...
 
 
 class GcsBucketProtocol(Protocol):
@@ -69,7 +69,7 @@ class GcsBucketProtocol(Protocol):
 
     def blob(self, blob_name: str) -> GcsBlobProtocol:
         """Create a blob reference within this bucket."""
-        raise NotImplementedError
+        ...
 
 
 class GcsClientProtocol(Protocol):
@@ -77,13 +77,13 @@ class GcsClientProtocol(Protocol):
 
     def bucket(self, bucket_name: str) -> GcsBucketProtocol:
         """Return bucket reference by name."""
-        raise NotImplementedError
+        ...
 
     def list_blobs(
         self, bucket_or_name: Union[GcsBucketProtocol, str], prefix: str = ""
     ) -> Iterable[GcsBlobProtocol]:
         """List blobs in bucket matching prefix."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -98,7 +98,7 @@ class SubprocessExecutorProtocol(Protocol):
         check: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Execute a command and return a CompletedProcess record."""
-        raise NotImplementedError
+        ...
 
 
 def _compute_md5_base64(payload: bytes) -> str:
@@ -440,6 +440,70 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             )
         return override_status
 
+    def _build_gcloud_describe_cmd(self, workload_name: str, zone: str) -> List[str]:
+        """
+        Build the `gcloud compute tpus tpu-vm describe` command and validate `gcloud` availability.
+
+        Args:
+        ----
+            workload_name: Identifier of the TPU VM instance.
+            zone: GCP availability zone of the TPU VM instance.
+
+        Returns:
+        -------
+            List[str]: Subprocess argument list for describing the TPU VM.
+
+        Raises:
+        ------
+            TpuOrchestrationError: If Google Cloud CLI (`gcloud`) is not installed.
+
+        """
+        gcloud_bin = shutil.which("gcloud")
+        if not gcloud_bin:
+            raise TpuOrchestrationError("Google Cloud CLI (gcloud) is not installed.")
+        return [
+            gcloud_bin,
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "describe",
+            workload_name,
+            f"--zone={zone}",
+            "--format=json",
+        ]
+
+    def _build_gcloud_delete_cmd(self, workload_name: str, zone: str) -> List[str]:
+        """
+        Build the `gcloud compute tpus tpu-vm delete` command and validate `gcloud` availability.
+
+        Args:
+        ----
+            workload_name: Identifier of the TPU VM instance.
+            zone: GCP availability zone of the TPU VM instance.
+
+        Returns:
+        -------
+            List[str]: Subprocess argument list for deleting the TPU VM.
+
+        Raises:
+        ------
+            TpuOrchestrationError: If Google Cloud CLI (`gcloud`) is not installed.
+
+        """
+        gcloud_bin = shutil.which("gcloud")
+        if not gcloud_bin:
+            raise TpuOrchestrationError("Google Cloud CLI (gcloud) is not installed.")
+        return [
+            gcloud_bin,
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "delete",
+            workload_name,
+            f"--zone={zone}",
+            "--quiet",
+        ]
+
     def _poll_gcloud_tpu_status_sync(
         self,
         workload_name: str,
@@ -465,20 +529,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             TpuPollingTimeoutError: If polling exceeds timeout threshold.
 
         """
-        gcloud_bin = shutil.which("gcloud")
-        if not gcloud_bin:
-            raise TpuOrchestrationError("Google Cloud CLI (gcloud) is not installed.")
-
-        cmd = [
-            gcloud_bin,
-            "compute",
-            "tpus",
-            "tpu-vm",
-            "describe",
-            workload_name,
-            f"--zone={zone}",
-            "--format=json",
-        ]
+        cmd = self._build_gcloud_describe_cmd(workload_name, zone)
         start = time.time()
         while time.time() - start < timeout_seconds:
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -516,20 +567,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             TpuPollingTimeoutError: If polling exceeds timeout threshold.
 
         """
-        gcloud_bin = shutil.which("gcloud")
-        if not gcloud_bin:
-            raise TpuOrchestrationError("Google Cloud CLI (gcloud) is not installed.")
-
-        cmd = [
-            gcloud_bin,
-            "compute",
-            "tpus",
-            "tpu-vm",
-            "describe",
-            workload_name,
-            f"--zone={zone}",
-            "--format=json",
-        ]
+        cmd = self._build_gcloud_describe_cmd(workload_name, zone)
         start = time.time()
         while time.time() - start < timeout_seconds:
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -566,20 +604,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             TpuOrchestrationError: If deletion fails after maximum retries or gcloud CLI is missing.
 
         """
-        gcloud_bin = shutil.which("gcloud")
-        if not gcloud_bin:
-            raise TpuOrchestrationError("Google Cloud CLI (gcloud) is not installed.")
-
-        cmd = [
-            gcloud_bin,
-            "compute",
-            "tpus",
-            "tpu-vm",
-            "delete",
-            workload_name,
-            f"--zone={zone}",
-            "--quiet",
-        ]
+        cmd = self._build_gcloud_delete_cmd(workload_name, zone)
         last_error = ""
         for attempt in range(1, max_retries + 1):
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -617,20 +642,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             TpuOrchestrationError: If deletion fails after maximum retries or gcloud CLI is missing.
 
         """
-        gcloud_bin = shutil.which("gcloud")
-        if not gcloud_bin:
-            raise TpuOrchestrationError("Google Cloud CLI (gcloud) is not installed.")
-
-        cmd = [
-            gcloud_bin,
-            "compute",
-            "tpus",
-            "tpu-vm",
-            "delete",
-            workload_name,
-            f"--zone={zone}",
-            "--quiet",
-        ]
+        cmd = self._build_gcloud_delete_cmd(workload_name, zone)
         last_error = ""
         for attempt in range(1, max_retries + 1):
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -643,6 +655,32 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         raise TpuOrchestrationError(
             f"Failed to reclaim TPU VM workload '{workload_name}' via gcloud: {last_error}"
         )
+
+    @staticmethod
+    def _build_xpk_describe_cmd(
+        xpk_bin: str, workload_name: str, max_cfg: MaxTextConfig
+    ) -> List[str]:
+        """
+        Build the `xpk workload describe` command list.
+
+        Args:
+        ----
+            xpk_bin: Path to the `xpk` executable.
+            workload_name: Identifier of the dispatched training workload.
+            max_cfg: MaxText infrastructure configuration.
+
+        Returns:
+        -------
+            List[str]: Subprocess argument list for describing the XPK workload.
+
+        """
+        return [
+            xpk_bin,
+            "workload",
+            "describe",
+            f"--workload={workload_name}",
+            f"--cluster=tpu-cluster-{max_cfg.accelerator_type.value}",
+        ]
 
     def _poll_workload_status_sync(
         self,
@@ -686,13 +724,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 timeout_seconds=timeout_seconds,
             )
 
-        cmd = [
-            xpk_bin,
-            "workload",
-            "describe",
-            f"--workload={workload_name}",
-            f"--cluster=tpu-cluster-{max_cfg.accelerator_type.value}",
-        ]
+        cmd = self._build_xpk_describe_cmd(xpk_bin, workload_name, max_cfg)
         start = time.time()
         while time.time() - start < timeout_seconds:
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -747,13 +779,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 timeout_seconds=timeout_seconds,
             )
 
-        cmd = [
-            xpk_bin,
-            "workload",
-            "describe",
-            f"--workload={workload_name}",
-            f"--cluster=tpu-cluster-{max_cfg.accelerator_type.value}",
-        ]
+        cmd = self._build_xpk_describe_cmd(xpk_bin, workload_name, max_cfg)
         start = time.time()
         while time.time() - start < timeout_seconds:
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -946,7 +972,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                                 f"Checksum mismatch for '{dest_file.name}': expected {remote_md5}, got {local_md5}"
                             )
                 return output_dir
-            except ValueError:
+            except ChecksumMismatchError:
                 raise
             except Exception as e:
                 last_err = e
@@ -976,6 +1002,13 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             str: Resolved workload status string.
 
         """
+        if (
+            getattr(self.poll_workload_status, "__func__", None)
+            is RemoteTpuMaxTextRunner.poll_workload_status
+        ):
+            return self._poll_workload_status_sync(
+                workload_name, max_cfg, timeout_seconds=timeout_seconds
+            )
         res = self.poll_workload_status(
             workload_name, max_cfg, timeout_seconds=timeout_seconds
         )
@@ -1001,6 +1034,11 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             bool: True if resources were reclaimed.
 
         """
+        if (
+            getattr(self.reclaim_tpu_workload, "__func__", None)
+            is RemoteTpuMaxTextRunner.reclaim_tpu_workload
+        ):
+            return self._reclaim_tpu_workload_sync(workload_name, max_cfg)
         res = self.reclaim_tpu_workload(workload_name, max_cfg)
         if asyncio.iscoroutine(res):
             return bool(asyncio.run(res))
@@ -1035,9 +1073,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             and os.environ.get("T1D_AUTO_SYNC_GCS") == "1"
             and not config.dry_run
         ):
-            from t1d_analytics import training_runner as _tr_mod
-
-            _tr_mod.sync_dataset_to_gcs(
+            sync_dataset_to_gcs(
                 Path(config.dataset_path), config.maxtext_config.bucket_url
             )
 

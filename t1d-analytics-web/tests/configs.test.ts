@@ -209,4 +209,38 @@ describe("Frontend configuration modules", () => {
       expect(webServers[1].reuseExistingServer).toBe(true);
     }
   });
+
+  /**
+   * Verifies that every TypeScript implementation module under `src/` is registered in `package.json` `scripts.docs`.
+   */
+  it("verifies all src/**/*.ts implementation modules are registered in TypeDoc scripts.docs", () => {
+    const docsScript = pkgRaw.scripts?.docs || "";
+    const srcDir = path.resolve(__dirname, "../src");
+    const collectTsFiles = (dir: string, prefix: string = "src"): string[] => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      const results: string[] = [];
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          results.push(
+            ...collectTsFiles(
+              path.join(dir, entry.name),
+              `${prefix}/${entry.name}`,
+            ),
+          );
+        } else if (
+          entry.name.endsWith(".ts") &&
+          !entry.name.endsWith(".d.ts")
+        ) {
+          results.push(`${prefix}/${entry.name}`);
+        }
+      }
+      return results;
+    };
+
+    const allSrcModules = collectTsFiles(srcDir);
+    expect(allSrcModules.length).toBeGreaterThan(10);
+    for (const modPath of allSrcModules) {
+      expect(docsScript).toContain(modPath);
+    }
+  });
 });

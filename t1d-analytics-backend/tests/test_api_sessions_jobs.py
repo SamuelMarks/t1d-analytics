@@ -323,7 +323,8 @@ def test_sliding_window_rate_limiting(
     monkeypatch: pytest.MonkeyPatch, mock_db: str
 ) -> None:
     """Test sliding-window rate limiting on execute_sql endpoint."""
-    from t1d_analytics.api import RATE_LIMIT_STORE, check_rate_limit
+    from t1d_analytics.api import check_rate_limit
+    from t1d_analytics.rate_limiter import RATE_LIMIT_STORE
 
     RATE_LIMIT_STORE.clear()
     ip = "192.168.1.100"
@@ -359,36 +360,38 @@ def test_rate_limiter_backends_and_retry_after(
     from concurrent.futures import ThreadPoolExecutor
 
     from t1d_analytics.api import (
-        RATE_LIMIT_STORE,
         DuckDbRateLimiter,
         MemoryRateLimiter,
         enforce_rate_limit,
         get_rate_limiter,
     )
     from t1d_analytics.errors import RateLimitExceededError
+    from t1d_analytics.rate_limiter import RATE_LIMIT_STORE, close_all_rate_limiters
 
-    mem_limiter = MemoryRateLimiter()
-    mem_limiter.reset()
-    assert mem_limiter.get_retry_after("10.0.0.1", window_seconds=60.0) == 1
-    assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is True
-    assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is False
-    assert mem_limiter.get_retry_after("10.0.0.1", window_seconds=60.0) >= 1
-    RATE_LIMIT_STORE["stale.ip.1"] = [0.0]
-    assert mem_limiter.is_allowed("10.0.0.2", limit=5, window_seconds=60.0) is True
-    assert "stale.ip.1" not in RATE_LIMIT_STORE
-    mem_limiter.reset()
-    assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is True
+    with MemoryRateLimiter() as mem_limiter:
+        mem_limiter.reset()
+        assert mem_limiter.get_retry_after("10.0.0.1", window_seconds=60.0) == 1
+        assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is True
+        assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is False
+        assert mem_limiter.get_retry_after("10.0.0.1", window_seconds=60.0) >= 1
+        RATE_LIMIT_STORE["stale.ip.1"] = [0.0]
+        assert mem_limiter.is_allowed("10.0.0.2", limit=5, window_seconds=60.0) is True
+        assert "stale.ip.1" not in RATE_LIMIT_STORE
+        mem_limiter.reset()
+        assert mem_limiter.is_allowed("10.0.0.1", limit=1, window_seconds=60.0) is True
 
     db_path = tmp_path / "rate_limits.duckdb"
-    duck_limiter = DuckDbRateLimiter(str(db_path))
-    duck_limiter.reset()
-    assert duck_limiter.get_retry_after("10.0.0.2", window_seconds=60.0) == 1
-    assert duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is True
-    assert duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is True
-    assert duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is False
-    assert duck_limiter.get_retry_after("10.0.0.2", window_seconds=60.0) >= 1
-    duck_limiter.reset()
-    assert duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is True
+    with DuckDbRateLimiter(str(db_path)) as duck_limiter:
+        duck_limiter.reset()
+        assert duck_limiter.get_retry_after("10.0.0.2", window_seconds=60.0) == 1
+        assert duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is True
+        assert duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is True
+        assert (
+            duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is False
+        )
+        assert duck_limiter.get_retry_after("10.0.0.2", window_seconds=60.0) >= 1
+        duck_limiter.reset()
+        assert duck_limiter.is_allowed("10.0.0.2", limit=2, window_seconds=60.0) is True
 
     monkeypatch.setenv("T1D_RATE_LIMITER_BACKEND", "duckdb")
     limiter_duck = get_rate_limiter()
@@ -397,6 +400,8 @@ def test_rate_limiter_backends_and_retry_after(
     monkeypatch.setenv("T1D_RATE_LIMITER_BACKEND", "memory")
     limiter_mem = get_rate_limiter()
     assert isinstance(limiter_mem, MemoryRateLimiter)
+    close_all_rate_limiters()
+    limiter_mem = get_rate_limiter()
 
     mock_request = MagicMock()
     mock_request.client.host = "10.0.0.99"
@@ -420,6 +425,7 @@ def test_rate_limiter_backends_and_retry_after(
         results = list(pool.map(lambda _: send_req(), range(30)))
     assert results.count(True) == 10
     assert results.count(False) == 20
+    close_all_rate_limiters()
 
 
 def test_training_job_endpoints(tmp_path: Path, mocker: MagicMock) -> None:
@@ -469,27 +475,55 @@ def test_training_job_endpoints(tmp_path: Path, mocker: MagicMock) -> None:
     assert resp_cancel.status_code == 200
     assert resp_cancel.json()["status"] in ["cancelled", "completed"]
 
+    from t1d_analytics.api import get_training_job_manager
+    from t1d_analytics.session_store import (
+        SessionStore,
+        managed_sessions_db_conn,
+        open_sessions_db_conn,
+    )
 
-def test_rate_limiter_abstract_stubs() -> None:
-    """Test abstract and protocol stub methods on BaseRateLimiter and TrainingRunnerProtocol."""
-    from t1d_analytics.job_manager import TrainingRunnerProtocol
+    mgr = get_training_job_manager()
+    pruned = mgr.prune_completed_jobs(max_retained=0)
+    assert pruned >= 0
+
+    sess_db = str(tmp_path / "managed_sess.duckdb")
+    with managed_sessions_db_conn(sess_db) as m_conn:
+        m_conn.execute("SELECT 1")
+    default_store = SessionStore()
+    assert default_store.list_sessions(db_path=sess_db).sessions == []
+
+    bad_conn = MagicMock()
+    bad_conn.execute.side_effect = duckdb.Error("CREATE TABLE failed")
+    mocker.patch("duckdb.connect", return_value=bad_conn)
+    with pytest.raises(duckdb.Error, match="CREATE TABLE failed"):
+        open_sessions_db_conn(str(tmp_path / "bad_schema.duckdb"))
+    bad_conn.close.assert_called_once()
+
+
+def test_rate_limiter_abstract_stubs(tmp_path: Path) -> None:
+    """Verify concrete rate limiters and LocalCpuRunner satisfy their base contracts."""
     from t1d_analytics.models import TrainingBackend, TrainingJobConfig
     from t1d_analytics.rate_limiter import BaseRateLimiter, MemoryRateLimiter
     from t1d_analytics.training_runner import LocalCpuRunner
 
     limiter = MemoryRateLimiter()
-    with pytest.raises(NotImplementedError):
-        BaseRateLimiter.is_allowed(limiter, "127.0.0.1")
-    with pytest.raises(NotImplementedError):
-        BaseRateLimiter.get_retry_after(limiter, "127.0.0.1")
-    with pytest.raises(NotImplementedError):
-        BaseRateLimiter.reset(limiter)
+    assert isinstance(limiter, BaseRateLimiter)
+    limiter.reset()
+    assert limiter.is_allowed("127.0.0.1") is True
+    assert limiter.get_retry_after("127.0.0.1") >= 1
 
+    ds_file = tmp_path / "ds.jsonl"
+    ds_file.write_text('{"prompt": "q", "sql": "SELECT 1"}\n', encoding="utf-8")
     cfg = TrainingJobConfig(
         model_name="gemma4-sql",
         backend=TrainingBackend.LOCAL_CPU,
-        dataset_path="ds.jsonl",
-        output_dir="out",
+        dataset_path=str(ds_file),
+        output_dir=str(tmp_path / "out"),
+        dry_run=True,
+        use_tiny_model=True,
     )
-    with pytest.raises(NotImplementedError):
-        TrainingRunnerProtocol.run_training(LocalCpuRunner(), cfg)
+    mock_tok = MagicMock()
+    mock_tok.encode.return_value = [1, 2, 3]
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=mock_tok):
+        res = LocalCpuRunner().run_training(cfg)
+    assert res["status"] == "dry_run_completed"

@@ -5,7 +5,7 @@
  */
 
 import { type SqlCellValue } from "./formatters";
-import { type ApiErrorInput } from "./sql-highlight";
+import { type ApiErrorInput } from "./api-client";
 
 /**
  * Structured payload emitted by the `/api/chat/stream` `done` or `result` event.

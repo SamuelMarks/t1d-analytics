@@ -640,7 +640,7 @@ def test_download_aspnet_postback_file_fetch_initial_form_and_fallback_filename(
 
     assert saved_path.exists()
     assert saved_path.read_bytes() == b"zip_bytes_content"
-    assert "ctl00ExportBtn_StudyA.zip" == saved_path.name
+    assert saved_path.name == "ctl00ExportBtn_StudyA.zip"
 
 
 def test_download_aspnet_postback_file_sha256_verification(

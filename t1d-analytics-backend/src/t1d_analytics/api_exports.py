@@ -288,9 +288,8 @@ def fetch_paginated_table_data(
         cols_info = conn.execute(f'DESCRIBE "{escaped_table}"').fetchall()
         column_names = [c[0] for c in cols_info]
 
-        if sort_by is not None and sort_by != "":
-            if sort_by not in column_names:
-                raise InvalidSortColumnError(params={"sort_by": sort_by})
+        if sort_by is not None and sort_by != "" and sort_by not in column_names:
+            raise InvalidSortColumnError(params={"sort_by": sort_by})
 
         where_clause = ""
         params: List[str] = []
@@ -720,7 +719,7 @@ def stream_json_export(
             """
             try:
                 nl = chr(10)
-                yield f"[{nl}".encode("utf-8")
+                yield f"[{nl}".encode()
                 first_row = True
                 batch = initial_batch
                 while batch:
@@ -732,7 +731,7 @@ def stream_json_export(
                         chunk_parts.append(prefix + json.dumps(row_dict, default=str))
                     yield "".join(chunk_parts).encode("utf-8")
                     batch = result.fetchmany(500)
-                yield f"{nl}]{nl}".encode("utf-8")
+                yield f"{nl}]{nl}".encode()
             finally:
                 db_conn.close()
 

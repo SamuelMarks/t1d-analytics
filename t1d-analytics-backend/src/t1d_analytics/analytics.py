@@ -18,19 +18,7 @@ from t1d_analytics.errors import (
 )
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.ingestion import (
-    _NUMERIC_CLINICAL_CONCEPTS as _NUMERIC_CLINICAL_CONCEPTS,
-)
-from t1d_analytics.ingestion import (
     IngestionManifestRecord as IngestionManifestRecord,
-)
-from t1d_analytics.ingestion import (
-    _detect_csv_encoding_and_delimiter as _detect_csv_encoding_and_delimiter,
-)
-from t1d_analytics.ingestion import (
-    _ensure_manifest_table as _ensure_manifest_table,
-)
-from t1d_analytics.ingestion import (
-    _read_clinical_dataframe as _read_clinical_dataframe,
 )
 from t1d_analytics.ingestion import (
     compute_file_hash as compute_file_hash,
@@ -255,44 +243,48 @@ def run_query_repl(
 
     print(_("Connecting to DuckDB at {}...", db_path))
     conn = duckdb.connect(db_path, read_only=True)
+    try:
+        print("\n" + "=" * 50)
+        print(_("Welcome to T1D Analytics Interface!"))
+        print(_("You can enter:"))
+        print(
+            _(
+                "  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)"
+            )
+        )
+        print(_("  - Natural language queries (will be translated to SQL via LLM)"))
+        print(_("  - 'exit' or 'quit' to close."))
+        print("=" * 50 + "\n")
 
-    print("\n" + "=" * 50)
-    print(_("Welcome to T1D Analytics Interface!"))
-    print(_("You can enter:"))
-    print(
-        _("  - Standard SQL queries (starting with SELECT, WITH, SHOW, DESCRIBE, etc.)")
-    )
-    print(_("  - Natural language queries (will be translated to SQL via LLM)"))
-    print(_("  - 'exit' or 'quit' to close."))
-    print("=" * 50 + "\n")
-
-    while True:
-        try:
-            user_input = input("query> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n" + _("Exiting."))
-            break
-
-        if not user_input:
-            continue
-
-        lower_input = user_input.lower()
-        if lower_input in ("exit", "quit"):
-            print(_("Exiting."))
-            break
-
-        if is_sql_query(user_input, conn=conn):
+        while True:
             try:
-                result = conn.sql(coerce_numeric_aggregates_in_sql(user_input))
-                # Show results nicely
-                if result:
-                    result.show()
-            except Exception as e:
-                print(_("SQL Error: {}", e))
-        else:
-            handle_natural_language(conn, user_input, model=model, provider=provider)
+                user_input = input("query> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n" + _("Exiting."))
+                break
 
-    conn.close()
+            if not user_input:
+                continue
+
+            lower_input = user_input.lower()
+            if lower_input in ("exit", "quit"):
+                print(_("Exiting."))
+                break
+
+            if is_sql_query(user_input, conn=conn):
+                try:
+                    result = conn.sql(coerce_numeric_aggregates_in_sql(user_input))
+                    # Show results nicely
+                    if result:
+                        result.show()
+                except Exception as e:
+                    print(_("SQL Error: {}", e))
+            else:
+                handle_natural_language(
+                    conn, user_input, model=model, provider=provider
+                )
+    finally:
+        conn.close()
 
 
 def profile_table(db_path: str, table_name: str) -> TableProfileResult:
@@ -442,14 +434,3 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
         }
     finally:
         conn.close()
-
-
-from t1d_analytics.api_exports import (  # noqa: E402
-    export_table as export_table,
-)
-from t1d_analytics.api_exports import (  # noqa: E402
-    iter_sanitized_table_batches as iter_sanitized_table_batches,
-)
-from t1d_analytics.api_exports import (  # noqa: E402
-    write_sanitized_excel_workbook as write_sanitized_excel_workbook,
-)

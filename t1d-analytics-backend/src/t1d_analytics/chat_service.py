@@ -56,18 +56,6 @@ from t1d_analytics.llm_client import (
     get_effective_api_key,
     resolve_provider_and_model,
 )
-from t1d_analytics.sql_agent import (
-    AgenticSqlResult as AgenticSqlResult,
-)
-from t1d_analytics.sql_agent import (
-    _classify_sql_error_hint as _classify_sql_error_hint,
-)
-from t1d_analytics.sql_agent import (
-    execute_agentic_nl_to_sql as execute_agentic_nl_to_sql,
-)
-from t1d_analytics.sql_agent import (
-    validate_sql_tokens as validate_sql_tokens,
-)
 from t1d_analytics.sql_utils import (
     ALL_SQL_KEYWORDS,
     SqlValue,
@@ -76,6 +64,26 @@ from t1d_analytics.sql_utils import (
 )
 
 logger = logging.getLogger(__name__)
+_STREAM_DONE_SENTINEL = "_T1D_SSE_STREAM_EOF_"
+
+
+def _next_stream_token_or_eof(iterator: Iterator[str]) -> str:
+    """
+    Pull the next token from a synchronous token iterator or return `_STREAM_DONE_SENTINEL` on exhaustion.
+
+    Args:
+    ----
+        iterator: Synchronous token iterator produced by `stream_fn`.
+
+    Returns:
+    -------
+        str: Next token string or `_STREAM_DONE_SENTINEL` when exhausted.
+
+    """
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _STREAM_DONE_SENTINEL
 
 
 def is_likely_sql_statement(query: str) -> bool:
@@ -101,7 +109,11 @@ def is_likely_sql_statement(query: str) -> bool:
     return not (first_word == "show" and len(tokens) > 1 and tokens[1].lower() == "me")
 
 
-def synthesize_fallback_clinical_sql(schema: str, nl_query: str) -> Tuple[str, str]:
+def synthesize_fallback_clinical_sql(
+    schema: str,
+    nl_query: str,
+    include_diagnostic_note: bool = False,
+) -> Tuple[str, str]:
     """
     Synthesize a deterministic, schema-validated DuckDB SQL query when local LLM inference crashes.
 
@@ -112,6 +124,7 @@ def synthesize_fallback_clinical_sql(schema: str, nl_query: str) -> Tuple[str, s
     ----
         schema: Extracted database schema text.
         nl_query: User's natural language question.
+        include_diagnostic_note: Whether to prepend a diagnostic notice explaining that local inference fell back to schema-guided SQL synthesis.
 
     Returns:
     -------
@@ -164,7 +177,12 @@ def synthesize_fallback_clinical_sql(schema: str, nl_query: str) -> Tuple[str, s
         sql = f'SELECT * FROM "{safe_tbl}" LIMIT {limit_val};'
 
     nl = chr(10)
-    full_resp = f"```sql{nl}{sql}{nl}```"
+    note_prefix = (
+        f"_Note: Local LLM inference was unavailable; synthesized schema-guided fallback SQL for `{safe_tbl}`._{nl}{nl}"
+        if include_diagnostic_note
+        else ""
+    )
+    full_resp = f"{note_prefix}```sql{nl}{sql}{nl}```"
     return full_resp, sql
 
 
@@ -408,8 +426,10 @@ def translate_nl_to_sql(
             conn = connect_fn(db_path, read_only=True)
         except duckdb.IOException as io_err:
             raise DatabaseNotFoundError(params={"error": str(io_err)}) from io_err
-        schema = schema_fn(conn)
-        conn.close()
+        try:
+            schema = schema_fn(conn)
+        finally:
+            conn.close()
         logger.debug(f"Retrieved schema: {schema[:200]}... (truncated)")
     except DatabaseNotFoundError as dnf:
         logger.error(f"Failed to read schema: {dnf}")
@@ -438,7 +458,9 @@ def translate_nl_to_sql(
             logger.warning(
                 f"Local Ollama model '{actual_model}' crashed ({e}); synthesizing schema-aware clinical SQL fallback."
             )
-            return synthesize_fallback_clinical_sql(schema, nl_query)
+            return synthesize_fallback_clinical_sql(
+                schema, nl_query, include_diagnostic_note=True
+            )
         logger.error(f"LLM translation error: {e}")
         raise LlmTranslationError(params={"error": str(e)}) from e
 
@@ -470,8 +492,10 @@ def _resolve_sql_mode_query(
     if is_likely_sql_statement(message):
         return message
     conn = connect_fn(db_path, read_only=True)
-    schema = schema_fn(conn)
-    conn.close()
+    try:
+        schema = schema_fn(conn)
+    finally:
+        conn.close()
     _, synthesized_sql = synthesize_fallback_clinical_sql(schema, message)
     return synthesized_sql
 
@@ -636,42 +660,49 @@ async def generate_sse_chat_events(
 
     try:
         conn = connect_fn(db_path, read_only=True)
-        schema = schema_fn(conn)
-        conn.close()
+        try:
+            schema = schema_fn(conn)
+        finally:
+            conn.close()
 
         prompt = build_sql_prompt_with_history(
             schema, request.message, history=request.history
         )
         resolved_prov, _ = resolve_provider_and_model(request.model, request.provider)
+        full_parts: List[str] = []
         try:
-            tokens_list = await asyncio.to_thread(
-                lambda: list(
-                    stream_fn(
-                        prompt,
-                        request.model,
-                        api_key=request.api_key,
-                        provider=request.provider,
-                    )
+            token_iter = iter(
+                stream_fn(
+                    prompt,
+                    request.model,
+                    api_key=request.api_key,
+                    provider=request.provider,
                 )
             )
+            while True:
+                if req is not None and await req.is_disconnected():
+                    logger.info("Client disconnected during SSE token streaming.")
+                    return
+                token = await asyncio.to_thread(_next_stream_token_or_eof, token_iter)
+                if token == _STREAM_DONE_SENTINEL:
+                    break
+                full_parts.append(token)
+                tok_payload = json.dumps({"event": "token", "token": token})
+                yield f"data: {tok_payload}{sse_sep}"
         except Exception as stream_exc:
             if _is_recoverable_local_ollama_crash(resolved_prov, stream_exc):
                 logger.warning(
                     f"Local Ollama streaming crashed ({stream_exc}); using schema-aware clinical SQL fallback."
                 )
-                fb_resp, _ = synthesize_fallback_clinical_sql(schema, request.message)
-                tokens_list = [fb_resp]
+                fb_resp, _ = synthesize_fallback_clinical_sql(
+                    schema, request.message, include_diagnostic_note=True
+                )
+                full_parts.append(fb_resp)
+                tok_payload = json.dumps({"event": "token", "token": fb_resp})
+                yield f"data: {tok_payload}{sse_sep}"
             else:
                 raise
 
-        full_parts: List[str] = []
-        for token in tokens_list:
-            if req is not None and await req.is_disconnected():
-                logger.info("Client disconnected during SSE token streaming.")
-                return
-            full_parts.append(token)
-            tok_payload = json.dumps({"event": "token", "token": token})
-            yield f"data: {tok_payload}{sse_sep}"
         full_response = "".join(full_parts)
         sql_query = _extract_sql_from_response(full_response)
 

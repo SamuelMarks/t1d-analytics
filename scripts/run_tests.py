@@ -13,7 +13,115 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import DefaultDict, Dict, List, Optional, Sequence, Tuple
+import time
+import urllib.request
+from pathlib import Path
+from typing import Callable, DefaultDict, Dict, List, Optional, Sequence, Tuple, Union
+
+
+def parse_lcov_files(
+    lcov_paths: Sequence[Union[str, Path]],
+) -> DefaultDict[str, DefaultDict[int, int]]:
+    """
+    Parse one or more LCOV files from disk and aggregate maximum hit counts per file and line.
+
+    Args:
+    ----
+        lcov_paths: Sequence of paths to LCOV files on disk.
+
+    Returns:
+    -------
+        DefaultDict[str, DefaultDict[int, int]]: Mapping of `filepath -> {line_number: max_hits}`.
+
+    """
+    cov_data: DefaultDict[str, DefaultDict[int, int]] = collections.defaultdict(
+        lambda: collections.defaultdict(int)
+    )
+    for lcov_file in lcov_paths:
+        try:
+            with open(lcov_file, "r") as f:
+                current_file: str = ""
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("SF:"):
+                        current_file = line[3:]
+                    elif line.startswith("DA:") and current_file:
+                        parts = line[3:].split(",")
+                        line_num = int(parts[0])
+                        hits = int(parts[1])
+                        cov_data[current_file][line_num] = max(
+                            cov_data[current_file][line_num], hits
+                        )
+        except FileNotFoundError:
+            print(f"Warning: {lcov_file} not found.")
+    return cov_data
+
+
+def wait_for_service_ready(
+    url: str,
+    max_attempts: int = 30,
+    sleep_seconds: float = 1.0,
+    urlopen_fn: Callable[..., object] = urllib.request.urlopen,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> bool:
+    """
+    Poll an HTTP health/readiness endpoint until it responds or `max_attempts` is exhausted.
+
+    Args:
+    ----
+        url: Target HTTP URL to poll.
+        max_attempts: Maximum polling iterations.
+        sleep_seconds: Delay in seconds between failed attempts.
+        urlopen_fn: Injectable URL opener callable.
+        sleep_fn: Injectable sleep callable.
+
+    Returns:
+    -------
+        bool: True if the endpoint responded without raising an exception, False otherwise.
+
+    """
+    for _ in range(max_attempts):
+        try:
+            urlopen_fn(url)
+            return True
+        except Exception:
+            sleep_fn(sleep_seconds)
+    return False
+
+
+def extract_pytest_coverage_percent(coverage_json_path: Union[str, Path]) -> int:
+    """
+    Read pytest `coverage.json` and return the integer total covered percentage.
+
+    Args:
+    ----
+        coverage_json_path: Path to the `coverage.json` report file.
+
+    Returns:
+    -------
+        int: Integer coverage percentage (0–100).
+
+    """
+    with open(coverage_json_path) as f:
+        data = json.load(f)
+        return int(float(data["totals"]["percent_covered"]))
+
+
+def extract_interrogate_coverage_percent(stdout_text: str) -> int:
+    """
+    Parse `interrogate` CLI output to extract the integer docstring coverage percentage.
+
+    Args:
+    ----
+        stdout_text: Raw standard output string from `interrogate`.
+
+    Returns:
+    -------
+        int: Parsed integer docstring coverage percentage, or 0 if not found.
+
+    """
+    match = re.search(r"actual: ([0-9.]+)%", stdout_text)
+    return int(float(match.group(1))) if match else 0
 
 
 def compute_combined_coverage(
@@ -199,9 +307,6 @@ def main() -> None:
         env=env,
     )
 
-    import time
-    import urllib.request
-
     backend_env = env.copy()
     backend_env["T1D_DB_PATH"] = "ci_test.duckdb"
     backend_env["T1D_SESSIONS_DB_PATH"] = (
@@ -223,14 +328,11 @@ def main() -> None:
     )
 
     print("Waiting for backend DB to connect and API to be ready...")
-    backend_ready = False
-    for _ in range(30):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:8000/api/ready")
-            backend_ready = True
-            break
-        except Exception:
-            time.sleep(1)
+    backend_ready = wait_for_service_ready(
+        "http://127.0.0.1:8000/api/ready",
+        urlopen_fn=urllib.request.urlopen,
+        sleep_fn=time.sleep,
+    )
 
     if not backend_ready:
         print("Backend failed to start.")
@@ -239,14 +341,11 @@ def main() -> None:
         sys.exit(1)
 
     print("Waiting for frontend dev server to be ready...")
-    frontend_ready = False
-    for _ in range(30):
-        try:
-            urllib.request.urlopen("http://127.0.0.1:5173")
-            frontend_ready = True
-            break
-        except Exception:
-            time.sleep(1)
+    frontend_ready = wait_for_service_ready(
+        "http://127.0.0.1:5173",
+        urlopen_fn=urllib.request.urlopen,
+        sleep_fn=time.sleep,
+    )
 
     if not frontend_ready:
         print("Frontend failed to start.")
@@ -278,32 +377,12 @@ def main() -> None:
         sys.exit(coverage_result.returncode)
 
     print("Merging coverage...")
-    cov_data: DefaultDict[str, DefaultDict[int, int]] = collections.defaultdict(
-        lambda: collections.defaultdict(int)
-    )
     lcov_files = [
         "coverage.lcov",
         os.path.join("t1d-analytics-web", "coverage", "lcov.info"),
         os.path.join("t1d-analytics-web", "coverage", "e2e", "lcov.info"),
     ]
-
-    for lcov_file in lcov_files:
-        try:
-            with open(lcov_file, "r") as f:
-                current_file: str = ""
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("SF:"):
-                        current_file = line[3:]
-                    elif line.startswith("DA:") and current_file:
-                        parts = line[3:].split(",")
-                        line_num = int(parts[0])
-                        hits = int(parts[1])
-                        cov_data[current_file][line_num] = max(
-                            cov_data[current_file][line_num], hits
-                        )
-        except FileNotFoundError:
-            print(f"Warning: {lcov_file} not found.")
+    cov_data = parse_lcov_files(lcov_files)
 
     total_found, total_hit, combined_lcov_text = compute_combined_coverage(cov_data)
     with open("combined-coverage.lcov", "w") as out:
@@ -321,9 +400,7 @@ def main() -> None:
 
     print("Generating shields in README.md...")
     try:
-        with open("coverage.json") as f:
-            data = json.load(f)
-            test_cov = int(data["totals"]["percent_covered"])
+        test_cov = extract_pytest_coverage_percent("coverage.json")
     except Exception as e:
         print(f"Failed to read coverage.json: {e}")
         sys.exit(1)
@@ -336,8 +413,7 @@ def main() -> None:
             text=True,
             env=env,
         )
-        match = re.search(r"actual: ([0-9.]+)%", result.stdout)
-        doc_cov = int(float(match.group(1))) if match else 0
+        doc_cov = extract_interrogate_coverage_percent(result.stdout)
     except Exception as e:
         print(f"Failed to run interrogate: {e}")
         sys.exit(1)

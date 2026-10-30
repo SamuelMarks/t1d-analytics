@@ -299,25 +299,15 @@ def test_domain_invariants_prompt_masking_and_lora_freezing(tmp_path: Path) -> N
 
 
 def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
-    """Test protocol and abstract method/property stubs in t1d_analytics.hf_models."""
+    """Test concrete implementations satisfy runtime-checkable protocols in t1d_analytics.hf_models."""
     from contextlib import nullcontext
     from typing import ContextManager, Optional, Sequence, Union
 
     from t1d_analytics.hf_models import (
         AcceleratorDetectorProtocol,
         AutocastTorchProtocol,
-        AutoModelFactoryProtocol,
-        AutoTokenizerFactoryProtocol,
-        BaseCausalLMFactory,
-        BaseTrainingRunner,
-        CosineSchedulerNamespaceProtocol,
         DeviceProtocol,
         DtypeLike,
-        LrSchedulerProtocol,
-        ModelOutputWithLogitsProtocol,
-        MpsBackendProtocol,
-        MpsBackendsHolderProtocol,
-        PaddedTokenizerProtocol,
         PretrainedSavableProtocol,
         QuantizationConfigProtocol,
         TensorLike,
@@ -328,27 +318,8 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
         TrainableModelProtocol,
     )
 
-    class _DummyProtoInstance:
-        """Minimal dummy instance for invoking protocol property getters."""
-
-    dummy_obj = _DummyProtoInstance()
-    for proto_cls, prop_name in (
-        (DeviceProtocol, "type"),
-        (TensorProtocol, "shape"),
-        (PaddedTokenizerProtocol, "pad_token_id"),
-        (ModelOutputWithLogitsProtocol, "logits"),
-        (CosineSchedulerNamespaceProtocol, "CosineAnnealingLR"),
-        (MpsBackendProtocol, "is_available"),
-        (MpsBackendsHolderProtocol, "mps"),
-    ):
-        prop = getattr(proto_cls, prop_name)
-        assert isinstance(prop, property)
-        assert prop.fget is not None
-        with pytest.raises(NotImplementedError):
-            prop.fget(dummy_obj)
-
     class _ConcreteTensor:
-        """Helper satisfying TensorProtocol for direct stub invocation."""
+        """Helper satisfying TensorProtocol."""
 
         @property
         def shape(self) -> Sequence[int]:
@@ -396,29 +367,13 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
     assert fake_tensor.item() == 0.0
     fake_tensor.backward()
     assert (fake_tensor / 2) is fake_tensor
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.size(fake_tensor)
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.view(fake_tensor, 1)
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.unsqueeze(fake_tensor, 0)
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.to(fake_tensor, "cpu")
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.clamp(fake_tensor, 0, 1)
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.item(fake_tensor)
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.backward(fake_tensor)
-    with pytest.raises(NotImplementedError):
-        TensorProtocol.__truediv__(fake_tensor, 2)
 
     tensor = torch.zeros(1)
     tiny_factory = TinyCausalLMFactory()
     tiny_model = tiny_factory.create_model("tiny")
 
     class _ConcreteExtras:
-        """Helper satisfying remaining protocol signatures for direct stub invocation."""
+        """Helper satisfying protocol signatures."""
 
         def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
             """No-op encode."""
@@ -472,51 +427,22 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
     assert extras.is_cuda_available() is False
     assert extras.is_mps_available() is False
     assert isinstance(auto_tok.from_pretrained("m"), _ConcreteExtras)
-    with pytest.raises(NotImplementedError):
-        TokenizerProtocol.encode(extras, "hi")
-    with pytest.raises(NotImplementedError):
-        AutoTokenizerFactoryProtocol.from_pretrained(auto_tok, "m")
-    with pytest.raises(NotImplementedError):
-        AutoModelFactoryProtocol.from_pretrained(extras, "m")
+    assert isinstance(tiny_model, TrainableModelProtocol)
+    assert isinstance(tiny_model, PretrainedSavableProtocol)
+    assert isinstance(extras, AutocastTorchProtocol)
+    assert isinstance(extras, TorchDeviceFactoryProtocol)
+    assert isinstance(extras, AcceleratorDetectorProtocol)
 
-    with pytest.raises(NotImplementedError):
-        TorchCausalLMProtocol.__call__(tiny_model, tensor)
-    with pytest.raises(NotImplementedError):
-        TorchCausalLMProtocol.parameters(tiny_model)
-    with pytest.raises(NotImplementedError):
-        TorchCausalLMProtocol.train(tiny_model)
-    with pytest.raises(NotImplementedError):
-        TorchCausalLMProtocol.eval(tiny_model)
-    with pytest.raises(NotImplementedError):
-        TorchCausalLMProtocol.to(tiny_model, "cpu")
-    with pytest.raises(NotImplementedError):
-        TorchCausalLMProtocol.state_dict(tiny_model)
-    with pytest.raises(NotImplementedError):
-        TorchCausalLMProtocol.save_pretrained(tiny_model, "out")
-
-    with pytest.raises(NotImplementedError):
-        TrainableModelProtocol.train(tiny_model)
-    with pytest.raises(NotImplementedError):
-        PretrainedSavableProtocol.save_pretrained(tiny_model, "out")
-    with pytest.raises(NotImplementedError):
-        LrSchedulerProtocol.step(extras)
-    with pytest.raises(NotImplementedError):
-        AutocastTorchProtocol.autocast(extras, "cpu", tensor)
-    with pytest.raises(NotImplementedError):
-        TorchDeviceFactoryProtocol.device(extras, "cpu")
-    with pytest.raises(NotImplementedError):
-        AcceleratorDetectorProtocol.is_cuda_available(extras)
-    with pytest.raises(NotImplementedError):
-        AcceleratorDetectorProtocol.is_mps_available(extras)
-
+    ds_file = tmp_path / "ds.jsonl"
+    ds_file.write_text('{"prompt": "q", "sql": "SELECT 1"}\n', encoding="utf-8")
     runner = LocalCpuRunner()
     cfg = TrainingJobConfig(
         model_name="tiny",
-        dataset_path=str(tmp_path / "ds.jsonl"),
+        dataset_path=str(ds_file),
+        dry_run=True,
+        use_tiny_model=True,
     )
-    with pytest.raises(NotImplementedError):
-        BaseTrainingRunner.validate_environment(runner)
-    with pytest.raises(NotImplementedError):
-        BaseTrainingRunner.run_training(runner, cfg)
-    with pytest.raises(NotImplementedError):
-        BaseCausalLMFactory.create_model(tiny_factory, "tiny")
+    assert runner.validate_environment() is True
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=extras):
+        assert runner.run_training(cfg)["status"] == "dry_run_completed"
+    assert isinstance(tiny_factory.create_model("tiny"), PretrainedSavableProtocol)

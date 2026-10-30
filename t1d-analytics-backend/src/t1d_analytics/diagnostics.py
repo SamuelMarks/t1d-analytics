@@ -357,32 +357,36 @@ def check_database_health(
     try:
         conn = duckdb.connect(target_path_str, read_only=True)
         try:
-            conn.execute("SELECT * FROM duckdb_tables() LIMIT 1")
-        except Exception:
-            integrity_ok = False
-        raw_tables = conn.execute("SHOW TABLES").fetchall()
-        all_tables = [row[0] for row in raw_tables]
-        compat_views = {
-            "tblaptsummary",
-            "adverseevents",
-            "subjects",
-            "hba1c",
-            "demographics",
-            "cgm_data",
-        }
-        primary_tables = [
-            t for t in all_tables if not t.startswith("_t1d_") and t not in compat_views
-        ]
-        tables = (
-            primary_tables
-            if primary_tables
-            else [t for t in all_tables if not t.startswith("_t1d_")]
-        )
-        for tbl_name in tables:
-            safe_tbl = tbl_name.replace('"', '""')
-            cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
-            total_rows += int(cnt_res[0]) if cnt_res else 0
-        conn.close()
+            try:
+                conn.execute("SELECT * FROM duckdb_tables() LIMIT 1")
+            except Exception:
+                integrity_ok = False
+            raw_tables = conn.execute("SHOW TABLES").fetchall()
+            all_tables = [row[0] for row in raw_tables]
+            compat_views = {
+                "tblaptsummary",
+                "adverseevents",
+                "subjects",
+                "hba1c",
+                "demographics",
+                "cgm_data",
+            }
+            primary_tables = [
+                t
+                for t in all_tables
+                if not t.startswith("_t1d_") and t not in compat_views
+            ]
+            tables = (
+                primary_tables
+                if primary_tables
+                else [t for t in all_tables if not t.startswith("_t1d_")]
+            )
+            for tbl_name in tables:
+                safe_tbl = tbl_name.replace('"', '""')
+                cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
+                total_rows += int(cnt_res[0]) if cnt_res else 0
+        finally:
+            conn.close()
     except Exception as e:
         msg = _(
             "Failed to open DuckDB database '{}': {}",

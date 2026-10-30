@@ -246,11 +246,13 @@ def download_file(
 
     """
     _ = get_translator()
-    is_doi = (
-        url.startswith("https://doi.org/")
-        or url.startswith("http://doi.org/")
-        or url.startswith("https://dx.doi.org/")
-        or url.startswith("http://dx.doi.org/")
+    is_doi = url.startswith(
+        (
+            "https://doi.org/",
+            "http://doi.org/",
+            "https://dx.doi.org/",
+            "http://dx.doi.org/",
+        )
     )
     if is_doi:
         link_file = dest_dir / "dataset_link.txt"

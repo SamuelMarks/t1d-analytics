@@ -40,7 +40,7 @@ class TrainingRunnerProtocol(Protocol):
         cancel_event: Optional[threading.Event] = None,
     ) -> Dict[str, JobMetricValue]:
         """Execute training job for the given configuration."""
-        raise NotImplementedError
+        ...
 
 
 @dataclass
@@ -233,3 +233,28 @@ class TrainingJobManager:
             if self._jobs[job_id].status in ("pending", "running"):
                 self._jobs[job_id].status = "cancelled"
             return True
+
+    def prune_completed_jobs(self, max_retained: int = 100) -> int:
+        """
+        Prune terminal jobs ('completed', 'failed', 'cancelled') when job history exceeds `max_retained`.
+
+        Args:
+        ----
+            max_retained: Maximum number of terminal jobs to retain in memory.
+
+        Returns:
+        -------
+            int: Number of pruned terminal job records.
+
+        """
+        with self._lock:
+            terminal_ids = [
+                jid
+                for jid, state in self._jobs.items()
+                if state.status in ("completed", "failed", "cancelled")
+            ]
+            excess = max(0, len(terminal_ids) - max(0, max_retained))
+            for jid in terminal_ids[:excess]:
+                self._jobs.pop(jid, None)
+                self._cancel_flags.pop(jid, None)
+            return excess

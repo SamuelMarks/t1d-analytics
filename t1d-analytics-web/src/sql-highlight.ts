@@ -1,49 +1,15 @@
 /**
  * @file sql-highlight.ts
  * @module sql-highlight
- * SQL statement classification, syntax highlighting synchronization, and re-exported modal/cohort/API helpers.
+ * SQL statement classification and live syntax highlighting synchronization.
  */
 
 import hljs from "highlight.js";
 import sql from "highlight.js/lib/languages/sql";
 import markdown from "highlight.js/lib/languages/markdown";
 
-import { trapModalFocus } from "./modal-utils";
-import {
-  type CohortFilterParams,
-  type TableRelationship,
-  CLINICAL_RELATIONSHIPS,
-  resolveTableJoin,
-  normalizeJoinType,
-  buildCohortSql,
-} from "./cohort-sql";
-import {
-  type ApiErrorPayload,
-  type ApiErrorInput,
-  type BackendErrorResponse,
-  parseApiError,
-  parseResponseJson,
-  fetchWithBackendError,
-} from "./api-client";
-
 hljs.registerLanguage("sql", sql);
 hljs.registerLanguage("markdown", markdown);
-
-export {
-  trapModalFocus,
-  type CohortFilterParams,
-  type TableRelationship,
-  CLINICAL_RELATIONSHIPS,
-  resolveTableJoin,
-  normalizeJoinType,
-  buildCohortSql,
-  type ApiErrorPayload,
-  type ApiErrorInput,
-  type BackendErrorResponse,
-  parseApiError,
-  parseResponseJson,
-  fetchWithBackendError,
-};
 
 /**
  * Checks whether a user input string is a valid read-only SQL query statement.

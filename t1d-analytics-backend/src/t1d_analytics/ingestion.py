@@ -108,7 +108,7 @@ def extract_zips(
 
             # Determine extraction directory
             p_name = path.name.lower()
-            if p_name.endswith(".tar.gz") or p_name.endswith(".tar.bz2"):
+            if p_name.endswith((".tar.gz", ".tar.bz2")):
                 extract_stem = path.name[:-7]
                 extract_dir = path.parent / extract_stem
             elif p_name.endswith(".tgz"):
@@ -465,266 +465,276 @@ def load_data_to_duckdb(
     logger.info(conn_msg)
     report_fn(conn_msg)
     conn = duckdb.connect(db_path, read_only=False)
-    _ensure_manifest_table(conn)
+    try:
+        _ensure_manifest_table(conn)
 
-    scan_msg = _("Scanning for tabular files (CSV, TXT, Parquet, GZ)...")
-    logger.info(scan_msg)
-    report_fn(scan_msg)
-    patterns = [
-        "*.csv",
-        "*.CSV",
-        "*.txt",
-        "*.TXT",
-        "*.parquet",
-        "*.PARQUET",
-        "*.csv.gz",
-        "*.CSV.GZ",
-    ]
-    if include_sas:
-        patterns.extend(["*.sas7bdat", "*.SAS7BDAT", "*.xpt", "*.XPT"])
-    if include_spss:
-        patterns.extend(["*.sav", "*.SAV"])
+        scan_msg = _("Scanning for tabular files (CSV, TXT, Parquet, GZ)...")
+        logger.info(scan_msg)
+        report_fn(scan_msg)
+        patterns = [
+            "*.csv",
+            "*.CSV",
+            "*.txt",
+            "*.TXT",
+            "*.parquet",
+            "*.PARQUET",
+            "*.csv.gz",
+            "*.CSV.GZ",
+        ]
+        if include_sas:
+            patterns.extend(["*.sas7bdat", "*.SAS7BDAT", "*.xpt", "*.XPT"])
+        if include_spss:
+            patterns.extend(["*.sav", "*.SAV"])
 
-    raw_files: list[Path] = []
-    for pat in patterns:
-        raw_files.extend(data_dir.rglob(pat))
-    data_files = list(dict.fromkeys(raw_files))
+        raw_files: list[Path] = []
+        for pat in patterns:
+            raw_files.extend(data_dir.rglob(pat))
+        data_files = list(dict.fromkeys(raw_files))
 
-    # Filter out MacOS hidden files or unhelpful docs
-    data_files = [
-        f
-        for f in data_files
-        if not f.name.startswith("._")
-        and "Glossary" not in f.name
-        and "Protocol" not in f.name
-    ]
+        # Filter out MacOS hidden files or unhelpful docs
+        data_files = [
+            f
+            for f in data_files
+            if not f.name.startswith("._")
+            and "Glossary" not in f.name
+            and "Protocol" not in f.name
+        ]
 
-    if not data_files:
-        no_files_msg = _("No tabular files found.")
-        logger.info(no_files_msg)
-        report_fn(no_files_msg)
-        conn.close()
-        return
+        if not data_files:
+            no_files_msg = _("No tabular files found.")
+            logger.info(no_files_msg)
+            report_fn(no_files_msg)
+            return
 
-    # Load reverse map for column renaming
-    reverse_map: Dict[str, str] = {}
-    matches = get_clinical_variable_mappings()
-    for std_name, orig_names in matches.items():
-        for orig in orig_names:
-            reverse_map[orig.lower()] = std_name
+        # Load reverse map for column renaming
+        reverse_map: Dict[str, str] = {}
+        matches = get_clinical_variable_mappings()
+        for std_name, orig_names in matches.items():
+            for orig in orig_names:
+                reverse_map[orig.lower()] = std_name
 
-    stem_counts: dict[str, int] = {}
-    for df in data_files:
-        s_name = Path(df.stem).stem if df.name.endswith(".csv.gz") else df.stem
-        raw_stem = re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
-        stem_counts[raw_stem] = stem_counts.get(raw_stem, 0) + 1
-
-    existing_views = {
-        v[0] for v in conn.execute("SELECT view_name FROM duckdb_views()").fetchall()
-    }
-    existing_tables = [
-        t[0]
-        for t in conn.execute("SHOW TABLES").fetchall()
-        if not t[0].startswith("_t1d_") and t[0] not in existing_views
-    ]
-    loaded_tables = list(existing_tables)
-    for data_file in data_files:
-        s_name = (
-            Path(data_file.stem).stem
-            if data_file.name.endswith(".csv.gz")
-            else data_file.stem
-        )
-        raw_stem = re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
-        safe_stem = raw_stem
-        if prefix_subdirs or stem_counts.get(raw_stem, 0) > 1:
-            rel_parent = data_file.parent.relative_to(data_dir)
-            if rel_parent != Path("."):
-                prefix = (
-                    re.sub(r"[^a-zA-Z0-9_]", "_", str(rel_parent)).strip("_").lower()
-                )
-                safe_stem = f"{prefix}_{raw_stem}" if prefix else raw_stem
-
-        current_source = str(data_file.resolve())
-        table_name = safe_stem.strip("_") or "dataset"
-        # Ensure it starts with a letter
-        if not table_name[0].isalpha():
-            table_name = "t_" + table_name
-
-        counter = 1
-        base_tbl = table_name
-        is_already_loaded = False
-
-        try:
-            current_hash = compute_file_hash(data_file)
-            manifest_row = conn.execute(
-                "SELECT table_name FROM _t1d_ingestion_manifest WHERE source_file = ? AND file_hash = ?",
-                [current_source, current_hash],
-            ).fetchone()
-
-            while table_name in existing_tables or table_name in loaded_tables:
-                row = conn.execute(
-                    "SELECT comment FROM duckdb_tables() WHERE table_name = ?",
-                    [table_name],
-                ).fetchone()
-                existing_comment = row[0] if row else None
-
-                if existing_comment == current_source or (
-                    manifest_row and manifest_row[0] == table_name
-                ):
-                    is_already_loaded = True
-                    break
-
-                counter += 1
-                table_name = f"{base_tbl}_{counter}"
-
-            if is_already_loaded:
-                skip_msg = _("Table {} already exists, skipping...", table_name)
-                logger.info(skip_msg)
-                report_fn(skip_msg)
-                continue
-
-            if table_name in existing_views:
-                safe_view_name = escape_sql_identifier(table_name)
-                conn.execute(f'DROP VIEW IF EXISTS "{safe_view_name}"')
-                existing_views.discard(table_name)
-
-            escaped_path = str(data_file).replace("'", "''")
-            is_clinical = data_file.suffix.lower() in (
-                ".sas7bdat",
-                ".xpt",
-                ".sav",
+        stem_counts: dict[str, int] = {}
+        for df in data_files:
+            s_name = Path(df.stem).stem if df.name.endswith(".csv.gz") else df.stem
+            raw_stem = (
+                re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
             )
-            if data_file.suffix.lower() == ".parquet":
-                load_pq_msg = _(
-                    "Loading {} (parquet) into table {}...",
-                    data_file.name,
-                    table_name,
-                )
-                logger.info(load_pq_msg)
-                report_fn(load_pq_msg)
-                conn.execute(
-                    f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_parquet('{escaped_path}')"
-                )
-            elif data_file.name.endswith(".csv.gz"):
-                load_gz_msg = _(
-                    "Loading {} (csv.gz) into table {}...",
-                    data_file.name,
-                    table_name,
-                )
-                logger.info(load_gz_msg)
-                report_fn(load_gz_msg)
-                conn.execute(
-                    f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true)"
-                )
-            elif is_clinical:
-                load_clin_msg = _(
-                    "Loading {} (clinical) into table {}...",
-                    data_file.name,
-                    table_name,
-                )
-                logger.info(load_clin_msg)
-                report_fn(load_clin_msg)
-                clinical_df = _read_clinical_dataframe(data_file)
-                conn.register("_clinical_df", clinical_df)
-                conn.execute(
-                    "CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM _clinical_df"
-                )
-            else:
-                _py_enc, duckdb_encoding, duckdb_sep = (
-                    _detect_csv_encoding_and_delimiter(data_file)
-                )
-                load_csv_msg = _(
-                    "Loading {} (encoding={}, sep='{}') into table {}...",
-                    data_file.name,
-                    duckdb_encoding,
-                    duckdb_sep,
-                    table_name,
-                )
-                logger.info(load_csv_msg)
-                report_fn(load_csv_msg)
+            stem_counts[raw_stem] = stem_counts.get(raw_stem, 0) + 1
 
-                # Create temp view to inspect columns
-                conn.execute(
-                    f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sep='{duckdb_sep}', encoding='{duckdb_encoding}')"
-                )
-            cols = conn.execute("DESCRIBE temp_view").fetchall()
-
-            select_exprs = []
-            seen_std_names = set()
-            for c in cols:
-                orig_col = str(c[0])
-                col_type = str(c[1]).upper() if len(c) > 1 else ""
-                std_name = reverse_map.get(orig_col.lower(), orig_col)
-
-                # Failsafe: avoid duplicate column names in the same table
-                if std_name.lower() in seen_std_names:
-                    std_name = orig_col  # fallback to original if collision still happens somehow
-
-                # If still duplicate (e.g. original name conflicts with a mapped name)
-                counter = 1
-                base_std_name = std_name
-                while std_name.lower() in seen_std_names:
-                    counter += 1
-                    std_name = f"{base_std_name}_{counter}"
-
-                seen_std_names.add(std_name.lower())
-
-                escaped_orig = escape_sql_identifier(orig_col)
-                escaped_std = escape_sql_identifier(std_name)
-                col_expr = f'"{escaped_orig}"'
-                if (
-                    std_name.lower() in _NUMERIC_CLINICAL_CONCEPTS
-                    and "CHAR" in col_type
-                ):
-                    col_expr = (
-                        f"TRY_CAST(NULLIF(TRIM(\"{escaped_orig}\"), '') AS DOUBLE)"
+        existing_views = {
+            v[0]
+            for v in conn.execute("SELECT view_name FROM duckdb_views()").fetchall()
+        }
+        existing_tables = [
+            t[0]
+            for t in conn.execute("SHOW TABLES").fetchall()
+            if not t[0].startswith("_t1d_") and t[0] not in existing_views
+        ]
+        loaded_tables = list(existing_tables)
+        for data_file in data_files:
+            s_name = (
+                Path(data_file.stem).stem
+                if data_file.name.endswith(".csv.gz")
+                else data_file.stem
+            )
+            raw_stem = (
+                re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
+            )
+            safe_stem = raw_stem
+            if prefix_subdirs or stem_counts.get(raw_stem, 0) > 1:
+                rel_parent = data_file.parent.relative_to(data_dir)
+                if rel_parent != Path("."):
+                    prefix = (
+                        re.sub(r"[^a-zA-Z0-9_]", "_", str(rel_parent))
+                        .strip("_")
+                        .lower()
                     )
-                if std_name != orig_col or col_expr != f'"{escaped_orig}"':
-                    select_exprs.append(f'{col_expr} AS "{escaped_std}"')
+                    safe_stem = f"{prefix}_{raw_stem}" if prefix else raw_stem
+
+            current_source = str(data_file.resolve())
+            table_name = safe_stem.strip("_") or "dataset"
+            # Ensure it starts with a letter
+            if not table_name[0].isalpha():
+                table_name = "t_" + table_name
+
+            counter = 1
+            base_tbl = table_name
+            is_already_loaded = False
+
+            try:
+                current_hash = compute_file_hash(data_file)
+                manifest_row = conn.execute(
+                    "SELECT table_name FROM _t1d_ingestion_manifest WHERE source_file = ? AND file_hash = ?",
+                    [current_source, current_hash],
+                ).fetchone()
+
+                while table_name in existing_tables or table_name in loaded_tables:
+                    row = conn.execute(
+                        "SELECT comment FROM duckdb_tables() WHERE table_name = ?",
+                        [table_name],
+                    ).fetchone()
+                    existing_comment = row[0] if row else None
+
+                    if existing_comment == current_source or (
+                        manifest_row and manifest_row[0] == table_name
+                    ):
+                        is_already_loaded = True
+                        break
+
+                    counter += 1
+                    table_name = f"{base_tbl}_{counter}"
+
+                if is_already_loaded:
+                    skip_msg = _("Table {} already exists, skipping...", table_name)
+                    logger.info(skip_msg)
+                    report_fn(skip_msg)
+                    continue
+
+                if table_name in existing_views:
+                    safe_view_name = escape_sql_identifier(table_name)
+                    conn.execute(f'DROP VIEW IF EXISTS "{safe_view_name}"')
+                    existing_views.discard(table_name)
+
+                escaped_path = str(data_file).replace("'", "''")
+                is_clinical = data_file.suffix.lower() in (
+                    ".sas7bdat",
+                    ".xpt",
+                    ".sav",
+                )
+                if data_file.suffix.lower() == ".parquet":
+                    load_pq_msg = _(
+                        "Loading {} (parquet) into table {}...",
+                        data_file.name,
+                        table_name,
+                    )
+                    logger.info(load_pq_msg)
+                    report_fn(load_pq_msg)
+                    conn.execute(
+                        f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_parquet('{escaped_path}')"
+                    )
+                elif data_file.name.endswith(".csv.gz"):
+                    load_gz_msg = _(
+                        "Loading {} (csv.gz) into table {}...",
+                        data_file.name,
+                        table_name,
+                    )
+                    logger.info(load_gz_msg)
+                    report_fn(load_gz_msg)
+                    conn.execute(
+                        f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true)"
+                    )
+                elif is_clinical:
+                    load_clin_msg = _(
+                        "Loading {} (clinical) into table {}...",
+                        data_file.name,
+                        table_name,
+                    )
+                    logger.info(load_clin_msg)
+                    report_fn(load_clin_msg)
+                    clinical_df = _read_clinical_dataframe(data_file)
+                    conn.register("_clinical_df", clinical_df)
+                    conn.execute(
+                        "CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM _clinical_df"
+                    )
                 else:
-                    select_exprs.append(f'"{escaped_orig}"')
+                    _py_enc, duckdb_encoding, duckdb_sep = (
+                        _detect_csv_encoding_and_delimiter(data_file)
+                    )
+                    load_csv_msg = _(
+                        "Loading {} (encoding={}, sep='{}') into table {}...",
+                        data_file.name,
+                        duckdb_encoding,
+                        duckdb_sep,
+                        table_name,
+                    )
+                    logger.info(load_csv_msg)
+                    report_fn(load_csv_msg)
 
-            nl = chr(10)
-            select_sql = f",{nl}                ".join(select_exprs)
-            escaped_table = escape_sql_identifier(table_name)
+                    # Create temp view to inspect columns
+                    conn.execute(
+                        f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sep='{duckdb_sep}', encoding='{duckdb_encoding}')"
+                    )
+                cols = conn.execute("DESCRIBE temp_view").fetchall()
 
-            query = (
-                f'CREATE TABLE "{escaped_table}" AS SELECT {nl}'
-                f"                {select_sql} {nl}"
-                f"            FROM temp_view"
+                select_exprs = []
+                seen_std_names = set()
+                for c in cols:
+                    orig_col = str(c[0])
+                    col_type = str(c[1]).upper() if len(c) > 1 else ""
+                    std_name = reverse_map.get(orig_col.lower(), orig_col)
+
+                    # Failsafe: avoid duplicate column names in the same table
+                    if std_name.lower() in seen_std_names:
+                        std_name = orig_col  # fallback to original if collision still happens somehow
+
+                    # If still duplicate (e.g. original name conflicts with a mapped name)
+                    counter = 1
+                    base_std_name = std_name
+                    while std_name.lower() in seen_std_names:
+                        counter += 1
+                        std_name = f"{base_std_name}_{counter}"
+
+                    seen_std_names.add(std_name.lower())
+
+                    escaped_orig = escape_sql_identifier(orig_col)
+                    escaped_std = escape_sql_identifier(std_name)
+                    col_expr = f'"{escaped_orig}"'
+                    if (
+                        std_name.lower() in _NUMERIC_CLINICAL_CONCEPTS
+                        and "CHAR" in col_type
+                    ):
+                        col_expr = (
+                            f"TRY_CAST(NULLIF(TRIM(\"{escaped_orig}\"), '') AS DOUBLE)"
+                        )
+                    if std_name != orig_col or col_expr != f'"{escaped_orig}"':
+                        select_exprs.append(f'{col_expr} AS "{escaped_std}"')
+                    else:
+                        select_exprs.append(f'"{escaped_orig}"')
+
+                nl = chr(10)
+                select_sql = f",{nl}                ".join(select_exprs)
+                escaped_table = escape_sql_identifier(table_name)
+
+                query = (
+                    f'CREATE TABLE "{escaped_table}" AS SELECT {nl}'
+                    f"                {select_sql} {nl}"
+                    f"            FROM temp_view"
+                )
+                conn.execute(query)
+                conn.execute("DROP VIEW temp_view")
+                if is_clinical:
+                    conn.unregister("_clinical_df")
+
+                escaped_source = current_source.replace("'", "''")
+                conn.execute(
+                    f"COMMENT ON TABLE \"{escaped_table}\" IS '{escaped_source}'"
+                )
+
+                row_count_res = conn.execute(
+                    f'SELECT COUNT(*) FROM "{escaped_table}"'
+                ).fetchone()
+                row_count = row_count_res[0] if row_count_res else 0
+                file_size = data_file.stat().st_size
+                conn.execute(
+                    "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR table_name = ?",
+                    [current_source, table_name],
+                )
+                conn.execute(
+                    "INSERT INTO _t1d_ingestion_manifest VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+                    [current_source, table_name, current_hash, row_count, file_size],
+                )
+
+                loaded_tables.append(table_name)
+            except Exception as e:
+                err_load = _("Failed to load {}: {}", data_file.name, e)
+                logger.error(err_load)
+                report_fn(err_load)
+
+        if loaded_tables:
+            pop_msg = _(
+                "Successfully populated {} tables in {}.", len(loaded_tables), db_path
             )
-            conn.execute(query)
-            conn.execute("DROP VIEW temp_view")
-            if is_clinical:
-                conn.unregister("_clinical_df")
-
-            escaped_source = current_source.replace("'", "''")
-            conn.execute(f"COMMENT ON TABLE \"{escaped_table}\" IS '{escaped_source}'")
-
-            row_count_res = conn.execute(
-                f'SELECT COUNT(*) FROM "{escaped_table}"'
-            ).fetchone()
-            row_count = row_count_res[0] if row_count_res else 0
-            file_size = data_file.stat().st_size
-            conn.execute(
-                "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR table_name = ?",
-                [current_source, table_name],
-            )
-            conn.execute(
-                "INSERT INTO _t1d_ingestion_manifest VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
-                [current_source, table_name, current_hash, row_count, file_size],
-            )
-
-            loaded_tables.append(table_name)
-        except Exception as e:
-            err_load = _("Failed to load {}: {}", data_file.name, e)
-            logger.error(err_load)
-            report_fn(err_load)
-
-    if loaded_tables:
-        pop_msg = _(
-            "Successfully populated {} tables in {}.", len(loaded_tables), db_path
-        )
-        logger.info(pop_msg)
-        report_fn(pop_msg)
-    conn.close()
+            logger.info(pop_msg)
+            report_fn(pop_msg)
+    finally:
+        conn.close()

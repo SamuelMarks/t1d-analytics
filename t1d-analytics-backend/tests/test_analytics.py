@@ -443,7 +443,7 @@ def test_load_data_no_matches_file(tmp_path: Path, mocker: MagicMock) -> None:
     mocker.patch(
         "pathlib.Path.exists",
         autospec=True,
-        side_effect=lambda self: False if "likely_matches" in str(self) else True,
+        side_effect=lambda self: "likely_matches" not in str(self),
     )
 
     (tmp_path / "data.csv").write_text("A,B\n1,2")
@@ -1071,7 +1071,7 @@ def test_clinical_data_ingestion_and_manifest(
 
 def test_read_clinical_dataframe_edge_cases(tmp_path: Path, mocker: MagicMock) -> None:
     """Test error handling in _read_clinical_dataframe."""
-    from t1d_analytics.analytics import _read_clinical_dataframe
+    from t1d_analytics.ingestion import _read_clinical_dataframe
 
     # Unsupported format
     unsupported = tmp_path / "test.unsupported"
@@ -1106,7 +1106,7 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
     """Test reading .sas7bdat, decoding bytes in columns, and fallback to pandas readers."""
     import pandas as pd
 
-    from t1d_analytics.analytics import _read_clinical_dataframe
+    from t1d_analytics.ingestion import _read_clinical_dataframe
 
     # 1. sas7bdat success with byte data to decode
     raw_df = pd.DataFrame({b"col_bytes": [b"val_bytes", "str_val"]})
@@ -1404,7 +1404,7 @@ def test_profile_table_no_columns(tmp_path: Path, mocker: MagicMock) -> None:
 
 def test_export_table_validations(tmp_path: Path) -> None:
     """Test validation errors for export_table (invalid ID, missing file, missing table, bad format)."""
-    from t1d_analytics.analytics import export_table
+    from t1d_analytics.api_exports import export_table
 
     db_file = tmp_path / "validations.duckdb"
     conn = duckdb.connect(str(db_file))
@@ -1435,7 +1435,7 @@ def test_export_table_validations(tmp_path: Path) -> None:
 
 def test_export_table_parquet_and_csv(tmp_path: Path) -> None:
     """Test exporting table to Parquet and CSV formats."""
-    from t1d_analytics.analytics import export_table
+    from t1d_analytics.api_exports import export_table
 
     db_file = tmp_path / "formats.duckdb"
     conn = duckdb.connect(str(db_file))
@@ -1472,7 +1472,7 @@ def test_export_table_excel_formula_sanitization(tmp_path: Path) -> None:
     """Test exporting table to Excel with formula injection sanitization."""
     from openpyxl import load_workbook
 
-    from t1d_analytics.analytics import export_table
+    from t1d_analytics.api_exports import export_table
 
     db_file = tmp_path / "excel.duckdb"
     conn = duckdb.connect(str(db_file))

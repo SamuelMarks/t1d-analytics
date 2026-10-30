@@ -38,7 +38,7 @@ class DeviceProtocol(Protocol):
     @property
     def type(self) -> str:
         """Return device type string (e.g., 'cpu', 'cuda', 'mps')."""
-        raise NotImplementedError
+        ...
 
 
 class DtypeProtocol(Protocol):
@@ -51,39 +51,39 @@ class TensorProtocol(Protocol):
     @property
     def shape(self) -> Sequence[int]:
         """Return tensor dimensions."""
-        raise NotImplementedError
+        ...
 
     def size(self, dim: int = -1) -> int:
         """Return size along the specified dimension."""
-        raise NotImplementedError
+        ...
 
     def view(self, *shape: int) -> "TensorProtocol":
         """Return reshaped tensor view."""
-        raise NotImplementedError
+        ...
 
     def unsqueeze(self, dim: int) -> "TensorProtocol":
         """Return tensor with singleton dimension inserted at dim."""
-        raise NotImplementedError
+        ...
 
     def to(self, device: Union[str, DeviceProtocol]) -> "TensorProtocol":
         """Move tensor to target device."""
-        raise NotImplementedError
+        ...
 
     def clamp(self, min_val: int, max_val: int) -> "TensorProtocol":
         """Clamp tensor elements to the range [min_val, max_val]."""
-        raise NotImplementedError
+        ...
 
     def item(self) -> float:
         """Extract scalar float value from 1-element tensor."""
-        raise NotImplementedError
+        ...
 
     def backward(self) -> None:
         """Compute gradients via backpropagation."""
-        raise NotImplementedError
+        ...
 
     def __truediv__(self, other: Union[int, float]) -> "TensorProtocol":
         """Divide tensor by scalar."""
-        raise NotImplementedError
+        ...
 
 
 if TYPE_CHECKING:
@@ -103,7 +103,7 @@ class TokenizerProtocol(Protocol):
 
     def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
         """Encode text into integer token identifiers."""
-        raise NotImplementedError
+        ...
 
 
 class AutoTokenizerFactoryProtocol(Protocol):
@@ -111,7 +111,7 @@ class AutoTokenizerFactoryProtocol(Protocol):
 
     def from_pretrained(self, pretrained_model_name_or_path: str) -> TokenizerProtocol:
         """Load pretrained tokenizer by name or path."""
-        raise NotImplementedError
+        ...
 
 
 class QuantizationConfigProtocol(Protocol):
@@ -128,7 +128,7 @@ class AutoModelFactoryProtocol(Protocol):
         quantization_config: Optional[QuantizationConfigProtocol] = None,
     ) -> "TorchCausalLMProtocol":
         """Load pretrained causal LM by name or path."""
-        raise NotImplementedError
+        ...
 
 
 class TransformersModuleProtocol(Protocol):
@@ -146,7 +146,7 @@ class PaddedTokenizerProtocol(Protocol):
     @property
     def pad_token_id(self) -> Optional[int]:
         """Return pad token identifier."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -156,7 +156,7 @@ class ModelOutputWithLogitsProtocol(Protocol):
     @property
     def logits(self) -> TensorLike:
         """Return output logits tensor."""
-        raise NotImplementedError
+        ...
 
 
 ModelForwardOutput = Union[TensorLike, ModelOutputWithLogitsProtocol]
@@ -167,31 +167,31 @@ class TorchCausalLMProtocol(Protocol):
 
     def __call__(self, input_ids: TensorLike) -> ModelForwardOutput:
         """Execute forward pass."""
-        raise NotImplementedError
+        ...
 
     def parameters(self) -> Iterable[TensorLike]:
         """Return trainable parameters."""
-        raise NotImplementedError
+        ...
 
     def train(self, mode: bool = True) -> "TorchCausalLMProtocol":
         """Set training mode."""
-        raise NotImplementedError
+        ...
 
     def eval(self) -> "TorchCausalLMProtocol":
         """Set evaluation mode."""
-        raise NotImplementedError
+        ...
 
     def to(self, device: DeviceLike) -> "TorchCausalLMProtocol":
         """Move model to target compute device."""
-        raise NotImplementedError
+        ...
 
     def state_dict(self) -> Dict[str, TensorLike]:
         """Return state dictionary."""
-        raise NotImplementedError
+        ...
 
     def save_pretrained(self, save_directory: str) -> None:
         """Save model weights to directory."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -200,7 +200,7 @@ class TrainableModelProtocol(Protocol):
 
     def train(self, mode: bool = True) -> TorchCausalLMProtocol:
         """Set training mode."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -209,7 +209,7 @@ class PretrainedSavableProtocol(Protocol):
 
     def save_pretrained(self, save_directory: str) -> None:
         """Save pretrained weights to directory."""
-        raise NotImplementedError
+        ...
 
 
 class LrSchedulerProtocol(Protocol):
@@ -217,7 +217,7 @@ class LrSchedulerProtocol(Protocol):
 
     def step(self) -> None:
         """Advance learning rate schedule by one step."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -227,7 +227,7 @@ class CosineSchedulerNamespaceProtocol(Protocol):
     @property
     def CosineAnnealingLR(self) -> Callable[..., LrSchedulerProtocol]:
         """Return CosineAnnealingLR scheduler constructor."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -236,7 +236,7 @@ class AutocastTorchProtocol(Protocol):
 
     def autocast(self, device_type: str, dtype: TensorLike) -> ContextManager[None]:
         """Return an autocast context manager."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -245,7 +245,7 @@ class TorchDeviceFactoryProtocol(Protocol):
 
     def device(self, dev: str) -> DeviceLike:
         """Construct a torch device object."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -255,7 +255,7 @@ class MpsBackendProtocol(Protocol):
     @property
     def is_available(self) -> Callable[[], bool]:
         """Return callable checking whether Apple Silicon MPS acceleration is available."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -265,7 +265,7 @@ class MpsBackendsHolderProtocol(Protocol):
     @property
     def mps(self) -> MpsBackendProtocol:
         """Return MPS backend namespace."""
-        raise NotImplementedError
+        ...
 
 
 @runtime_checkable
@@ -274,11 +274,11 @@ class AcceleratorDetectorProtocol(Protocol):
 
     def is_cuda_available(self) -> bool:
         """Return True if an NVIDIA CUDA accelerator is available."""
-        raise NotImplementedError
+        ...
 
     def is_mps_available(self) -> bool:
         """Return True if an Apple Silicon MPS accelerator is available."""
-        raise NotImplementedError
+        ...
 
 
 def _is_mps_available(backends_obj: MpsBackendsHolderProtocol) -> bool:
@@ -332,7 +332,7 @@ class BaseTrainingRunner(ABC):
             RuntimeError: If mandatory execution dependencies are missing.
 
         """
-        raise NotImplementedError
+        ...
 
     def prepare_dataset(self, config: TrainingJobConfig) -> Path:
         """
@@ -409,7 +409,7 @@ class BaseTrainingRunner(ABC):
             Dict[str, JobMetricValue]: Execution results containing training loss, steps, and duration.
 
         """
-        raise NotImplementedError
+        ...
 
 
 class BaseCausalLMFactory(ABC):
@@ -448,7 +448,7 @@ class BaseCausalLMFactory(ABC):
             RuntimeError: If dependencies for model creation are missing or fail.
 
         """
-        raise NotImplementedError
+        ...
 
 
 class TinyCausalLMFactory(BaseCausalLMFactory):

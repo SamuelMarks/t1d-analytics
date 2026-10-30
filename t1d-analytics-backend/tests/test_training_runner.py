@@ -355,7 +355,7 @@ def test_local_cpu_runner_with_real_datasets(tmp_path: Path) -> None:
         dry_run=False,
     )
     with patch(
-        "builtins.open", side_effect=[IOError("Read error"), MagicMock(), MagicMock()]
+        "builtins.open", side_effect=[OSError("Read error"), MagicMock(), MagicMock()]
     ):
         with pytest.raises(InsufficientDataError):
             runner.run_training(config_corrupt)

@@ -15,9 +15,13 @@ import pytest
 from scripts.run_tests import (
     build_test_commands,
     compute_combined_coverage,
+    extract_interrogate_coverage_percent,
+    extract_pytest_coverage_percent,
     main,
+    parse_lcov_files,
     run_cmd,
     update_readme_badges,
+    wait_for_service_ready,
 )
 
 from t1d_analytics.sql_utils import SqlValue
@@ -36,7 +40,7 @@ def test_pure_orchestration_helpers() -> None:
     total_found, total_hit, text = compute_combined_coverage(cov_map)
     assert total_found == 2
     assert total_hit == 1
-    assert "SF:src/a.py\nDA:1,2\nDA:2,0\nLF:2\nLH:1\nend_of_record\n" == text
+    assert text == "SF:src/a.py\nDA:1,2\nDA:2,0\nLF:2\nLH:1\nend_of_record\n"
 
     raw_readme = "[![License](https://example.com/lic.svg)](#)\n# Title\n"
     updated_green, found = update_readme_badges(raw_readme, 100, 100)
@@ -65,24 +69,48 @@ def test_real_filesystem_lcov_merge_and_readme_update(tmp_path: Path) -> None:
         "SF:src/mod.py\nDA:1,2\nDA:2,1\nend_of_record\n", encoding="utf-8"
     )
 
-    cov_map: DefaultDict[str, DefaultDict[int, int]] = collections.defaultdict(
-        lambda: collections.defaultdict(int)
-    )
-    for lcov_file in (lcov_a, lcov_b):
-        current_sf = ""
-        for line in lcov_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("SF:"):
-                current_sf = line[3:]
-            elif line.startswith("DA:") and current_sf:
-                line_no_str, count_str = line[3:].split(",")
-                cov_map[current_sf][int(line_no_str)] += int(count_str)
-
+    cov_map = parse_lcov_files([lcov_a, lcov_b, tmp_path / "missing.lcov"])
     total_found, total_hit, merged_lcov = compute_combined_coverage(cov_map)
     assert total_found == 2
     assert total_hit == 2
     merged_path = tmp_path / "combined-coverage.lcov"
     merged_path.write_text(merged_lcov, encoding="utf-8")
-    assert "DA:1,3\nDA:2,1\nLF:2\nLH:2" in merged_path.read_text(encoding="utf-8")
+    assert "DA:1,2\nDA:2,1\nLF:2\nLH:2" in merged_path.read_text(encoding="utf-8")
+
+    cov_json = tmp_path / "coverage.json"
+    cov_json.write_text('{"totals": {"percent_covered": 98.7}}', encoding="utf-8")
+    assert extract_pytest_coverage_percent(cov_json) == 98
+    assert extract_interrogate_coverage_percent("actual: 100.0% PASSED") == 100
+    assert extract_interrogate_coverage_percent("no match") == 0
+
+    calls = 0
+
+    def flaky_open(url: str) -> str:
+        """Fail once before succeeding."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("not ready")
+        return url
+
+    assert (
+        wait_for_service_ready(
+            "http://localhost:8000",
+            max_attempts=3,
+            urlopen_fn=flaky_open,
+            sleep_fn=lambda _: None,
+        )
+        is True
+    )
+    assert (
+        wait_for_service_ready(
+            "http://localhost:8000",
+            max_attempts=2,
+            urlopen_fn=lambda _: (_ for _ in ()).throw(OSError("down")),
+            sleep_fn=lambda _: None,
+        )
+        is False
+    )
 
     readme_file = tmp_path / "README.md"
     readme_file.write_text(
@@ -489,7 +517,7 @@ def test_main_badge_colors_and_no_license_shield(
                 return io.StringIO(readme_without_license)
             if "README.md" in filename and mode == "w":
                 return CapturingStringIO()
-            if filename.endswith("lcov") or filename.endswith("lcov.info"):
+            if filename.endswith(("lcov", "lcov.info")):
                 return io.StringIO(lcov_content)
             return io.StringIO()
 
@@ -551,7 +579,7 @@ def test_main_badge_colors_red_and_interrogate_no_match(
                 return io.StringIO(readme_data)
             if "README.md" in filename and mode == "w":
                 return CapturingRedStringIO()
-            if filename.endswith("lcov") or filename.endswith("lcov.info"):
+            if filename.endswith(("lcov", "lcov.info")):
                 return io.StringIO(lcov_content)
             return io.StringIO()
 

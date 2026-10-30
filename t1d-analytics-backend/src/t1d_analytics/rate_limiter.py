@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from abc import ABC, abstractmethod
+from types import TracebackType
 from typing import Callable, Dict, List, Optional
 
 import duckdb
@@ -37,7 +38,7 @@ class BaseRateLimiter(ABC):
             bool: True if allowed, False if rate-limited.
 
         """
-        raise NotImplementedError
+        ...
 
     @abstractmethod
     def get_retry_after(self, client_ip: str, window_seconds: float = 60.0) -> int:
@@ -54,12 +55,46 @@ class BaseRateLimiter(ABC):
             int: Seconds until the rate limit expires.
 
         """
-        raise NotImplementedError
+        ...
 
     @abstractmethod
     def reset(self) -> None:
         """Reset rate limiter state."""
-        raise NotImplementedError
+        ...
+
+    def close(self) -> None:
+        """Release any underlying rate limiter resources."""
+        return None
+
+    def __enter__(self) -> "BaseRateLimiter":
+        """
+        Enter the runtime context for the rate limiter.
+
+        Returns
+        -------
+            BaseRateLimiter: The active rate limiter instance.
+
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
+        """
+        Exit the runtime context and close the rate limiter.
+
+        Args:
+        ----
+            exc_type: Exception type if raised inside the context block.
+            exc_val: Exception instance if raised inside the context block.
+            exc_tb: Exception traceback if raised inside the context block.
+
+        """
+        _ = (exc_type, exc_val, exc_tb)
+        self.close()
 
 
 class MemoryRateLimiter(BaseRateLimiter):
@@ -216,9 +251,22 @@ class DuckDbRateLimiter(BaseRateLimiter):
         with self._lock:
             self._conn.execute("DELETE FROM api_rate_limits")
 
+    def close(self) -> None:
+        """Close the underlying DuckDB connection in a thread-safe manner."""
+        with self._lock:
+            self._conn.close()
+
 
 _RATE_LIMITER_INSTANCES: Dict[str, BaseRateLimiter] = {}
 _RATE_LIMITER_INSTANCES_LOCK = threading.Lock()
+
+
+def close_all_rate_limiters() -> None:
+    """Close and remove all cached rate limiter instances."""
+    with _RATE_LIMITER_INSTANCES_LOCK:
+        for limiter in _RATE_LIMITER_INSTANCES.values():
+            limiter.close()
+        _RATE_LIMITER_INSTANCES.clear()
 
 
 def get_rate_limiter() -> BaseRateLimiter:

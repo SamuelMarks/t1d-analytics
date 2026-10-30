@@ -47,7 +47,8 @@ READ_ONLY_SQL_PREFIXES = (
     "table",
 )
 
-ALL_SQL_KEYWORDS = READ_ONLY_SQL_PREFIXES + (
+ALL_SQL_KEYWORDS = (
+    *READ_ONLY_SQL_PREFIXES,
     "call",
     "create",
     "drop",

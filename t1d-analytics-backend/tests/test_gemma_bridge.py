@@ -430,7 +430,7 @@ def _run_native_fallbacks_assertions(tmp_path: Path, duckdb: types.ModuleType) -
     # Test run_etl when table has no columns (rel.description is None/empty)
     with patch(
         "duckdb.DuckDBPyConnection.execute",
-        return_value=MagicMock(description=None, fetchall=lambda: []),
+        return_value=MagicMock(description=None, fetchall=list),
     ):
         etl_empty_cols = engine.run_etl(
             "sft", db_file, "cgm_metrics", output_dir=tmp_path / "etl_empty_cols"
@@ -796,9 +796,10 @@ def test_classify_sql_error_hint_and_execute_agentic_nl_to_sql() -> None:
     assert res_fail["error"] is not None
 
 
-def test_gemma_module_protocols_stubs() -> None:
-    """Test protocol stub properties on _Gemma*ModuleProtocol classes."""
+def test_gemma_module_protocols_stubs(tmp_path: Path) -> None:
+    """Verify runtime-checkable protocol compliance on _FakeGemmaLibraryModule."""
     from t1d_analytics.gemma_bridge import (
+        GemmaLibraryAdapter,
         _GemmaDpoModuleProtocol,
         _GemmaEtlModuleProtocol,
         _GemmaEvalModuleProtocol,
@@ -806,14 +807,13 @@ def test_gemma_module_protocols_stubs() -> None:
     )
 
     fake_mod = _FakeGemmaLibraryModule()
-    for proto_cls, attr_name in (
-        (_GemmaEtlModuleProtocol, "run_etl"),
-        (_GemmaSftModuleProtocol, "run_sft"),
-        (_GemmaDpoModuleProtocol, "run_dpo"),
-        (_GemmaEvalModuleProtocol, "evaluate_sql"),
-    ):
-        prop = getattr(proto_cls, attr_name)
-        assert isinstance(prop, property)
-        assert prop.fget is not None
-        with pytest.raises(NotImplementedError):
-            prop.fget(fake_mod)
+    assert isinstance(fake_mod, _GemmaEtlModuleProtocol)
+    assert isinstance(fake_mod, _GemmaSftModuleProtocol)
+    assert isinstance(fake_mod, _GemmaDpoModuleProtocol)
+    assert isinstance(fake_mod, _GemmaEvalModuleProtocol)
+    db_file = tmp_path / "db.duckdb"
+    db_file.write_text("", encoding="utf-8")
+    adapter = GemmaLibraryAdapter(fake_mod)
+    assert (
+        adapter.run_etl("sft", str(db_file), "tbl", str(tmp_path / "out"))["rows"] == 10
+    )

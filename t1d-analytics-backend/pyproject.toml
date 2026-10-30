@@ -32,8 +32,8 @@ t1d-analytics = "t1d_analytics.cli:main"
 line-length = 88
 target-version = "py39"
 src = ["src", "t1d-analytics-backend/src", "../scripts", "scripts"]
-lint.select = ["E", "F", "I", "D"]
-lint.ignore = ["D203", "D212", "E501"]
+lint.select = ["E", "F", "I", "D", "B", "UP", "SIM", "C4", "PIE", "RUF"]
+lint.ignore = ["D203", "D212", "E501", "UP006", "UP007", "UP015", "UP035", "UP037", "UP045", "SIM105", "SIM108", "SIM117", "B008", "RUF001", "RUF002"]
 
 [tool.mypy]
 strict = true
@@ -75,7 +75,12 @@ omit = ["tests/*", "*/tests/*"]
 [tool.coverage.report]
 show_missing = true
 fail_under = 100
-exclude_lines = ["if TYPE_CHECKING:"]
+exclude_lines = [
+    "if TYPE_CHECKING:",
+    "class .*\\(Protocol\\):",
+    "@(abc\\.)?abstractmethod",
+    "raise NotImplementedError",
+]
 
 [tool.interrogate]
 ignore-init-method = false

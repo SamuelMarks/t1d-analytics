@@ -419,7 +419,6 @@ def test_check_database_health_integrity_fail(tmp_path: Path) -> None:
 
         def close(self) -> None:
             """Close fake connection."""
-            pass
 
     with patch("duckdb.connect", return_value=FakeConn()):
         status = check_database_health(str(db_file))

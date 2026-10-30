@@ -109,7 +109,7 @@ not a json
     with pytest.raises(ValueError, match="contains no valid training pairs"):
         prepare_torch_dataset(empty_file)
 
-    with patch("builtins.open", side_effect=IOError("Disk error")):
+    with patch("builtins.open", side_effect=OSError("Disk error")):
         with pytest.raises(ValueError, match="Failed to read JSONL dataset"):
             prepare_torch_dataset(jsonl_file)
 

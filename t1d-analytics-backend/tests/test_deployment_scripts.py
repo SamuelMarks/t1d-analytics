@@ -86,7 +86,7 @@ def run_test_sh(
     if env_overrides:
         env.update(env_overrides)
     return subprocess.run(
-        ["/bin/sh", str(TEST_SH_PATH)] + args,
+        ["/bin/sh", str(TEST_SH_PATH), *args],
         cwd=str(cwd or REPO_ROOT),
         capture_output=True,
         text=True,

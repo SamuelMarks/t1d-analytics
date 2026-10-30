@@ -113,9 +113,6 @@ from t1d_analytics.chat_service import (
 from t1d_analytics.chat_service import (
     generate_sql_from_nl as generate_sql_from_nl,
 )
-from t1d_analytics.chat_service import (
-    stream_nl_to_sql_events as stream_nl_to_sql_events,
-)
 from t1d_analytics.db_security import (
     discover_workspace_databases,
     get_allowed_db_dirs,
@@ -146,12 +143,6 @@ from t1d_analytics.llm_client import (
     resolve_provider_and_model,
 )
 from t1d_analytics.rate_limiter import (
-    RATE_LIMIT_LOCK as RATE_LIMIT_LOCK,
-)
-from t1d_analytics.rate_limiter import (
-    RATE_LIMIT_STORE as RATE_LIMIT_STORE,
-)
-from t1d_analytics.rate_limiter import (
     BaseRateLimiter as BaseRateLimiter,
 )
 from t1d_analytics.rate_limiter import (
@@ -162,6 +153,9 @@ from t1d_analytics.rate_limiter import (
 )
 from t1d_analytics.rate_limiter import (
     check_rate_limit as check_rate_limit,
+)
+from t1d_analytics.rate_limiter import (
+    close_all_rate_limiters,
 )
 from t1d_analytics.rate_limiter import (
     enforce_rate_limit as _enforce_rate_limit,
@@ -197,8 +191,6 @@ __all__ = [
     "ModelsResponse",
     "ProviderStatus",
     "ProvidersStatusResponse",
-    "RATE_LIMIT_LOCK",
-    "RATE_LIMIT_STORE",
     "SchemaResponse",
     "SessionListResponse",
     "SessionModel",
@@ -208,6 +200,7 @@ __all__ = [
     "TrainingJobRequest",
     "_extract_sql_from_response",
     "app",
+    "chat_router",
     "check_rate_limit",
     "enforce_rate_limit",
     "extract_stream_delta",
@@ -217,6 +210,10 @@ __all__ = [
     "resolve_provider_and_model",
     "sanitize_spreadsheet_cell",
     "sanitize_sql_value",
+    "sessions_router",
+    "status_router",
+    "tables_router",
+    "training_router",
     "validate_db_path",
 ]
 
@@ -331,7 +328,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning(f"Startup auto-ingestion failed for {db_path}: {e}")
     run_system_diagnostics(db_path=db_path)
     log_startup_diagnostics(db_path=db_path)
-    yield
+    try:
+        yield
+    finally:
+        close_all_rate_limiters()
 
 
 _lifespan = lifespan
@@ -564,8 +564,12 @@ def get_training_job_manager() -> TrainingJobManager:
 _build_sql_prompt = build_sql_prompt_with_history
 stream_llm_tokens = stream_llm_completion_tokens
 
+chat_router = APIRouter()
+tables_router = APIRouter()
+status_router = APIRouter()
 
-@app.post("/api/chat", response_model=ChatResponse)
+
+@chat_router.post("/api/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
     """
     Handle incoming chat messages and execute SQL or NLP queries.
@@ -636,7 +640,7 @@ def stream_chat_events(
     )
 
 
-@app.post("/api/chat/stream")
+@chat_router.post("/api/chat/stream")
 async def chat_stream_endpoint(request: ChatRequest, req: Request) -> StreamingResponse:
     """
     Handle chat requests with Server-Sent Events (SSE) streaming.
@@ -792,7 +796,7 @@ def parse_error(e: Exception) -> ApiError:
     return ApiError(error_code="backend.errorUnexpected", params={"error": str(e)})
 
 
-@app.post("/api/execute-sql", response_model=ExecuteSqlResponse)
+@chat_router.post("/api/execute-sql", response_model=ExecuteSqlResponse)
 def execute_sql_endpoint(
     request: ExecuteSqlRequest, req: Request
 ) -> ExecuteSqlResponse:
@@ -829,7 +833,10 @@ def execute_sql_endpoint(
         return ExecuteSqlResponse(error=parse_error(e))
 
 
-@app.get("/api/table/{table_name}", response_model=TableDataResponse)
+app.include_router(chat_router)
+
+
+@tables_router.get("/api/table/{table_name}", response_model=TableDataResponse)
 def get_table_data(
     table_name: str,
     limit: int = 25,
@@ -869,7 +876,7 @@ def get_table_data(
     )
 
 
-@app.get("/api/table/{table_name}/profile")
+@tables_router.get("/api/table/{table_name}/profile")
 def get_table_profile(
     table_name: str, db_path: Optional[str] = None
 ) -> TableProfileResult:
@@ -894,7 +901,7 @@ def get_table_profile(
     )
 
 
-@app.get("/api/export/excel")
+@tables_router.get("/api/export/excel")
 def export_excel(table_name: str, db_path: Optional[str] = None) -> StreamingResponse:
     """
     Export table data formatted as a native OpenXML Excel (.xlsx) workbook.
@@ -916,7 +923,7 @@ def export_excel(table_name: str, db_path: Optional[str] = None) -> StreamingRes
     )
 
 
-@app.get("/api/export/parquet")
+@tables_router.get("/api/export/parquet")
 def export_parquet(
     table_name: str,
     db_path: Optional[str] = None,
@@ -941,7 +948,7 @@ def export_parquet(
     )
 
 
-@app.get("/api/export/csv")
+@tables_router.get("/api/export/csv")
 def export_csv(
     table_name: str,
     db_path: Optional[str] = None,
@@ -966,7 +973,7 @@ def export_csv(
     )
 
 
-@app.get("/api/export/json")
+@tables_router.get("/api/export/json")
 def export_json(
     table_name: str,
     db_path: Optional[str] = None,
@@ -991,7 +998,7 @@ def export_json(
     )
 
 
-@app.get("/api/status", response_model=StatusResponse)
+@status_router.get("/api/status", response_model=StatusResponse)
 def get_status(
     request: Request,
     db_path: Optional[str] = None,
@@ -1042,7 +1049,7 @@ def get_status(
     return resp
 
 
-@app.get("/api/ready", response_model=None)
+@status_router.get("/api/ready", response_model=None)
 def get_ready(
     request: Request, db_path: Optional[str] = None
 ) -> Union[StatusResponse, JSONResponse]:
@@ -1062,7 +1069,7 @@ def get_ready(
     return get_status(request=request, db_path=db_path, require_ready=True)
 
 
-@app.get("/api/health", response_model=None)
+@status_router.get("/api/health", response_model=None)
 def get_health(
     request: Request, db_path: Optional[str] = None
 ) -> Union[SystemHealthDict, JSONResponse]:
@@ -1132,7 +1139,7 @@ def _build_schema_response(target_db: str, lang: str = "en") -> SchemaResponse:
             conn.close()
 
 
-@app.get("/api/schema", response_model=SchemaResponse)
+@tables_router.get("/api/schema", response_model=SchemaResponse)
 def get_schema(request: Request, db_path: Optional[str] = None) -> SchemaResponse:
     """
     Return structured schema for the frontend Schema Explorer.
@@ -1153,7 +1160,7 @@ def get_schema(request: Request, db_path: Optional[str] = None) -> SchemaRespons
     return _build_schema_response(target_db=target_db, lang=lang)
 
 
-@app.get("/api/providers/status", response_model=ProvidersStatusResponse)
+@status_router.get("/api/providers/status", response_model=ProvidersStatusResponse)
 def get_providers_status() -> ProvidersStatusResponse:
     """
     Report connection health and credential status for all supported LLM providers.
@@ -1166,7 +1173,7 @@ def get_providers_status() -> ProvidersStatusResponse:
     return probe_providers_status(urlopen_fn=urllib.request.urlopen)
 
 
-@app.get("/api/models", response_model=ModelsResponse)
+@status_router.get("/api/models", response_model=ModelsResponse)
 def list_models(
     include_cloud: bool = True,
     configured_models: Optional[str] = None,
@@ -1192,7 +1199,7 @@ def list_models(
     )
 
 
-@app.get("/api/databases", response_model=DatabaseListResponse)
+@tables_router.get("/api/databases", response_model=DatabaseListResponse)
 def list_databases() -> DatabaseListResponse:
     """
     Discover and list available DuckDB database files in the workspace.
@@ -1203,6 +1210,10 @@ def list_databases() -> DatabaseListResponse:
 
     """
     return discover_workspace_databases()
+
+
+app.include_router(tables_router)
+app.include_router(status_router)
 
 
 training_router = APIRouter()

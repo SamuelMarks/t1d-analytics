@@ -201,7 +201,7 @@ def test_generate_sql_fallback_no_prefix(mocker: MagicMock) -> None:
     mock_llm_instance.completion.return_value = mocker.MagicMock(choices=[mock_choice])
 
     mock_conn = mocker.MagicMock()
-    full, sql = generate_sql_from_nl(
+    _full, sql = generate_sql_from_nl(
         "dummy_db",
         "test query",
         connect_fn=lambda path, read_only=True: mock_conn,
@@ -232,7 +232,7 @@ def test_generate_sql_from_nl_multi_block(mock_create: MagicMock, mock_db: str) 
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
-    full_resp, sql = generate_sql_from_nl(mock_db, "get users")
+    _full_resp, sql = generate_sql_from_nl(mock_db, "get users")
     assert sql == "SELECT id, name FROM users WHERE id > 0;"
 
 
@@ -254,7 +254,7 @@ def test_generate_sql_from_nl_non_query_block(
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
-    full_resp, sql = generate_sql_from_nl(mock_db, "get users")
+    _full_resp, sql = generate_sql_from_nl(mock_db, "get users")
     assert sql == "random text block"
 
 
@@ -804,7 +804,7 @@ SELECT count(*) FROM users;
     mock_resp = MagicMock(choices=[mock_choice])
     mock_llm2.completion.return_value = mock_resp
     with patch("any_llm.AnyLLM.create", return_value=mock_llm2):
-        full, sql = generate_sql_from_nl(
+        _full, sql = generate_sql_from_nl(
             mock_db, "Count users", model_name="openai/gpt-4o"
         )
         assert "SELECT count(*) FROM users" in sql
@@ -979,7 +979,7 @@ SELECT 1;
     mock_llm.completion.return_value = MagicMock(choices=[mock_choice])
 
     with patch("any_llm.AnyLLM.create", return_value=mock_llm) as mock_create:
-        full, sql = generate_sql_from_nl(
+        _full, sql = generate_sql_from_nl(
             mock_db,
             "Count users",
             model_name="openai/gpt-4o",
@@ -1074,7 +1074,7 @@ def test_stream_llm_tokens_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> N
     from t1d_analytics.api import stream_llm_tokens
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="backend.missingApiKey"):
+    with pytest.raises(RuntimeError, match=r"backend\.missingApiKey"):
         list(stream_llm_tokens("test prompt", "openai/gpt-4o"))
 
 
@@ -1284,7 +1284,7 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         fb_full, fb_sql = translate_nl_to_sql(
             mock_db, "Show me the first 5 users", model_name="gemma4:latest"
         )
-        assert 'SELECT * FROM "users" LIMIT 5;' == fb_sql
+        assert fb_sql == 'SELECT * FROM "users" LIMIT 5;'
         assert fb_sql in fb_full
 
     # 6. /api/chat/stream recovers when stream_fn raises a local Ollama OOM / sync-in-async crash

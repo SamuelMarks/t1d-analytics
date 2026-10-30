@@ -75,13 +75,14 @@ def test_codebase_translation_keys_parity() -> None:
 
         def visit_Call(self, node: ast.Call) -> None:
             """Visit Call nodes and extract Constant strings from _() calls."""
-            if isinstance(node.func, ast.Name) and node.func.id == "_":
-                if (
-                    node.args
-                    and isinstance(node.args[0], ast.Constant)
-                    and isinstance(node.args[0].value, str)
-                ):
-                    self.keys.add(node.args[0].value)
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "_"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                self.keys.add(node.args[0].value)
             self.generic_visit(node)
 
     src_dir = Path(__file__).parent.parent / "src" / "t1d_analytics"

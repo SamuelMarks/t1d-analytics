@@ -57,7 +57,6 @@ def test_list_models_success(monkeypatch: pytest.MonkeyPatch) -> None:
             exc_tb: typing.Optional[types.TracebackType],
         ) -> None:
             """Exit the context manager."""
-            pass
 
     with patch("urllib.request.urlopen", MockUrlopen):
         response = client.get("/api/models")
@@ -328,7 +327,6 @@ def test_get_providers_status_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
             exc_tb: typing.Optional[types.TracebackType] = None,
         ) -> None:
             """Exit context."""
-            pass
 
     with patch("urllib.request.urlopen", return_value=MockResp()):
         resp = client.get("/api/providers/status")
@@ -399,7 +397,6 @@ def test_get_providers_status_unprefixed_host_and_non_200(
             exc_tb: typing.Optional[types.TracebackType] = None,
         ) -> None:
             """Exit context."""
-            pass
 
     with patch("urllib.request.urlopen", return_value=MockStatus500()):
         resp = client.get("/api/providers/status")

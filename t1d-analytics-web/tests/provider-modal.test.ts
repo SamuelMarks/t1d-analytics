@@ -334,6 +334,7 @@ describe("ProviderSettingsModalController & Model Loading", () => {
       json: async () => ({}),
     });
     await minimalUi.loadModels();
+    ui.updateModalBadge("non-existent-provider", true);
     await expect(minimalUi.openProviderModal()).resolves.toBeUndefined();
     expect(() => minimalUi.closeProviderModal()).not.toThrow();
     await minimalUi.saveProviderSettings();

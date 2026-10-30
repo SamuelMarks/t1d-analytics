@@ -62,18 +62,49 @@ def open_sessions_db_conn(
     else:
         conn = duckdb.connect(db_path, read_only=False)
 
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chat_sessions (
-            session_id VARCHAR PRIMARY KEY,
-            title VARCHAR,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            messages_json VARCHAR
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id VARCHAR PRIMARY KEY,
+                title VARCHAR,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                messages_json VARCHAR
+            )
+            """
         )
-        """
-    )
+    except Exception:
+        conn.close()
+        raise
     return conn
+
+
+@contextmanager
+def managed_sessions_db_conn(
+    db_path: Optional[str] = None,
+    open_fn: Callable[
+        [Optional[str]], duckdb.DuckDBPyConnection
+    ] = open_sessions_db_conn,
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    """
+    Context manager wrapping `open_sessions_db_conn` that guarantees `conn.close()` on exit.
+
+    Args:
+    ----
+        db_path: Optional path to the sessions database file.
+        open_fn: Injectable callable opening the sessions DuckDB connection.
+
+    Yields:
+    ------
+        duckdb.DuckDBPyConnection: Open DuckDB connection to the sessions database.
+
+    """
+    conn = open_fn(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 class SessionStore:
@@ -83,7 +114,7 @@ class SessionStore:
         self,
         conn_factory: Callable[
             [Optional[str]], ContextManager[duckdb.DuckDBPyConnection]
-        ],
+        ] = managed_sessions_db_conn,
         lock: Optional[threading.Lock] = None,
     ) -> None:
         """

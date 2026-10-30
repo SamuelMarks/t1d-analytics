@@ -10,8 +10,8 @@ import { ChatState, type Message } from "../src/state";
 import {
   isReadOnlySqlStatement,
   updateInputHighlight,
-  trapModalFocus,
 } from "../src/sql-highlight";
+import { trapModalFocus } from "../src/modal-utils";
 import { ChatUI, requireElementById } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 

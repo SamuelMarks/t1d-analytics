@@ -446,12 +446,9 @@ def _parse_make_bat_structure(
         set(usage_match.group(1).split("|")) if usage_match is not None else set()
     )
 
-    dispatch_map: dict[str, str] = {
-        arg: label
-        for arg, label in re.findall(
-            r'if "%~1"=="([^"]+)"\s+goto\s+([a-zA-Z0-9_]+)', content
-        )
-    }
+    dispatch_map: dict[str, str] = dict(
+        re.findall(r'if "%~1"=="([^"]+)"\s+goto\s+([a-zA-Z0-9_]+)', content)
+    )
 
     label_blocks: dict[str, list[str]] = {}
     current_label: str | None = None

@@ -1204,9 +1204,9 @@ def test_train_subcommand_tpu_execution(
     out_dir = tmp_path / "tpu_cli_out"
 
     with (
-        patch("t1d_analytics.training_runner.sync_dataset_to_gcs"),
+        patch("t1d_analytics.tpu_orchestrator.sync_dataset_to_gcs"),
         patch(
-            "t1d_analytics.training_runner.subprocess.run",
+            "t1d_analytics.tpu_orchestrator.subprocess.run",
             return_value=__import__("subprocess").CompletedProcess(
                 args=[], returncode=0, stdout='{"state": "READY"}', stderr=""
             ),
@@ -1365,7 +1365,7 @@ def test_main_download_with_token_and_auth_plugin(
     )
 
 
-@patch("t1d_analytics.analytics.export_table")
+@patch("t1d_analytics.api_exports.export_table")
 def test_cli_generic_export_success(
     mock_export: MagicMock,
     capsys: CaptureFixture[str],

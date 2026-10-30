@@ -17,6 +17,7 @@ from typing_extensions import TypedDict
 
 from t1d_analytics import (
     analytics,
+    api_exports,
     diagnostics,
     gemma_bridge,
     seed,
@@ -961,7 +962,7 @@ def handle_manifest(opts: CliOptionsModel) -> None:
     print("-" * 100)
     for r in records:
         print(
-            f"{str(r['table_name']):<25} | {str(r['row_count']):<10} | {str(r['file_size']):<10} | {str(r['loaded_at']):<25} | {r['source_file']}"
+            f"{r['table_name']!s:<25} | {r['row_count']!s:<10} | {r['file_size']!s:<10} | {r['loaded_at']!s:<25} | {r['source_file']}"
         )
 
 
@@ -1099,10 +1100,10 @@ def handle_export(opts: CliOptionsModel) -> None:
         opts: Validated CLI options model containing db, table, format, and output_file.
 
     """
-    _ = get_translator()
+    _ = get_translator(opts.lang)
     print(_("Connecting to DuckDB at {}...", opts.db))
     print(_("Exporting table '{}' to {}...", opts.table, opts.output_file))
-    analytics.export_table(
+    api_exports.export_table(
         db_path=opts.db,
         table_name=opts.table,
         output_path=opts.output_file,
@@ -1237,14 +1238,14 @@ def handle_watch(opts: CliOptionsModel) -> None:
             del seen_hashes[del_f]
             print(f"Detected file deletion: '{del_f}'. Pruning manifest...")
             if Path(opts.db).exists():
+                conn_del: Optional[duckdb.DuckDBPyConnection] = None
                 try:
-                    conn = duckdb.connect(opts.db)
+                    conn_del = duckdb.connect(opts.db)
                     del_name = Path(del_f).name
-                    conn.execute(
+                    conn_del.execute(
                         "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR source_file = ?",
                         (del_f, del_name),
                     )
-                    conn.close()
                 except duckdb.Error as e:
                     print(
                         f"Warning: Failed to update manifest after deletion: {e}",
@@ -1255,6 +1256,9 @@ def handle_watch(opts: CliOptionsModel) -> None:
                         f"Warning: Unexpected error updating manifest: {e}",
                         file=sys.stderr,
                     )
+                finally:
+                    if conn_del is not None:
+                        conn_del.close()
 
         changed = False
         for f in current_files:
@@ -1399,106 +1403,111 @@ def handle_train(opts: CliOptionsModel) -> None:
     print("=" * 60)
 
     conn = duckdb.connect(opts.db)
-    generator = training_data.TrainingDataGenerator(
-        conn,
-        model=opts.model,
-        provider=opts.provider,
-    )
+    try:
+        generator = training_data.TrainingDataGenerator(
+            conn,
+            model=opts.model,
+            provider=opts.provider,
+        )
 
-    print("Generating synthetic pairs and persisting to DuckDB...")
-    schema = generator.extract_schema()
-    split_val_flag = opts.split_validation
-    split_r = (0.8, 0.1, 0.1) if split_val_flag else None
-    for table_name, table_schema in schema.items():
-        print(f"Generating {opts.samples_per_table} pairs for table: {table_name}...")
-        pairs = generator.generate_pairs(table_schema, opts.samples_per_table)
-        generator.write_to_db(pairs, split_ratios=split_r)
+        print("Generating synthetic pairs and persisting to DuckDB...")
+        schema = generator.extract_schema()
+        split_val_flag = opts.split_validation
+        split_r = (0.8, 0.1, 0.1) if split_val_flag else None
+        for table_name, table_schema in schema.items():
+            print(
+                f"Generating {opts.samples_per_table} pairs for table: {table_name}..."
+            )
+            pairs = generator.generate_pairs(table_schema, opts.samples_per_table)
+            generator.write_to_db(pairs, split_ratios=split_r)
 
-    out_dir = Path(str(opts.output_dir))
-    out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = Path(str(opts.output_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    formats = [f.strip().lower() for f in opts.export_formats.split(",")]
-    manifest_stages = export_training_stages(
-        conn=conn,
-        generator=generator,
-        out_dir=out_dir,
-        formats=formats,
-        split_val_flag=split_val_flag,
-    )
+        formats = [f.strip().lower() for f in opts.export_formats.split(",")]
+        manifest_stages = export_training_stages(
+            conn=conn,
+            generator=generator,
+            out_dir=out_dir,
+            formats=formats,
+            split_val_flag=split_val_flag,
+        )
 
-    split_validation_passed = (
-        verify_split_prompt_leakage(conn) if split_val_flag else True
-    )
-    hparams = validate_cli_hyperparameters(opts)
+        split_validation_passed = (
+            verify_split_prompt_leakage(conn) if split_val_flag else True
+        )
+        hparams = validate_cli_hyperparameters(opts)
 
-    backend_val = opts.backend
-    manifest: Dict[
-        str,
-        Union[str, int, bool, List[str], Dict[str, ManifestStageDict]],
-    ] = {
-        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "model": f"{opts.provider}/{opts.model}",
-        "database": str(opts.db),
-        "samples_per_table": int(opts.samples_per_table),
-        "backend": backend_val,
-        "tables_processed": list(schema.keys()),
-        "export_formats": formats,
-        "stages": manifest_stages,
-        "split_validation_passed": split_validation_passed,
-    }
-    manifest_path = out_dir / "training_manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as mf:
-        json.dump(manifest, mf, indent=2)
-    print(f"Exported training manifest to {manifest_path}...")
+        backend_val = opts.backend
+        manifest: Dict[
+            str,
+            Union[str, int, bool, List[str], Dict[str, ManifestStageDict]],
+        ] = {
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "model": f"{opts.provider}/{opts.model}",
+            "database": str(opts.db),
+            "samples_per_table": int(opts.samples_per_table),
+            "backend": backend_val,
+            "tables_processed": list(schema.keys()),
+            "export_formats": formats,
+            "stages": manifest_stages,
+            "split_validation_passed": split_validation_passed,
+        }
+        manifest_path = out_dir / "training_manifest.json"
+        with open(manifest_path, "w", encoding="utf-8") as mf:
+            json.dump(manifest, mf, indent=2)
+        print(f"Exported training manifest to {manifest_path}...")
 
-    if opts.execute_training:
-        maxtext_cfg = None
-        if backend_val == "remote-tpu-maxtext":
-            maxtext_cfg = MaxTextConfig(
-                project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp"),
-                zone=opts.tpu_zone,
-                bucket_url=opts.gcs_bucket,
-                accelerator_type=TpuAcceleratorType(opts.tpu_type),
-                num_slices=opts.tpu_slices,
+        if opts.execute_training:
+            maxtext_cfg = None
+            if backend_val == "remote-tpu-maxtext":
+                maxtext_cfg = MaxTextConfig(
+                    project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp"),
+                    zone=opts.tpu_zone,
+                    bucket_url=opts.gcs_bucket,
+                    accelerator_type=TpuAcceleratorType(opts.tpu_type),
+                    num_slices=opts.tpu_slices,
+                    model_name=opts.model,
+                )
+
+            target_parquet = out_dir / "sft_data.parquet"
+            target_jsonl = out_dir / "sft_data.jsonl"
+            ds_target = (
+                str(target_parquet)
+                if "parquet" in formats
+                else (
+                    str(target_jsonl)
+                    if "jsonl" in formats
+                    else str(out_dir / "training_data.parquet")
+                )
+            )
+            config = TrainingJobConfig(
                 model_name=opts.model,
+                backend=TrainingBackend(backend_val),
+                dataset_path=ds_target,
+                output_dir=str(out_dir / "checkpoints"),
+                hyperparameters=hparams,
+                dry_run=opts.dry_run,
+                maxtext_config=maxtext_cfg,
+                use_lora=opts.use_lora,
+                quantization=opts.quantization,
             )
-
-        target_parquet = out_dir / "sft_data.parquet"
-        target_jsonl = out_dir / "sft_data.jsonl"
-        ds_target = (
-            str(target_parquet)
-            if "parquet" in formats
-            else (
-                str(target_jsonl)
-                if "jsonl" in formats
-                else str(out_dir / "training_data.parquet")
+            print(
+                f"Initiating training runner with backend '{config.backend.value}'..."
             )
-        )
-        config = TrainingJobConfig(
-            model_name=opts.model,
-            backend=TrainingBackend(backend_val),
-            dataset_path=ds_target,
-            output_dir=str(out_dir / "checkpoints"),
-            hyperparameters=hparams,
-            dry_run=opts.dry_run,
-            maxtext_config=maxtext_cfg,
-            use_lora=opts.use_lora,
-            quantization=opts.quantization,
-        )
-        print(f"Initiating training runner with backend '{config.backend.value}'...")
-        from t1d_analytics import training_runner
+            from t1d_analytics import training_runner
 
-        runner = training_runner.get_training_runner(config.backend)
-        runner.validate_environment()
-        res = runner.run_training(config)
-        results_file = out_dir / "training_results.json"
-        with open(results_file, "w") as rf:
-            json.dump(res, rf, indent=2)
-        print(
-            f"Training run completed for model '{config.model_name}'. Results saved to {results_file}."
-        )
-
-    conn.close()
+            runner = training_runner.get_training_runner(config.backend)
+            runner.validate_environment()
+            res = runner.run_training(config)
+            results_file = out_dir / "training_results.json"
+            with open(results_file, "w") as rf:
+                json.dump(res, rf, indent=2)
+            print(
+                f"Training run completed for model '{config.model_name}'. Results saved to {results_file}."
+            )
+    finally:
+        conn.close()
     print("Training orchestration completed successfully.")
 
 
@@ -1544,21 +1553,6 @@ def handle_bridge_gemma_sql(opts: CliOptionsModel) -> None:
         )
         print(res.stdout)
         print("gemma-4-sql training completed successfully.")
-
-
-_handle_download_cmd = handle_download
-_handle_extract_cmd = handle_extract
-_handle_load_cmd = handle_load
-_handle_manifest_cmd = handle_manifest
-_handle_export_cmd = handle_export
-_handle_query_cmd = handle_query
-_handle_generate_training_data_cmd = handle_generate_training_data
-_handle_evaluate_cmd = handle_evaluate
-_handle_doctor_cmd = handle_doctor
-_handle_seed_cmd = handle_seed
-_handle_train_cmd = handle_train
-_handle_gemma_etl_cmd = handle_bridge_gemma_sql
-_handle_gemma_train_cmd = handle_bridge_gemma_sql
 
 
 if __name__ == "__main__":

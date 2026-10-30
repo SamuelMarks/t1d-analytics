@@ -12,10 +12,10 @@ from t1d_analytics.models import (
     TrainingHyperparameters,
     TrainingJobConfig,
 )
+from t1d_analytics.tpu_orchestrator import sync_dataset_to_gcs
 from t1d_analytics.training_runner import (
     LocalGpuRunner,
     resolve_device_telemetry,
-    sync_dataset_to_gcs,
 )
 
 has_cuda = torch.cuda.is_available()
