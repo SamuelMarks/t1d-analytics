@@ -188,6 +188,43 @@ def _build_gcloud_ssh_command(
 class RemoteTpuMaxTextRunner(BaseTrainingRunner):
     """Training runner orchestrating MaxText jobs on Google Cloud TPU clusters."""
 
+    def __init__(
+        self,
+        subprocess_executor: Optional[SubprocessExecutorProtocol] = None,
+    ) -> None:
+        """
+        Initialize the Cloud TPU MaxText runner with an optional subprocess executor.
+
+        Args:
+        ----
+            subprocess_executor: Optional callable matching `SubprocessExecutorProtocol`
+                (defaults to `subprocess.run`).
+
+        """
+        self._subprocess_executor = subprocess_executor
+
+    def _run_subprocess(
+        self,
+        cmd: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        """
+        Execute a CLI command via the configured `SubprocessExecutorProtocol` or `subprocess.run`.
+
+        Args:
+        ----
+            cmd: Command argument sequence.
+
+        Returns:
+        -------
+            subprocess.CompletedProcess[str]: Completed process record.
+
+        """
+        if self._subprocess_executor is not None:
+            return self._subprocess_executor(
+                cmd, capture_output=True, text=True, check=False
+            )
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
     def validate_environment(self) -> bool:
         """
         Validate that Google Cloud CLI or Libscript toolchain is installed.
@@ -308,7 +345,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 xpk_bin, workload_name, cluster_name, max_cfg
             )
 
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        proc = self._run_subprocess(cmd)
         if proc.returncode != 0:
             raise TpuOrchestrationError(f"TPU dispatch failed: {proc.stderr.strip()}")
         return proc
@@ -509,6 +546,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         workload_name: str,
         zone: str,
         timeout_seconds: float = 30.0,
+        cancel_event: Optional[threading.Event] = None,
     ) -> str:
         """
         Poll TPU VM workload status synchronously using Google Cloud CLI (gcloud).
@@ -518,6 +556,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             workload_name: Identifier of the TPU VM instance.
             zone: GCP availability zone of the TPU VM instance.
             timeout_seconds: Timeout threshold in seconds.
+            cancel_event: Optional cooperative cancellation event.
 
         Returns:
         -------
@@ -525,14 +564,19 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
 
         Raises:
         ------
-            TpuOrchestrationError: If gcloud CLI is missing, instance is not found, or preemption occurs.
+            TpuOrchestrationError: If gcloud CLI is missing, instance is not found, cancelled, or preemption occurs.
             TpuPollingTimeoutError: If polling exceeds timeout threshold.
 
         """
         cmd = self._build_gcloud_describe_cmd(workload_name, zone)
         start = time.time()
         while time.time() - start < timeout_seconds:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if cancel_event is not None and cancel_event.is_set():
+                self._reclaim_gcloud_tpu_workload_sync(workload_name, zone)
+                raise TpuOrchestrationError(
+                    f"Workload '{workload_name}' cancelled and reclaimed."
+                )
+            res = self._run_subprocess(cmd)
             parsed = self._parse_gcloud_describe_response(workload_name, zone, res)
             if parsed is not None:
                 return parsed
@@ -547,6 +591,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         workload_name: str,
         zone: str,
         timeout_seconds: float = 30.0,
+        cancel_event: Optional[threading.Event] = None,
     ) -> str:
         """
         Poll TPU VM workload status using Google Cloud CLI (gcloud).
@@ -556,6 +601,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             workload_name: Identifier of the TPU VM instance.
             zone: GCP availability zone of the TPU VM instance.
             timeout_seconds: Timeout threshold in seconds.
+            cancel_event: Optional cooperative cancellation event.
 
         Returns:
         -------
@@ -563,14 +609,19 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
 
         Raises:
         ------
-            TpuOrchestrationError: If gcloud CLI is missing, instance is not found, or preemption occurs.
+            TpuOrchestrationError: If gcloud CLI is missing, instance is not found, cancelled, or preemption occurs.
             TpuPollingTimeoutError: If polling exceeds timeout threshold.
 
         """
         cmd = self._build_gcloud_describe_cmd(workload_name, zone)
         start = time.time()
         while time.time() - start < timeout_seconds:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if cancel_event is not None and cancel_event.is_set():
+                await self._reclaim_gcloud_tpu_workload(workload_name, zone)
+                raise TpuOrchestrationError(
+                    f"Workload '{workload_name}' cancelled and reclaimed."
+                )
+            res = self._run_subprocess(cmd)
             parsed = self._parse_gcloud_describe_response(workload_name, zone, res)
             if parsed is not None:
                 return parsed
@@ -607,7 +658,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         cmd = self._build_gcloud_delete_cmd(workload_name, zone)
         last_error = ""
         for attempt in range(1, max_retries + 1):
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            res = self._run_subprocess(cmd)
             if res.returncode == 0:
                 return True
             last_error = res.stderr.strip()
@@ -645,7 +696,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         cmd = self._build_gcloud_delete_cmd(workload_name, zone)
         last_error = ""
         for attempt in range(1, max_retries + 1):
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            res = self._run_subprocess(cmd)
             if res.returncode == 0:
                 return True
             last_error = res.stderr.strip()
@@ -682,12 +733,39 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             f"--cluster=tpu-cluster-{max_cfg.accelerator_type.value}",
         ]
 
+    @staticmethod
+    def _build_xpk_delete_cmd(
+        xpk_bin: str, workload_name: str, max_cfg: MaxTextConfig
+    ) -> List[str]:
+        """
+        Build the `xpk workload delete` command list.
+
+        Args:
+        ----
+            xpk_bin: Path to the `xpk` executable.
+            workload_name: Identifier of the workload to delete.
+            max_cfg: MaxText infrastructure configuration.
+
+        Returns:
+        -------
+            List[str]: Subprocess argument list for deleting the XPK workload.
+
+        """
+        return [
+            xpk_bin,
+            "workload",
+            "delete",
+            f"--workload={workload_name}",
+            f"--cluster=tpu-cluster-{max_cfg.accelerator_type.value}",
+        ]
+
     def _poll_workload_status_sync(
         self,
         workload_name: str,
         max_cfg: MaxTextConfig,
         timeout_seconds: float = 30.0,
         status_override: Optional[str] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> str:
         """
         Poll workload execution status synchronously from XPK or Google Cloud TPU API.
@@ -698,6 +776,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             max_cfg: MaxText infrastructure configuration.
             timeout_seconds: Timeout threshold in seconds.
             status_override: Optional explicit status override string.
+            cancel_event: Optional cooperative cancellation event.
 
         Returns:
         -------
@@ -706,12 +785,20 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         Raises:
         ------
             TpuPollingTimeoutError: If polling exceeds specified timeout duration.
-            TpuOrchestrationError: If workload is preempted or encounters an execution failure.
+            TpuOrchestrationError: If workload is preempted, cancelled, or encounters an execution failure.
 
         """
+        if cancel_event is not None and cancel_event.is_set():
+            self._reclaim_tpu_workload_sync(workload_name, max_cfg)
+            raise TpuOrchestrationError(
+                f"Workload '{workload_name}' cancelled and reclaimed."
+            )
+
         resolved_override = self._evaluate_status_override(
             workload_name,
-            status_override or os.environ.get("T1D_TPU_STATUS_OVERRIDE"),
+            status_override
+            or max_cfg.status_override
+            or os.environ.get("T1D_TPU_STATUS_OVERRIDE"),
         )
         if resolved_override is not None:
             return resolved_override
@@ -722,12 +809,18 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 workload_name=workload_name,
                 zone=max_cfg.zone,
                 timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
             )
 
         cmd = self._build_xpk_describe_cmd(xpk_bin, workload_name, max_cfg)
         start = time.time()
         while time.time() - start < timeout_seconds:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if cancel_event is not None and cancel_event.is_set():
+                self._execute_xpk_reclaim_command(xpk_bin, workload_name, max_cfg)
+                raise TpuOrchestrationError(
+                    f"Workload '{workload_name}' cancelled and reclaimed."
+                )
+            res = self._run_subprocess(cmd)
             parsed = self._parse_xpk_describe_response(workload_name, res)
             if parsed is not None:
                 return parsed
@@ -743,6 +836,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         max_cfg: MaxTextConfig,
         timeout_seconds: float = 30.0,
         status_override: Optional[str] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> str:
         """
         Poll workload execution status from XPK or Google Cloud TPU API.
@@ -753,6 +847,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             max_cfg: MaxText infrastructure configuration.
             timeout_seconds: Timeout threshold in seconds.
             status_override: Optional explicit status override string.
+            cancel_event: Optional cooperative cancellation event.
 
         Returns:
         -------
@@ -761,12 +856,20 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         Raises:
         ------
             TpuPollingTimeoutError: If polling exceeds specified timeout duration.
-            TpuOrchestrationError: If workload is preempted or encounters an execution failure.
+            TpuOrchestrationError: If workload is preempted, cancelled, or encounters an execution failure.
 
         """
+        if cancel_event is not None and cancel_event.is_set():
+            await self.reclaim_tpu_workload(workload_name, max_cfg)
+            raise TpuOrchestrationError(
+                f"Workload '{workload_name}' cancelled and reclaimed."
+            )
+
         resolved_override = self._evaluate_status_override(
             workload_name,
-            status_override or os.environ.get("T1D_TPU_STATUS_OVERRIDE"),
+            status_override
+            or max_cfg.status_override
+            or os.environ.get("T1D_TPU_STATUS_OVERRIDE"),
         )
         if resolved_override is not None:
             return resolved_override
@@ -777,12 +880,18 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 workload_name=workload_name,
                 zone=max_cfg.zone,
                 timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
             )
 
         cmd = self._build_xpk_describe_cmd(xpk_bin, workload_name, max_cfg)
         start = time.time()
         while time.time() - start < timeout_seconds:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if cancel_event is not None and cancel_event.is_set():
+                self._execute_xpk_reclaim_command(xpk_bin, workload_name, max_cfg)
+                raise TpuOrchestrationError(
+                    f"Workload '{workload_name}' cancelled and reclaimed."
+                )
+            res = self._run_subprocess(cmd)
             parsed = self._parse_xpk_describe_response(workload_name, res)
             if parsed is not None:
                 return parsed
@@ -816,15 +925,8 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             TpuOrchestrationError: If `xpk workload delete` exits with a non-zero code.
 
         """
-        cluster_name = f"tpu-cluster-{max_cfg.accelerator_type.value}"
-        cmd = [
-            xpk_bin,
-            "workload",
-            "delete",
-            f"--workload={workload_name}",
-            f"--cluster={cluster_name}",
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        cmd = self._build_xpk_delete_cmd(xpk_bin, workload_name, max_cfg)
+        res = self._run_subprocess(cmd)
         if res.returncode != 0:
             raise TpuOrchestrationError(
                 f"Failed to reclaim TPU workload: {res.stderr.strip()}"
@@ -987,6 +1089,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         workload_name: str,
         max_cfg: MaxTextConfig,
         timeout_seconds: float,
+        cancel_event: Optional[threading.Event] = None,
     ) -> str:
         """
         Invoke workload status polling synchronously, honoring any patched `poll_workload_status`.
@@ -996,6 +1099,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             workload_name: Dispatched workload identifier.
             max_cfg: MaxText infrastructure configuration.
             timeout_seconds: Polling timeout in seconds.
+            cancel_event: Optional cooperative cancellation event.
 
         Returns:
         -------
@@ -1007,7 +1111,10 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             is RemoteTpuMaxTextRunner.poll_workload_status
         ):
             return self._poll_workload_status_sync(
-                workload_name, max_cfg, timeout_seconds=timeout_seconds
+                workload_name,
+                max_cfg,
+                timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
             )
         res = self.poll_workload_status(
             workload_name, max_cfg, timeout_seconds=timeout_seconds
@@ -1070,7 +1177,10 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         if (
             config.maxtext_config
             and config.maxtext_config.bucket_url
-            and os.environ.get("T1D_AUTO_SYNC_GCS") == "1"
+            and (
+                config.maxtext_config.auto_sync_gcs
+                or os.environ.get("T1D_AUTO_SYNC_GCS") == "1"
+            )
             and not config.dry_run
         ):
             sync_dataset_to_gcs(
@@ -1091,14 +1201,21 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
 
         status_str = "dispatched"
         if not config.dry_run:
-            if os.environ.get("T1D_EXECUTE_TPU_DISPATCH") == "1":
+            should_dispatch = (
+                config.maxtext_config is not None
+                and config.maxtext_config.execute_tpu_dispatch
+            ) or os.environ.get("T1D_EXECUTE_TPU_DISPATCH") == "1"
+            if should_dispatch:
                 max_cfg_dispatch = config.maxtext_config or MaxTextConfig(
                     project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp")
                 )
                 self._dispatch_xpk_workload(config, max_cfg_dispatch, config_path)
                 try:
                     status_str = self._invoke_status_poll_sync(
-                        workload_name, max_cfg_dispatch, timeout_seconds=5
+                        workload_name,
+                        max_cfg_dispatch,
+                        timeout_seconds=5,
+                        cancel_event=cancel_event,
                     )
                 except RuntimeError as e:
                     if "PREEMPTED" in str(e):
@@ -1112,6 +1229,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                                     workload_name,
                                     max_cfg_dispatch,
                                     timeout_seconds=2,
+                                    cancel_event=cancel_event,
                                 )
                                 break
                             except RuntimeError:

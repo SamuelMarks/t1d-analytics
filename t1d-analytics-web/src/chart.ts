@@ -25,10 +25,12 @@ import {
   type AGPIntervalMetrics,
   type AGPData,
   detectCgmColumns,
+  normalizeGlucoseToMgDl,
   calculateTIR,
   calculateDayNightTIR,
   computePercentile,
   calculateAGP,
+  detectSensorIntervalMinutes,
   calculateActiveWear,
 } from "./cgm-metrics";
 
@@ -48,42 +50,71 @@ export {
   type AGPIntervalMetrics,
   type AGPData,
   detectCgmColumns,
+  normalizeGlucoseToMgDl,
   calculateTIR,
   calculateDayNightTIR,
   computePercentile,
   calculateAGP,
+  detectSensorIntervalMinutes,
   calculateActiveWear,
 };
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * Creates a typed SVG DOM element in the `http://www.w3.org/2000/svg` namespace with attributes and optional text content.
+ * @template K - SVG tag name key.
+ * @param {K} tag - SVG element tag name.
+ * @param {Record<string, string>} attrs - Key-value map of SVG attributes to set.
+ * @param {string} [textContent] - Optional textContent to assign to the element.
+ * @returns {SVGElementTagNameMap[K]} Constructed SVG element.
+ */
+export function createSvgElement<K extends keyof SVGElementTagNameMap>(
+  tag: K,
+  attrs: Record<string, string>,
+  textContent?: string,
+): SVGElementTagNameMap[K] {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    el.setAttribute(k, v);
+  }
+  if (textContent !== undefined) {
+    el.textContent = textContent;
+  }
+  return el;
+}
 
 /**
  * Create an accessible SVG stacked bar chart representing clinical Time-in-Range.
  * @param {TIRMetrics} metrics - The TIR percentages to render.
+ * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
  * @returns {SVGSVGElement} The generated SVG chart element.
  */
-export function renderTIRBarSvg(metrics: TIRMetrics): SVGSVGElement {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 500 70");
-  svg.setAttribute("width", "100%");
-  svg.setAttribute("height", "70");
-  svg.setAttribute("role", "img");
+export function renderTIRBarSvg(
+  metrics: TIRMetrics,
+  idSuffix: string = "",
+): SVGSVGElement {
+  const suffix = idSuffix ? `-${idSuffix}` : "";
+  const titleId = `tir-svg-title${suffix}`;
+  const descId = `tir-svg-desc${suffix}`;
+  const svg = createSvgElement("svg", {
+    viewBox: "0 0 500 70",
+    width: "100%",
+    height: "70",
+    role: "img",
+  });
 
-  const svgTitle = document.createElementNS(
-    "http://www.w3.org/2000/svg",
+  const svgTitle = createSvgElement(
     "title",
-  );
-  svgTitle.id = "tir-svg-title";
-  svgTitle.textContent = i18next.t(
-    "cgm.title",
-    "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
+    { id: titleId },
+    i18next.t(
+      "cgm.title",
+      "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
+    ),
   );
   svg.appendChild(svgTitle);
 
-  const svgDesc = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "desc",
-  );
-  svgDesc.id = "tir-svg-desc";
-  svgDesc.textContent = i18next.t("cgm.tirChartAria", {
+  const descText = i18next.t("cgm.tirChartAria", {
     inRange: formatNumber(metrics.inRange),
     low: formatNumber(metrics.low),
     veryLow: formatNumber(metrics.veryLow),
@@ -91,9 +122,10 @@ export function renderTIRBarSvg(metrics: TIRMetrics): SVGSVGElement {
     veryHigh: formatNumber(metrics.veryHigh),
     defaultValue: `Time in Range Chart: In Range ${formatNumber(metrics.inRange)}%, Low ${formatNumber(metrics.low)}%, Very Low ${formatNumber(metrics.veryLow)}%, High ${formatNumber(metrics.high)}%, Very High ${formatNumber(metrics.veryHigh)}%`,
   });
+  const svgDesc = createSvgElement("desc", { id: descId }, descText);
   svg.appendChild(svgDesc);
-  svg.setAttribute("aria-label", svgDesc.textContent);
-  svg.setAttribute("aria-labelledby", "tir-svg-title tir-svg-desc");
+  svg.setAttribute("aria-label", descText);
+  svg.setAttribute("aria-labelledby", `${titleId} ${descId}`);
 
   const segments = [
     {
@@ -131,53 +163,57 @@ export function renderTIRBarSvg(metrics: TIRMetrics): SVGSVGElement {
     const width = (seg.pct / 100) * 500;
     const formattedSegPct = formatPercent(seg.pct);
 
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    rect.setAttribute("x", String(currentX));
-    rect.setAttribute("y", "10");
-    rect.setAttribute("width", String(width));
-    rect.setAttribute("height", String(barHeight));
-    rect.setAttribute("fill", seg.color);
-
-    const title = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "title",
+    const rect = createSvgElement("rect", {
+      x: String(currentX),
+      y: "10",
+      width: String(width),
+      height: String(barHeight),
+      fill: seg.color,
+    });
+    rect.appendChild(
+      createSvgElement("title", {}, `${seg.label}: ${formattedSegPct}`),
     );
-    title.textContent = `${seg.label}: ${formattedSegPct}`;
-    rect.appendChild(title);
     svg.appendChild(rect);
 
     if (width >= 35) {
-      const text = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "text",
+      svg.appendChild(
+        createSvgElement(
+          "text",
+          {
+            x: String(currentX + width / 2),
+            y: "32",
+            fill: "#ffffff",
+            "font-size": "11",
+            "font-family": "system-ui, sans-serif",
+            "text-anchor": "middle",
+          },
+          formattedSegPct,
+        ),
       );
-      text.setAttribute("x", String(currentX + width / 2));
-      text.setAttribute("y", "32");
-      text.setAttribute("fill", "#ffffff");
-      text.setAttribute("font-size", "11");
-      text.setAttribute("font-family", "system-ui, sans-serif");
-      text.setAttribute("text-anchor", "middle");
-      text.textContent = formattedSegPct;
-      svg.appendChild(text);
     }
 
     currentX += width;
   }
 
   // Legend caption
-  const desc = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  desc.setAttribute("x", "0");
-  desc.setAttribute("y", "62");
-  desc.setAttribute("font-size", "11");
-  desc.setAttribute("font-family", "system-ui, sans-serif");
-  desc.setAttribute("fill", "var(--text-muted, #bac2de)");
-  desc.textContent = i18next.t("cgm.meanLabel", {
-    mean: formatNumber(metrics.mean),
-    readings: formatNumber(metrics.count),
-    inRange: formatNumber(metrics.inRange),
-    defaultValue: `Mean: ${formatNumber(metrics.mean)} mg/dL | Readings: ${formatNumber(metrics.count)} | Target (70-180 mg/dL): ${formatNumber(metrics.inRange)}%`,
-  });
-  svg.appendChild(desc);
+  svg.appendChild(
+    createSvgElement(
+      "text",
+      {
+        x: "0",
+        y: "62",
+        "font-size": "11",
+        "font-family": "system-ui, sans-serif",
+        fill: "var(--text-muted, #bac2de)",
+      },
+      i18next.t("cgm.meanLabel", {
+        mean: formatNumber(metrics.mean),
+        readings: formatNumber(metrics.count),
+        inRange: formatNumber(metrics.inRange),
+        defaultValue: `Mean: ${formatNumber(metrics.mean)} mg/dL | Readings: ${formatNumber(metrics.count)} | Target (70-180 mg/dL): ${formatNumber(metrics.inRange)}%`,
+      }),
+    ),
+  );
 
   return svg;
 }
@@ -185,39 +221,31 @@ export function renderTIRBarSvg(metrics: TIRMetrics): SVGSVGElement {
 /**
  * Create an accessible SVG glucose distribution histogram.
  * @param {number[]} values - Array of raw glucose readings.
+ * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
  * @returns {SVGSVGElement} The generated SVG histogram element.
  */
-export function renderHistogramSvg(values: number[]): SVGSVGElement {
-  const valid = values.filter(
-    (v) => typeof v === "number" && !isNaN(v) && v > 0,
-  );
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 500 120");
-  svg.setAttribute("width", "100%");
-  svg.setAttribute("height", "120");
-  svg.setAttribute("role", "img");
-
+export function renderHistogramSvg(
+  values: number[],
+  idSuffix: string = "",
+): SVGSVGElement {
+  const suffix = idSuffix ? `-${idSuffix}` : "";
+  const titleId = `hist-svg-title${suffix}`;
+  const descId = `hist-svg-desc${suffix}`;
+  const valid = normalizeGlucoseToMgDl(values);
   const histTitle = i18next.t(
     "cgm.histChartAria",
     "Glucose Distribution Histogram",
   );
-  const svgTitle = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "title",
-  );
-  svgTitle.id = "hist-svg-title";
-  svgTitle.textContent = histTitle;
-  svg.appendChild(svgTitle);
-
-  const svgDesc = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "desc",
-  );
-  svgDesc.id = "hist-svg-desc";
-  svgDesc.textContent = histTitle;
-  svg.appendChild(svgDesc);
-  svg.setAttribute("aria-label", histTitle);
-  svg.setAttribute("aria-labelledby", "hist-svg-title hist-svg-desc");
+  const svg = createSvgElement("svg", {
+    viewBox: "0 0 500 120",
+    width: "100%",
+    height: "120",
+    role: "img",
+    "aria-label": histTitle,
+    "aria-labelledby": `${titleId} ${descId}`,
+  });
+  svg.appendChild(createSvgElement("title", { id: titleId }, histTitle));
+  svg.appendChild(createSvgElement("desc", { id: descId }, histTitle));
 
   if (valid.length === 0) return svg;
 
@@ -247,14 +275,6 @@ export function renderHistogramSvg(values: number[]): SVGSVGElement {
     if (binCenter < 70) color = "#e74c3c";
     else if (binCenter > 180) color = "#f39c12";
 
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    rect.setAttribute("x", String(x + 1));
-    rect.setAttribute("y", String(y));
-    rect.setAttribute("width", String(Math.max(1, barWidth - 2)));
-    rect.setAttribute("height", String(barHeight));
-    rect.setAttribute("fill", color);
-    rect.setAttribute("tabindex", "0");
-
     const binMin = formatNumber(min + i * binSize);
     const binMax = formatNumber(min + (i + 1) * binSize);
     const formattedCount = formatNumber(count);
@@ -264,13 +284,16 @@ export function renderHistogramSvg(values: number[]): SVGSVGElement {
       count: formattedCount,
       defaultValue: `${binMin}-${binMax} mg/dL: ${formattedCount} readings`,
     });
-    rect.setAttribute("aria-label", tooltipText);
-    const title = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "title",
-    );
-    title.textContent = tooltipText;
-    rect.appendChild(title);
+    const rect = createSvgElement("rect", {
+      x: String(x + 1),
+      y: String(y),
+      width: String(Math.max(1, barWidth - 2)),
+      height: String(barHeight),
+      fill: color,
+      tabindex: "0",
+      "aria-label": tooltipText,
+    });
+    rect.appendChild(createSvgElement("title", {}, tooltipText));
     svg.appendChild(rect);
   }
 
@@ -280,9 +303,16 @@ export function renderHistogramSvg(values: number[]): SVGSVGElement {
 /**
  * Render an accessible SVG Ambulatory Glucose Profile (AGP) 24-hour curve chart.
  * @param {AGPData} agp - The calculated AGP profile metrics.
+ * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
  * @returns {SVGSVGElement} Accessible SVG element displaying percentile ribbons and target band.
  */
-export function renderAGPSvg(agp: AGPData): SVGSVGElement {
+export function renderAGPSvg(
+  agp: AGPData,
+  idSuffix: string = "",
+): SVGSVGElement {
+  const suffix = idSuffix ? `-${idSuffix}` : "";
+  const titleId = `agp-svg-title${suffix}`;
+  const descId = `agp-svg-desc${suffix}`;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 600 230");
   svg.setAttribute("width", "100%");
@@ -293,7 +323,7 @@ export function renderAGPSvg(agp: AGPData): SVGSVGElement {
     "http://www.w3.org/2000/svg",
     "title",
   );
-  svgTitle.id = "agp-svg-title";
+  svgTitle.id = titleId;
   svgTitle.textContent = i18next.t(
     "cgm.agpCurveTitle",
     "24-Hour Ambulatory Glucose Profile (Median & Percentiles)",
@@ -307,7 +337,7 @@ export function renderAGPSvg(agp: AGPData): SVGSVGElement {
     "http://www.w3.org/2000/svg",
     "desc",
   );
-  svgDesc.id = "agp-svg-desc";
+  svgDesc.id = descId;
   svgDesc.textContent = i18next.t("cgm.agpSummaryAria", {
     days: formattedDays,
     readings: formattedReadings,
@@ -315,7 +345,7 @@ export function renderAGPSvg(agp: AGPData): SVGSVGElement {
   });
   svg.appendChild(svgDesc);
   svg.setAttribute("aria-label", svgDesc.textContent);
-  svg.setAttribute("aria-labelledby", "agp-svg-title agp-svg-desc");
+  svg.setAttribute("aria-labelledby", `${titleId} ${descId}`);
 
   const minG = 40;
   const maxG = 350;
@@ -548,11 +578,13 @@ export function renderAGPSvg(agp: AGPData): SVGSVGElement {
  * Render a complete CGM analytics card element from table rows.
  * @param {Array<Record<string, ClinicalRowValue>>} rows - The data rows.
  * @param {number} [observationDays=14] - Duration in days for observation window (default: 14, 0 for all data).
+ * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
  * @returns {HTMLElement | null} The analytics card element or null if not CGM data.
  */
 export function renderCgmCard(
   rows: Array<Record<string, ClinicalRowValue>>,
   observationDays: number = 14,
+  idSuffix: string = "",
 ): HTMLElement | null {
   const { glucoseCol, timeCol } = detectCgmColumns(rows);
   if (!glucoseCol) return null;
@@ -622,7 +654,7 @@ export function renderCgmCard(
     }
     windowSelect.onchange = () => {
       const selectedDays = parseInt(windowSelect.value, 10);
-      const newCard = renderCgmCard(rows, selectedDays);
+      const newCard = renderCgmCard(rows, selectedDays, idSuffix);
       if (newCard && container.parentNode) {
         container.parentNode.replaceChild(newCard, container);
       }
@@ -737,20 +769,20 @@ export function renderCgmCard(
   container.appendChild(badgesRow);
 
   // 1. Time-in-Range stacked bar
-  const tirChart = renderTIRBarSvg(metrics);
+  const tirChart = renderTIRBarSvg(metrics, idSuffix);
   container.appendChild(tirChart);
 
   // 2. 24-Hour Ambulatory Glucose Profile (AGP) Curve
   if (timeCol) {
     const agpData = calculateAGP(displayRows, timeCol, glucoseCol);
     if (agpData && agpData.totalReadings > 0) {
-      const agpChart = renderAGPSvg(agpData);
+      const agpChart = renderAGPSvg(agpData, idSuffix);
       container.appendChild(agpChart);
     }
   }
 
   // 3. Glucose distribution histogram
-  const histChart = renderHistogramSvg(values);
+  const histChart = renderHistogramSvg(values, idSuffix);
   container.appendChild(histChart);
 
   return container;

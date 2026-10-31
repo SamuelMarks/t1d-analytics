@@ -5,6 +5,12 @@
  */
 import i18next from "./i18n";
 import {
+  deleteRemoteSession,
+  fetchRemoteSessions,
+  pushRemoteSession,
+  type RemoteSessionPayload,
+} from "./api-client";
+import {
   type TableRelationship,
   CLINICAL_RELATIONSHIPS,
   resolveTableJoin,
@@ -362,33 +368,9 @@ export class ChatState {
   public async syncWithServer(): Promise<boolean> {
     try {
       // 1. Fetch remote sessions from server
-      const resp = await fetch("/api/sessions");
-      if (!resp.ok) {
-        throw new Error(`Server returned status ${resp.status}`);
-      }
-      const rawData = await resp.json();
-      const sessionsList: Array<{
-        session_id: string;
-        title: string;
-        created_at: string;
-        updated_at: string;
-        messages: Message[];
-      }> = Array.isArray(rawData)
-        ? rawData
-        : Array.isArray(rawData?.sessions)
-          ? rawData.sessions
-          : [];
+      const sessionsList = await fetchRemoteSessions<Message>();
 
-      const serverMap = new Map<
-        string,
-        {
-          session_id: string;
-          title: string;
-          created_at: string;
-          updated_at: string;
-          messages: Message[];
-        }
-      >();
+      const serverMap = new Map<string, RemoteSessionPayload<Message>>();
       for (const s of sessionsList) {
         if (s && s.session_id) {
           serverMap.set(s.session_id, s);
@@ -405,15 +387,14 @@ export class ChatState {
           Boolean(localChat.titleModified) && localChat.title !== remote?.title;
 
         if (hasNewerMessages || hasModifiedTitle) {
-          await fetch("/api/sessions", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              session_id: localChat.id,
-              title: localChat.title,
-              messages: localChat.messages,
-            }),
-          });
+          await pushRemoteSession(
+            localChat.id,
+            localChat.title,
+            localChat.messages,
+          );
+          if (remote) {
+            remote.title = localChat.title;
+          }
           localChat.titleModified = false;
         }
       }
@@ -422,9 +403,7 @@ export class ChatState {
       for (const s of sessionsList) {
         if (!s || !s.session_id) continue;
         if (this.deletedChatIds.has(s.session_id)) {
-          fetch(`/api/sessions/${encodeURIComponent(s.session_id)}`, {
-            method: "DELETE",
-          }).catch(() => {});
+          deleteRemoteSession(s.session_id).catch(() => {});
           continue;
         }
         const local = this.chats.find((c) => c.id === s.session_id);
@@ -524,9 +503,7 @@ export class ChatState {
     }
     this.deletedChatIds.add(id);
     if (this.serverSyncEnabled) {
-      fetch(`/api/sessions/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      }).catch(() => {});
+      deleteRemoteSession(id).catch(() => {});
     }
     this.chats = this.chats.filter((c) => c.id !== id);
     if (this.activeChatId === id) {
@@ -554,15 +531,7 @@ export class ChatState {
       chat.titleModified = true;
       this.saveToLocalStorage();
       if (this.serverSyncEnabled && !chat.isTemporary) {
-        fetch("/api/sessions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_id: chat.id,
-            title: chat.title,
-            messages: chat.messages,
-          }),
-        }).catch(() => {});
+        pushRemoteSession(chat.id, chat.title, chat.messages).catch(() => {});
       }
     }
   }

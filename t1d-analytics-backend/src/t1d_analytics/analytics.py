@@ -17,24 +17,6 @@ from t1d_analytics.errors import (
     TableNotFoundError,
 )
 from t1d_analytics.i18n import get_translator
-from t1d_analytics.ingestion import (
-    IngestionManifestRecord as IngestionManifestRecord,
-)
-from t1d_analytics.ingestion import (
-    compute_file_hash as compute_file_hash,
-)
-from t1d_analytics.ingestion import (
-    extract_zips as extract_zips,
-)
-from t1d_analytics.ingestion import (
-    get_clinical_variable_mappings as get_clinical_variable_mappings,
-)
-from t1d_analytics.ingestion import (
-    get_ingestion_manifest as get_ingestion_manifest,
-)
-from t1d_analytics.ingestion import (
-    load_data_to_duckdb as load_data_to_duckdb,
-)
 from t1d_analytics.llm_client import (
     build_clinical_sql_prompt,
     complete_llm_prompt,
@@ -44,13 +26,10 @@ from t1d_analytics.sql_utils import (
     SqlValue,
     coerce_numeric_aggregates_in_sql,
     escape_sql_identifier,
+    extract_sql_from_response,
+    extract_table_columns_map,
     is_read_only_sql_query,
-)
-from t1d_analytics.sql_utils import (
-    extract_sql_from_response as extract_sql_from_response,
-)
-from t1d_analytics.sql_utils import (
-    is_sql_query as is_sql_query,
+    is_sql_query,
 )
 
 
@@ -99,16 +78,15 @@ def get_database_schema_models(
         List[TableSchemaModel]: Ordered list of structured table schema models.
 
     """
-    tables = [
-        t
-        for t in conn.execute("SHOW TABLES").fetchall()
-        if not t[0].startswith("_t1d_")
-    ]
+    cols_map = extract_table_columns_map(
+        conn, exclude_internal=True, exclude_training_tables=False
+    )
     models: List[TableSchemaModel] = []
-    for (table_name,) in tables:
+    for table_name, columns in cols_map.items():
         escaped_table = escape_sql_identifier(str(table_name))
-        columns = conn.execute(f'DESCRIBE "{escaped_table}"').fetchall()
-        col_infos = [ColumnInfo(name=str(c[0]), type=str(c[1])) for c in columns]
+        col_infos = [
+            ColumnInfo(name=col_name, type=col_type) for col_name, col_type in columns
+        ]
 
         try:
             sample = conn.execute(f'SELECT * FROM "{escaped_table}" LIMIT 1').fetchone()

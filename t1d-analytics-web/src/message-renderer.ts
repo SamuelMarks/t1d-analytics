@@ -3,7 +3,7 @@
  * @module message-renderer
  * Renders chat message bubbles, sanitized Markdown (`DOMPurify` + `marked`),
  * SQL syntax-highlighted blocks with copy/play/refresh controls, tabular SQL results,
- * and clinical CGM visual analytics cards.
+ * and clinical CGM visual analytics cards with incremental DOM memoization.
  */
 
 import DOMPurify from "dompurify";
@@ -13,9 +13,32 @@ import markdown from "highlight.js/lib/languages/markdown";
 import python from "highlight.js/lib/languages/python";
 import i18next from "i18next";
 import { marked } from "marked";
+import {
+  type ApiErrorInput,
+  fetchWithBackendError,
+  parseApiError,
+  parseResponseJson,
+} from "./api-client";
 import { renderCgmCard } from "./chart";
-import { type ExportableCellValue } from "./exporters";
-import { type ChatState, type Message } from "./state";
+import { type ProviderSettingsModalController } from "./controllers/provider-modal-controller";
+import { type SchemaExplorerController } from "./controllers/schema-explorer-controller";
+import { exportRowsToCsv, exportRowsToJson } from "./exporters";
+import { classifySqlResult, type SqlCellValue } from "./formatters";
+import { type Chat, type ChatState, type Message } from "./state";
+
+/**
+ * Response payload returned by `/api/chat` and `/api/execute-sql`.
+ */
+export interface ChatApiResponse {
+  /** Assistant response text or translation key. */
+  content?: string;
+  /** Generated or executed SQL query string. */
+  sqlQuery?: string;
+  /** Tabular SQL query result rows. */
+  sqlResult?: Record<string, SqlCellValue>[];
+  /** Structured or string API error payload. */
+  error?: ApiErrorInput;
+}
 
 hljs.registerLanguage("sql", sql);
 hljs.registerLanguage("markdown", markdown);
@@ -152,32 +175,36 @@ export interface MessageRendererHost {
   state: ChatState;
   /** Scrollable container element holding chat messages. */
   messagesContainer: HTMLElement;
+  /** Wrapper element for the syntax-highlighted textarea input. */
+  chatInputWrapper: HTMLElement;
   /** Textarea element where the user types queries or SQL. */
   chatInput: HTMLTextAreaElement;
+  /** Submit button element for sending messages. */
+  sendBtn: HTMLButtonElement;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   modelSelect: HTMLSelectElement;
+  /** Provider settings modal sub-controller. */
+  providerModalController: ProviderSettingsModalController;
+  /** Schema explorer sub-controller. */
+  schemaExplorerController: SchemaExplorerController;
   /** Synchronizes syntax highlighting in the chat input. */
   syncHighlight(): void;
-  /** Binds copy/reload diagnostic buttons on a card. */
-  bindSchemaDiagnosticButtons(container: HTMLElement): void;
-  /** Executes a SQL query from a Play or Refresh button. */
-  executeDirectSqlAction(
-    queryToPlay: string,
-    triggerBtn: HTMLButtonElement,
-    messageToUpdate?: Message,
-  ): Promise<void>;
-  /** Exports rows to CSV. */
-  exportRowsToCsv(
-    rows: Array<Record<string, ExportableCellValue>>,
-    filename: string,
-  ): void;
-  /** Exports rows to JSON. */
-  exportRowsToJson(
-    rows: Array<Record<string, ExportableCellValue>>,
-    filename: string,
-  ): void;
   /** Announces a message to screen readers. */
   announce(message: string, isAssertive?: boolean): void;
+}
+
+/**
+ * Cached DOM entry for a rendered `Message` object.
+ */
+interface CachedMessageEntry {
+  /** Deterministic fingerprint of the message content and locale. */
+  fingerprint: string;
+  /** Reference to the SQL result array when rendered. */
+  sqlResultRef: Record<string, SqlCellValue>[] | undefined;
+  /** Constructed `.message` DOM element. */
+  element: HTMLDivElement;
+  /** Whether this message rendered a CGM analytics card. */
+  hadCgmCard: boolean;
 }
 
 /**
@@ -186,6 +213,8 @@ export interface MessageRendererHost {
 export class MessageRenderer {
   /** Host UI reference. */
   private readonly ui: MessageRendererHost;
+  /** WeakMap cache of rendered message DOM nodes keyed by `Message` object identity. */
+  private readonly messageCache = new WeakMap<Message, CachedMessageEntry>();
 
   /**
    * Creates a new `MessageRenderer`.
@@ -196,52 +225,46 @@ export class MessageRenderer {
   }
 
   /**
-   * Renders the messages of the active chat into `messagesContainer`.
-   * @returns {void}
+   * Builds the empty-state element with optional database notice and example query chips.
+   * @returns {HTMLDivElement} The constructed `.empty-state` element.
    */
-  public renderMessages(): void {
-    const activeChat = this.ui.state.getActiveChat();
-    if (!activeChat) return;
+  private buildEmptyState(): HTMLDivElement {
+    const emptyStateDiv = document.createElement("div");
+    emptyStateDiv.className = "empty-state";
+    emptyStateDiv.setAttribute("role", "status");
+    emptyStateDiv.setAttribute("aria-live", "polite");
 
-    this.ui.messagesContainer.replaceChildren();
+    if (
+      this.ui.state.systemStatus.dbStatusCode === "empty_db" ||
+      this.ui.state.systemStatus.dbStatusCode === "missing_initial_data" ||
+      this.ui.state.systemStatus.dbStatusCode === "missing_file"
+    ) {
+      const dbNotice = createSchemaDiagnosticCard({
+        icon: "ℹ️",
+        title: i18next.t("status.emptyDbPrompt"),
+        command: "t1d-analytics load",
+      });
+      dbNotice.style.marginBottom = "1rem";
+      this.ui.schemaExplorerController.bindSchemaDiagnosticButtons(dbNotice);
+      emptyStateDiv.appendChild(dbNotice);
+    }
 
-    if (activeChat.messages.length === 0) {
-      const emptyStateDiv = document.createElement("div");
-      emptyStateDiv.className = "empty-state";
-      emptyStateDiv.setAttribute("role", "status");
-      emptyStateDiv.setAttribute("aria-live", "polite");
+    const noMessagesP = document.createElement("p");
+    noMessagesP.style.marginBottom = "1rem";
+    noMessagesP.textContent = i18next.t("ui.noMessagesYet");
+    emptyStateDiv.appendChild(noMessagesP);
 
-      if (
-        this.ui.state.systemStatus.dbStatusCode === "empty_db" ||
-        this.ui.state.systemStatus.dbStatusCode === "missing_initial_data" ||
-        this.ui.state.systemStatus.dbStatusCode === "missing_file"
-      ) {
-        const dbNotice = createSchemaDiagnosticCard({
-          icon: "ℹ️",
-          title: i18next.t("status.emptyDbPrompt"),
-          command: "t1d-analytics load",
-        });
-        dbNotice.style.marginBottom = "1rem";
-        this.ui.bindSchemaDiagnosticButtons(dbNotice);
-        emptyStateDiv.appendChild(dbNotice);
-      }
+    const chipsContainer = document.createElement("div");
+    chipsContainer.className = "chips-container";
 
-      const noMessagesP = document.createElement("p");
-      noMessagesP.style.marginBottom = "1rem";
-      noMessagesP.textContent = i18next.t("ui.noMessagesYet");
-      emptyStateDiv.appendChild(noMessagesP);
-
-      const chipsContainer = document.createElement("div");
-      chipsContainer.className = "chips-container";
-
-      const exampleQueries: Array<{
-        label: string;
-        query: string;
-        mode: "sql" | "gemma4";
-      }> = [
-        {
-          label: i18next.t("ui.exampleQueries.patientDemographics"),
-          query: `${i18next.t("ui.exampleQueries.patientDemographicsComment", "-- Patient Demographics & Treatment Breakdown")}
+    const exampleQueries: Array<{
+      label: string;
+      query: string;
+      mode: "sql" | "gemma4";
+    }> = [
+      {
+        label: i18next.t("ui.exampleQueries.patientDemographics"),
+        query: `${i18next.t("ui.exampleQueries.patientDemographicsComment", "-- Patient Demographics & Treatment Breakdown")}
 
 SELECT 
     TxGroup, 
@@ -250,11 +273,11 @@ SELECT
     SUM(NumSevHypo) as total_severe_hypo_events
 FROM tblaptsummary 
 GROUP BY TxGroup;`,
-          mode: "sql",
-        },
-        {
-          label: i18next.t("ui.exampleQueries.adverseEvents"),
-          query: `${i18next.t("ui.exampleQueries.adverseEventsComment", "-- Frequency of Adverse Events")}
+        mode: "sql",
+      },
+      {
+        label: i18next.t("ui.exampleQueries.adverseEvents"),
+        query: `${i18next.t("ui.exampleQueries.adverseEventsComment", "-- Frequency of Adverse Events")}
 
 SELECT 
     event as adverse_event_type, 
@@ -262,11 +285,11 @@ SELECT
 FROM adverseevents 
 GROUP BY event 
 ORDER BY occurrence_count DESC;`,
-          mode: "sql",
-        },
-        {
-          label: i18next.t("ui.exampleQueries.pumpManufacturers"),
-          query: `${i18next.t("ui.exampleQueries.pumpManufacturersComment", "-- Patient Pump Manufacturers")}
+        mode: "sql",
+      },
+      {
+        label: i18next.t("ui.exampleQueries.pumpManufacturers"),
+        query: `${i18next.t("ui.exampleQueries.pumpManufacturersComment", "-- Patient Pump Manufacturers")}
 
 SELECT 
     Pt_PumpManuf as pump_manufacturer, 
@@ -275,11 +298,11 @@ FROM subjects
 WHERE Pt_PumpManuf IS NOT NULL 
 GROUP BY Pt_PumpManuf 
 ORDER BY user_count DESC;`,
-          mode: "sql",
-        },
-        {
-          label: i18next.t("ui.exampleQueries.hba1cDemographics"),
-          query: `${i18next.t("ui.exampleQueries.hba1cDemographicsComment", "-- Joining Subject Summaries with HbA1c Lab Results")}
+        mode: "sql",
+      },
+      {
+        label: i18next.t("ui.exampleQueries.hba1cDemographics"),
+        query: `${i18next.t("ui.exampleQueries.hba1cDemographicsComment", "-- Joining Subject Summaries with HbA1c Lab Results")}
 
 SELECT 
     t.TxGroup, 
@@ -291,369 +314,655 @@ JOIN hba1c h ON t.PtID = h.PtID
 WHERE h.HbA1c IS NOT NULL
 GROUP BY t.TxGroup, t.Gender
 ORDER BY t.TxGroup, average_hba1c DESC;`,
-          mode: "sql",
+        mode: "sql",
+      },
+      {
+        label: i18next.t("ui.exampleQueries.nlpFirst5"),
+        query: i18next.t(
+          "ui.exampleQueries.nlpFirst5Prompt",
+          "Show me the first 5 patients in the demographics table.",
+        ),
+        mode: "gemma4",
+      },
+    ];
+
+    exampleQueries.forEach((item) => {
+      const chip = document.createElement("button");
+      chip.className = "chip";
+      chip.textContent = item.label;
+      chip.addEventListener("click", () => {
+        this.ui.chatInput.value = item.query;
+        const hasChipModeOption = Array.from(this.ui.modelSelect.options).some(
+          (opt) => opt.value === item.mode,
+        );
+        const targetChipMode = hasChipModeOption ? item.mode : "sql";
+        this.ui.modelSelect.value = targetChipMode;
+        this.ui.state.setActiveChatModel(targetChipMode);
+        this.ui.chatInput.focus();
+        this.ui.syncHighlight();
+      });
+      chipsContainer.appendChild(chip);
+    });
+
+    emptyStateDiv.appendChild(chipsContainer);
+    return emptyStateDiv;
+  }
+
+  /**
+   * Creates a Copy SQL icon button for a code block.
+   * @param {string} textToCopy - SQL query text to copy to clipboard.
+   * @returns {HTMLButtonElement} The constructed Copy button.
+   */
+  private createCopyBtn(textToCopy: string): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.className = "copy-sql-btn icon-btn";
+    btn.setAttribute("aria-label", i18next.t("aria.copyQuery", "Copy Query"));
+    btn.setAttribute("data-i18n-aria-label", "aria.copyQuery");
+    btn.title = i18next.t("ui.copyQuery", "Copy Query");
+    btn.setAttribute("data-i18n-title", "ui.copyQuery");
+    const renderCopyIcon = (): SVGSVGElement =>
+      createSvgIcon(14, [
+        {
+          tag: "rect",
+          attrs: {
+            x: "9",
+            y: "9",
+            width: "13",
+            height: "13",
+            rx: "2",
+            ry: "2",
+          },
         },
         {
-          label: i18next.t("ui.exampleQueries.nlpFirst5"),
-          query: i18next.t(
-            "ui.exampleQueries.nlpFirst5Prompt",
-            "Show me the first 5 patients in the demographics table.",
-          ),
-          mode: "gemma4",
+          tag: "path",
+          attrs: {
+            d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1",
+          },
         },
-      ];
+      ]);
+    btn.replaceChildren(renderCopyIcon());
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        this.ui.announce(i18next.t("status.commandCopied"));
+        btn.replaceChildren(
+          createSvgIcon(14, [
+            { tag: "polyline", attrs: { points: "20 6 9 17 4 12" } },
+          ]),
+        );
+        setTimeout(() => {
+          btn.replaceChildren(renderCopyIcon());
+        }, 2000);
+      } catch (err) {
+        console.error("Failed to copy text: ", err);
+      }
+    });
+    return btn;
+  }
 
-      exampleQueries.forEach((item) => {
-        const chip = document.createElement("button");
-        chip.className = "chip";
-        chip.textContent = item.label;
-        chip.addEventListener("click", () => {
-          this.ui.chatInput.value = item.query;
-          const hasChipModeOption = Array.from(
-            this.ui.modelSelect.options,
-          ).some((opt) => opt.value === item.mode);
-          const targetChipMode = hasChipModeOption ? item.mode : "sql";
-          this.ui.modelSelect.value = targetChipMode;
-          this.ui.state.setActiveChatModel(targetChipMode);
-          this.ui.chatInput.focus();
-          this.ui.syncHighlight();
-        });
-        chipsContainer.appendChild(chip);
+  /**
+   * Creates a Play SQL button for executing a SQL query.
+   * @param {string} queryToPlay - SQL query text to execute.
+   * @returns {HTMLButtonElement} The constructed Play button.
+   */
+  private createPlayBtn(queryToPlay: string): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.className = "play-sql-btn";
+    btn.setAttribute(
+      "aria-label",
+      i18next.t("aria.playQuery", "Execute Query"),
+    );
+    btn.setAttribute("data-i18n-aria-label", "aria.playQuery");
+    const playSvg = createSvgIcon(
+      14,
+      [{ tag: "polygon", attrs: { points: "5 3 19 12 5 21 5 3" } }],
+      "currentColor",
+      true,
+    );
+    const playLabelSpan = document.createElement("span");
+    playLabelSpan.setAttribute("data-i18n", "app.play");
+    playLabelSpan.textContent = i18next.t("app.play", "Play");
+    btn.replaceChildren(playSvg, playLabelSpan);
+    btn.addEventListener("click", () => {
+      void this.executeDirectSqlAction(queryToPlay, btn);
+    });
+    return btn;
+  }
+
+  /**
+   * Creates a Refresh SQL button that re-executes a query and updates the message in place.
+   * @param {string} queryToPlay - SQL query text to re-execute.
+   * @param {Message} messageToUpdate - Target assistant message to update.
+   * @returns {HTMLButtonElement} The constructed Refresh button.
+   */
+  private createRefreshBtn(
+    queryToPlay: string,
+    messageToUpdate: Message,
+  ): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.className = "copy-sql-btn icon-btn";
+    btn.setAttribute(
+      "aria-label",
+      i18next.t("aria.refreshQuery", "Refresh Query"),
+    );
+    btn.setAttribute("data-i18n-aria-label", "aria.refreshQuery");
+    btn.title = i18next.t("ui.refreshQuery", "Refresh Query");
+    btn.setAttribute("data-i18n-title", "ui.refreshQuery");
+    btn.replaceChildren(
+      createSvgIcon(14, [
+        { tag: "polyline", attrs: { points: "23 4 23 10 17 10" } },
+        { tag: "polyline", attrs: { points: "1 20 1 14 7 14" } },
+        {
+          tag: "path",
+          attrs: {
+            d: "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
+          },
+        },
+      ]),
+    );
+    btn.addEventListener("click", () => {
+      void this.executeDirectSqlAction(queryToPlay, btn, messageToUpdate);
+    });
+    return btn;
+  }
+
+  /**
+   * Creates the accessible typing indicator element shown while awaiting a response.
+   * @returns {HTMLDivElement} Loading message indicator element.
+   */
+  public createLoadingIndicator(): HTMLDivElement {
+    const loadingDiv = document.createElement("div");
+    loadingDiv.className = "message assistant loading";
+    loadingDiv.setAttribute("role", "status");
+    loadingDiv.setAttribute("aria-live", "polite");
+    const queryingLabel = i18next.t("ui.querying");
+    const typingIndicator = document.createElement("div");
+    typingIndicator.className = "typing-indicator";
+    typingIndicator.setAttribute("aria-label", queryingLabel);
+    typingIndicator.append(
+      document.createElement("span"),
+      document.createElement("span"),
+      document.createElement("span"),
+    );
+    const srSpan = document.createElement("span");
+    srSpan.className = "sr-only";
+    srSpan.textContent = queryingLabel;
+    typingIndicator.appendChild(srSpan);
+    const loadingTextDiv = document.createElement("div");
+    loadingTextDiv.style.fontSize = "0.85em";
+    loadingTextDiv.style.marginTop = "0.5rem";
+    loadingTextDiv.style.opacity = "0.7";
+    loadingTextDiv.textContent = queryingLabel;
+    loadingDiv.append(typingIndicator, loadingTextDiv);
+    return loadingDiv;
+  }
+
+  /**
+   * Formats and appends an assistant chat response from either SSE streaming or batch `/api/chat`.
+   * @param {ChatApiResponse} data - The terminal SSE or batch response payload.
+   * @param {string} model - The active model identifier.
+   * @param {string} [fallbackText=""] - Fallback accumulated text when `data.content` is empty.
+   * @returns {void}
+   */
+  public finalizeAssistantResponse(
+    data: ChatApiResponse,
+    model: string,
+    fallbackText?: string,
+  ): void {
+    let assistantMsg =
+      data.content && i18next.exists(data.content)
+        ? i18next.t(data.content)
+        : data.content || fallbackText || "";
+    if (data.error) {
+      const parsedError = parseApiError(data.error);
+      assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
+      this.ui.announce(assistantMsg, true);
+    } else {
+      const classified = classifySqlResult(data.sqlResult);
+      if (classified.kind === "scalar") {
+        assistantMsg = assistantMsg
+          ? `${assistantMsg} **${classified.column}:** ${classified.formattedValue}`
+          : classified.formattedValue;
+      }
+    }
+
+    this.ui.state.addMessageToActiveChat({
+      role: "assistant",
+      content: assistantMsg,
+      sqlResult: data.sqlResult,
+      sqlQuery: data.sqlQuery,
+      isError: !!data.error,
+      model,
+    });
+  }
+
+  /**
+   * Executes a SQL query against `/api/execute-sql` and either appends a new assistant message or updates an existing message in place.
+   * @param {string} queryToPlay - The SQL query string to execute.
+   * @param {HTMLButtonElement} triggerBtn - The button element that triggered execution.
+   * @param {Message} [messageToUpdate] - Optional existing assistant message to update in place.
+   * @returns {Promise<void>}
+   */
+  public async executeDirectSqlAction(
+    queryToPlay: string,
+    triggerBtn: HTMLButtonElement,
+    messageToUpdate?: Message,
+  ): Promise<void> {
+    triggerBtn.disabled = true;
+    try {
+      const dbPathOpt =
+        this.ui.state.currentDb && this.ui.state.currentDb !== "t1d.duckdb"
+          ? { db_path: this.ui.state.currentDb }
+          : {};
+      const response = await fetchWithBackendError("/api/execute-sql", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: queryToPlay, ...dbPathOpt }),
       });
+      const data = await parseResponseJson<ChatApiResponse>(response);
 
-      emptyStateDiv.appendChild(chipsContainer);
-      this.ui.messagesContainer.appendChild(emptyStateDiv);
+      let contentStr = "";
+      let sqlRes: Record<string, SqlCellValue>[] | undefined = data.sqlResult;
+
+      if (data.error) {
+        const parsedError = parseApiError(data.error);
+        contentStr = i18next.t("ui.errorDetails", { error: parsedError });
+        this.ui.announce(contentStr, true);
+      } else {
+        const classified = classifySqlResult(sqlRes);
+        if (classified.kind === "empty") {
+          contentStr = i18next.t("ui.noRows", "No rows returned");
+          this.ui.announce(contentStr, false);
+          sqlRes = [];
+        } else if (classified.kind === "scalar") {
+          contentStr = classified.formattedValue;
+          sqlRes = undefined;
+        } else {
+          contentStr = i18next.t("app.tableData", "Table Data");
+        }
+      }
+
+      if (messageToUpdate) {
+        messageToUpdate.content = contentStr;
+        messageToUpdate.sqlResult = sqlRes;
+        messageToUpdate.isError = !!data.error;
+        this.ui.state.saveToLocalStorage();
+      } else {
+        this.ui.state.addMessageToActiveChat({
+          role: "assistant",
+          content: contentStr,
+          sqlResult: sqlRes,
+          sqlQuery: queryToPlay,
+          isError: !!data.error,
+          model: "sql",
+        });
+      }
+      this.renderMessages();
+      this.ui.messagesContainer.scrollTop =
+        this.ui.messagesContainer.scrollHeight;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
+      if (messageToUpdate) {
+        messageToUpdate.content = announcedErr;
+        messageToUpdate.sqlResult = undefined;
+        messageToUpdate.isError = true;
+        this.ui.state.saveToLocalStorage();
+      } else {
+        this.ui.announce(announcedErr, true);
+        this.ui.state.addMessageToActiveChat({
+          role: "assistant",
+          content: announcedErr,
+          isError: true,
+          sqlQuery: queryToPlay,
+          model: "sql",
+        });
+      }
+      this.renderMessages();
+      this.ui.messagesContainer.scrollTop =
+        this.ui.messagesContainer.scrollHeight;
+    } finally {
+      triggerBtn.disabled = false;
+    }
+  }
+
+  /**
+   * Renders a tabular SQL result container with CSV/JSON exports and optional CGM analytics card.
+   * @param {Array<Record<string, SqlCellValue>>} sqlRows - Non-empty SQL result rows.
+   * @param {number} cgmCardIndex - Current index for unique CGM SVG IDs.
+   * @returns {{ container: HTMLDivElement; hadCgmCard: boolean }} Rendered table container and CGM card flag.
+   */
+  private buildSqlTableContainer(
+    sqlRows: Array<Record<string, SqlCellValue>>,
+    cgmCardIndex: number,
+  ): { container: HTMLDivElement; hadCgmCard: boolean } {
+    const tableContainer = document.createElement("div");
+    tableContainer.className = "sql-table-container";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "sql-table-toolbar";
+    const csvBtn = document.createElement("button");
+    csvBtn.className = "btn-secondary export-csv-btn";
+    csvBtn.setAttribute("data-i18n", "table.exportCsvShort");
+    csvBtn.textContent = i18next.t("table.exportCsvShort", "CSV");
+    csvBtn.setAttribute("data-i18n-aria-label", "table.exportCsv");
+    csvBtn.setAttribute(
+      "aria-label",
+      i18next.t("table.exportCsv", "Export CSV"),
+    );
+    csvBtn.addEventListener("click", () =>
+      exportRowsToCsv(sqlRows, "query_results.csv"),
+    );
+
+    const jsonBtn = document.createElement("button");
+    jsonBtn.className = "btn-secondary export-json-btn";
+    jsonBtn.setAttribute("data-i18n", "table.exportJsonShort");
+    jsonBtn.textContent = i18next.t("table.exportJsonShort", "JSON");
+    jsonBtn.setAttribute("data-i18n-aria-label", "table.exportJson");
+    jsonBtn.setAttribute(
+      "aria-label",
+      i18next.t("table.exportJson", "Export JSON"),
+    );
+    jsonBtn.addEventListener("click", () =>
+      exportRowsToJson(sqlRows, "query_results.json"),
+    );
+
+    toolbar.append(csvBtn, jsonBtn);
+    tableContainer.appendChild(toolbar);
+
+    const table = document.createElement("table");
+    table.className = "sql-table";
+
+    const caption = document.createElement("caption");
+    caption.className = "sr-only";
+    caption.textContent = i18next.t("app.tableData");
+    table.appendChild(caption);
+
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    const columns = Object.keys(sqlRows[0]);
+
+    columns.forEach((col) => {
+      const th = document.createElement("th");
+      th.textContent = col;
+      th.setAttribute("scope", "col");
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    sqlRows.forEach((row) => {
+      const tr = document.createElement("tr");
+      columns.forEach((col) => {
+        const td = document.createElement("td");
+        const cellValue = row[col];
+        td.textContent =
+          cellValue === null || cellValue === undefined
+            ? "NULL"
+            : String(cellValue);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    const cgmCardSuffix = cgmCardIndex === 0 ? "" : `card-${cgmCardIndex}`;
+    const cgmCard = renderCgmCard(sqlRows, 14, cgmCardSuffix);
+    if (cgmCard) {
+      tableContainer.appendChild(cgmCard);
+    }
+
+    tableContainer.appendChild(table);
+    return { container: tableContainer, hadCgmCard: Boolean(cgmCard) };
+  }
+
+  /**
+   * Builds a single `.message` DOM element for a chat message.
+   * @param {Message} msg - The message model to render.
+   * @param {Chat} activeChat - The active chat session.
+   * @param {number} cgmCardIndex - Current index for unique CGM SVG IDs.
+   * @returns {{ element: HTMLDivElement; hadCgmCard: boolean }} Constructed message node and CGM card flag.
+   */
+  private buildMessageElement(
+    msg: Message,
+    activeChat: Chat,
+    cgmCardIndex: number,
+  ): { element: HTMLDivElement; hadCgmCard: boolean } {
+    const msgDiv = document.createElement("div");
+    msgDiv.className = `message ${msg.role}`;
+
+    if (msg.model) {
+      const header = document.createElement("div");
+      header.className = "message-header";
+      const badge = document.createElement("span");
+      badge.className = "model-badge";
+      badge.textContent =
+        msg.model === "sql"
+          ? i18next.t("ui.rawSql")
+          : i18next.t("ui.modelName", { name: msg.model });
+
+      if (msg.role === "user") {
+        header.style.justifyContent = "flex-end";
+        badge.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
+        badge.style.color = "var(--user-msg-text)";
+      }
+
+      header.appendChild(badge);
+      msgDiv.appendChild(header);
+    }
+
+    const contentDiv = document.createElement("div");
+    const isSqlMessage =
+      msg.role === "user" &&
+      (msg.model === "sql" || (!msg.model && activeChat.model === "sql"));
+
+    if (isSqlMessage) {
+      contentDiv.className = "sql-user-query-wrapper";
+      const headerDiv = document.createElement("div");
+      headerDiv.className = "sql-query-header";
+      headerDiv.append(
+        this.createCopyBtn(msg.content),
+        this.createPlayBtn(msg.content),
+      );
+
+      const preBlock = document.createElement("pre");
+      preBlock.style.margin = "0";
+      preBlock.style.background = "transparent";
+      preBlock.style.padding = "0";
+      preBlock.style.whiteSpace = "pre-wrap";
+      preBlock.tabIndex = 0;
+      preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
+      preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
+
+      const codeBlock = document.createElement("code");
+      codeBlock.className = "language-sql";
+      codeBlock.style.background = "transparent";
+      codeBlock.style.padding = "0";
+      codeBlock.textContent = msg.content;
+
+      hljs.highlightElement(codeBlock);
+      preBlock.appendChild(codeBlock);
+      contentDiv.append(headerDiv, preBlock);
+    } else {
+      const rawHtml = String(marked.parse(msg.content ?? ""));
+      contentDiv.innerHTML = DOMPurify.sanitize(rawHtml, {
+        ADD_ATTR: ["target"],
+      });
+      contentDiv.querySelectorAll<HTMLElement>("pre").forEach((preElement) => {
+        preElement.querySelectorAll<HTMLElement>("code").forEach((block) => {
+          hljs.highlightElement(block);
+          if (block.className.includes("language-sql")) {
+            const wrapper = document.createElement("div");
+            wrapper.className = "sql-query-container";
+            const headerDiv = document.createElement("div");
+            headerDiv.className = "sql-query-header";
+            const queryStr = String(block.textContent);
+            headerDiv.append(
+              this.createCopyBtn(queryStr),
+              this.createPlayBtn(queryStr),
+            );
+            preElement.replaceWith(wrapper);
+            wrapper.append(headerDiv, preElement);
+          }
+        });
+      });
+    }
+
+    if (msg.isError) {
+      contentDiv.className = "error-text";
+      contentDiv.setAttribute("role", "alert");
+      contentDiv.setAttribute("aria-live", "assertive");
+    }
+
+    msgDiv.appendChild(contentDiv);
+
+    const hasMarkdownSqlBlock =
+      contentDiv.querySelector(".sql-query-container") !== null;
+    if (msg.sqlQuery && !hasMarkdownSqlBlock) {
+      const queryContainer = document.createElement("div");
+      queryContainer.className = "sql-query-container";
+      const preBlock = document.createElement("pre");
+      preBlock.tabIndex = 0;
+      preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
+      preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
+      const codeBlock = document.createElement("code");
+      codeBlock.className = "language-sql sql-query";
+      codeBlock.textContent = msg.sqlQuery;
+      hljs.highlightElement(codeBlock);
+      preBlock.appendChild(codeBlock);
+
+      const headerDiv = document.createElement("div");
+      headerDiv.className = "sql-query-header";
+      headerDiv.appendChild(this.createCopyBtn(msg.sqlQuery));
+      if (msg.role === "assistant" && msg.model === "sql") {
+        headerDiv.appendChild(this.createRefreshBtn(msg.sqlQuery, msg));
+      } else {
+        headerDiv.appendChild(this.createPlayBtn(msg.sqlQuery));
+      }
+
+      queryContainer.append(headerDiv, preBlock);
+      msgDiv.appendChild(queryContainer);
+    }
+
+    let hadCgmCard = false;
+    const sqlRows = msg.sqlResult;
+    if (sqlRows) {
+      if (sqlRows.length > 0) {
+        const built = this.buildSqlTableContainer(sqlRows, cgmCardIndex);
+        hadCgmCard = built.hadCgmCard;
+        msgDiv.appendChild(built.container);
+      } else {
+        const emptyDiv = document.createElement("div");
+        emptyDiv.className = "sql-empty";
+        emptyDiv.textContent = i18next.t("ui.noRows");
+        msgDiv.appendChild(emptyDiv);
+      }
+    }
+
+    return { element: msgDiv, hadCgmCard };
+  }
+
+  /**
+   * Renders the messages of the active chat into `messagesContainer`, reusing cached
+   * DOM nodes for unchanged messages to preserve scroll positions and avoid redundant SVG/Markdown builds.
+   * @returns {void}
+   */
+  public renderMessages(): void {
+    const activeChat = this.ui.state.getActiveChat();
+    if (!activeChat) return;
+
+    if (activeChat.messages.length === 0) {
+      this.ui.messagesContainer.replaceChildren(this.buildEmptyState());
       return;
     }
 
-    activeChat.messages.forEach((msg) => {
-      const msgDiv = document.createElement("div");
-      msgDiv.className = `message ${msg.role}`;
+    let cgmCardIndex = 0;
+    const desiredNodes: HTMLDivElement[] = [];
 
-      if (msg.model) {
-        const header = document.createElement("div");
-        header.className = "message-header";
-        const badge = document.createElement("span");
-        badge.className = "model-badge";
-        badge.textContent =
-          msg.model === "sql"
-            ? i18next.t("ui.rawSql")
-            : i18next.t("ui.modelName", { name: msg.model });
+    for (const msg of activeChat.messages) {
+      const effectiveModel =
+        msg.model ?? (msg.role === "user" ? activeChat.model : "");
+      const fingerprint = `${i18next.language}|${msg.role}|${effectiveModel}|${Boolean(msg.isError)}|${msg.content ?? ""}|${msg.sqlQuery ?? ""}|${msg.sqlResult ? msg.sqlResult.length : -1}|${cgmCardIndex}`;
+      const cached = this.messageCache.get(msg);
 
-        if (msg.role === "user") {
-          header.style.justifyContent = "flex-end";
-          badge.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
-          badge.style.color = "var(--user-msg-text)";
+      if (
+        cached &&
+        cached.fingerprint === fingerprint &&
+        cached.sqlResultRef === msg.sqlResult
+      ) {
+        desiredNodes.push(cached.element);
+        if (cached.hadCgmCard) {
+          cgmCardIndex += 1;
         }
-
-        header.appendChild(badge);
-        msgDiv.appendChild(header);
-      }
-
-      const contentDiv = document.createElement("div");
-
-      const isSqlMessage =
-        msg.role === "user" &&
-        (msg.model === "sql" || (!msg.model && activeChat.model === "sql"));
-
-      const createCopyBtn = (textToCopy: string): HTMLButtonElement => {
-        const btn = document.createElement("button");
-        btn.className = "copy-sql-btn icon-btn";
-        btn.setAttribute(
-          "aria-label",
-          i18next.t("aria.copyQuery", "Copy Query"),
-        );
-        btn.setAttribute("data-i18n-aria-label", "aria.copyQuery");
-        btn.title = i18next.t("ui.copyQuery", "Copy Query");
-        btn.setAttribute("data-i18n-title", "ui.copyQuery");
-        const renderCopyIcon = (): SVGSVGElement =>
-          createSvgIcon(14, [
-            {
-              tag: "rect",
-              attrs: {
-                x: "9",
-                y: "9",
-                width: "13",
-                height: "13",
-                rx: "2",
-                ry: "2",
-              },
-            },
-            {
-              tag: "path",
-              attrs: {
-                d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1",
-              },
-            },
-          ]);
-        btn.replaceChildren(renderCopyIcon());
-        btn.addEventListener("click", async () => {
-          try {
-            await navigator.clipboard.writeText(textToCopy);
-            this.ui.announce(i18next.t("status.commandCopied"));
-            btn.replaceChildren(
-              createSvgIcon(14, [
-                { tag: "polyline", attrs: { points: "20 6 9 17 4 12" } },
-              ]),
-            );
-            setTimeout(() => {
-              btn.replaceChildren(renderCopyIcon());
-            }, 2000);
-          } catch (err) {
-            console.error("Failed to copy text: ", err);
-          }
-        });
-        return btn;
-      };
-
-      const createPlayBtn = (queryToPlay: string): HTMLButtonElement => {
-        const btn = document.createElement("button");
-        btn.className = "play-sql-btn";
-        btn.setAttribute(
-          "aria-label",
-          i18next.t("aria.playQuery", "Execute Query"),
-        );
-        btn.setAttribute("data-i18n-aria-label", "aria.playQuery");
-        const playSvg = createSvgIcon(
-          14,
-          [{ tag: "polygon", attrs: { points: "5 3 19 12 5 21 5 3" } }],
-          "currentColor",
-          true,
-        );
-        const playLabelSpan = document.createElement("span");
-        playLabelSpan.setAttribute("data-i18n", "app.play");
-        playLabelSpan.textContent = i18next.t("app.play", "Play");
-        btn.replaceChildren(playSvg, playLabelSpan);
-        btn.addEventListener("click", () => {
-          void this.ui.executeDirectSqlAction(queryToPlay, btn);
-        });
-        return btn;
-      };
-
-      const createRefreshBtn = (
-        queryToPlay: string,
-        messageToUpdate: Message,
-      ): HTMLButtonElement => {
-        const btn = document.createElement("button");
-        btn.className = "copy-sql-btn icon-btn";
-        btn.setAttribute(
-          "aria-label",
-          i18next.t("aria.refreshQuery", "Refresh Query"),
-        );
-        btn.setAttribute("data-i18n-aria-label", "aria.refreshQuery");
-        btn.title = i18next.t("ui.refreshQuery", "Refresh Query");
-        btn.setAttribute("data-i18n-title", "ui.refreshQuery");
-        btn.replaceChildren(
-          createSvgIcon(14, [
-            { tag: "polyline", attrs: { points: "23 4 23 10 17 10" } },
-            { tag: "polyline", attrs: { points: "1 20 1 14 7 14" } },
-            {
-              tag: "path",
-              attrs: {
-                d: "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15",
-              },
-            },
-          ]),
-        );
-        btn.addEventListener("click", () => {
-          void this.ui.executeDirectSqlAction(
-            queryToPlay,
-            btn,
-            messageToUpdate,
-          );
-        });
-        return btn;
-      };
-
-      if (isSqlMessage) {
-        contentDiv.className = "sql-user-query-wrapper";
-
-        const headerDiv = document.createElement("div");
-        headerDiv.className = "sql-query-header";
-        headerDiv.appendChild(createCopyBtn(msg.content));
-        headerDiv.appendChild(createPlayBtn(msg.content));
-
-        const preBlock = document.createElement("pre");
-        preBlock.style.margin = "0";
-        preBlock.style.background = "transparent";
-        preBlock.style.padding = "0";
-        preBlock.style.whiteSpace = "pre-wrap";
-        preBlock.tabIndex = 0;
-        preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
-        preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
-
-        const codeBlock = document.createElement("code");
-        codeBlock.className = "language-sql";
-        codeBlock.style.background = "transparent";
-        codeBlock.style.padding = "0";
-        codeBlock.textContent = msg.content;
-
-        hljs.highlightElement(codeBlock);
-        preBlock.appendChild(codeBlock);
-
-        contentDiv.appendChild(headerDiv);
-        contentDiv.appendChild(preBlock);
       } else {
-        const rawHtml = String(marked.parse(msg.content ?? ""));
-        contentDiv.innerHTML = DOMPurify.sanitize(rawHtml, {
-          ADD_ATTR: ["target"],
+        const built = this.buildMessageElement(msg, activeChat, cgmCardIndex);
+        this.messageCache.set(msg, {
+          fingerprint,
+          sqlResultRef: msg.sqlResult,
+          element: built.element,
+          hadCgmCard: built.hadCgmCard,
         });
-        contentDiv
-          .querySelectorAll<HTMLElement>("pre")
-          .forEach((preElement) => {
-            preElement
-              .querySelectorAll<HTMLElement>("code")
-              .forEach((block) => {
-                hljs.highlightElement(block);
-
-                if (block.className.includes("language-sql")) {
-                  const wrapper = document.createElement("div");
-                  wrapper.className = "sql-query-container";
-
-                  const headerDiv = document.createElement("div");
-                  headerDiv.className = "sql-query-header";
-                  const queryStr = String(block.textContent);
-                  headerDiv.appendChild(createCopyBtn(queryStr));
-                  headerDiv.appendChild(createPlayBtn(queryStr));
-
-                  preElement.replaceWith(wrapper);
-                  wrapper.appendChild(headerDiv);
-                  wrapper.appendChild(preElement);
-                }
-              });
-          });
-      }
-
-      if (msg.isError) {
-        contentDiv.className = "error-text";
-        contentDiv.setAttribute("role", "alert");
-        contentDiv.setAttribute("aria-live", "assertive");
-      }
-
-      msgDiv.appendChild(contentDiv);
-
-      const hasMarkdownSqlBlock =
-        contentDiv.querySelector(".sql-query-container") !== null;
-      if (msg.sqlQuery && !hasMarkdownSqlBlock) {
-        const queryContainer = document.createElement("div");
-        queryContainer.className = "sql-query-container";
-        const preBlock = document.createElement("pre");
-        preBlock.tabIndex = 0;
-        preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
-        preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
-        const codeBlock = document.createElement("code");
-        codeBlock.className = "language-sql sql-query";
-        codeBlock.textContent = msg.sqlQuery;
-
-        hljs.highlightElement(codeBlock);
-        preBlock.appendChild(codeBlock);
-
-        const headerDiv = document.createElement("div");
-        headerDiv.className = "sql-query-header";
-
-        headerDiv.appendChild(createCopyBtn(msg.sqlQuery));
-
-        if (msg.role === "assistant" && msg.model === "sql") {
-          headerDiv.appendChild(createRefreshBtn(msg.sqlQuery, msg));
-        } else {
-          headerDiv.appendChild(createPlayBtn(msg.sqlQuery));
-        }
-
-        queryContainer.appendChild(headerDiv);
-        queryContainer.appendChild(preBlock);
-        msgDiv.appendChild(queryContainer);
-      }
-      const sqlRows = msg.sqlResult;
-      if (sqlRows) {
-        if (sqlRows.length > 0) {
-          const tableContainer = document.createElement("div");
-          tableContainer.className = "sql-table-container";
-
-          const toolbar = document.createElement("div");
-          toolbar.className = "sql-table-toolbar";
-          const csvBtn = document.createElement("button");
-          csvBtn.className = "btn-secondary export-csv-btn";
-          csvBtn.setAttribute("data-i18n", "table.exportCsvShort");
-          csvBtn.textContent = i18next.t("table.exportCsvShort", "CSV");
-          csvBtn.setAttribute("data-i18n-aria-label", "table.exportCsv");
-          csvBtn.setAttribute(
-            "aria-label",
-            i18next.t("table.exportCsv", "Export CSV"),
-          );
-          csvBtn.addEventListener("click", () =>
-            this.ui.exportRowsToCsv(sqlRows, "query_results.csv"),
-          );
-
-          const jsonBtn = document.createElement("button");
-          jsonBtn.className = "btn-secondary export-json-btn";
-          jsonBtn.setAttribute("data-i18n", "table.exportJsonShort");
-          jsonBtn.textContent = i18next.t("table.exportJsonShort", "JSON");
-          jsonBtn.setAttribute("data-i18n-aria-label", "table.exportJson");
-          jsonBtn.setAttribute(
-            "aria-label",
-            i18next.t("table.exportJson", "Export JSON"),
-          );
-          jsonBtn.addEventListener("click", () =>
-            this.ui.exportRowsToJson(sqlRows, "query_results.json"),
-          );
-
-          toolbar.appendChild(csvBtn);
-          toolbar.appendChild(jsonBtn);
-          tableContainer.appendChild(toolbar);
-
-          const table = document.createElement("table");
-          table.className = "sql-table";
-
-          const caption = document.createElement("caption");
-          caption.className = "sr-only";
-          caption.textContent = i18next.t("app.tableData");
-          table.appendChild(caption);
-
-          const thead = document.createElement("thead");
-          const headerRow = document.createElement("tr");
-          const columns = Object.keys(sqlRows[0]);
-
-          columns.forEach((col) => {
-            const th = document.createElement("th");
-            th.textContent = col;
-            th.setAttribute("scope", "col");
-            headerRow.appendChild(th);
-          });
-          thead.appendChild(headerRow);
-          table.appendChild(thead);
-
-          const tbody = document.createElement("tbody");
-          sqlRows.forEach((row) => {
-            const tr = document.createElement("tr");
-            columns.forEach((col) => {
-              const td = document.createElement("td");
-              const cellValue = row[col];
-              td.textContent =
-                cellValue === null || cellValue === undefined
-                  ? "NULL"
-                  : String(cellValue);
-              tr.appendChild(td);
-            });
-            tbody.appendChild(tr);
-          });
-          table.appendChild(tbody);
-
-          const cgmCard = renderCgmCard(sqlRows);
-          if (cgmCard) {
-            tableContainer.appendChild(cgmCard);
-          }
-
-          tableContainer.appendChild(table);
-          msgDiv.appendChild(tableContainer);
-        } else {
-          const emptyDiv = document.createElement("div");
-          emptyDiv.className = "sql-empty";
-          emptyDiv.textContent = i18next.t("ui.noRows");
-          msgDiv.appendChild(emptyDiv);
+        desiredNodes.push(built.element);
+        if (built.hadCgmCard) {
+          cgmCardIndex += 1;
         }
       }
+    }
 
-      this.ui.messagesContainer.appendChild(msgDiv);
+    const desiredSet = new Set<Element>(desiredNodes);
+    Array.from(this.ui.messagesContainer.children).forEach((child) => {
+      if (!desiredSet.has(child)) {
+        child.remove();
+      }
     });
+
+    for (let i = 0; i < desiredNodes.length; i++) {
+      const desired = desiredNodes[i];
+      const current = this.ui.messagesContainer.children[i];
+      if (current !== desired) {
+        this.ui.messagesContainer.insertBefore(desired, current ?? null);
+      }
+    }
+  }
+
+  /**
+   * Renders the active chat pane, updating input controls, model selector, and message nodes.
+   * @returns {void}
+   */
+  public renderActiveChat(): void {
+    const activeChat = this.ui.state.getActiveChat();
+
+    if (!activeChat) {
+      const emptyDiv = document.createElement("div");
+      emptyDiv.className = "empty-state";
+      emptyDiv.setAttribute("role", "status");
+      emptyDiv.setAttribute("aria-live", "polite");
+      emptyDiv.setAttribute("data-i18n", "app.emptyState");
+      emptyDiv.textContent = i18next.t("app.emptyState");
+      this.ui.messagesContainer.replaceChildren(emptyDiv);
+      this.ui.chatInput.disabled = true;
+      this.ui.chatInputWrapper.classList.add("disabled");
+      this.ui.sendBtn.disabled = true;
+      this.ui.modelSelect.disabled = true;
+      return;
+    }
+
+    const online = this.ui.state.systemStatus.backendOnline;
+    this.ui.chatInput.disabled = !online;
+    this.ui.chatInputWrapper.classList.toggle("disabled", !online);
+    this.ui.chatInput.placeholder = online
+      ? i18next.t("app.typeMessage")
+      : i18next.t("status.inputOffline");
+    this.ui.sendBtn.disabled = !online;
+
+    this.ui.modelSelect.disabled = false;
+    const hasActiveModelOption = Array.from(this.ui.modelSelect.options).some(
+      (opt) => opt.value === activeChat.model,
+    );
+    this.ui.modelSelect.value = hasActiveModelOption ? activeChat.model : "sql";
+    this.ui.providerModalController.updateProviderBadgeStatus();
+    this.ui.syncHighlight();
+    this.renderMessages();
   }
 }

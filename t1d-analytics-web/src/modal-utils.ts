@@ -1,8 +1,23 @@
 /**
  * @file modal-utils.ts
  * @module modal-utils
- * Accessible keyboard focus-trapping and modal dialog interaction utilities.
+ * Accessible keyboard focus-trapping, DOM element lookup, and modal dialog interaction utilities.
  */
+
+/**
+ * Looks up a required typed element by ID and throws a descriptive Error if missing.
+ * @template T - Target HTML element subtype.
+ * @param {string} id - The DOM element ID.
+ * @returns {T} The matched element.
+ * @throws {Error} When the required mount element is not found in the document.
+ */
+export function requireElementById<T extends HTMLElement>(id: string): T {
+  const el = document.querySelector<T>(`#${id}`);
+  if (!el) {
+    throw new Error(`Required DOM element #${id} not found`);
+  }
+  return el;
+}
 
 /**
  * Traps keyboard focus within a modal dialog and handles the Escape key to close.

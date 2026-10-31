@@ -68,6 +68,7 @@ describe("Frontend configuration modules", () => {
     const proxyTargetOverrideCfg = createViteConfig({
       VITE_API_PROXY_TARGET: "http://127.0.0.1:9000",
       BUILD_TIMESTAMP_UTC: "2026-10-29T12:00:00Z UTC",
+      VITE_COVERAGE: "true",
     });
     expect(proxyTargetOverrideCfg.server?.proxy?.["/api"]).toEqual({
       target: "http://127.0.0.1:9000",
@@ -76,6 +77,8 @@ describe("Frontend configuration modules", () => {
     expect(proxyTargetOverrideCfg.define?.__BUILD_TIMESTAMP_UTC__).toBe(
       JSON.stringify("2026-10-29T12:00:00Z UTC"),
     );
+    expect(Array.isArray(proxyTargetOverrideCfg.plugins)).toBe(true);
+    expect(proxyTargetOverrideCfg.plugins?.length).toBeGreaterThan(0);
 
     expect(getDefaultViteEnv()).toBe(process.env);
     const origProcess = globalThis.process;
@@ -211,10 +214,23 @@ describe("Frontend configuration modules", () => {
   });
 
   /**
-   * Verifies that every TypeScript implementation module under `src/` is registered in `package.json` `scripts.docs`.
+   * Verifies that every TypeScript implementation module under `src/` is registered as an exact entry point in `package.json` `scripts.docs` and validates TypeDoc/ESLint strictness rules.
    */
   it("verifies all src/**/*.ts implementation modules are registered in TypeDoc scripts.docs", () => {
     const docsScript = pkgRaw.scripts?.docs || "";
+    const docsTokens = docsScript.trim().split(/\s+/);
+    expect(docsTokens[0]).toBe("typedoc");
+    expect(docsTokens).toContain("--out");
+
+    const registeredEntryPoints = docsTokens
+      .filter((token) => token.startsWith("src/"))
+      .sort();
+    for (const entryPoint of registeredEntryPoints) {
+      expect(fs.existsSync(path.resolve(__dirname, "..", entryPoint))).toBe(
+        true,
+      );
+    }
+
     const srcDir = path.resolve(__dirname, "../src");
     const collectTsFiles = (dir: string, prefix: string = "src"): string[] => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -237,10 +253,7 @@ describe("Frontend configuration modules", () => {
       return results;
     };
 
-    const allSrcModules = collectTsFiles(srcDir);
-    expect(allSrcModules.length).toBeGreaterThan(10);
-    for (const modPath of allSrcModules) {
-      expect(docsScript).toContain(modPath);
-    }
+    const allSrcModules = collectTsFiles(srcDir).sort();
+    expect(registeredEntryPoints).toEqual(allSrcModules);
   });
 });

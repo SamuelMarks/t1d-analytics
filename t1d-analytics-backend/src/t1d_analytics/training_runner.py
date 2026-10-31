@@ -6,6 +6,7 @@ import math
 import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -20,6 +21,7 @@ from t1d_analytics.errors import (
 from t1d_analytics.hf_models import (
     AcceleratorDetectorProtocol,
     AutocastTorchProtocol,
+    BaseCausalLMFactory,
     BaseTrainingRunner,
     CosineSchedulerNamespaceProtocol,
     DeviceLike,
@@ -49,6 +51,25 @@ from t1d_analytics.sql_utils import SqlValue
 from t1d_analytics.tpu_orchestrator import RemoteTpuMaxTextRunner
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TorchRunnerProfile:
+    """Configuration profile for a local PyTorch causal LM runner variant."""
+
+    device: str
+    checkpoint_subdir: str
+    metadata_filename: str
+    error_prefix: str
+    mixed_precision: str = "fp32"
+    device_name: Optional[str] = None
+    peak_memory_mb: Optional[float] = None
+    include_loss_history_in_result: bool = True
+    include_device_in_result: bool = False
+    include_eval_metrics_in_result: bool = False
+    custom_factory: Optional[BaseCausalLMFactory] = None
+    ignore_index: Optional[int] = None
+    move_model_to_device: bool = False
 
 
 class BaseTorchCausalLMRunner(BaseTrainingRunner):
@@ -212,6 +233,8 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         final_loss = loss_history[-1] if loss_history else 0.0
         return loss_history, final_loss
 
+    _execute_pytorch_causal_lm_loop = _run_torch_optimizer_loop
+
     def _prepare_execution_context(
         self, config: TrainingJobConfig
     ) -> Tuple[Path, Path, int, int, float, int, float, int, int]:
@@ -307,18 +330,104 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         with open(ckpt_dir / "training_metrics.json", "w", encoding="utf-8") as f:
             json.dump(metrics_payload, f, indent=2)
 
+    def _build_checkpoint_payloads(
+        self,
+        config: TrainingJobConfig,
+        profile: TorchRunnerProfile,
+        batch_size: int,
+        epochs: int,
+        lr: float,
+        total_steps: int,
+        sample_count: int,
+        final_loss: float,
+        loss_vals: List[SqlValue],
+        eval_metrics_vals: Dict[str, SqlValue],
+    ) -> Tuple[Dict[str, JobMetricValue], Dict[str, JobMetricValue]]:
+        """
+        Construct the metadata and metrics dictionaries persisted to the checkpoint directory.
+
+        Args:
+        ----
+            config: Training job configuration.
+            profile: Runner execution and artifact reporting profile.
+            batch_size: Effective batch size.
+            epochs: Effective epoch count.
+            lr: Effective learning rate.
+            total_steps: Total optimization steps.
+            sample_count: Number of training samples.
+            final_loss: Final scalar loss value.
+            loss_vals: Per-step loss history list.
+            eval_metrics_vals: Validation evaluation metrics dictionary.
+
+        Returns:
+        -------
+            Tuple[Dict[str, JobMetricValue], Dict[str, JobMetricValue]]: `(metadata_payload, metrics_payload)`.
+
+        """
+        if profile.include_device_in_result:
+            metadata_payload: Dict[str, JobMetricValue] = {
+                "model_name": config.model_name,
+                "backend": config.backend.value,
+                "device": profile.device,
+                "device_name": profile.device_name or profile.device,
+                "mixed_precision": profile.mixed_precision,
+                "peak_memory_mb": profile.peak_memory_mb or 0.0,
+            }
+            metrics_payload: Dict[str, JobMetricValue] = {
+                "loss_history": loss_vals,
+                "final_loss": final_loss,
+                "total_steps": total_steps,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "learning_rate": lr,
+                "device": profile.device,
+                "mixed_precision": profile.mixed_precision,
+            }
+            return metadata_payload, metrics_payload
+
+        if profile.include_eval_metrics_in_result:
+            metadata_payload = {
+                "model_name": config.model_name,
+                "batch_size": batch_size,
+                "epochs": epochs,
+                "learning_rate": lr,
+                "backend": config.backend.value,
+                "use_lora": config.use_lora,
+                "quantization": config.quantization,
+            }
+            metrics_payload = {
+                "loss_history": loss_vals,
+                "final_loss": final_loss,
+                "total_steps": total_steps,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "learning_rate": lr,
+                "eval_metrics": eval_metrics_vals,
+            }
+            return metadata_payload, metrics_payload
+
+        metadata_payload = {
+            "model_name": config.model_name,
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "learning_rate": lr,
+            "backend": config.backend.value,
+        }
+        metrics_payload = {
+            "loss_history": loss_vals,
+            "final_loss": final_loss,
+            "total_steps": total_steps,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": lr,
+            "samples": sample_count,
+        }
+        return metadata_payload, metrics_payload
+
     def _run_local_torch_training(
         self,
         config: TrainingJobConfig,
-        device: str,
-        checkpoint_subdir: str,
-        metadata_filename: str,
-        error_prefix: str,
-        mixed_precision: str = "fp32",
-        device_name: Optional[str] = None,
-        peak_memory_mb: Optional[float] = None,
-        include_loss_history_in_result: bool = True,
-        include_device_in_result: bool = False,
+        profile: TorchRunnerProfile,
         cancel_event: Optional[threading.Event] = None,
     ) -> Dict[str, JobMetricValue]:
         """
@@ -327,15 +436,7 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         Args:
         ----
             config: Training job configuration.
-            device: Target PyTorch device string (e.g., `'cpu'`, `'cuda:0'`, `'mps'`).
-            checkpoint_subdir: Subdirectory name under `output_dir` for the final checkpoint.
-            metadata_filename: Filename for the metadata JSON written inside the checkpoint directory.
-            error_prefix: Prefix for `TrainingExecutionError` messages on failure.
-            mixed_precision: Precision mode (`'fp32'` or `'fp16'`).
-            device_name: Optional hardware device name for GPU metadata.
-            peak_memory_mb: Optional peak memory telemetry in MB for GPU metadata.
-            include_loss_history_in_result: Whether to include `loss_history` in the returned dictionary.
-            include_device_in_result: Whether to include `device` and `mixed_precision` in the returned dictionary.
+            profile: Runner execution and artifact reporting profile.
             cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
@@ -362,28 +463,52 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         ) = self._prepare_execution_context(config)
         hparams = config.hyperparameters
         loss_history: List[float] = []
+        eval_metrics: Dict[str, float] = {}
 
         try:
             import torch
 
+            max_seq_len = (
+                (hparams.max_seq_length if hparams else 128)
+                if profile.include_eval_metrics_in_result
+                else 128
+            )
             dataset = prepare_torch_dataset(
                 ds_path,
+                max_seq_length=max_seq_len,
                 tokenizer_name=config.model_name,
             )
-            factory = resolve_causal_lm_factory(config)
+            factory = profile.custom_factory or resolve_causal_lm_factory(config)
             model = factory.create_model(
                 model_name=config.model_name,
-                device=device,
+                device=profile.device,
                 quantization=config.quantization,
                 use_lora=config.use_lora,
             )
 
             target_dev: Optional[DeviceLike] = None
-            if include_device_in_result:
+            if profile.include_device_in_result or profile.move_model_to_device:
                 target_dev = (
-                    torch.device(device)
+                    torch.device(profile.device)
                     if isinstance(torch, TorchDeviceFactoryProtocol)
                     else "cpu"
+                )
+            if profile.move_model_to_device and target_dev is not None:
+                try:
+                    model = model.to(target_dev)
+                except Exception as e:
+                    logger.debug(f"Failed to move HF model to device: {e}")
+
+            eval_dataset: Optional[List[Tuple[TensorLike, TensorLike]]] = None
+            if (
+                profile.include_eval_metrics_in_result
+                and config.validation_dataset_path
+                and Path(config.validation_dataset_path).exists()
+            ):
+                eval_dataset = prepare_torch_dataset(
+                    Path(config.validation_dataset_path),
+                    max_seq_length=max_seq_len,
+                    tokenizer_name=config.model_name,
                 )
 
             if config.dry_run:
@@ -409,54 +534,39 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
                     accum_steps=accum_steps,
                     max_norm=max_norm,
                     target_dev=target_dev,
-                    mixed_precision=mixed_precision,
+                    mixed_precision=profile.mixed_precision,
+                    ignore_index=profile.ignore_index,
                     cancel_event=cancel_event,
                 )
-                self._save_model_checkpoint(model, out_path / checkpoint_subdir)
+                if eval_dataset and target_dev is not None:
+                    eval_metrics = self._evaluate(
+                        model,
+                        eval_dataset,
+                        target_dev,
+                        batch_size=batch_size,
+                    )
+                self._save_model_checkpoint(model, out_path / profile.checkpoint_subdir)
         except Exception as e:
-            raise TrainingExecutionError(f"{error_prefix}: {e}") from e
+            raise TrainingExecutionError(f"{profile.error_prefix}: {e}") from e
 
         loss_vals: List[SqlValue] = list(loss_history)
+        eval_metrics_vals: Dict[str, SqlValue] = dict(eval_metrics)
         if not config.dry_run:
-            if include_device_in_result:
-                metadata_payload: Dict[str, JobMetricValue] = {
-                    "model_name": config.model_name,
-                    "backend": config.backend.value,
-                    "device": device,
-                    "device_name": device_name or device,
-                    "mixed_precision": mixed_precision,
-                    "peak_memory_mb": peak_memory_mb or 0.0,
-                }
-                metrics_payload: Dict[str, JobMetricValue] = {
-                    "loss_history": loss_vals,
-                    "final_loss": final_loss,
-                    "total_steps": total_steps,
-                    "epochs": epochs,
-                    "batch_size": batch_size,
-                    "learning_rate": lr,
-                    "device": device,
-                    "mixed_precision": mixed_precision,
-                }
-            else:
-                metadata_payload = {
-                    "model_name": config.model_name,
-                    "batch_size": batch_size,
-                    "epochs": epochs,
-                    "learning_rate": lr,
-                    "backend": config.backend.value,
-                }
-                metrics_payload = {
-                    "loss_history": loss_vals,
-                    "final_loss": final_loss,
-                    "total_steps": total_steps,
-                    "epochs": epochs,
-                    "batch_size": batch_size,
-                    "learning_rate": lr,
-                    "samples": sample_count,
-                }
+            metadata_payload, metrics_payload = self._build_checkpoint_payloads(
+                config=config,
+                profile=profile,
+                batch_size=batch_size,
+                epochs=epochs,
+                lr=lr,
+                total_steps=total_steps,
+                sample_count=sample_count,
+                final_loss=final_loss,
+                loss_vals=loss_vals,
+                eval_metrics_vals=eval_metrics_vals,
+            )
             self._write_training_artifacts(
-                ckpt_dir=out_path / checkpoint_subdir,
-                metadata_filename=metadata_filename,
+                ckpt_dir=out_path / profile.checkpoint_subdir,
+                metadata_filename=profile.metadata_filename,
                 metadata_payload=metadata_payload,
                 metrics_payload=metrics_payload,
             )
@@ -471,11 +581,13 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
             "runtime_seconds": round(elapsed, 4),
             "output_dir": str(out_path),
         }
-        if include_loss_history_in_result:
+        if profile.include_loss_history_in_result:
             result["loss_history"] = loss_vals
-        if include_device_in_result:
-            result["device"] = device
-            result["mixed_precision"] = mixed_precision
+        if profile.include_eval_metrics_in_result:
+            result["eval_metrics"] = eval_metrics_vals
+        if profile.include_device_in_result:
+            result["device"] = profile.device
+            result["mixed_precision"] = profile.mixed_precision
         return result
 
 
@@ -518,12 +630,14 @@ class LocalCpuRunner(BaseTorchCausalLMRunner):
         """
         return self._run_local_torch_training(
             config=config,
-            device="cpu",
-            checkpoint_subdir="checkpoint-final",
-            metadata_filename="training_args.json",
-            error_prefix="CPU training execution failed",
-            include_loss_history_in_result=True,
-            include_device_in_result=False,
+            profile=TorchRunnerProfile(
+                device="cpu",
+                checkpoint_subdir="checkpoint-final",
+                metadata_filename="training_args.json",
+                error_prefix="CPU training execution failed",
+                include_loss_history_in_result=True,
+                include_device_in_result=False,
+            ),
             cancel_event=cancel_event,
         )
 
@@ -617,15 +731,17 @@ class LocalGpuRunner(BaseTorchCausalLMRunner):
 
         return self._run_local_torch_training(
             config=config,
-            device=device,
-            checkpoint_subdir="checkpoint-gpu-final",
-            metadata_filename="gpu_metadata.json",
-            error_prefix="GPU training execution failed",
-            mixed_precision=mixed_precision,
-            device_name=device_name,
-            peak_memory_mb=peak_memory_mb,
-            include_loss_history_in_result=False,
-            include_device_in_result=True,
+            profile=TorchRunnerProfile(
+                device=device,
+                checkpoint_subdir="checkpoint-gpu-final",
+                metadata_filename="gpu_metadata.json",
+                error_prefix="GPU training execution failed",
+                mixed_precision=mixed_precision,
+                device_name=device_name,
+                peak_memory_mb=peak_memory_mb,
+                include_loss_history_in_result=False,
+                include_device_in_result=True,
+            ),
             cancel_event=cancel_event,
         )
 
@@ -643,7 +759,7 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
 
         Raises
         ------
-            RuntimeError: If transformers or torch are missing.
+            MissingSdkError: If transformers or torch are missing.
 
         """
         try:
@@ -683,134 +799,30 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
             TrainingExecutionError: If training loop fails.
 
         """
-        start_time = time.time()
-        (
-            ds_path,
-            out_path,
-            batch_size,
-            epochs,
-            lr,
-            accum_steps,
-            max_norm,
-            _,
-            total_steps,
-        ) = self._prepare_execution_context(config)
-        hparams = config.hyperparameters
-        loss_history: List[float] = []
-        eval_metrics: Dict[str, float] = {}
+        import torch
 
         device = "cpu"
-        try:
-            import torch
+        if torch.cuda.is_available():
+            device = "cuda:0"
+        elif _is_mps_available(torch.backends):
+            device = "mps"
 
-            if torch.cuda.is_available():
-                device = "cuda:0"
-            elif _is_mps_available(torch.backends):
-                device = "mps"
-
-            target_dev = torch.device(device)
-
-            dataset = prepare_torch_dataset(
-                ds_path,
-                max_seq_length=hparams.max_seq_length if hparams else 128,
-                tokenizer_name=config.model_name,
-            )
-
-            factory = HuggingFaceCausalLMFactory()
-            model = factory.create_model(
-                model_name=config.model_name,
+        return self._run_local_torch_training(
+            config=config,
+            profile=TorchRunnerProfile(
                 device=device,
-                quantization=config.quantization,
-                use_lora=config.use_lora,
-            )
-            try:
-                model = model.to(target_dev)
-            except Exception as e:
-                logger.debug(f"Failed to move HF model to device: {e}")
-
-            eval_dataset: Optional[List[Tuple[TensorLike, TensorLike]]] = None
-            if config.validation_dataset_path:
-                val_path = Path(config.validation_dataset_path)
-                if val_path.exists():
-                    eval_dataset = prepare_torch_dataset(
-                        val_path,
-                        max_seq_length=hparams.max_seq_length if hparams else 128,
-                        tokenizer_name=config.model_name,
-                    )
-
-            if config.dry_run:
-                inp, _ = dataset[0]
-                outputs = model(inp.unsqueeze(0).to(target_dev))
-                _ = _extract_output_logits(outputs)
-                loss_history = [0.0] * total_steps
-                final_loss = 0.0
-            else:
-                loss_history, final_loss = self._run_torch_optimizer_loop(
-                    model=model,
-                    dataset=dataset,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    total_steps=total_steps,
-                    lr=lr,
-                    weight_decay=hparams.weight_decay if hparams else 0.01,
-                    accum_steps=accum_steps,
-                    max_norm=max_norm,
-                    target_dev=target_dev,
-                    ignore_index=-100,
-                    cancel_event=cancel_event,
-                )
-                if eval_dataset:
-                    eval_metrics = self._evaluate(
-                        model,
-                        eval_dataset,
-                        target_dev,
-                        batch_size=batch_size,
-                    )
-                self._save_model_checkpoint(model, out_path / "checkpoint-hf-final")
-
-        except Exception as e:
-            raise TrainingExecutionError(
-                f"Hugging Face training execution failed: {e}"
-            ) from e
-
-        loss_history_vals: List[SqlValue] = list(loss_history)
-        eval_metrics_vals: Dict[str, SqlValue] = dict(eval_metrics)
-        if not config.dry_run:
-            self._write_training_artifacts(
-                ckpt_dir=out_path / "checkpoint-hf-final",
+                checkpoint_subdir="checkpoint-hf-final",
                 metadata_filename="training_args.json",
-                metadata_payload={
-                    "model_name": config.model_name,
-                    "batch_size": batch_size,
-                    "epochs": epochs,
-                    "learning_rate": lr,
-                    "backend": config.backend.value,
-                    "use_lora": config.use_lora,
-                    "quantization": config.quantization,
-                },
-                metrics_payload={
-                    "loss_history": loss_history_vals,
-                    "final_loss": final_loss,
-                    "total_steps": total_steps,
-                    "epochs": epochs,
-                    "batch_size": batch_size,
-                    "learning_rate": lr,
-                    "eval_metrics": eval_metrics_vals,
-                },
-            )
-
-        elapsed = time.time() - start_time
-        return {
-            "status": "dry_run_completed" if config.dry_run else "completed",
-            "backend": config.backend.value,
-            "model_name": config.model_name,
-            "total_steps": total_steps,
-            "final_loss": final_loss,
-            "loss_history": loss_history_vals,
-            "eval_metrics": eval_metrics_vals,
-            "runtime_seconds": round(elapsed, 4),
-            "output_dir": str(out_path),
-        }
+                error_prefix="Hugging Face training execution failed",
+                include_loss_history_in_result=True,
+                include_device_in_result=False,
+                include_eval_metrics_in_result=True,
+                custom_factory=HuggingFaceCausalLMFactory(),
+                ignore_index=-100,
+                move_model_to_device=True,
+            ),
+            cancel_event=cancel_event,
+        )
 
 
 def get_training_runner(backend: TrainingBackend) -> BaseTrainingRunner:
@@ -880,10 +892,9 @@ class Gemma4SqlRunner(BaseTrainingRunner):
 
         Raises:
         ------
-            RuntimeError: If gemma-4-sql execution fails.
+            TrainingExecutionError: If gemma-4-sql execution fails.
 
         """
-        _ = cancel_event
         from t1d_analytics.gemma_bridge import run_gemma_sql_train
 
         self.prepare_dataset(config)
@@ -927,7 +938,11 @@ class Gemma4SqlRunner(BaseTrainingRunner):
             }
 
         start_time = time.time()
-        proc = run_gemma_sql_train(stage=stage, config_path=config_file)
+        proc = run_gemma_sql_train(
+            stage=stage,
+            config_path=config_file,
+            cancel_event=cancel_event,
+        )
         elapsed = time.time() - start_time
 
         return {
@@ -967,6 +982,7 @@ __all__ = [
     "LocalGpuRunner",
     "RemoteTpuMaxTextRunner",
     "TinyCausalLMFactory",
+    "TorchRunnerProfile",
     "TrainingExecutionError",
     "TrainingJobManager",
     "get_training_runner",

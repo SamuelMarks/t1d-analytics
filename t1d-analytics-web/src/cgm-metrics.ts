@@ -247,15 +247,34 @@ export function detectCgmColumns(
 }
 
 /**
+ * Normalize an array of positive sensor glucose readings to mg/dL, automatically scaling mmol/L traces (`median < 25` and `p95 < 55`) by `18.0182`.
+ * @param {number[]} values - Raw numeric sensor glucose values.
+ * @returns {number[]} Positive sensor glucose values normalized to mg/dL.
+ */
+export function normalizeGlucoseToMgDl(values: number[]): number[] {
+  const valid = values.filter(
+    (v) => typeof v === "number" && !isNaN(v) && v > 0,
+  );
+  if (valid.length === 0) {
+    return [];
+  }
+  const sorted = [...valid].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const p95 = sorted[Math.floor(sorted.length * 0.95)];
+  const isMmol = median > 0 && median < 25 && p95 < 55;
+  return isMmol
+    ? valid.map((v) => v * CLINICAL_CHART_THEME.mmolToMgDlFactor)
+    : valid;
+}
+
+/**
  * Calculate clinical Time-in-Range (TIR) percentages from an array of glucose readings.
  * @param {number[]} values - Sensor glucose values in mg/dL.
  * @returns {TIRMetrics} Calculated clinical TIR metrics.
  */
 export function calculateTIR(values: number[]): TIRMetrics {
-  const valid = values.filter(
-    (v) => typeof v === "number" && !isNaN(v) && v > 0,
-  );
-  if (valid.length === 0) {
+  const scaledValues = normalizeGlucoseToMgDl(values);
+  if (scaledValues.length === 0) {
     return {
       veryLow: 0,
       low: 0,
@@ -271,12 +290,6 @@ export function calculateTIR(values: number[]): TIRMetrics {
       hbgi: 0,
     };
   }
-
-  const sorted = [...valid].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const p95 = sorted[Math.floor(sorted.length * 0.95)];
-  const isMmol = median > 0 && median < 25 && p95 < 55;
-  const scaledValues = isMmol ? valid.map((v) => v * 18.0182) : valid;
 
   let vl = 0;
   let l = 0;
@@ -371,17 +384,9 @@ export function calculateDayNightTIR(
     }
   }
 
-  const allValues = [...dayValues, ...nightValues].filter(
-    (v) => !isNaN(v) && v > 0,
-  );
-  const sorted = [...allValues].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const p95 = sorted[Math.floor(sorted.length * 0.95)];
-  const isMmol = median > 0 && median < 25 && p95 < 55;
-  const scaledDay = isMmol ? dayValues.map((v) => v * 18.0182) : dayValues;
-  const scaledNight = isMmol
-    ? nightValues.map((v) => v * 18.0182)
-    : nightValues;
+  const normalizedAll = normalizeGlucoseToMgDl([...dayValues, ...nightValues]);
+  const scaledDay = normalizedAll.slice(0, dayValues.length);
+  const scaledNight = normalizedAll.slice(dayValues.length);
 
   return {
     day: calculateTIR(scaledDay),
@@ -423,7 +428,7 @@ export function calculateAGP(
   const numBuckets = Math.floor(1440 / intervalMinutes);
   const buckets: number[][] = Array.from({ length: numBuckets }, () => []);
   const days = new Set<string>();
-  let totalValid = 0;
+  const validEntries: Array<{ bucketIdx: number; glucoseVal: number }> = [];
 
   for (const r of rows) {
     const rawTime = r[timeCol];
@@ -446,11 +451,18 @@ export function calculateAGP(
       numBuckets - 1,
       Math.floor(parsedTime.minuteOfDay / intervalMinutes),
     );
-    buckets[bucketIdx].push(glucoseVal);
-    totalValid++;
+    validEntries.push({ bucketIdx, glucoseVal });
   }
 
-  if (totalValid === 0) return null;
+  if (validEntries.length === 0) return null;
+
+  const normalizedGlucose = normalizeGlucoseToMgDl(
+    validEntries.map((entry) => entry.glucoseVal),
+  );
+  for (let i = 0; i < validEntries.length; i++) {
+    buckets[validEntries[i].bucketIdx].push(normalizedGlucose[i]);
+  }
+  const totalValid = validEntries.length;
 
   const intervals: AGPIntervalMetrics[] = [];
   for (let i = 0; i < numBuckets; i++) {
@@ -542,21 +554,52 @@ export function calculateAGP(
 }
 
 /**
+ * Detect the sensor sampling interval in minutes (`1`, `5`, or `15`) from positive epoch timestamps.
+ * Orders timestamps chronologically before computing consecutive deltas and falls back to `5` minutes
+ * (288 readings/day) when fewer than two distinct ordered readings exist.
+ * @param {number[]} epochTimesMs - Array of valid positive epoch timestamps in milliseconds.
+ * @returns {number} Detected sensor sampling interval in minutes (`1`, `5`, or `15`).
+ */
+export function detectSensorIntervalMinutes(epochTimesMs: number[]): number {
+  if (epochTimesMs.length < 2) {
+    return 5;
+  }
+  const sorted = [...epochTimesMs].sort((a, b) => a - b);
+  const deltasMin: number[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    deltasMin.push((sorted[i] - sorted[i - 1]) / 60000);
+  }
+  deltasMin.sort((a, b) => a - b);
+  const medianDelta = deltasMin[Math.floor(deltasMin.length / 2)];
+  if (medianDelta >= 0.5 && medianDelta < 3) {
+    return 1;
+  }
+  if (medianDelta >= 10 && medianDelta <= 20) {
+    return 15;
+  }
+  return 5;
+}
+
+/**
  * Calculate active CGM sensor wear time percentage according to clinical consensus.
- * Clinical standard expects 288 readings/day for 5-minute sampling (>=70% active wear).
+ * Clinical standard expects 288 readings/day for 5-minute sampling (>=70% active wear),
+ * or auto-detects 1-minute (1440/day) and 15-minute FreeStyle Libre (96/day) intervals.
  * @param {Array<Record<string, ClinicalRowValue>>} rows - CGM dataset rows.
  * @param {string} timeCol - Column name representing timestamp.
- * @param {number} [expectedReadingsPerDay=288] - Expected readings per 24 hours.
+ * @param {number} [expectedReadingsPerDay] - Explicit expected readings per 24 hours override.
  * @param {number} [monitoringDays] - Optional explicit duration of the monitoring/observation window in days.
+ * @param {number} [intervalMinutes] - Optional explicit sensor sampling interval in minutes (`1`, `5`, `15`).
  * @returns {ActiveWearMetrics} Active wear metrics.
  */
 export function calculateActiveWear(
   rows: Array<Record<string, ClinicalRowValue>>,
   timeCol: string,
-  expectedReadingsPerDay: number = 288,
+  expectedReadingsPerDay?: number,
   monitoringDays?: number,
+  intervalMinutes?: number,
 ): ActiveWearMetrics {
   const days = new Set<string>();
+  const epochTimesMs: number[] = [];
   let totalReadings = 0;
   let minTime = Infinity;
   let maxTime = -Infinity;
@@ -569,6 +612,7 @@ export function calculateActiveWear(
       totalReadings++;
       const tMs = parsed.epochMs;
       if (tMs > 0) {
+        epochTimesMs.push(tMs);
         if (tMs < minTime) minTime = tMs;
         if (tMs > maxTime) maxTime = tMs;
       }
@@ -589,27 +633,42 @@ export function calculateActiveWear(
   let calendarDays = monitoringDays;
   if (!calendarDays || calendarDays < 1) {
     if (minTime !== Infinity && maxTime !== -Infinity && maxTime >= minTime) {
-      const minDate = new Date(minTime);
-      const maxDate = new Date(maxTime);
-      const minUtc = Date.UTC(
-        minDate.getUTCFullYear(),
-        minDate.getUTCMonth(),
-        minDate.getUTCDate(),
-      );
-      const maxUtc = Date.UTC(
-        maxDate.getUTCFullYear(),
-        maxDate.getUTCMonth(),
-        maxDate.getUTCDate(),
-      );
-      const dayDiff = Math.round((maxUtc - minUtc) / (24 * 3600 * 1000));
-      calendarDays = Math.max(1, dayDiff + 1);
+      const elapsedMs = maxTime - minTime;
+      if (elapsedMs < 24 * 3600 * 1000) {
+        calendarDays = 1;
+      } else {
+        const minDate = new Date(minTime);
+        const maxDate = new Date(maxTime);
+        const minUtc = Date.UTC(
+          minDate.getUTCFullYear(),
+          minDate.getUTCMonth(),
+          minDate.getUTCDate(),
+        );
+        const maxUtc = Date.UTC(
+          maxDate.getUTCFullYear(),
+          maxDate.getUTCMonth(),
+          maxDate.getUTCDate(),
+        );
+        const dayDiff = Math.round((maxUtc - minUtc) / (24 * 3600 * 1000));
+        calendarDays = Math.max(1, dayDiff + 1);
+      }
     } else {
       calendarDays = Math.max(1, days.size);
     }
   }
 
+  let resolvedReadingsPerDay: number;
+  if (intervalMinutes !== undefined && intervalMinutes > 0) {
+    resolvedReadingsPerDay = Math.round(1440 / intervalMinutes);
+  } else if (expectedReadingsPerDay !== undefined) {
+    resolvedReadingsPerDay = expectedReadingsPerDay;
+  } else {
+    const detectedInterval = detectSensorIntervalMinutes(epochTimesMs);
+    resolvedReadingsPerDay = Math.round(1440 / detectedInterval);
+  }
+
   const activeDays = days.size;
-  const expectedReadings = calendarDays * expectedReadingsPerDay;
+  const expectedReadings = calendarDays * resolvedReadingsPerDay;
   const wearPercentage =
     expectedReadings > 0
       ? Math.min(

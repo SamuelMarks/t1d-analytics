@@ -21,9 +21,6 @@ from fastapi import HTTPException, Request
 from typing_extensions import TypedDict
 
 from t1d_analytics.analytics import (
-    extract_sql_from_response as _extract_sql_from_response,
-)
-from t1d_analytics.analytics import (
     get_database_schema,
 )
 from t1d_analytics.api_schemas import (
@@ -33,18 +30,16 @@ from t1d_analytics.api_schemas import (
     ChatResponse,
 )
 from t1d_analytics.errors import (
+    DatabaseError,
     DatabaseNotFoundError,
     ErrorDetailDict,
     InvalidDatabasePathError,
+    LlmProviderError,
     LlmTranslationError,
     MissingSdkError,
     ProviderNotConfiguredError,
     SchemaReadError,
     T1DError,
-)
-from t1d_analytics.gemma_bridge import (
-    _extract_schema_map_from_text,
-    prune_schema_with_gemma_rag,
 )
 from t1d_analytics.llm_client import (
     PROVIDER_ENV_KEYS,
@@ -56,11 +51,18 @@ from t1d_analytics.llm_client import (
     get_effective_api_key,
     resolve_provider_and_model,
 )
+from t1d_analytics.sql_agent import (
+    _extract_schema_map_from_text,
+    prune_schema_with_gemma_rag,
+)
 from t1d_analytics.sql_utils import (
     ALL_SQL_KEYWORDS,
     SqlValue,
     escape_sql_identifier,
     strip_sql_comments_and_parens,
+)
+from t1d_analytics.sql_utils import (
+    extract_sql_from_response as _extract_sql_from_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +111,76 @@ def is_likely_sql_statement(query: str) -> bool:
     return not (first_word == "show" and len(tokens) > 1 and tokens[1].lower() == "me")
 
 
+def _score_table_for_query(
+    tbl_name: str,
+    cols: List[str],
+    lower_q: str,
+    query_words: set[str],
+) -> int:
+    """
+    Compute a relevance score for a schema table against a natural-language query.
+
+    Args:
+    ----
+        tbl_name: Candidate table name.
+        cols: Column names belonging to the table.
+        lower_q: Lowercased natural-language query.
+        query_words: Tokenized lowercase query words.
+
+    Returns:
+    -------
+        int: Non-negative relevance score.
+
+    """
+    tbl_lower = tbl_name.lower()
+    score = 10 if tbl_lower in lower_q else 0
+    for w in query_words:
+        if len(w) >= 3 and w in tbl_lower:
+            score += 4
+        score += sum(2 for c in cols if len(w) >= 3 and w == c.lower())
+    return score
+
+
+def _select_best_fallback_table(
+    schema_map: Dict[str, List[str]],
+    lower_q: str,
+) -> str:
+    """
+    Choose the best target table from `schema_map` for fallback SQL synthesis.
+
+    Args:
+    ----
+        schema_map: Mapping of table names to column names.
+        lower_q: Lowercased natural-language query.
+
+    Returns:
+    -------
+        str: Selected table identifier.
+
+    """
+    if not schema_map:
+        return "patients"
+
+    query_words = set(re.findall(r"[a-z0-9_]+", lower_q))
+    best_table: Optional[str] = None
+    best_score = 0
+    for tbl_name, cols in schema_map.items():
+        score = _score_table_for_query(tbl_name, cols, lower_q, query_words)
+        if score > best_score:
+            best_score = score
+            best_table = tbl_name
+
+    if best_table is not None:
+        return best_table
+
+    lower_to_actual = {tbl_name.lower(): tbl_name for tbl_name in schema_map}
+    for preferred in ("demographics", "patients", "tblaptsummary", "subjects"):
+        if preferred in lower_to_actual:
+            return lower_to_actual[preferred]
+
+    return next(iter(schema_map.keys()))
+
+
 def synthesize_fallback_clinical_sql(
     schema: str,
     nl_query: str,
@@ -136,39 +208,7 @@ def synthesize_fallback_clinical_sql(
 
     limit_match = re.search(r"\b(?:first|top|limit)\s+(\d+)\b", lower_q)
     limit_val = int(limit_match.group(1)) if limit_match else 10
-
-    target_table = "patients"
-    if schema_map:
-        best_table: Optional[str] = None
-        best_score = -1
-        query_words = set(re.findall(r"[a-z0-9_]+", lower_q))
-        for tbl_name, cols in schema_map.items():
-            tbl_lower = tbl_name.lower()
-            score = 0
-            if tbl_lower in lower_q:
-                score += 10
-            for w in query_words:
-                if len(w) >= 3 and w in tbl_lower:
-                    score += 4
-                for c in cols:
-                    if len(w) >= 3 and w == c.lower():
-                        score += 2
-            if score > best_score:
-                best_score = score
-                best_table = tbl_name
-        if best_table is not None and best_score > 0:
-            target_table = best_table
-        else:
-            for preferred in ("demographics", "patients", "tblaptsummary", "subjects"):
-                for tbl_name in schema_map:
-                    if tbl_name.lower() == preferred:
-                        target_table = tbl_name
-                        break
-                else:
-                    continue
-                break
-            else:
-                target_table = next(iter(schema_map.keys()))
+    target_table = _select_best_fallback_table(schema_map, lower_q)
 
     safe_tbl = escape_sql_identifier(target_table)
     if re.search(r"\b(?:how\s+many|count|total\s+number)\b", lower_q):
@@ -566,10 +606,10 @@ def execute_chat_turn(
         )
     except (HTTPException, InvalidDatabasePathError):
         raise
-    except ValueError as ve:
+    except (DatabaseError, ValueError) as ve:
         logger.error(f"Database error during chat request: {ve}")
         return ChatResponse(content="backend.errorDbExecution", error=error_parser(ve))
-    except RuntimeError as re_err:
+    except (LlmProviderError, T1DError, RuntimeError) as re_err:
         logger.error(f"NLP error during chat request: {re_err}")
         return ChatResponse(
             content="backend.errorNlpTranslation", error=error_parser(re_err)
@@ -577,6 +617,220 @@ def execute_chat_turn(
     except Exception as e:
         logger.exception("Unexpected error during chat request.")
         return ChatResponse(content="backend.errorUnexpected", error=error_parser(e))
+
+
+def _generate_sql_mode_sse_frames(
+    db_path: str,
+    message: str,
+    sse_sep: str,
+    execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection],
+    schema_fn: Callable[[duckdb.DuckDBPyConnection], str],
+    error_parser: Callable[[Exception], ApiError],
+) -> Iterator[str]:
+    """
+    Generate SSE frames for direct SQL mode (`model in ('sql', '')`).
+
+    Args:
+    ----
+        db_path: Validated DuckDB file path.
+        message: User message or SQL query.
+        sse_sep: Double-newline SSE frame separator.
+        execute_fn: Read-only SQL execution callable.
+        connect_fn: DuckDB connection factory callable.
+        schema_fn: Database schema extraction callable.
+        error_parser: Exception to ApiError converter callable.
+
+    Yields:
+    ------
+        str: Formatted SSE event frames.
+
+    """
+    nl = chr(10)
+    exec_payload = json.dumps(
+        {"event": "token", "token": f"Executing SQL query...{nl}"}
+    )
+    yield f"data: {exec_payload}{sse_sep}"
+    yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
+    sql_query = message
+    try:
+        sql_query = _resolve_sql_mode_query(
+            db_path, message, connect_fn=connect_fn, schema_fn=schema_fn
+        )
+        results = execute_fn(db_path, sql_query)
+        res_dict: SseTerminalPayload = {
+            "content": "backend.literalSql",
+            "sqlQuery": sql_query,
+            "sqlResult": results,
+            "error": None,
+        }
+        yield from _emit_sse_terminal_payload(res_dict, sse_sep)
+    except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
+        err_dict = error_parser(e).model_dump()
+        err_dict_payload: SseTerminalPayload = {
+            "content": "backend.errorDbExecution",
+            "sqlQuery": sql_query,
+            "sqlResult": None,
+            "error": err_dict,
+        }
+        yield from _emit_sse_terminal_payload(err_dict_payload, sse_sep)
+
+
+def _finalize_nl_sse_frames(
+    db_path: str,
+    full_response: str,
+    auto_execute: bool,
+    sse_sep: str,
+    execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
+    error_parser: Callable[[Exception], ApiError],
+) -> Iterator[str]:
+    """
+    Emit `sql_generated`, optional `execution_progress`, and terminal SSE frames for an NL response.
+
+    Args:
+    ----
+        db_path: Validated DuckDB file path.
+        full_response: Complete assistant markdown text.
+        auto_execute: Whether to automatically execute the extracted SQL.
+        sse_sep: Double-newline SSE frame separator.
+        execute_fn: Read-only SQL execution callable.
+        error_parser: Exception to ApiError converter callable.
+
+    Yields:
+    ------
+        str: Formatted SSE event frames.
+
+    """
+    sql_query = _extract_sql_from_response(full_response)
+    sql_results: Optional[List[Dict[str, SqlValue]]] = None
+    sql_err_dict: Optional[Dict[str, SqlValue]] = None
+    if sql_query:
+        yield f"data: {json.dumps({'event': 'sql_generated', 'sqlQuery': sql_query})}{sse_sep}"
+        if auto_execute:
+            yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
+            try:
+                sql_results = execute_fn(db_path, sql_query)
+            except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
+                sql_err_dict = error_parser(e).model_dump()
+
+    nl_res_dict: SseTerminalPayload = {
+        "content": full_response,
+        "sqlQuery": sql_query,
+        "sqlResult": sql_results,
+        "error": sql_err_dict,
+    }
+    yield from _emit_sse_terminal_payload(nl_res_dict, sse_sep)
+
+
+async def _is_request_disconnected(req: Optional[Request]) -> bool:
+    """
+    Check whether an optional FastAPI `Request` has disconnected.
+
+    Args:
+    ----
+        req: Optional FastAPI Request object.
+
+    Returns:
+    -------
+        bool: True if `req` is present and disconnected.
+
+    """
+    return bool(req is not None and await req.is_disconnected())
+
+
+def _read_schema_from_db(
+    db_path: str,
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection],
+    schema_fn: Callable[[duckdb.DuckDBPyConnection], str],
+) -> str:
+    """
+    Open a read-only DuckDB connection, extract the table schema text, and close the connection.
+
+    Args:
+    ----
+        db_path: DuckDB file path.
+        connect_fn: DuckDB connection factory callable.
+        schema_fn: Database schema extraction callable.
+
+    Returns:
+    -------
+        str: Extracted schema DDL/summary string.
+
+    """
+    conn = connect_fn(db_path, read_only=True)
+    try:
+        return schema_fn(conn)
+    finally:
+        conn.close()
+
+
+def _validate_sse_request_or_error(
+    request: ChatRequest,
+    sse_sep: str,
+    db_validator: Callable[[Optional[str]], str],
+) -> Tuple[str, Optional[str]]:
+    """
+    Validate `request.message` and `request.db_path`, returning `(db_path, error_sse_frame)`.
+
+    Args:
+    ----
+        request: Incoming ChatRequest payload.
+        sse_sep: Double-newline SSE frame separator.
+        db_validator: Database path validator callable.
+
+    Returns:
+    -------
+        Tuple[str, Optional[str]]: `(validated_db_path, optional_error_frame)`.
+
+    """
+    if not request.message.strip():
+        payload = json.dumps({"event": "error", "error": "backend.emptyMessage"})
+        return "", f"data: {payload}{sse_sep}"
+
+    try:
+        return db_validator(request.db_path), None
+    except (HTTPException, InvalidDatabasePathError):
+        payload = json.dumps({"event": "error", "error": "backend.invalidDatabasePath"})
+        return "", f"data: {payload}{sse_sep}"
+
+
+def _recover_ollama_stream_fallback_token(
+    resolved_prov: str,
+    stream_exc: Exception,
+    schema: str,
+    message: str,
+    sse_sep: str,
+) -> Tuple[str, str]:
+    """
+    Recover from a local Ollama crash by synthesizing fallback SQL, or re-raise `stream_exc`.
+
+    Args:
+    ----
+        resolved_prov: Resolved provider identifier.
+        stream_exc: Exception raised during token streaming.
+        schema: Extracted database schema string.
+        message: User natural-language query.
+        sse_sep: Double-newline SSE frame separator.
+
+    Returns:
+    -------
+        Tuple[str, str]: `(fallback_markdown_text, sse_token_frame)`.
+
+    Raises:
+    ------
+        Exception: Re-raises `stream_exc` if not a recoverable local Ollama crash.
+
+    """
+    if not _is_recoverable_local_ollama_crash(resolved_prov, stream_exc):
+        raise stream_exc
+    logger.warning(
+        f"Local Ollama streaming crashed ({stream_exc}); using schema-aware clinical SQL fallback."
+    )
+    fb_resp, _ = synthesize_fallback_clinical_sql(
+        schema, message, include_diagnostic_note=True
+    )
+    tok_payload = json.dumps({"event": "token", "token": fb_resp})
+    return fb_resp, f"data: {tok_payload}{sse_sep}"
 
 
 async def generate_sse_chat_events(
@@ -610,61 +864,30 @@ async def generate_sse_chat_events(
     """
     nl = chr(10)
     sse_sep = f"{nl}{nl}"
-    if req is not None and await req.is_disconnected():
+    if await _is_request_disconnected(req):
         logger.info("Client disconnected before stream generation.")
         return
 
-    if not request.message.strip():
-        payload = json.dumps({"event": "error", "error": "backend.emptyMessage"})
-        yield f"data: {payload}{sse_sep}"
-        return
-
-    try:
-        db_path = db_validator(request.db_path)
-    except (HTTPException, InvalidDatabasePathError):
-        payload = json.dumps({"event": "error", "error": "backend.invalidDatabasePath"})
-        yield f"data: {payload}{sse_sep}"
+    db_path, err_frame = _validate_sse_request_or_error(request, sse_sep, db_validator)
+    if err_frame is not None:
+        yield err_frame
         return
 
     if request.model in ("sql", ""):
-        exec_payload = json.dumps(
-            {"event": "token", "token": f"Executing SQL query...{nl}"}
-        )
-        yield f"data: {exec_payload}{sse_sep}"
-        yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
-        sql_query = request.message
-        try:
-            sql_query = _resolve_sql_mode_query(
-                db_path, request.message, connect_fn=connect_fn, schema_fn=schema_fn
-            )
-            results = execute_fn(db_path, sql_query)
-            res_dict: SseTerminalPayload = {
-                "content": "backend.literalSql",
-                "sqlQuery": sql_query,
-                "sqlResult": results,
-                "error": None,
-            }
-            for frame in _emit_sse_terminal_payload(res_dict, sse_sep):
-                yield frame
-        except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
-            err_dict = error_parser(e).model_dump()
-            err_dict_payload: SseTerminalPayload = {
-                "content": "backend.errorDbExecution",
-                "sqlQuery": sql_query,
-                "sqlResult": None,
-                "error": err_dict,
-            }
-            for frame in _emit_sse_terminal_payload(err_dict_payload, sse_sep):
-                yield frame
+        for frame in _generate_sql_mode_sse_frames(
+            db_path,
+            request.message,
+            sse_sep,
+            execute_fn=execute_fn,
+            connect_fn=connect_fn,
+            schema_fn=schema_fn,
+            error_parser=error_parser,
+        ):
+            yield frame
         return
 
     try:
-        conn = connect_fn(db_path, read_only=True)
-        try:
-            schema = schema_fn(conn)
-        finally:
-            conn.close()
-
+        schema = _read_schema_from_db(db_path, connect_fn, schema_fn)
         prompt = build_sql_prompt_with_history(
             schema, request.message, history=request.history
         )
@@ -680,7 +903,7 @@ async def generate_sse_chat_events(
                 )
             )
             while True:
-                if req is not None and await req.is_disconnected():
+                if await _is_request_disconnected(req):
                     logger.info("Client disconnected during SSE token streaming.")
                     return
                 token = await asyncio.to_thread(_next_stream_token_or_eof, token_iter)
@@ -690,40 +913,21 @@ async def generate_sse_chat_events(
                 tok_payload = json.dumps({"event": "token", "token": token})
                 yield f"data: {tok_payload}{sse_sep}"
         except Exception as stream_exc:
-            if _is_recoverable_local_ollama_crash(resolved_prov, stream_exc):
-                logger.warning(
-                    f"Local Ollama streaming crashed ({stream_exc}); using schema-aware clinical SQL fallback."
-                )
-                fb_resp, _ = synthesize_fallback_clinical_sql(
-                    schema, request.message, include_diagnostic_note=True
-                )
-                full_parts.append(fb_resp)
-                tok_payload = json.dumps({"event": "token", "token": fb_resp})
-                yield f"data: {tok_payload}{sse_sep}"
-            else:
-                raise
+            fb_resp, tok_frame = _recover_ollama_stream_fallback_token(
+                resolved_prov, stream_exc, schema, request.message, sse_sep
+            )
+            full_parts.append(fb_resp)
+            yield tok_frame
 
         full_response = "".join(full_parts)
-        sql_query = _extract_sql_from_response(full_response)
-
-        sql_results: Optional[List[Dict[str, SqlValue]]] = None
-        sql_err_dict: Optional[Dict[str, SqlValue]] = None
-        if sql_query:
-            yield f"data: {json.dumps({'event': 'sql_generated', 'sqlQuery': sql_query})}{sse_sep}"
-            if request.auto_execute:
-                yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
-                try:
-                    sql_results = execute_fn(db_path, sql_query)
-                except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
-                    sql_err_dict = error_parser(e).model_dump()
-
-        nl_res_dict: SseTerminalPayload = {
-            "content": full_response,
-            "sqlQuery": sql_query,
-            "sqlResult": sql_results,
-            "error": sql_err_dict,
-        }
-        for frame in _emit_sse_terminal_payload(nl_res_dict, sse_sep):
+        for frame in _finalize_nl_sse_frames(
+            db_path,
+            full_response,
+            request.auto_execute,
+            sse_sep,
+            execute_fn=execute_fn,
+            error_parser=error_parser,
+        ):
             yield frame
     except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
         err_dict = error_parser(e).model_dump()
@@ -735,6 +939,3 @@ async def generate_sse_chat_events(
         }
         for frame in _emit_sse_terminal_payload(nl_err_payload, sse_sep):
             yield frame
-
-
-stream_nl_to_sql_events = generate_sse_chat_events

@@ -63,8 +63,8 @@ export function createViteConfig(
     },
     plugins: [
       istanbul({
-        include: ["src/*", "*.ts"],
-        exclude: ["node_modules", "test/", "tests/"],
+        include: ["src/**/*"],
+        exclude: ["node_modules", "test/", "tests/", "*.config.ts"],
         extension: [".js", ".ts"],
         requireEnv: false,
       }),

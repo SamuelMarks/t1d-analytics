@@ -3,7 +3,6 @@
 import os
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Dict, Generator, List, Optional, Union
 from unittest.mock import MagicMock, patch
@@ -912,10 +911,12 @@ def test_huggingface_runner_validation_path_and_model_no_train(tmp_path: Path) -
 
 
 def test_local_cpu_and_gpu_tiny_model_execution(tmp_path: Path) -> None:
-    """Test LocalCpuRunner and LocalGpuRunner with use_tiny_model=True using real TinyCausalLMFactory."""
+    """Test LocalCpuRunner and LocalGpuRunner with use_tiny_model=True using real TinyCausalLMFactory and verify loss decreases."""
     ds = tmp_path / "dataset_tiny.jsonl"
-    ds.write_text("""{"prompt": "question", "completion": "SELECT 1"}
-""")
+    ds.write_text(
+        '{"prompt": "SELECT patients with age > 18", "completion": "SELECT subject_id FROM patients WHERE age > 18"}\n'
+        '{"prompt": "SELECT patients with age > 18", "completion": "SELECT subject_id FROM patients WHERE age > 18"}\n'
+    )
 
     cpu_runner = LocalCpuRunner()
     cfg_tiny_cpu = TrainingJobConfig(
@@ -924,11 +925,33 @@ def test_local_cpu_and_gpu_tiny_model_execution(tmp_path: Path) -> None:
         output_dir=str(tmp_path / "out_tiny_cpu"),
         use_tiny_model=True,
         dry_run=False,
-        hyperparameters=TrainingHyperparameters(num_epochs=1, batch_size=1),
+        hyperparameters=TrainingHyperparameters(
+            num_epochs=6, batch_size=2, learning_rate=1e-2
+        ),
     )
     res_cpu = cpu_runner.run_training(cfg_tiny_cpu)
     assert res_cpu["status"] == "completed"
-    assert (tmp_path / "out_tiny_cpu" / "checkpoint-final" / "model.pt").exists()
+    loss_hist = res_cpu["loss_history"]
+    assert isinstance(loss_hist, list)
+    assert len(loss_hist) == 6
+    first_loss = loss_hist[0]
+    last_loss = loss_hist[-1]
+    assert isinstance(first_loss, (int, float))
+    assert isinstance(last_loss, (int, float))
+    assert float(last_loss) < float(first_loss)
+    ckpt_dir = tmp_path / "out_tiny_cpu" / "checkpoint-final"
+    assert (ckpt_dir / "model.pt").exists()
+    loaded_state = torch.load(ckpt_dir / "model.pt", map_location="cpu")
+    assert isinstance(loaded_state, dict)
+    assert "embed.weight" in loaded_state
+    assert "head.weight" in loaded_state
+    import json
+
+    metrics_json = json.loads((ckpt_dir / "training_metrics.json").read_text())
+    assert metrics_json["total_steps"] == 6
+    assert isinstance(metrics_json["final_loss"], float)
+    args_json = json.loads((ckpt_dir / "training_args.json").read_text())
+    assert args_json["model_name"] == "test-tiny"
 
     gpu_runner = LocalGpuRunner()
     cfg_tiny_gpu = TrainingJobConfig(
@@ -969,8 +992,7 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
     )
     job_id = mgr.submit_job(config)
     assert job_id.startswith("job-")
-    time.sleep(0.15)
-    job = mgr.get_job(job_id)
+    job = mgr.wait_for_job(job_id)
     assert job is not None
     assert job["status"] == "completed"
     assert len(mgr.list_jobs()) == 1
@@ -985,8 +1007,7 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
         side_effect=RuntimeError("Training failed fatally"),
     )
     job_id_fail = mgr.submit_job(config)
-    time.sleep(0.15)
-    job_fail = mgr.get_job(job_id_fail)
+    job_fail = mgr.wait_for_job(job_id_fail)
     assert job_fail is not None
     assert job_fail["status"] == "failed"
     assert "Training failed fatally" in str(job_fail["error"])
@@ -1013,8 +1034,7 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
     event_start.wait(timeout=1.0)
     assert mgr2.cancel_job(job_id_cancel) is True
     event_release.set()
-    time.sleep(0.15)
-    job_cancel = mgr2.get_job(job_id_cancel)
+    job_cancel = mgr2.wait_for_job(job_id_cancel)
     assert job_cancel is not None
     assert job_cancel["status"] == "cancelled"
 
@@ -1034,7 +1054,7 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
         side_effect=cancel_on_get_runner,
     )
     job_id_pre = mgr3.submit_job(config)
-    time.sleep(0.15)
-    job_pre = mgr3.get_job(job_id_pre)
+    job_pre = mgr3.wait_for_job(job_id_pre)
     assert job_pre is not None
     assert job_pre["status"] == "cancelled"
+    assert mgr3.wait_for_job("missing-job-id") is None

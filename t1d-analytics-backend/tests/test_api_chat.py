@@ -71,7 +71,7 @@ def test_execute_sql_timeout(mock_db: str) -> None:
 
 
 def test_execute_sql_timer_safe_interrupt_branch(mock_db: str) -> None:
-    """Test the timer callback when connection is already closed to cover false branch."""
+    """Test that timeout timer firing after connection close does not call interrupt() on a closed connection."""
     import threading
 
     timer_callback = None
@@ -86,8 +86,9 @@ def test_execute_sql_timer_safe_interrupt_branch(mock_db: str) -> None:
         return original_timer(interval, function)
 
     with patch("threading.Timer", side_effect=mock_timer):
-        execute_sql(mock_db, "SELECT 1")
+        rows = execute_sql(mock_db, "SELECT id, name FROM users ORDER BY id")
 
+    assert rows == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
     assert timer_callback is not None
     timer_callback()
 
@@ -280,7 +281,7 @@ def test_chat_endpoint_sql_success(mock_db: str) -> None:
 
 @patch("t1d_analytics.api.generate_sql_from_nl")
 def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> None:
-    """Test API handles NLP queries successfully and auto-executes the query."""
+    """Test API handles NLP queries successfully, passes expected arguments, and auto-executes the query."""
     mock_generate.return_value = ("Generated Markdown", "SELECT * FROM users")
     response = client.post(
         "/api/chat",
@@ -292,6 +293,11 @@ def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> Non
     assert data["sqlResult"] is not None
     assert len(data["sqlResult"]) == 2
     assert data["sqlQuery"] == "SELECT * FROM users"
+    mock_generate.assert_called_once()
+    call_args, call_kwargs = mock_generate.call_args
+    assert Path(call_args[0]).resolve() == Path(mock_db).resolve()
+    assert call_args[1] == "give me users"
+    assert call_kwargs["model_name"] == "gemma4"
 
 
 @patch("t1d_analytics.api.generate_sql_from_nl")
@@ -942,18 +948,24 @@ async def test_stream_chat_events_client_disconnect(mock_db: str) -> None:
 
 
 def test_chat_endpoints_with_provider_headers(mock_db: str) -> None:
-    """Test /api/chat and /api/chat/stream accept x-provider and x-provider-api-key headers."""
+    """Test /api/chat and /api/chat/stream forward x-provider and x-provider-api-key headers to LLM translation."""
     with patch(
         "t1d_analytics.api.generate_sql_from_nl", return_value=("answer", "SELECT 1")
-    ):
+    ) as mock_gen:
         resp = client.post(
             "/api/chat",
             json={"message": "Count users", "db_path": mock_db},
             headers={"x-provider": "openai", "x-provider-api-key": "sk-header-test"},
         )
         assert resp.status_code == 200
+        mock_gen.assert_called_once()
+        _, gen_kwargs = mock_gen.call_args
+        assert gen_kwargs["provider"] == "openai"
+        assert gen_kwargs["api_key"] == "sk-header-test"
 
-    with patch("t1d_analytics.api.stream_llm_tokens", return_value=iter(["Done"])):
+    with patch(
+        "t1d_analytics.api.stream_llm_tokens", return_value=iter(["Done"])
+    ) as mock_stream:
         resp_stream = client.post(
             "/api/chat/stream",
             json={"message": "Count users", "db_path": mock_db},
@@ -961,6 +973,10 @@ def test_chat_endpoints_with_provider_headers(mock_db: str) -> None:
         )
         assert resp_stream.status_code == 200
         assert "Done" in resp_stream.text
+        mock_stream.assert_called_once()
+        _, stream_kwargs = mock_stream.call_args
+        assert stream_kwargs["provider"] == "anthropic"
+        assert stream_kwargs["api_key"] == "sk-ant-header"
 
 
 def test_generate_sql_from_nl_with_direct_api_key(

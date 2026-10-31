@@ -53,11 +53,16 @@ def test_docs_conf_variables_and_extensions() -> None:
         if line.strip().startswith(".. automodule::")
     }
     src_pkg_dir = conf_path.parent.parent / "src" / "t1d_analytics"
-    expected_modules = {"t1d_analytics"} | {
-        f"t1d_analytics.{p.stem}"
-        for p in src_pkg_dir.glob("*.py")
-        if p.stem != "__init__"
-    }
+    expected_modules = {"t1d_analytics"}
+    for p in src_pkg_dir.rglob("*.py"):
+        rel = p.relative_to(src_pkg_dir)
+        if p.stem == "__init__":
+            if rel.parent != Path():
+                expected_modules.add("t1d_analytics." + ".".join(rel.parent.parts))
+        else:
+            expected_modules.add(
+                "t1d_analytics." + ".".join((*rel.parent.parts, p.stem))
+            )
     assert documented_modules == expected_modules
     for mod_name in sorted(documented_modules):
         imported = importlib.import_module(mod_name)

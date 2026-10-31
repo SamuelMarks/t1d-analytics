@@ -502,6 +502,26 @@ def _run_native_fallbacks_assertions(tmp_path: Path, duckdb: types.ModuleType) -
         tmp_path / "dpo_out_full" / "checkpoint-final" / "training_metrics.json"
     ).exists()
 
+    # Numerical convergence check for _optimize_dpo_preference_tensors across optimization steps
+    conv_pairs = [
+        {
+            "prompt": "Find patients with HbA1c above 8.0",
+            "chosen_sql": "SELECT subject_id, hba1c FROM patients WHERE hba1c > 8.0",
+            "rejected_sql": "SELECT 0 FROM bad_table WHERE 1=0",
+        }
+    ]
+    conv_losses, conv_margins = (
+        InProcessDuckDbGemmaFallback._optimize_dpo_preference_tensors(
+            conv_pairs,
+            beta=0.5,
+            num_steps=8,
+        )
+    )
+    assert len(conv_losses) == 8
+    assert len(conv_margins) == 8
+    assert conv_margins[-1] > conv_margins[0]
+    assert conv_losses[-1] < conv_losses[0]
+
     # Also test DPO when no valid chosen_sql pairs exist in file
     pref_empty = tmp_path / "pref_empty.jsonl"
     pref_empty.write_text('{"prompt": "p", "chosen_sql": ""}\n')
@@ -550,7 +570,7 @@ def _run_native_fallbacks_assertions(tmp_path: Path, duckdb: types.ModuleType) -
 
 
 def test_run_gemma_sql_etl_extra_args(tmp_path: Path) -> None:
-    """Test run_gemma_sql_etl with extra_args."""
+    """Test run_gemma_sql_etl with extra_args verifies exact CLI arguments."""
     import duckdb
 
     from t1d_analytics.gemma_bridge import run_gemma_sql_etl
@@ -559,20 +579,29 @@ def test_run_gemma_sql_etl_extra_args(tmp_path: Path) -> None:
     conn = duckdb.connect(db_path)
     conn.execute("CREATE TABLE t (id INT)")
     conn.close()
+    out_dir = tmp_path / "out"
 
     with patch("t1d_analytics.gemma_bridge.get_gemma_sql_binary", return_value="echo"):
         res = run_gemma_sql_etl(
             "sft",
             db_path,
             "t",
-            output_dir=tmp_path / "out",
+            output_dir=out_dir,
             extra_args=["--verbose", "true"],
         )
         assert res.returncode == 0
+        assert "etl sft" in res.stdout
+        assert f"--duckdb-path {Path(db_path).resolve()}" in res.stdout
+        assert "--duckdb-table t" in res.stdout
+        assert f"--output-dir {out_dir.resolve()}" in res.stdout
+        assert "--verbose true" in res.stdout
 
 
 def test_run_gemma_sql_train_extra_args(tmp_path: Path) -> None:
-    """Test run_gemma_sql_train with extra_args."""
+    """Test run_gemma_sql_train with extra_args and cancel_event handling."""
+    import threading
+
+    from t1d_analytics.errors import SubprocessTimeoutError, TrainingExecutionError
     from t1d_analytics.gemma_bridge import run_gemma_sql_train
 
     cfg = tmp_path / "config.yaml"
@@ -581,6 +610,49 @@ def test_run_gemma_sql_train_extra_args(tmp_path: Path) -> None:
     with patch("t1d_analytics.gemma_bridge.get_gemma_sql_binary", return_value="echo"):
         res = run_gemma_sql_train("sft", str(cfg), extra_args=["--debug"])
         assert res.returncode == 0
+        assert "sft" in res.stdout
+        assert f"--config {cfg.resolve()}" in res.stdout
+        assert "--debug" in res.stdout
+
+        # With unset cancel_event (polls once before completion, then completes)
+        ev_ok = threading.Event()
+        mock_popen_ok = MagicMock()
+        mock_popen_ok.poll.side_effect = [None, 0]
+        mock_popen_ok.communicate.return_value = ("completed via popen", "")
+        with patch("subprocess.Popen", return_value=mock_popen_ok):
+            res_ev = run_gemma_sql_train("sft", str(cfg), cancel_event=ev_ok)
+            assert res_ev.returncode == 0
+            assert "completed via popen" in res_ev.stdout
+
+        # With pre-set cancel_event -> terminates and raises TrainingExecutionError
+        ev_cancel = threading.Event()
+        ev_cancel.set()
+        mock_popen_cancel = MagicMock()
+        with patch("subprocess.Popen", return_value=mock_popen_cancel):
+            with pytest.raises(TrainingExecutionError, match="training cancelled"):
+                run_gemma_sql_train("sft", str(cfg), cancel_event=ev_cancel)
+        mock_popen_cancel.terminate.assert_called_once()
+
+        # With pre-set cancel_event where wait raises TimeoutExpired -> kills process
+        mock_popen_hang = MagicMock()
+        mock_popen_hang.wait.side_effect = subprocess.TimeoutExpired(
+            cmd="gemma-4-sql", timeout=2.0
+        )
+        with patch("subprocess.Popen", return_value=mock_popen_hang):
+            with pytest.raises(TrainingExecutionError, match="training cancelled"):
+                run_gemma_sql_train("sft", str(cfg), cancel_event=ev_cancel)
+        mock_popen_hang.kill.assert_called_once()
+
+        # With unset cancel_event that times out -> kills process and raises SubprocessTimeoutError
+        ev_timeout = threading.Event()
+        mock_popen_timeout = MagicMock()
+        mock_popen_timeout.poll.return_value = None
+        with patch("subprocess.Popen", return_value=mock_popen_timeout):
+            with pytest.raises(SubprocessTimeoutError, match="timed out"):
+                run_gemma_sql_train(
+                    "sft", str(cfg), timeout=0.0, cancel_event=ev_timeout
+                )
+        mock_popen_timeout.kill.assert_called_once()
 
 
 def test_resolve_local_gemma_sql_repo(tmp_path: Path) -> None:
@@ -605,6 +677,15 @@ def test_resolve_local_gemma_sql_repo(tmp_path: Path) -> None:
         # Second call when already in sys.path
         found_again = resolve_local_gemma_sql_repo(search_root=fake_root)
         assert found_again == gemma_pkg.parent
+
+    # Call with register_sys_path=False does not mutate sys.path
+    clean_path_no_reg = [p for p in sys.path if str(tmp_path) not in p]
+    with patch("sys.path", clean_path_no_reg):
+        found_no_reg = resolve_local_gemma_sql_repo(
+            search_root=fake_file, register_sys_path=False
+        )
+        assert found_no_reg == gemma_pkg.parent
+        assert str(gemma_pkg.parent) not in sys.path
 
     # Missing repo reaching filesystem root
     with patch("pathlib.Path.exists", return_value=False):
@@ -797,7 +878,7 @@ def test_classify_sql_error_hint_and_execute_agentic_nl_to_sql() -> None:
 
 
 def test_gemma_module_protocols_stubs(tmp_path: Path) -> None:
-    """Verify runtime-checkable protocol compliance on _FakeGemmaLibraryModule."""
+    """Verify GemmaLibraryAdapter delegation across ETL, SFT, DPO, and SQL evaluation stages."""
     from t1d_analytics.gemma_bridge import (
         GemmaLibraryAdapter,
         _GemmaDpoModuleProtocol,
@@ -813,7 +894,16 @@ def test_gemma_module_protocols_stubs(tmp_path: Path) -> None:
     assert isinstance(fake_mod, _GemmaEvalModuleProtocol)
     db_file = tmp_path / "db.duckdb"
     db_file.write_text("", encoding="utf-8")
+    ds_file = tmp_path / "ds.jsonl"
+    ds_file.write_text('{"prompt": "q", "completion": "SELECT 1"}\n', encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
     adapter = GemmaLibraryAdapter(fake_mod)
-    assert (
-        adapter.run_etl("sft", str(db_file), "tbl", str(tmp_path / "out"))["rows"] == 10
-    )
+    etl_res = adapter.run_etl("sft", str(db_file), "tbl", str(out_dir))
+    assert etl_res["rows"] == 10
+    sft_res = adapter.run_sft("gemma-2b", str(ds_file), str(out_dir), {"lr": 1e-4})
+    assert sft_res == {"loss": 0.12, "steps": 10}
+    dpo_res = adapter.run_dpo("gemma-2b", str(ds_file), str(out_dir), beta=0.2)
+    assert dpo_res == {"loss": 0.08, "beta": 0.2}
+    eval_res = adapter.evaluate_sql("gemma-2b", str(ds_file), str(db_file))
+    assert eval_res == 0.94

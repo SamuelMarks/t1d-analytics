@@ -38,12 +38,7 @@ export function parseApiError(errorObj: ApiErrorInput): string {
   if (typeof errorObj === "string") {
     return i18next.exists(errorObj) ? String(i18next.t(errorObj)) : errorObj;
   }
-  if (
-    errorObj &&
-    typeof errorObj === "object" &&
-    "error_code" in errorObj &&
-    typeof errorObj.error_code === "string"
-  ) {
+  if (errorObj && typeof errorObj === "object" && "error_code" in errorObj) {
     const key = errorObj.error_code;
     const params = errorObj.params;
     return i18next.exists(key)
@@ -73,6 +68,70 @@ export async function parseResponseJson<T>(response: Response): Promise<T> {
 }
 
 /**
+ * Remote chat session record returned by `/api/sessions`.
+ * @template TMsg - Message item type.
+ */
+export interface RemoteSessionPayload<TMsg = unknown> {
+  /** Session identifier. */
+  session_id: string;
+  /** Session display title. */
+  title: string;
+  /** Creation ISO timestamp. */
+  created_at: string;
+  /** Last update ISO timestamp. */
+  updated_at: string;
+  /** Array of chat messages. */
+  messages: TMsg[];
+}
+
+/**
+ * Fetches persisted chat sessions from `/api/sessions`.
+ * @template TMsg - Message item type.
+ * @returns {Promise<Array<RemoteSessionPayload<TMsg>>>} Normalized list of remote sessions.
+ */
+export async function fetchRemoteSessions<TMsg>(): Promise<
+  Array<RemoteSessionPayload<TMsg>>
+> {
+  const resp = await fetch("/api/sessions");
+  if (!resp.ok) {
+    throw new Error(`Server returned status ${resp.status}`);
+  }
+  const rawData:
+    | Array<RemoteSessionPayload<TMsg>>
+    | { sessions?: Array<RemoteSessionPayload<TMsg>> }
+    | null = await resp.json();
+  return Array.isArray(rawData)
+    ? rawData
+    : Array.isArray(rawData?.sessions)
+      ? rawData.sessions
+      : [];
+}
+
+/**
+ * Persists a chat session to `/api/sessions` via HTTP POST.
+ * @template TMsg - Message item type.
+ * @param {string} sessionId - Chat session identifier.
+ * @param {string} title - Chat session title.
+ * @param {TMsg[]} messages - Ordered array of session messages.
+ * @returns {Promise<Response>} Fetch response promise.
+ */
+export async function pushRemoteSession<TMsg>(
+  sessionId: string,
+  title: string,
+  messages: TMsg[],
+): Promise<Response> {
+  return fetch("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      title,
+      messages,
+    }),
+  });
+}
+
+/**
  * Helper to fetch and automatically throw parsed backend errors.
  * @param {string} url - The URL to fetch.
  * @param {RequestInit} [options] - Fetch options.
@@ -96,4 +155,17 @@ export async function fetchWithBackendError(
     throw new Error(errorMsg);
   }
   return response;
+}
+
+/**
+ * Deletes a persisted chat session on the server via `DELETE /api/sessions/{id}`.
+ * @param {string} sessionId - Chat session identifier to delete.
+ * @returns {Promise<Response>} Fetch response promise.
+ */
+export async function deleteRemoteSession(
+  sessionId: string,
+): Promise<Response> {
+  return fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
 }

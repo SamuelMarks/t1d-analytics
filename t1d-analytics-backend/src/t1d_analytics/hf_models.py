@@ -23,6 +23,7 @@ from typing import (
 )
 
 from t1d_analytics.errors import (
+    DatasetNotFoundError,
     MissingSdkError,
     TrainingExecutionError,
 )
@@ -348,12 +349,12 @@ class BaseTrainingRunner(ABC):
 
         Raises:
         ------
-            FileNotFoundError: If dataset path does not exist on disk.
+            DatasetNotFoundError: If dataset path does not exist on disk.
 
         """
         ds_path = Path(config.dataset_path)
         if not ds_path.exists():
-            raise FileNotFoundError(f"Training dataset not found at '{ds_path}'.")
+            raise DatasetNotFoundError(f"Training dataset not found at '{ds_path}'.")
         return ds_path
 
     def _count_dataset_samples(self, dataset_path: Path) -> int:

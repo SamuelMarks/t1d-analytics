@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
+import { parseApiError } from "../src/api-client";
 import {
   classifySqlResult,
   getBuildTimestampUtc,
@@ -21,6 +22,10 @@ describe("formatters.ts", () => {
 
   it("resolves current locale from i18next", () => {
     expect(getCurrentLocale()).toBe(i18next.language);
+    expect(parseApiError(null)).toBe("null");
+    expect(parseApiError(404)).toBe("404");
+    expect(parseApiError({})).toBe("[object Object]");
+    expect(parseApiError("ui.noRows")).toBe("No rows returned");
   });
 
   it("formats numbers with locale or override", () => {

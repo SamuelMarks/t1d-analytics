@@ -26,6 +26,7 @@ from t1d_analytics.api_schemas import (
     ProvidersStatusResponse,
     ProviderStatus,
 )
+from t1d_analytics.errors import MissingApiKeyError, MissingSdkError
 
 logger = logging.getLogger(__name__)
 
@@ -81,38 +82,13 @@ class _DeltaContentProtocol(Protocol):
 
 
 @runtime_checkable
-class _DeltaProtocol(Protocol):
-    """Protocol for an OpenAI/Anthropic/Ollama streaming delta object."""
-
-    @property
-    def text(self) -> Optional[str]:
-        """Return delta text."""
-        ...
-
-    @property
-    def content(self) -> Optional[str]:
-        """Return delta content."""
-        ...
-
-
-@runtime_checkable
-class DirectTextChunkProtocol(Protocol):
-    """Protocol for a streaming chunk or choice exposing direct `text`."""
-
-    @property
-    def text(self) -> Optional[str]:
-        """Return direct text attribute."""
-        ...
-
-
-@runtime_checkable
 class _ChoiceWithDeltaProtocol(Protocol):
     """Protocol for a streaming choice item exposing `delta`."""
 
     @property
     def delta(
         self,
-    ) -> Optional[Union[_DeltaProtocol, _DeltaContentProtocol, _DeltaTextProtocol]]:
+    ) -> Optional[Union[_DeltaContentProtocol, _DeltaTextProtocol]]:
         """Return choice delta."""
         ...
 
@@ -122,13 +98,13 @@ class _ChoiceWithMessageProtocol(Protocol):
     """Protocol for a streaming choice item exposing `message`."""
 
     @property
-    def message(self) -> Optional[Union[_DeltaProtocol, _DeltaContentProtocol]]:
+    def message(self) -> Optional[_DeltaContentProtocol]:
         """Return choice message."""
         ...
 
 
 @runtime_checkable
-class OpenAiStreamChunkProtocol(Protocol):
+class OpenAiChunkProtocol(Protocol):
     """Protocol for an OpenAI/Ollama/any-llm streaming chunk exposing `choices`."""
 
     @property
@@ -139,7 +115,7 @@ class OpenAiStreamChunkProtocol(Protocol):
             Union[
                 _ChoiceWithDeltaProtocol,
                 _ChoiceWithMessageProtocol,
-                DirectTextChunkProtocol,
+                _DeltaTextProtocol,
             ]
         ]
     ]:
@@ -148,8 +124,8 @@ class OpenAiStreamChunkProtocol(Protocol):
 
 
 @runtime_checkable
-class GeminiStreamChunkProtocol(Protocol):
-    """Protocol for a Gemini streaming chunk exposing `candidates`."""
+class GoogleChunkProtocol(Protocol):
+    """Protocol for a Google/Gemini streaming chunk exposing `candidates`."""
 
     @property
     def candidates(self) -> Optional[Sequence[_CandidateProtocol]]:
@@ -158,37 +134,53 @@ class GeminiStreamChunkProtocol(Protocol):
 
 
 @runtime_checkable
-class AnthropicStreamChunkProtocol(Protocol):
+class AnthropicChunkProtocol(Protocol):
     """Protocol for an Anthropic streaming chunk exposing `delta`."""
 
     @property
     def delta(
         self,
-    ) -> Optional[Union[_DeltaProtocol, _DeltaTextProtocol, _DeltaContentProtocol]]:
+    ) -> Optional[Union[_DeltaTextProtocol, _DeltaContentProtocol]]:
         """Return top-level streaming delta."""
         ...
 
 
-LlmStreamChunkProtocol = OpenAiStreamChunkProtocol
-LlmDeltaChoicesContainerProtocol = OpenAiStreamChunkProtocol
-LlmMessageChoicesContainerProtocol = OpenAiStreamChunkProtocol
-GeminiCandidateChunkProtocol = GeminiStreamChunkProtocol
-AnthropicDeltaChunkProtocol = AnthropicStreamChunkProtocol
+DirectTextChunkProtocol = _DeltaTextProtocol
+OpenAiStreamChunkProtocol = OpenAiChunkProtocol
+GeminiStreamChunkProtocol = GoogleChunkProtocol
+AnthropicStreamChunkProtocol = AnthropicChunkProtocol
+LlmStreamChunkProtocol = OpenAiChunkProtocol
+LlmDeltaChoicesContainerProtocol = OpenAiChunkProtocol
+LlmMessageChoicesContainerProtocol = OpenAiChunkProtocol
+GeminiCandidateChunkProtocol = GoogleChunkProtocol
+AnthropicDeltaChunkProtocol = AnthropicChunkProtocol
 
 
-class _UrlResponseProtocol(Protocol):
-    """Protocol for an HTTP response context manager returned by `urlopen`."""
+@runtime_checkable
+class _HttpStatusProtocol(Protocol):
+    """Protocol for an HTTP response exposing a `status` integer code."""
 
     @property
     def status(self) -> int:
         """Return HTTP status code."""
         ...
 
+
+@runtime_checkable
+class _HttpReadableProtocol(Protocol):
+    """Protocol for an HTTP response exposing a `read()` method."""
+
     def read(self) -> bytes:
         """Read response body bytes."""
         ...
 
-    def __enter__(self) -> "_UrlResponseProtocol":
+
+class _UrlResponseProtocol(Protocol):
+    """Protocol for an HTTP response context manager returned by `urlopen`."""
+
+    def __enter__(
+        self,
+    ) -> Union["_UrlResponseProtocol", _HttpStatusProtocol, _HttpReadableProtocol]:
         """Enter context manager."""
         ...
 
@@ -410,23 +402,56 @@ ANY_LLM_PROVIDER_CATALOG: Dict[str, List[str]] = {
 }
 
 
-def normalize_ollama_host(default_host: str = "http://127.0.0.1:11434") -> str:
+def resolve_ollama_base_url(
+    raw_host: Optional[str] = None,
+    default_host: str = "http://127.0.0.1:11434",
+) -> str:
     """
-    Resolve and normalize the Ollama host URL from the OLLAMA_HOST environment variable.
+    Purely resolve and normalize the Ollama host URL without mutating `os.environ`.
 
     Args:
     ----
-        default_host: Fallback host URL if OLLAMA_HOST is not set.
+        raw_host: Optional explicit host URL override.
+        default_host: Fallback host URL if neither `raw_host` nor `OLLAMA_HOST` is set.
 
     Returns:
     -------
         str: Normalized base URL starting with http:// or https:// and without trailing slash.
 
     """
-    host = os.environ.get("OLLAMA_HOST", default_host).rstrip("/")
+    candidate = (
+        raw_host if raw_host is not None else os.environ.get("OLLAMA_HOST")
+    ) or default_host
+    host = candidate.rstrip("/")
     if not host.startswith(("http://", "https://")):
         host = f"http://{host}"
     return host
+
+
+def configure_ollama_env(
+    raw_host: Optional[str] = None,
+    default_host: str = "http://127.0.0.1:11434",
+) -> str:
+    """
+    Explicitly initialize `OLLAMA_HOST` and `OLLAMA_API_BASE` in `os.environ` and return the resolved URL.
+
+    Args:
+    ----
+        raw_host: Optional explicit host URL override.
+        default_host: Fallback host URL if neither `raw_host` nor `OLLAMA_HOST` is set.
+
+    Returns:
+    -------
+        str: Normalized base URL stored in `os.environ`.
+
+    """
+    host = resolve_ollama_base_url(raw_host=raw_host, default_host=default_host)
+    os.environ["OLLAMA_HOST"] = host
+    os.environ["OLLAMA_API_BASE"] = host
+    return host
+
+
+normalize_ollama_host = resolve_ollama_base_url
 
 
 def resolve_provider_and_model(
@@ -514,6 +539,39 @@ def get_effective_api_key(
     return None
 
 
+def validate_provider_readiness(provider: str) -> None:
+    """
+    Validate that the requested LLM provider has its required SDK and API credentials configured.
+
+    Args:
+    ----
+        provider: Provider identifier (e.g. 'ollama', 'openai', 'anthropic', 'google').
+
+    Raises:
+    ------
+        MissingSdkError: If `any-llm-sdk` is not installed for a non-Ollama provider.
+        MissingApiKeyError: If the required provider API key environment variable is not set.
+
+    """
+    prov = provider.lower().strip()
+    if prov != "ollama":
+        try:
+            import any_llm
+
+            _ = any_llm
+        except ImportError as exc:
+            raise MissingSdkError(
+                f"Provider '{provider}' requires any-llm-sdk. Install with: pip install any-llm-sdk[{provider}]",
+                params={"provider": provider},
+            ) from exc
+        if prov in PROVIDER_ENV_KEYS and not is_provider_configured(prov):
+            env_var = PROVIDER_ENV_KEYS[prov]
+            raise MissingApiKeyError(
+                f"Provider '{provider}' requires environment variable '{env_var}' to be set.",
+                params={"provider": provider, "env_var": env_var},
+            )
+
+
 def parse_configured_models_string(raw_models: str) -> List[Tuple[str, str]]:
     """
     Parse a comma-separated list of configured any-llm models into (provider, full_model_name) pairs.
@@ -548,6 +606,58 @@ def parse_configured_models_string(raw_models: str) -> List[Tuple[str, str]]:
     return results
 
 
+def _discover_additional_provider_models(
+    active_catalog: Mapping[str, Sequence[str]],
+    seen: set[str],
+    list_models_fn: Optional[_AnyLlmListModelsFn],
+) -> List[Tuple[str, str, bool]]:
+    """
+    Discover models for non-primary any-llm providers that have configured credentials.
+
+    Args:
+    ----
+        active_catalog: Primary cloud catalog mapping already processed.
+        seen: Mutable set of discovered model names.
+        list_models_fn: Optional callable to query live SDK models.
+
+    Returns:
+    -------
+        List[Tuple[str, str, bool]]: Additional `(provider, model_name, is_configured)` tuples.
+
+    """
+    extra_discovered: List[Tuple[str, str, bool]] = []
+    for prov, prov_models in ANY_LLM_PROVIDER_CATALOG.items():
+        if (
+            prov in active_catalog
+            or prov == "gemini"
+            or not is_provider_configured(prov)
+        ):
+            continue
+        if list_models_fn is not None:
+            try:
+                sdk_models = list_models_fn(
+                    provider=prov,
+                    api_key=get_effective_api_key(prov),
+                )
+                for sdk_m in sdk_models:
+                    full_name = (
+                        sdk_m.id
+                        if sdk_m.id.startswith(f"{prov}/")
+                        else f"{prov}/{sdk_m.id}"
+                    )
+                    if full_name not in seen:
+                        seen.add(full_name)
+                        extra_discovered.append((prov, full_name, True))
+            except Exception as exc:
+                logger.debug(f"any_llm.list_models failed for {prov}: {exc}")
+
+        for m in prov_models:
+            if m not in seen:
+                seen.add(m)
+                extra_discovered.append((prov, m, True))
+    return extra_discovered
+
+
 def discover_configured_any_llm_models(
     extra_configured_models: Optional[str] = None,
     list_models_fn: Optional[_AnyLlmListModelsFn] = None,
@@ -576,42 +686,16 @@ def discover_configured_any_llm_models(
     seen: set[str] = set()
     active_catalog = cloud_catalog if cloud_catalog is not None else CLOUD_MODEL_CATALOG
 
-    # 1. Always include primary cloud catalog (OpenAI, Anthropic, Google)
     for prov, prov_models in active_catalog.items():
         conf = is_provider_configured(prov)
         for m in prov_models:
             seen.add(m)
             discovered.append((prov, m, conf))
 
-    # 2. Include additional any-llm providers that have credentials configured in env
-    for prov, prov_models in ANY_LLM_PROVIDER_CATALOG.items():
-        if prov in active_catalog or prov == "gemini":
-            continue
-        if is_provider_configured(prov):
-            if list_models_fn is not None:
-                try:
-                    sdk_models = list_models_fn(
-                        provider=prov,
-                        api_key=get_effective_api_key(prov),
-                    )
-                    for sdk_m in sdk_models:
-                        full_name = (
-                            sdk_m.id
-                            if sdk_m.id.startswith(f"{prov}/")
-                            else f"{prov}/{sdk_m.id}"
-                        )
-                        if full_name not in seen:
-                            seen.add(full_name)
-                            discovered.append((prov, full_name, True))
-                except Exception as exc:
-                    logger.debug(f"any_llm.list_models failed for {prov}: {exc}")
+    discovered.extend(
+        _discover_additional_provider_models(active_catalog, seen, list_models_fn)
+    )
 
-            for m in prov_models:
-                if m not in seen:
-                    seen.add(m)
-                    discovered.append((prov, m, True))
-
-    # 3. Include explicit models configured via T1D_ANY_LLM_MODELS or ANY_LLM_CONFIGURED_MODELS or client header
     env_models_str = ",".join(
         filter(
             None,
@@ -682,7 +766,6 @@ def is_sequence_of_choices(
 def _extract_delta_or_message_str(
     item: Optional[
         Union[
-            _DeltaProtocol,
             _DeltaContentProtocol,
             _DeltaTextProtocol,
             LlmCompletionMessageProtocol,
@@ -816,6 +899,38 @@ def _extract_openai_chunk_delta(chunk: StreamChunkInput) -> str:
     return ""
 
 
+def _extract_mapping_chunk_delta(chunk: StreamMappingChunk) -> str:
+    """
+    Extract token delta string from a dictionary/mapping streaming chunk.
+
+    Args:
+    ----
+        chunk: Mapping chunk payload.
+
+    Returns:
+    -------
+        str: Extracted token string or empty string.
+
+    """
+    choices_raw = chunk.get("choices")
+    if is_sequence_of_choices(choices_raw):
+        for choice in choices_raw:
+            if is_mapping_chunk(choice):
+                delta = choice.get("delta")
+                if is_mapping_chunk(delta) and delta.get("content"):
+                    return str(delta["content"])
+                if choice.get("text"):
+                    return str(choice["text"])
+    msg = chunk.get("message")
+    if is_mapping_chunk(msg) and msg.get("content"):
+        return str(msg["content"])
+    if chunk.get("response"):
+        return str(chunk["response"])
+    if chunk.get("text"):
+        return str(chunk["text"])
+    return ""
+
+
 def extract_stream_delta(chunk: StreamChunkInput, provider: str = "ollama") -> str:
     """
     Extract token delta string from provider-specific streaming response chunk.
@@ -835,23 +950,7 @@ def extract_stream_delta(chunk: StreamChunkInput, provider: str = "ollama") -> s
     if isinstance(chunk, str):
         return chunk
     if is_mapping_chunk(chunk):
-        choices_raw = chunk.get("choices")
-        if is_sequence_of_choices(choices_raw):
-            for choice in choices_raw:
-                if is_mapping_chunk(choice):
-                    delta = choice.get("delta")
-                    if is_mapping_chunk(delta) and delta.get("content"):
-                        return str(delta["content"])
-                    if choice.get("text"):
-                        return str(choice["text"])
-        msg = chunk.get("message")
-        if is_mapping_chunk(msg) and msg.get("content"):
-            return str(msg["content"])
-        if chunk.get("response"):
-            return str(chunk["response"])
-        if chunk.get("text"):
-            return str(chunk["text"])
-        return ""
+        return _extract_mapping_chunk_delta(chunk)
 
     prov = provider.lower()
     if prov in ("google", "gemini"):
@@ -1052,6 +1151,127 @@ Context & Rules for T1D Analytics:
 {history_context}User request: {nl_query}"""
 
 
+def probe_ollama_tags_and_version(
+    ollama_url: Optional[str] = None,
+    timeout: float = 2.0,
+    urlopen_fn: Callable[..., _UrlResponseProtocol] = urllib.request.urlopen,
+    include_version: bool = True,
+) -> Tuple[List[ModelInfo], Optional[str]]:
+    """
+    Probe a local Ollama service for available models (`/api/tags`) and optional version (`/api/version`).
+
+    Args:
+    ----
+        ollama_url: Optional explicit URL to the Ollama `/api/tags` endpoint.
+        timeout: HTTP request timeout in seconds.
+        urlopen_fn: HTTP opener callable (defaults to `urllib.request.urlopen`).
+        include_version: Whether to also query `/api/version` for the Ollama daemon version.
+
+    Returns:
+    -------
+        Tuple[List[ModelInfo], Optional[str]]: Discovered Ollama `ModelInfo` records and version string.
+
+    """
+    host = resolve_ollama_base_url()
+    tags_url = ollama_url if ollama_url is not None else f"{host}/api/tags"
+    req = urllib.request.Request(tags_url)
+    with urlopen_fn(req, timeout=timeout) as response:
+        if (
+            isinstance(response, _HttpStatusProtocol)
+            and isinstance(response.status, int)
+            and not isinstance(response.status, bool)
+            and response.status != 200
+        ):
+            raise urllib.error.URLError(f"HTTP {response.status}")
+        raw_bytes = (
+            response.read()
+            if isinstance(response, _HttpReadableProtocol)
+            else b'{"models": []}'
+        )
+        data = json.loads(raw_bytes.decode("utf-8"))
+
+    version: Optional[str] = None
+    if include_version:
+        try:
+            v_req = urllib.request.Request(f"{host}/api/version")
+            with urlopen_fn(v_req, timeout=timeout) as v_resp:
+                v_raw = (
+                    v_resp.read()
+                    if isinstance(v_resp, _HttpReadableProtocol)
+                    else b"{}"
+                )
+                v_data = json.loads(v_raw.decode("utf-8"))
+                version = str(v_data.get("version", "")) or None
+        except Exception:
+            version = None
+
+    models: List[ModelInfo] = [
+        ModelInfo(
+            name=str(model.get("name")),
+            size=model.get("size"),
+            provider="ollama",
+            configured=True,
+            requires_key=False,
+            available=True,
+            reachable=True,
+            error_code=None,
+        )
+        for model in data.get("models", [])
+        if model.get("name")
+    ]
+    return models, version
+
+
+def generate_ollama_json_completion(
+    model: str,
+    prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 512,
+    timeout: float = 30.0,
+    urlopen_fn: Callable[..., _UrlResponseProtocol] = urllib.request.urlopen,
+) -> str:
+    """
+    Execute a synchronous JSON-mode generation request against the local Ollama `/api/generate` endpoint.
+
+    Args:
+    ----
+        model: Local Ollama model name (e.g. 'gemma4').
+        prompt: Prompt string to send.
+        temperature: Sampling temperature.
+        max_tokens: Maximum tokens to predict (`num_predict`).
+        timeout: HTTP timeout in seconds.
+        urlopen_fn: HTTP opener callable (defaults to `urllib.request.urlopen`).
+
+    Returns:
+    -------
+        str: Raw `"response"` text from the Ollama JSON response payload.
+
+    """
+    base_url = resolve_ollama_base_url()
+    api_url = f"{base_url}/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with urlopen_fn(req, timeout=timeout) as response:
+        raw_body = (
+            response.read() if isinstance(response, _HttpReadableProtocol) else b"{}"
+        )
+        result = json.loads(raw_body.decode("utf-8"))
+        return str(result.get("response", "[]"))
+
+
 def probe_providers_status(
     urlopen_fn: Callable[..., _UrlResponseProtocol] = urllib.request.urlopen,
 ) -> ProvidersStatusResponse:
@@ -1071,13 +1291,14 @@ def probe_providers_status(
 
     ollama_healthy = False
     ollama_details = "Ollama service unavailable"
-    ollama_base = normalize_ollama_host()
     try:
-        req = urllib.request.Request(f"{ollama_base}/api/tags")
-        with urlopen_fn(req, timeout=2) as resp:
-            if resp.status == 200:
-                ollama_healthy = True
-                ollama_details = "Ollama service online"
+        probe_ollama_tags_and_version(
+            timeout=2,
+            urlopen_fn=urlopen_fn,
+            include_version=False,
+        )
+        ollama_healthy = True
+        ollama_details = "Ollama service online"
     except Exception as e:
         ollama_details = f"Ollama unreachable: {e}"
 
@@ -1174,27 +1395,14 @@ def fetch_available_models(
         ModelsResponse: List of available local and cloud models.
 
     """
-    base_url = normalize_ollama_host()
-
     models: List[ModelInfo] = []
     try:
-        req = urllib.request.Request(f"{base_url}/api/tags")
-        with urlopen_fn(req, timeout=5) as response:
-            data = json.loads(response.read().decode())
-
-        for model in data.get("models", []):
-            models.append(
-                ModelInfo(
-                    name=model.get("name"),
-                    size=model.get("size"),
-                    provider="ollama",
-                    configured=True,
-                    requires_key=False,
-                    available=True,
-                    reachable=True,
-                    error_code=None,
-                )
-            )
+        ollama_models, _ = probe_ollama_tags_and_version(
+            timeout=5,
+            urlopen_fn=urlopen_fn,
+            include_version=False,
+        )
+        models.extend(ollama_models)
     except Exception as e:
         logger.error(f"Error fetching models from local Ollama instance: {e}")
 

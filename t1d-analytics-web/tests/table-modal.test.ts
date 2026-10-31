@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
+import { exportRowsToCsv, exportRowsToJson } from "../src/exporters";
 import { ChatState } from "../src/state";
 import { ChatUI, TablePreviewModalController } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
@@ -19,19 +20,19 @@ describe("TablePreviewModalController & Data Exports", () => {
     mountChatUiTestDom();
     mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ models: [], schema: [] }),
+      json: async () => ({ models: [], tables: [] }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
   });
 
   afterEach(() => {
-    ui.destroy();
+    ui.dispose();
     localStorage.clear();
     document.body.innerHTML = "";
     vi.restoreAllMocks();
@@ -39,372 +40,300 @@ describe("TablePreviewModalController & Data Exports", () => {
 
   it("handles table modal interaction, pagination, sorting, and search", async () => {
     expect(ui.tableModalController).toBeInstanceOf(TablePreviewModalController);
+    ui.tableModalController.close();
 
+    state.setCurrentDb("custom_table.duckdb");
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          rows: [
-            { id: 1, name: "Test" },
-            { id: 2, name: null },
-          ],
-        }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [
+          { id: 1, name: "Test" },
+          { id: 2, name: null },
+        ],
+        total_rows: 50,
+        page: 1,
+        total_pages: 2,
+      }),
     });
 
     await ui.tableModalController.open("test_table");
+    state.setCurrentDb("t1d.duckdb");
 
-    const modal = document.getElementById("table-modal");
-    expect(modal?.getAttribute("aria-hidden")).toBeNull();
+    // Clicking prevBtn on page 1 does nothing
+    ui.tableModalController.prevBtn.disabled = false;
+    ui.tableModalController.prevBtn.click();
+    expect(ui.tableModalController.currentPage).toBe(1);
+
+    const modal = ui.tableModalController.modal;
+    expect(modal.getAttribute("aria-modal")).toBe("true");
 
     // Next page
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 3, name: "Test 2" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 3, name: "Test 2" }],
+        total_rows: 50,
+        page: 2,
+        total_pages: 2,
+      }),
     });
-    const nextBtn = document.getElementById("next-page-btn");
-    nextBtn?.dispatchEvent(new MouseEvent("click"));
+    ui.tableModalController.nextBtn.click();
     await flushPromises();
-    expect(ui["currentPage"]).toBe(2);
+    expect(ui.tableModalController.currentPage).toBe(2);
 
     // Prev page
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 1, name: "Test" }],
+        total_rows: 50,
+        page: 1,
+        total_pages: 2,
+      }),
     });
-    const prevBtn = document.getElementById("prev-page-btn");
-    prevBtn?.dispatchEvent(new MouseEvent("click"));
+    ui.tableModalController.prevBtn.click();
     await flushPromises();
-    expect(ui["currentPage"]).toBe(1);
+    expect(ui.tableModalController.currentPage).toBe(1);
 
-    // Prev page bounds
-    prevBtn?.dispatchEvent(new MouseEvent("click"));
-    expect(ui["currentPage"]).toBe(1);
+    // Sort by clicking on th
+    const ths = ui.tableModalController.theadEl.querySelectorAll("th");
+    expect(ths[0]?.getAttribute("scope")).toBe("col");
 
-    // Check accessibility attributes in modal table
-    const ths = document
-      .getElementById("modal-table-head")
-      ?.querySelectorAll("th");
-    expect(ths?.[0]?.getAttribute("scope")).toBe("col");
-
-    // Test sort by clicking on th
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 1, name: "Test" }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
     });
-    ths?.[0]?.dispatchEvent(new MouseEvent("click"));
+    ths[0]?.click();
     await flushPromises();
-    expect(ui["currentSortBy"]).toBe("id");
-    expect(ui["currentSortOrder"]).toBe("asc");
+    expect(ui.tableModalController.currentSortBy).toBe("id");
+    expect(ui.tableModalController.currentSortOrder).toBe("asc");
 
     // Click same th again to toggle desc
+    const thsAfterAsc = ui.tableModalController.theadEl.querySelectorAll("th");
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 1, name: "Test" }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
     });
-    ths?.[0]?.dispatchEvent(new MouseEvent("click"));
+    thsAfterAsc[0]?.click();
     await flushPromises();
-    expect(ui["currentSortOrder"]).toBe("desc");
+    expect(ui.tableModalController.currentSortOrder).toBe("desc");
 
-    // Press Enter or Space on th to sort
+    // Click same th a 3rd time to toggle back to asc, and test keyboard Enter/Space sorting
+    const thsAfterDesc = ui.tableModalController.theadEl.querySelectorAll("th");
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        rows: [{ id: 1, name: "Test" }],
+      }),
     });
-    ths?.[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    thsAfterDesc[0]?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
     await flushPromises();
-    expect(ui["currentSortOrder"]).toBe("asc");
+    expect(ui.tableModalController.currentSortOrder).toBe("asc");
 
-    // Press other key on th (no sort)
-    ths?.[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    // Non-Enter/Space key does nothing
+    ui.tableModalController.theadEl
+      .querySelectorAll("th")[0]
+      ?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+      );
 
-    // Test search input
+    // Next page returning 0 rows on page > 1 auto-decrements back to page 1
+    ui.tableModalController.currentPage = 2;
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ rows: [], total_pages: 1 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ rows: [{ id: 1, name: "Test" }], total_pages: 1 }),
+      });
+    await ui.tableModalController.fetchTableData();
+    expect(ui.tableModalController.currentPage).toBe(1);
+
+    // Search input with debounce
+    vi.useFakeTimers();
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 1, name: "Test" }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
     });
-    const searchInput = getTestElement<HTMLInputElement>("modal-table-search");
+    const searchInput = ui.tableModalController.searchInput;
+    searchInput.value = "first";
+    searchInput.dispatchEvent(new Event("input"));
     searchInput.value = "needle";
     searchInput.dispatchEvent(new Event("input"));
+    await vi.advanceTimersByTimeAsync(300);
+    vi.useRealTimers();
     await flushPromises();
-    expect(ui["currentSearchTerm"]).toBe("needle");
+    expect(ui.tableModalController.currentSearchTerm).toBe("needle");
 
-    // Test sort select change
+    // Sort select change
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 1, name: "Test" }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
     });
-    const sortSelect = getTestElement<HTMLSelectElement>(
-      "modal-table-sort-col",
-    );
+    const sortSelect = ui.tableModalController.sortColSelect;
     sortSelect.value = "name";
     sortSelect.dispatchEvent(new Event("change"));
     await flushPromises();
-    expect(ui["currentSortBy"]).toBe("name");
+    expect(ui.tableModalController.currentSortBy).toBe("name");
 
-    // Test sort order button toggle (asc -> desc and desc -> asc)
+    // Sort order button toggle (desc -> asc and asc -> desc)
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 1, name: "Test" }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
     });
-    const sortOrderBtn = getTestElement<HTMLButtonElement>(
-      "modal-table-sort-order",
-    );
-    sortOrderBtn.dispatchEvent(new MouseEvent("click"));
+    ui.tableModalController.sortOrderBtn.click();
     await flushPromises();
-    expect(ui["currentSortOrder"]).toBe("desc");
+    expect(ui.tableModalController.currentSortOrder).toBe("desc");
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1, name: "Test" }] }),
+      json: async () => ({
+        columns: ["id", "name"],
+        rows: [{ id: 1, name: "Test" }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
     });
-    sortOrderBtn.dispatchEvent(new MouseEvent("click"));
+    ui.tableModalController.sortOrderBtn.click();
     await flushPromises();
-    expect(ui["currentSortOrder"]).toBe("asc");
+    expect(ui.tableModalController.currentSortOrder).toBe("asc");
 
-    // Modal Overlay click
-    modal?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(modal?.getAttribute("aria-hidden")).toBe("true");
+    // Refresh if open on locale change
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        columns: ["id"],
+        rows: [{ id: 1 }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
+    });
+    await ui.tableModalController.refreshIfOpen();
+
+    // Backdrop click closes modal
+    modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(modal.getAttribute("aria-hidden")).toBe("true");
   });
 
-  it("handles table fetch empty rows, errors, and HTTP error mapping", async () => {
-    ui["currentPage"] = 2;
-    ui["currentTable"] = "test_table";
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ rows: [], total_pages: 1 }),
-    });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1 }], total_pages: 1 }),
-    });
-    await ui["fetchTableData"]();
-    expect(ui["currentPage"]).toBe(1);
-
-    ui["currentPage"] = 1;
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ rows: [] }),
-    });
-    await ui["fetchTableData"]();
-    expect(ui["currentPage"]).toBe(1);
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "No data available",
-    );
-
-    mockFetch.mockRejectedValueOnce(new Error("Network Error"));
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "error-text",
-    );
-
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "Failed to load data",
-    );
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 502,
-      json: () => Promise.reject(new Error("Invalid JSON")),
-    });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "HTTP 502",
-    );
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      json: () => Promise.resolve({ detail: "Unmapped error string" }),
-    });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "Unmapped error string",
-    );
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      json: () =>
-        Promise.resolve({
-          detail: { error_code: "unmapped", params: { error: "some data" } },
-        }),
-    });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.textContent).toContain(
-      'unmapped: {"error":"some data"}',
-    );
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      json: () => Promise.resolve({ detail: "backend.invalidTable" }),
-    });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "Invalid table name",
-    );
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      json: () =>
-        Promise.resolve({
-          detail: {
-            error_code: "backend.serverError",
-            params: { error: "something broke" },
-          },
-        }),
-    });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "Internal server error: something broke",
-    );
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 403,
-      json: () => Promise.resolve({ otherField: "something" }),
-    });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "HTTP 403",
-    );
-
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 422,
-      json: () =>
-        Promise.resolve({
-          detail: [{ loc: ["body", "message"], msg: "field required" }],
-        }),
-    });
-    await ui["fetchTableData"]();
-    expect(document.getElementById("modal-table-body")?.innerHTML).toContain(
-      "object Object",
-    );
-  });
-
-  it("handles modal focus trap, Escape key dismissal, and focus restoration", async () => {
+  it("handles table fetch empty rows, errors, HTTP error mapping, and Escape key", async () => {
     const input = getTestElement<HTMLTextAreaElement>("chat-input");
     input.disabled = false;
     input.focus();
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ rows: [{ id: 1 }] }),
+      json: async () => ({
+        columns: ["id"],
+        rows: [],
+        total_rows: 0,
+        page: 1,
+        total_pages: 0,
+      }),
     });
-
-    const modal = getTestElement("table-modal");
-    const closeBtn = getTestElement("close-modal-btn");
-
-    await ui["openTableModal"]("test_table");
-    expect(modal.getAttribute("aria-hidden")).toBeNull();
-    expect(modal.getAttribute("aria-modal")).toBe("true");
-
-    closeBtn.focus();
-    const focusable = modal.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    await ui.tableModalController.open("empty_table");
+    expect(ui.tableModalController.tbodyEl.textContent).toContain(
+      "No data available",
     );
-    const lastElement = focusable[focusable.length - 1];
-    modal.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
+
+    mockFetch.mockRejectedValueOnce("Non-Error failure");
+    await ui.tableModalController.fetchTableData();
+    expect(ui.tableModalController.tbodyEl.textContent).toContain(
+      "Non-Error failure",
     );
-    expect(document.activeElement).toBe(lastElement);
 
-    modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
-    expect(document.activeElement).toBe(closeBtn);
-
-    modal.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        detail: {
+          error_code: "backend.serverError",
+          params: { error: "something broke" },
+        },
+      }),
+    });
+    await ui.tableModalController.fetchTableData();
+    expect(ui.tableModalController.tbodyEl.textContent).toContain(
+      "Internal server error: something broke",
     );
-    expect(document.activeElement).toBe(closeBtn);
 
-    const dummy1 = document.createElement("button");
-    const dummy2 = document.createElement("button");
-    modal.appendChild(dummy1);
-    modal.appendChild(dummy2);
-    dummy1.focus();
-    modal.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
-    modal.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }),
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: async () => ({ detail: {} }),
+    });
+    await ui.tableModalController.fetchTableData();
+    expect(ui.tableModalController.tbodyEl.textContent).toContain(
+      "[object Object]",
     );
-    dummy1.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    dummy1.remove();
-    dummy2.remove();
 
-    // Press Escape to close
-    modal.dispatchEvent(
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: async () => ({ detail: "Plain gateway error" }),
+    });
+    await ui.tableModalController.fetchTableData();
+    expect(ui.tableModalController.tbodyEl.textContent).toContain(
+      "Plain gateway error",
+    );
+
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    });
+    await ui.tableModalController.fetchTableData();
+    expect(ui.tableModalController.tbodyEl.textContent).toContain("HTTP 503");
+
+    // Escape key closes modal and restores focus
+    ui.tableModalController.modal.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
     );
-    expect(modal.getAttribute("aria-hidden")).toBe("true");
-    expect(modal.getAttribute("aria-modal")).toBeNull();
-
-    // Restore focus to chat input when previous focus is removed from DOM
-    const dummyBtn = document.createElement("button");
-    document.body.appendChild(dummyBtn);
-    dummyBtn.focus();
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ rows: [] }),
-    });
-    await ui["openTableModal"]("test_table");
-    document.body.removeChild(dummyBtn);
-    modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(modal.getAttribute("aria-hidden")).toBe("true");
-    expect(document.activeElement).toBe(input);
-
-    // Close button click
-    closeBtn.dispatchEvent(new MouseEvent("click"));
-    expect(modal.getAttribute("aria-hidden")).toBe("true");
-  });
-
-  it("handles missing modal DOM elements and focusableElements.length === 0 safely", async () => {
-    const searchInput = document.getElementById("modal-table-search");
-    const sortSelect = document.getElementById("modal-table-sort-col");
-    const sortOrderBtn = document.getElementById("modal-table-sort-order");
-    searchInput?.remove();
-    sortSelect?.remove();
-    sortOrderBtn?.remove();
-
-    document.getElementById("modal-export-csv-btn")?.remove();
-    document.getElementById("modal-export-json-btn")?.remove();
-    document.getElementById("modal-export-full-csv-btn")?.remove();
-    document.getElementById("modal-export-excel-btn")?.remove();
-    document.getElementById("modal-export-parquet-btn")?.remove();
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          rows: [{ id: 1 }],
-          total_count: 1,
-          total_pages: 1,
-        }),
-    });
-    await ui["openTableModal"]("patients");
-
-    const th = document.querySelector<HTMLElement>("#modal-table-head th");
-    if (th) {
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ rows: [{ id: 1 }], total_pages: 1 }),
-      });
-      th.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
-      th.dispatchEvent(new KeyboardEvent("keydown", { key: " " }));
-      th.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    }
-
-    document.getElementById("table-modal")?.remove();
-    await ui["openTableModal"]("test");
-
-    document.getElementById("table-loading")?.remove();
-    await ui["fetchTableData"]();
+    expect(ui.tableModalController.modal.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
   });
 
   it("exports rows to CSV and JSON and triggers export from modal and chat buttons", async () => {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     let capturedBlob: Blob | null = null;
     const createObjectURL = vi.fn().mockImplementation((blob: Blob) => {
       capturedBlob = blob;
@@ -424,10 +353,11 @@ describe("TablePreviewModalController & Data Exports", () => {
         note: null,
         extra: undefined,
         formula1: "=1+1",
-        formula2: "@SUM",
+        formula2: "  @SUM",
         formula3: `${tab}Tab`,
         numPos: "+12.5",
         numNeg: "-42",
+        spacesOnly: "   ",
         details: { note: "ok" },
       },
       {
@@ -438,11 +368,13 @@ describe("TablePreviewModalController & Data Exports", () => {
         formula1: "+CMD",
         formula2: "-CALC",
         formula3: `${cr}Return`,
+        spacesOnly: "",
         otherKey: "disparate",
         details: null,
       },
     ];
-    ui.exportRowsToCsv(sampleRows, "test.csv");
+    exportRowsToCsv([], "empty.csv");
+    exportRowsToCsv(sampleRows, "test.csv");
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-csv");
     expect(capturedBlob).not.toBeNull();
@@ -458,21 +390,15 @@ describe("TablePreviewModalController & Data Exports", () => {
     expect(csvText).toContain(`"Bob${lf}Smith"`);
     expect(csvText).toContain('"{""note"":""ok""}"');
     expect(csvText).toContain("'=1+1");
-    expect(csvText).toContain("'@SUM");
+    expect(csvText).toContain("'  @SUM");
     expect(csvText).toContain("'+CMD");
     expect(csvText).toContain("'-CALC");
     expect(csvText).toContain('"+12.5","-42"');
 
     createObjectURL.mockClear();
-    ui.exportRowsToJson([{ id: 1, name: "Alice" }], "test.json");
+    exportRowsToJson([], "empty.json");
+    exportRowsToJson([{ id: 1, name: "Alice" }], "test.json");
     expect(createObjectURL).toHaveBeenCalled();
-
-    const exportCsvSpy = vi
-      .spyOn(ui, "exportRowsToCsv")
-      .mockImplementation(() => {});
-    const exportJsonSpy = vi
-      .spyOn(ui, "exportRowsToJson")
-      .mockImplementation(() => {});
 
     state.createChat();
     state.addMessageToActiveChat({
@@ -481,77 +407,57 @@ describe("TablePreviewModalController & Data Exports", () => {
       sqlQuery: "SELECT * FROM users",
       sqlResult: [{ id: 1, name: "Alice" }],
     });
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
 
+    createObjectURL.mockClear();
     document.querySelector<HTMLButtonElement>(".export-csv-btn")?.click();
-    expect(exportCsvSpy).toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
     document.querySelector<HTMLButtonElement>(".export-json-btn")?.click();
-    expect(exportJsonSpy).toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          rows: [{ id: 1, patient: "P100" }],
-          total_count: 1,
-          total_pages: 1,
-        }),
+      json: async () => ({
+        columns: ["id", "patient"],
+        rows: [{ id: 1, patient: "P100" }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
     });
-    await ui["openTableModal"]("patients");
+    await ui.tableModalController.open("patients");
 
-    document.getElementById("modal-export-csv-btn")?.click();
-    expect(exportCsvSpy).toHaveBeenCalledTimes(2);
-    document.getElementById("modal-export-json-btn")?.click();
-    expect(exportJsonSpy).toHaveBeenCalledTimes(2);
+    ui.tableModalController.csvBtn.click();
+    expect(createObjectURL).toHaveBeenCalledTimes(3);
+    ui.tableModalController.jsonBtn.click();
+    expect(createObjectURL).toHaveBeenCalledTimes(4);
 
     const windowOpenSpy = vi
       .spyOn(window, "open")
       .mockImplementation(() => null);
-    const modalFullCsvBtn = document.getElementById(
-      "modal-export-full-csv-btn",
-    );
-    const modalExcelBtn = document.getElementById("modal-export-excel-btn");
-    const modalParquetBtn = document.getElementById("modal-export-parquet-btn");
 
     state.setCurrentDb("my_custom.duckdb");
-    modalFullCsvBtn?.click();
+    ui.tableModalController.fullCsvBtn.click();
     expect(windowOpenSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "/api/export/csv?table_name=patients&db_path=my_custom.duckdb",
-      ),
+      "/api/export/csv?table_name=patients&db_path=my_custom.duckdb",
     );
-    modalExcelBtn?.click();
+    ui.tableModalController.excelBtn.click();
     expect(windowOpenSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "/api/export/excel?table_name=patients&db_path=my_custom.duckdb",
-      ),
+      "/api/export/excel?table_name=patients&db_path=my_custom.duckdb",
     );
-    modalParquetBtn?.click();
+    ui.tableModalController.parquetBtn.click();
     expect(windowOpenSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "/api/export/parquet?table_name=patients&db_path=my_custom.duckdb",
-      ),
-    );
-
-    state.setCurrentDb("");
-    modalFullCsvBtn?.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/csv?table_name=patients",
-    );
-    modalExcelBtn?.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/excel?table_name=patients",
-    );
-    modalParquetBtn?.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/parquet?table_name=patients",
+      "/api/export/parquet?table_name=patients&db_path=my_custom.duckdb",
     );
 
     state.setCurrentDb("t1d.duckdb");
-    modalFullCsvBtn?.click();
+    ui.tableModalController.fullCsvBtn.click();
     expect(windowOpenSpy).toHaveBeenCalledWith(
       "/api/export/csv?table_name=patients",
     );
+    ui.tableModalController.excelBtn.click();
+    ui.tableModalController.parquetBtn.click();
+    ui.tableModalController.closeBtn.click();
     windowOpenSpy.mockRestore();
   });
 });

@@ -8,8 +8,8 @@ from typing import Callable, Dict, List, Optional, Union
 
 import duckdb
 
-from t1d_analytics.analytics import load_data_to_duckdb
 from t1d_analytics.errors import SeedVerificationError
+from t1d_analytics.ingestion import load_data_to_duckdb
 from t1d_analytics.session_store import open_sessions_db_conn
 from t1d_analytics.sql_utils import escape_sql_identifier
 

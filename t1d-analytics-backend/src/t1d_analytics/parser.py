@@ -1,6 +1,6 @@
 """HTML parser for T1D public datasets."""
 
-from typing import List, Optional
+from typing import List, Optional, Sequence
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -145,6 +145,60 @@ def extract_postback_event(tag: Tag) -> Optional[tuple[str, str]]:
     return None
 
 
+def _parse_dataset_row(
+    cells: Sequence[Tag],
+    is_standard_grid: bool,
+    base_url: Optional[str],
+) -> Optional[DatasetInfo]:
+    """
+    Parse a single HTML table row's `<td>` cells into a `DatasetInfo` instance.
+
+    Args:
+    ----
+        cells: Sequence of `<td>` tags in the row.
+        is_standard_grid: Whether the table is the standard 6-column ASP.NET GridView.
+        base_url: Optional base URL to resolve relative links.
+
+    Returns:
+    -------
+        Optional[DatasetInfo]: Parsed dataset record, or None if the row is not a data row.
+
+    """
+    min_cells = 6 if is_standard_grid else 2
+    if len(cells) < min_cells:
+        return None
+
+    protocol = cells[0].text.strip()
+    if not protocol or (
+        not is_standard_grid and protocol.lower() in ("protocol", "study", "dataset")
+    ):
+        return None
+
+    ds_cell = cells[4] if is_standard_grid else cells[1]
+    doc_cell: Optional[Tag] = (
+        cells[5] if is_standard_grid else (cells[2] if len(cells) > 2 else None)
+    )
+    dataset_url = extract_url(ds_cell, base_url=base_url)
+    document_url = (
+        extract_url(doc_cell, base_url=base_url) if doc_cell is not None else None
+    )
+
+    postback_target: Optional[str] = None
+    postback_argument: Optional[str] = None
+    if not dataset_url:
+        postback = extract_postback_event(ds_cell)
+        if postback:
+            postback_target, postback_argument = postback
+
+    return DatasetInfo(
+        protocol=protocol,
+        dataset_url=dataset_url if dataset_url else None,
+        document_url=document_url if document_url else None,
+        postback_target=postback_target,
+        postback_argument=postback_argument,
+    )
+
+
 def parse_datasets(html: str, base_url: Optional[str] = None) -> List[DatasetInfo]:
     """
     Parse HTML to extract dataset information.
@@ -174,54 +228,13 @@ def parse_datasets(html: str, base_url: Optional[str] = None) -> List[DatasetInf
     if not isinstance(table, Tag):
         return []
 
-    datasets = []
+    datasets: List[DatasetInfo] = []
     for row in table.find_all("tr"):
         row_classes = row.get("class") or []
         if "headerstyle" in row_classes or row.find("td", class_="GroupHeaderStyle"):
             continue
-
-        cells = row.find_all("td")
-        if not cells:
-            continue
-
-        postback_target: Optional[str] = None
-        postback_argument: Optional[str] = None
-
-        if is_standard_grid:
-            if len(cells) < 6:
-                continue
-            protocol = cells[0].text.strip()
-            if not protocol:
-                continue
-            dataset_url = extract_url(cells[4], base_url=base_url)
-            document_url = extract_url(cells[5], base_url=base_url)
-            if not dataset_url:
-                postback = extract_postback_event(cells[4])
-                if postback:
-                    postback_target, postback_argument = postback
-        else:
-            if len(cells) < 2:
-                continue
-            protocol = cells[0].text.strip()
-            if not protocol or protocol.lower() in ("protocol", "study", "dataset"):
-                continue
-            dataset_url = extract_url(cells[1], base_url=base_url)
-            document_url = (
-                extract_url(cells[2], base_url=base_url) if len(cells) > 2 else None
-            )
-            if not dataset_url:
-                postback = extract_postback_event(cells[1])
-                if postback:
-                    postback_target, postback_argument = postback
-
-        datasets.append(
-            DatasetInfo(
-                protocol=protocol,
-                dataset_url=dataset_url if dataset_url else None,
-                document_url=document_url if document_url else None,
-                postback_target=postback_target,
-                postback_argument=postback_argument,
-            )
-        )
+        parsed = _parse_dataset_row(row.find_all("td"), is_standard_grid, base_url)
+        if parsed is not None:
+            datasets.append(parsed)
 
     return datasets

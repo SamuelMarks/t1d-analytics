@@ -118,6 +118,7 @@ class TrainingJobManager:
         self._lock = threading.Lock()
         self._jobs: Dict[str, TrainingJobState] = {}
         self._cancel_flags: Dict[str, threading.Event] = {}
+        self._done_flags: Dict[str, threading.Event] = {}
         self._runner_resolver = runner_resolver
 
     def submit_job(self, config: TrainingJobConfig) -> str:
@@ -135,6 +136,7 @@ class TrainingJobManager:
         """
         job_id = f"job-{uuid.uuid4().hex[:12]}"
         cancel_event = threading.Event()
+        done_event = threading.Event()
         with self._lock:
             self._jobs[job_id] = TrainingJobState(
                 job_id=job_id,
@@ -146,6 +148,7 @@ class TrainingJobManager:
                 created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             )
             self._cancel_flags[job_id] = cancel_event
+            self._done_flags[job_id] = done_event
 
         def _worker() -> None:
             """Execute training runner asynchronously within background thread."""
@@ -179,10 +182,33 @@ class TrainingJobManager:
                     self._jobs[job_id].completed_at = datetime.datetime.now(
                         datetime.timezone.utc
                     ).isoformat()
+                done_event.set()
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
         return job_id
+
+    def wait_for_job(
+        self, job_id: str, timeout: float = 5.0
+    ) -> Optional[TrainingJobDict]:
+        """
+        Wait deterministically for a background training job to reach a terminal state.
+
+        Args:
+        ----
+            job_id: The job ID string to wait on.
+            timeout: Maximum seconds to wait before returning the current state.
+
+        Returns:
+        -------
+            Optional[TrainingJobDict]: Job details dictionary or None if not found.
+
+        """
+        with self._lock:
+            done_event = self._done_flags.get(job_id)
+        if done_event is not None:
+            done_event.wait(timeout=timeout)
+        return self.get_job(job_id)
 
     def get_job(self, job_id: str) -> Optional[TrainingJobDict]:
         """
@@ -257,4 +283,5 @@ class TrainingJobManager:
             for jid in terminal_ids[:excess]:
                 self._jobs.pop(jid, None)
                 self._cancel_flags.pop(jid, None)
+                self._done_flags.pop(jid, None)
             return excess

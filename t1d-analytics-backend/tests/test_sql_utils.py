@@ -11,6 +11,7 @@ import pytest
 
 from t1d_analytics.sql_utils import (
     coerce_numeric_aggregates_in_sql,
+    connect_duckdb_with_retry,
     extract_sql_from_response,
     extract_table_schemas,
     is_internal_table,
@@ -191,6 +192,9 @@ def test_validate_read_only_sql() -> None:
         MultipleStatementsError,
         ReadOnlyViolationError,
     )
+    from t1d_analytics.sql_utils import escape_sql_literal
+
+    assert escape_sql_literal("O'Brien") == "O''Brien"
 
     assert (
         validate_read_only_sql("  SELECT * FROM patients WHERE name = 'a;b'; ")
@@ -200,11 +204,26 @@ def test_validate_read_only_sql() -> None:
     with pytest.raises(EmptyQueryError):
         validate_read_only_sql("   -- only a comment\n ")
 
-    with pytest.raises(MultipleStatementsError):
-        validate_read_only_sql("SELECT 1; DROP TABLE patients;")
+    for multi_vec in (
+        "SELECT 1; DROP TABLE patients;",
+        "SELECT 1; ATTACH 'evil.db'",
+        "SELECT 1; COPY patients TO '/tmp/leak.csv'",
+    ):
+        with pytest.raises(MultipleStatementsError):
+            validate_read_only_sql(multi_vec)
 
-    with pytest.raises(ReadOnlyViolationError):
-        validate_read_only_sql("DROP TABLE patients")
+    for forbidden_vec in (
+        "DROP TABLE patients",
+        "/*! DROP TABLE patients */",
+        "-- comment\nDROP TABLE patients",
+        "SELECT * FROM read_csv_auto('/etc/passwd')",
+        "SELECT * FROM read_parquet('secret.parquet')",
+        "SELECT * FROM glob('*')",
+        "WITH mutated AS (DELETE FROM patients RETURNING *) SELECT * FROM mutated",
+        "WITH ins AS (INSERT INTO patients VALUES (1)) SELECT * FROM ins",
+    ):
+        with pytest.raises(ReadOnlyViolationError):
+            validate_read_only_sql(forbidden_vec)
 
 
 def test_execute_duckdb_batch_write_with_retry(tmp_path: Path) -> None:
@@ -258,3 +277,44 @@ def test_execute_duckdb_batch_write_with_retry(tmp_path: Path) -> None:
     ):
         with pytest.raises(duckdb.IOException, match="Disk full"):
             execute_duckdb_write_with_retry(db_file, "SELECT 1", max_attempts=2)
+
+    # Leading whitespace formula injection defense
+    assert sanitize_spreadsheet_cell("  =1+1") == "'  =1+1"
+    assert sanitize_spreadsheet_cell(" @SUM(A1:A2)") == "' @SUM(A1:A2)"
+    assert sanitize_spreadsheet_cell("   ") == "   "
+    assert sanitize_spreadsheet_cell("") == ""
+
+    # connect_duckdb_with_retry: lock retry and clean caller exception propagation
+    connect_calls = 0
+    real_connect = duckdb.connect
+
+    def _flaky_connect(path: str, read_only: bool = True) -> duckdb.DuckDBPyConnection:
+        """Fail once with lock error then connect."""
+        nonlocal connect_calls
+        connect_calls += 1
+        if connect_calls == 1:
+            raise duckdb.IOException("Conflicting lock on file")
+        return real_connect(path, read_only=read_only)
+
+    slept_intervals: list[float] = []
+    with patch("duckdb.connect", side_effect=_flaky_connect):
+        with connect_duckdb_with_retry(
+            db_file, read_only=True, max_attempts=3, sleep_fn=slept_intervals.append
+        ) as conn_retry:
+            row = conn_retry.execute("SELECT 42").fetchone()
+            assert row == (42,)
+    assert len(slept_intervals) == 1
+
+    # Verify an IOException raised INSIDE the caller block propagates cleanly without RuntimeError
+    with pytest.raises(duckdb.IOException, match="Caller query IO failure"):
+        with connect_duckdb_with_retry(db_file, read_only=True) as conn_inner:
+            _ = conn_inner
+            raise duckdb.IOException("Caller query IO failure")
+
+    with patch(
+        "duckdb.connect",
+        side_effect=duckdb.IOException("Unrecoverable permission denied"),
+    ):
+        with pytest.raises(duckdb.IOException, match="Unrecoverable"):
+            with connect_duckdb_with_retry(db_file, read_only=True, max_attempts=2):
+                pass

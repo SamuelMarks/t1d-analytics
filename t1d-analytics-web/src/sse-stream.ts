@@ -5,7 +5,11 @@
  */
 
 import { type SqlCellValue } from "./formatters";
-import { type ApiErrorInput } from "./api-client";
+import {
+  type ApiErrorInput,
+  fetchWithBackendError,
+  parseResponseJson,
+} from "./api-client";
 
 /**
  * Structured payload emitted by the `/api/chat/stream` `done` or `result` event.
@@ -95,4 +99,84 @@ export async function consumeSseChatStream(
   }
 
   return { streamUsed, streamText, finalData };
+}
+
+/**
+ * Options for dispatching a chat request via SSE (`/api/chat/stream`) with batch (`/api/chat`) fallback.
+ */
+export interface DispatchChatRequestOptions {
+  /** Serialized JSON request body string. */
+  bodyJson: string;
+  /** HTTP request headers including optional provider credentials. */
+  headers: Record<string, string>;
+  /** Whether SSE token streaming is enabled. */
+  streamingEnabled: boolean;
+  /** Loading indicator DOM node updated with live tokens during SSE streaming. */
+  loadingDiv: HTMLDivElement;
+  /** Callback invoked on each streamed token to scroll the message pane. */
+  onTokenScroll: () => void;
+}
+
+/**
+ * Outcome returned by `dispatchChatRequest`.
+ */
+export interface DispatchChatOutcome {
+  /** Terminal chat response payload from SSE or batch `/api/chat`. */
+  data: SseFinalChatData;
+  /** Accumulated token text fallback when `data.content` is empty. */
+  fallbackText: string;
+}
+
+/**
+ * Dispatches a chat message via `/api/chat/stream` when `streamingEnabled` is true,
+ * automatically falling back to `/api/chat` when streaming is disabled or unsupported.
+ * @param {DispatchChatRequestOptions} options - Dispatch configuration.
+ * @returns {Promise<DispatchChatOutcome>} Resolved chat response payload and fallback text.
+ */
+export async function dispatchChatRequest(
+  options: DispatchChatRequestOptions,
+): Promise<DispatchChatOutcome> {
+  if (options.streamingEnabled) {
+    try {
+      const streamResp = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: options.headers,
+        body: options.bodyJson,
+      });
+
+      if (
+        streamResp.ok &&
+        streamResp.headers
+          ?.get("content-type")
+          ?.includes("text/event-stream") &&
+        streamResp.body?.getReader
+      ) {
+        const reader = streamResp.body.getReader();
+        const contentEl = document.createElement("div");
+        contentEl.className = "message-content streaming-content";
+        options.loadingDiv.replaceChildren(contentEl);
+
+        const sseOutcome = await consumeSseChatStream(reader, (accText) => {
+          contentEl.textContent = accText;
+          options.onTokenScroll();
+        });
+        if (sseOutcome.streamUsed && sseOutcome.finalData) {
+          return {
+            data: sseOutcome.finalData,
+            fallbackText: sseOutcome.streamText,
+          };
+        }
+      }
+    } catch {
+      // Fall back to batch /api/chat below
+    }
+  }
+
+  const response = await fetchWithBackendError("/api/chat", {
+    method: "POST",
+    headers: options.headers,
+    body: options.bodyJson,
+  });
+  const data = await parseResponseJson<SseFinalChatData>(response);
+  return { data, fallbackText: "" };
 }

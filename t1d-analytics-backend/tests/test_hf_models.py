@@ -299,142 +299,42 @@ def test_domain_invariants_prompt_masking_and_lora_freezing(tmp_path: Path) -> N
 
 
 def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
-    """Test concrete implementations satisfy runtime-checkable protocols in t1d_analytics.hf_models."""
-    from contextlib import nullcontext
-    from typing import ContextManager, Optional, Sequence, Union
-
+    """Verify TinyCausalLM, tokenizer adapters, and LocalCpuRunner satisfy hf_models runtime protocols."""
+    from t1d_analytics.dataset_loader import prepare_torch_dataset
     from t1d_analytics.hf_models import (
-        AcceleratorDetectorProtocol,
-        AutocastTorchProtocol,
-        DeviceProtocol,
-        DtypeLike,
         PretrainedSavableProtocol,
-        QuantizationConfigProtocol,
-        TensorLike,
-        TensorProtocol,
-        TokenizerProtocol,
-        TorchCausalLMProtocol,
-        TorchDeviceFactoryProtocol,
         TrainableModelProtocol,
     )
 
-    class _ConcreteTensor:
-        """Helper satisfying TensorProtocol."""
-
-        @property
-        def shape(self) -> Sequence[int]:
-            """Return shape."""
-            return (1,)
-
-        def size(self, dim: int = -1) -> int:
-            """Return size."""
-            return 1
-
-        def view(self, *shape: int) -> TensorProtocol:
-            """Return view."""
-            return self
-
-        def unsqueeze(self, dim: int) -> TensorProtocol:
-            """Return unsqueezed tensor."""
-            return self
-
-        def to(self, device: Union[str, DeviceProtocol]) -> TensorProtocol:
-            """Return device-moved tensor."""
-            return self
-
-        def clamp(self, min_val: int, max_val: int) -> TensorProtocol:
-            """Return clamped tensor."""
-            return self
-
-        def item(self) -> float:
-            """Return scalar float."""
-            return 0.0
-
-        def backward(self) -> None:
-            """No-op backward."""
-
-        def __truediv__(self, other: Union[int, float]) -> TensorProtocol:
-            """Return divided tensor."""
-            return self
-
-    fake_tensor = _ConcreteTensor()
-    assert fake_tensor.shape == (1,)
-    assert fake_tensor.size() == 1
-    assert fake_tensor.view(1) is fake_tensor
-    assert fake_tensor.unsqueeze(0) is fake_tensor
-    assert fake_tensor.to("cpu") is fake_tensor
-    assert fake_tensor.clamp(0, 1) is fake_tensor
-    assert fake_tensor.item() == 0.0
-    fake_tensor.backward()
-    assert (fake_tensor / 2) is fake_tensor
-
-    tensor = torch.zeros(1)
-    tiny_factory = TinyCausalLMFactory()
-    tiny_model = tiny_factory.create_model("tiny")
-
-    class _ConcreteExtras:
-        """Helper satisfying protocol signatures."""
+    class _CharWordTokenizer:
+        """Deterministic word-level tokenizer satisfying TokenizerProtocol."""
 
         def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-            """No-op encode."""
-            return []
+            """Encode space-separated words into deterministic token IDs."""
+            _ = add_special_tokens
+            return [max(1, len(tok) % 64) for tok in text.split()] or [1]
 
-        def from_pretrained(
-            self,
-            pretrained_model_name_or_path: str,
-            torch_dtype: Optional[DtypeLike] = None,
-            quantization_config: Optional[QuantizationConfigProtocol] = None,
-        ) -> TorchCausalLMProtocol:
-            """No-op from_pretrained."""
-            return tiny_model
-
-        def step(self) -> None:
-            """No-op step."""
-
-        def autocast(self, device_type: str, dtype: TensorLike) -> ContextManager[None]:
-            """No-op autocast."""
-            return nullcontext()
-
-        def device(self, dev: str) -> str:
-            """No-op device."""
-            return dev
-
-        def is_cuda_available(self) -> bool:
-            """No-op cuda check."""
-            return False
-
-        def is_mps_available(self) -> bool:
-            """No-op mps check."""
-            return False
-
-    class _ConcreteAutoTok:
-        """Helper satisfying AutoTokenizerFactoryProtocol."""
-
-        def from_pretrained(
-            self, pretrained_model_name_or_path: str
-        ) -> TokenizerProtocol:
-            """Return concrete tokenizer."""
-            return _ConcreteExtras()
-
-    extras = _ConcreteExtras()
-    auto_tok = _ConcreteAutoTok()
-    assert extras.encode("hi") == []
-    assert extras.from_pretrained("m") is tiny_model
-    extras.step()
-    with extras.autocast("cpu", tensor):
-        pass
-    assert extras.device("cpu") == "cpu"
-    assert extras.is_cuda_available() is False
-    assert extras.is_mps_available() is False
-    assert isinstance(auto_tok.from_pretrained("m"), _ConcreteExtras)
-    assert isinstance(tiny_model, TrainableModelProtocol)
-    assert isinstance(tiny_model, PretrainedSavableProtocol)
-    assert isinstance(extras, AutocastTorchProtocol)
-    assert isinstance(extras, TorchDeviceFactoryProtocol)
-    assert isinstance(extras, AcceleratorDetectorProtocol)
+    tok = _CharWordTokenizer()
 
     ds_file = tmp_path / "ds.jsonl"
-    ds_file.write_text('{"prompt": "q", "sql": "SELECT 1"}\n', encoding="utf-8")
+    ds_file.write_text(
+        '{"prompt": "Count patients", "sql": "SELECT count(*) FROM patients"}\n',
+        encoding="utf-8",
+    )
+    pairs = prepare_torch_dataset(ds_file, max_seq_length=16, tokenizer=tok)
+    assert len(pairs) == 1
+    in_ids, lbls = pairs[0]
+    assert in_ids.shape == (15,)
+    assert lbls.shape == (15,)
+
+    tiny_factory = TinyCausalLMFactory()
+    tiny_model = tiny_factory.create_model("tiny", vocab_size=128, embed_dim=16)
+    assert isinstance(tiny_model, TrainableModelProtocol)
+    assert isinstance(tiny_model, PretrainedSavableProtocol)
+    save_dir = tmp_path / "tiny_ckpt"
+    tiny_model.save_pretrained(str(save_dir))
+    assert (save_dir / "model.pt").exists()
+
     runner = LocalCpuRunner()
     cfg = TrainingJobConfig(
         model_name="tiny",
@@ -443,6 +343,7 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
         use_tiny_model=True,
     )
     assert runner.validate_environment() is True
-    with patch("transformers.AutoTokenizer.from_pretrained", return_value=extras):
-        assert runner.run_training(cfg)["status"] == "dry_run_completed"
-    assert isinstance(tiny_factory.create_model("tiny"), PretrainedSavableProtocol)
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=tok):
+        res = runner.run_training(cfg)
+        assert res["status"] == "dry_run_completed"
+        assert res["model_name"] == "tiny"

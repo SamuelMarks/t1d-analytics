@@ -26,6 +26,16 @@ class T1DError(Exception):
     """
     Base exception class for all T1D Analytics domain errors.
 
+    Notes
+    -----
+    Method Resolution Order (MRO) Contract:
+    Leaf domain exceptions inherit from `T1DError` first and optionally from standard
+    library exception classes (`ValueError`, `RuntimeError`, `FileNotFoundError`,
+    `PermissionError`, `KeyError`, `TimeoutError`) second so that callers can catch
+    structured `T1DError` instances (and inspect `.error_code`, `.params`,
+    `.status_code`, and `.to_dict()`) while preserving standard Python exception
+    compatibility where required.
+
     Attributes
     ----------
         error_code: Internationalization translation key (e.g., 'backend.sqlExecution').
@@ -303,6 +313,13 @@ class PathAccessDeniedError(T1DError, PermissionError):
     default_status_code = 403
 
 
+class UnauthorizedApiError(T1DError, PermissionError):
+    """Raised when an HTTP API request lacks a valid X-API-Key or Bearer token."""
+
+    default_error_code = "backend.unauthorized"
+    default_status_code = 401
+
+
 class InvalidDatabasePathError(DatabaseError):
     """Raised when a database path traverses outside allowed directories or contains invalid characters."""
 
@@ -471,6 +488,34 @@ class ConfigFileNotFoundError(TrainingError, FileNotFoundError, ValueError):
     default_status_code = 404
 
 
+class ConfigurationError(T1DError, ValueError):
+    """Raised when runtime configuration, environment settings, or dataset parameters are invalid."""
+
+    default_error_code = "backend.configurationInvalid"
+    default_status_code = 400
+
+
+class DatasetNotFoundError(TrainingError, FileNotFoundError):
+    """Raised when a required training or evaluation dataset file does not exist on disk."""
+
+    default_error_code = "backend.datasetNotFound"
+    default_status_code = 404
+
+
+class SqlTimeoutError(SqlExecutionError, TimeoutError):
+    """Raised when a read-only DuckDB query exceeds its configured execution timeout."""
+
+    default_error_code = "backend.queryTimeout"
+    default_status_code = 504
+
+
+class UnsupportedExportFormatError(ExportError):
+    """Raised when an unsupported table export format is requested."""
+
+    default_error_code = "backend.unsupportedExportFormat"
+    default_status_code = 400
+
+
 class SubprocessTimeoutError(TrainingError, TimeoutError):
     """Raised when a local training or ETL CLI subprocess exceeds its execution timeout."""
 
@@ -483,3 +528,24 @@ class SchemaExtractionError(DatabaseError, RuntimeError):
 
     default_error_code = "backend.schemaExtractionFailed"
     default_status_code = 500
+
+
+def exception_to_error_detail(exc: BaseException) -> ErrorDetailDict:
+    """
+    Convert any exception into a structured `ErrorDetailDict` with `error_code` and `params`.
+
+    Args:
+    ----
+        exc: The raised exception instance.
+
+    Returns:
+    -------
+        ErrorDetailDict: Dictionary containing `error_code` and `params`.
+
+    """
+    if isinstance(exc, T1DError):
+        return exc.to_dict()
+    return {
+        "error_code": "backend.errorUnexpected",
+        "params": {"error": str(exc)},
+    }

@@ -381,13 +381,26 @@ def test_export_excel_endpoint(mock_db: str, mocker: MagicMock) -> None:
     assert resp_500b.status_code == 500
 
 
-def test_export_parquet_endpoint(mock_db: str, mocker: MagicMock) -> None:
-    """Test /api/export/parquet endpoint for data export in columnar parquet format."""
+def test_export_parquet_endpoint(
+    mock_db: str, tmp_path: Path, mocker: MagicMock
+) -> None:
+    """Test /api/export/parquet endpoint for data export in columnar parquet format and verify round-trip DuckDB read."""
     resp = client.get(f"/api/export/parquet?table_name=users&db_path={mock_db}")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/vnd.apache.parquet"
     assert "users_export.parquet" in resp.headers["content-disposition"]
     assert len(resp.content) > 0
+
+    parquet_file = tmp_path / "verify_users.parquet"
+    parquet_file.write_bytes(resp.content)
+    verify_conn = duckdb.connect(":memory:")
+    try:
+        parquet_rows = verify_conn.execute(
+            f"SELECT id, name FROM read_parquet('{parquet_file}') ORDER BY id"
+        ).fetchall()
+    finally:
+        verify_conn.close()
+    assert parquet_rows == [(1, "Alice"), (2, "Bob")]
 
     resp_no_db = client.get("/api/export/parquet?table_name=users&db_path=no_db.duckdb")
     assert resp_no_db.status_code == 404

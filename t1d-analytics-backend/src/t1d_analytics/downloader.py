@@ -211,6 +211,140 @@ def _verify_and_finalize_download(
     tmp_path.replace(dest_path)
 
 
+def _resolve_url_filename(url: str) -> str:
+    """
+    Resolve a safe local filename from a URL path or query parameters.
+
+    Args:
+    ----
+        url: Source download URL.
+
+    Returns:
+    -------
+        str: Resolved filename string.
+
+    """
+    parsed = urlparse(url)
+    unquoted_path = unquote(parsed.path) if parsed.path else ""
+    raw_filename = unquoted_path.split("/")[-1] if unquoted_path else ""
+    filename = Path(raw_filename).name if raw_filename else ""
+
+    if (
+        not filename
+        or filename == "/"
+        or filename.lower().endswith((".aspx", ".php", ".jsp", ".cgi"))
+    ):
+        query_filename = None
+        if parsed.query:
+            params = urllib.parse.parse_qs(parsed.query)
+            for k in ("file", "filename", "name", "dataset"):
+                if k in params and params[k] and Path(unquote(params[k][0])).name:
+                    query_filename = Path(unquote(params[k][0])).name
+                    break
+        filename = query_filename or filename or "downloaded_file"
+    return filename
+
+
+def _stream_response_to_file(
+    response: requests.Response,
+    tmp_path: Path,
+    filename: str,
+    existing_bytes: int,
+    progress_callback: Optional[Callable[[int, Optional[int]], None]],
+) -> None:
+    """
+    Stream HTTP response chunks into `tmp_path` while updating progress callbacks or TTY progress.
+
+    Args:
+    ----
+        response: Active `requests.Response` object.
+        tmp_path: Temporary destination file path.
+        filename: Display filename for TTY progress reporting.
+        existing_bytes: Number of bytes already present on disk when resuming.
+        progress_callback: Optional progress callback `(downloaded_bytes, total_bytes)`.
+
+    """
+    is_partial = response.status_code == 206
+    mode = "ab" if (is_partial and existing_bytes > 0) else "wb"
+    if not is_partial:
+        existing_bytes = 0
+
+    total_size_header = response.headers.get("content-length")
+    total_size: Optional[int] = (
+        int(total_size_header)
+        if total_size_header and total_size_header.isdigit()
+        else None
+    )
+    if total_size is not None and is_partial:
+        total_size += existing_bytes
+
+    downloaded = existing_bytes
+    start_time = time.time()
+
+    with open(tmp_path, mode) as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress_callback:
+                    progress_callback(downloaded, total_size)
+                elif sys.stdout.isatty():
+                    elapsed = max(time.time() - start_time, 1e-4)
+                    rate_mb = (downloaded - existing_bytes) / elapsed / (1024 * 1024)
+                    pct = (downloaded / total_size * 100) if total_size else 0.0
+                    msg = f"{filename}: {downloaded / (1024 * 1024):.1f} MB ({pct:.1f}%) @ {rate_mb:.2f} MB/s"
+                    sys.stdout.write("\r" + msg)
+                    sys.stdout.flush()
+
+    if sys.stdout.isatty() and progress_callback is None:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
+def _apply_content_disposition_paths(
+    response: requests.Response,
+    dest_dir: Path,
+    filename: str,
+    dest_path: Path,
+    tmp_path: Path,
+) -> tuple[str, Path, Path, bool]:
+    """
+    Update `(filename, dest_path, tmp_path)` if `Content-Disposition` specifies a target filename.
+
+    Args:
+    ----
+        response: Active `requests.Response` object.
+        dest_dir: Destination directory path.
+        filename: Current resolved filename.
+        dest_path: Current destination file path.
+        tmp_path: Current temporary file path.
+
+    Returns:
+    -------
+        tuple[str, Path, Path, bool]: `(filename, dest_path, tmp_path, already_exists)`.
+
+    """
+    _ = get_translator()
+    parsed_cd_name = parse_content_disposition(
+        response.headers.get("content-disposition") or ""
+    )
+    if not parsed_cd_name:
+        return filename, dest_path, tmp_path, False
+
+    filename = parsed_cd_name
+    dest_path = dest_dir / filename
+    if dest_path.exists():
+        tmp_path.unlink(missing_ok=True)
+        print(_("File already exists, skipping: {}", filename))
+        return filename, dest_path, tmp_path, True
+
+    new_tmp_path = dest_path.with_name(f"{filename}.tmp")
+    if new_tmp_path != tmp_path and tmp_path.exists():
+        new_tmp_path.unlink(missing_ok=True)
+        tmp_path.rename(new_tmp_path)
+    return filename, dest_path, new_tmp_path, False
+
+
 def download_file(
     url: str,
     dest_dir: Path,
@@ -246,15 +380,14 @@ def download_file(
 
     """
     _ = get_translator()
-    is_doi = url.startswith(
+    if url.startswith(
         (
             "https://doi.org/",
             "http://doi.org/",
             "https://dx.doi.org/",
             "http://dx.doi.org/",
         )
-    )
-    if is_doi:
+    ):
         link_file = dest_dir / "dataset_link.txt"
         if not link_file.exists():
             link_file.write_text(url)
@@ -263,25 +396,7 @@ def download_file(
             print(_("DOI link already exists, skipping: {}", url))
         return
 
-    parsed = urlparse(url)
-    unquoted_path = unquote(parsed.path) if parsed.path else ""
-    raw_filename = unquoted_path.split("/")[-1] if unquoted_path else ""
-    filename = Path(raw_filename).name if raw_filename else ""
-
-    if (
-        not filename
-        or filename == "/"
-        or filename.lower().endswith((".aspx", ".php", ".jsp", ".cgi"))
-    ):
-        query_filename = None
-        if parsed.query:
-            params = urllib.parse.parse_qs(parsed.query)
-            for k in ("file", "filename", "name", "dataset"):
-                if k in params and params[k] and Path(unquote(params[k][0])).name:
-                    query_filename = Path(unquote(params[k][0])).name
-                    break
-        filename = query_filename or filename or "downloaded_file"
-
+    filename = _resolve_url_filename(url)
     dest_path = dest_dir / filename
     with _get_file_lock(dest_path):
         if dest_path.exists():
@@ -296,11 +411,11 @@ def download_file(
         if effective_token and "Authorization" not in req_headers:
             req_headers["Authorization"] = f"Bearer {effective_token}"
 
-        existing_bytes = 0
-        if resume and tmp_path.exists():
-            existing_bytes = tmp_path.stat().st_size
-            if existing_bytes > 0:
-                req_headers["Range"] = f"bytes={existing_bytes}-"
+        existing_bytes = (
+            tmp_path.stat().st_size if (resume and tmp_path.exists()) else 0
+        )
+        if existing_bytes > 0:
+            req_headers["Range"] = f"bytes={existing_bytes}-"
 
         try:
             response = requests.get(
@@ -312,7 +427,6 @@ def download_file(
                 timeout=30,
             )
             try:
-                # Handle 401 Unauthorized via token refresh callback if configured
                 if response.status_code == 401 and token_refresh_callback:
                     response.close()
                     effective_token = token_refresh_callback()
@@ -326,7 +440,6 @@ def download_file(
                         timeout=30,
                     )
 
-                # Handle Range Not Satisfiable by re-requesting from byte 0
                 if existing_bytes > 0 and response.status_code == 416:
                     response.close()
                     tmp_path.unlink(missing_ok=True)
@@ -343,66 +456,21 @@ def download_file(
 
                 response.raise_for_status()
 
-                cd = response.headers.get("content-disposition")
-                parsed_cd_name = parse_content_disposition(cd or "")
-                if parsed_cd_name:
-                    filename = parsed_cd_name
-                    dest_path = dest_dir / filename
-                    if dest_path.exists():
-                        tmp_path.unlink(missing_ok=True)
-                        print(_("File already exists, skipping: {}", filename))
-                        return
-                    new_tmp_path = dest_path.with_name(f"{filename}.tmp")
-                    if new_tmp_path != tmp_path and tmp_path.exists():
-                        if new_tmp_path.exists():
-                            new_tmp_path.unlink(missing_ok=True)
-                        tmp_path.rename(new_tmp_path)
-                    tmp_path = new_tmp_path
-
-                is_partial = response.status_code == 206
-                mode = "ab" if (is_partial and existing_bytes > 0) else "wb"
-                if not is_partial:
-                    existing_bytes = 0
-
-                total_size_header = response.headers.get("content-length")
-                total_size: Optional[int] = (
-                    int(total_size_header)
-                    if total_size_header and total_size_header.isdigit()
-                    else None
+                filename, dest_path, tmp_path, already_exists = (
+                    _apply_content_disposition_paths(
+                        response, dest_dir, filename, dest_path, tmp_path
+                    )
                 )
-                if total_size is not None and is_partial:
-                    total_size += existing_bytes
+                if already_exists:
+                    return
 
-                downloaded = existing_bytes
-                start_time = time.time()
-
-                with open(tmp_path, mode) as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if progress_callback:
-                                progress_callback(downloaded, total_size)
-                            elif sys.stdout.isatty():
-                                elapsed = max(time.time() - start_time, 1e-4)
-                                rate_mb = (
-                                    (downloaded - existing_bytes)
-                                    / elapsed
-                                    / (1024 * 1024)
-                                )
-                                pct = (
-                                    (downloaded / total_size * 100)
-                                    if total_size
-                                    else 0.0
-                                )
-                                msg = f"{filename}: {downloaded / (1024 * 1024):.1f} MB ({pct:.1f}%) @ {rate_mb:.2f} MB/s"
-                                sys.stdout.write("\r" + msg)
-                                sys.stdout.flush()
-
-                if sys.stdout.isatty() and progress_callback is None:
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-
+                _stream_response_to_file(
+                    response,
+                    tmp_path,
+                    filename,
+                    existing_bytes,
+                    progress_callback,
+                )
                 _verify_and_finalize_download(
                     tmp_path, dest_path, filename, expected_sha256
                 )

@@ -18,9 +18,11 @@ if TYPE_CHECKING:
 
 from t1d_analytics.errors import DatabaseError
 from t1d_analytics.i18n import get_translator
-from t1d_analytics.sql_utils import escape_sql_identifier
+from t1d_analytics.sql_utils import escape_sql_identifier, escape_sql_literal
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_DECOMPRESSED_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB quota
 
 
 class IngestionManifestRecord(TypedDict):
@@ -57,13 +59,160 @@ def compute_file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
+def _extract_tar_archive(
+    path: Path,
+    extract_dir: Path,
+    resolved_extract_dir: Path,
+    total_extracted_bytes: int,
+    max_decompressed_bytes: int,
+    report_fn: Callable[[str], None],
+) -> int:
+    """
+    Safely extract a tar archive into `extract_dir` with symlink, path-traversal, and size-quota checks.
+
+    Args:
+    ----
+        path: Source tar archive path.
+        extract_dir: Target extraction directory.
+        resolved_extract_dir: Resolved target extraction directory.
+        total_extracted_bytes: Running cumulative extracted byte count.
+        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes.
+        report_fn: Progress/warning reporter callback.
+
+    Returns:
+    -------
+        int: Updated cumulative extracted byte count.
+
+    """
+    _ = get_translator()
+    try:
+        with tarfile.open(path, "r:*") as tar_ref:
+            for tar_member in tar_ref.getmembers():
+                if tar_member.issym() or tar_member.islnk():
+                    warn_sym = _(
+                        "Skipping unsafe entry {} in {} (symlink or hardlink detected).",
+                        tar_member.name,
+                        path.name,
+                    )
+                    logger.warning(warn_sym)
+                    report_fn(warn_sym)
+                    continue
+                tar_target = (resolved_extract_dir / tar_member.name).resolve()
+                is_safe_tar = (
+                    tar_target == resolved_extract_dir
+                    or tar_target.is_relative_to(resolved_extract_dir)
+                )
+                if not is_safe_tar:
+                    warn_trav = _(
+                        "Skipping unsafe entry {} in {} (path traversal detected).",
+                        tar_member.name,
+                        path.name,
+                    )
+                    logger.warning(warn_trav)
+                    report_fn(warn_trav)
+                    continue
+                if (
+                    total_extracted_bytes + max(0, tar_member.size)
+                    > max_decompressed_bytes
+                ):
+                    warn_quota = _(
+                        "Skipping entry {} in {} (decompressed size quota exceeded).",
+                        tar_member.name,
+                        path.name,
+                    )
+                    logger.warning(warn_quota)
+                    report_fn(warn_quota)
+                    continue
+                total_extracted_bytes += max(0, tar_member.size)
+                tar_ref.extract(tar_member, extract_dir)
+    except (tarfile.TarError, EOFError, OSError):
+        err_tar = _("Failed to extract {} (Bad Archive File).", path.name)
+        logger.error(err_tar)
+        report_fn(err_tar)
+    return total_extracted_bytes
+
+
+def _extract_zip_archive(
+    path: Path,
+    extract_dir: Path,
+    resolved_extract_dir: Path,
+    total_extracted_bytes: int,
+    max_decompressed_bytes: int,
+    report_fn: Callable[[str], None],
+) -> int:
+    """
+    Safely extract a zip archive into `extract_dir` with symlink, path-traversal, and size-quota checks.
+
+    Args:
+    ----
+        path: Source zip archive path.
+        extract_dir: Target extraction directory.
+        resolved_extract_dir: Resolved target extraction directory.
+        total_extracted_bytes: Running cumulative extracted byte count.
+        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes.
+        report_fn: Progress/warning reporter callback.
+
+    Returns:
+    -------
+        int: Updated cumulative extracted byte count.
+
+    """
+    _ = get_translator()
+    try:
+        with zipfile.ZipFile(path, "r") as zip_ref:
+            for zip_info in zip_ref.infolist():
+                if (zip_info.external_attr >> 16) & 0o170000 == 0o120000:
+                    warn_zsym = _(
+                        "Skipping unsafe entry {} in {} (symlink detected).",
+                        zip_info.filename,
+                        path.name,
+                    )
+                    logger.warning(warn_zsym)
+                    report_fn(warn_zsym)
+                    continue
+                zip_target = (resolved_extract_dir / zip_info.filename).resolve()
+                is_safe_zip = (
+                    zip_target == resolved_extract_dir
+                    or zip_target.is_relative_to(resolved_extract_dir)
+                )
+                if not is_safe_zip:
+                    warn_ztrav = _(
+                        "Skipping unsafe entry {} in {} (path traversal detected).",
+                        zip_info.filename,
+                        path.name,
+                    )
+                    logger.warning(warn_ztrav)
+                    report_fn(warn_ztrav)
+                    continue
+                if (
+                    total_extracted_bytes + max(0, zip_info.file_size)
+                    > max_decompressed_bytes
+                ):
+                    warn_zquota = _(
+                        "Skipping entry {} in {} (decompressed size quota exceeded).",
+                        zip_info.filename,
+                        path.name,
+                    )
+                    logger.warning(warn_zquota)
+                    report_fn(warn_zquota)
+                    continue
+                total_extracted_bytes += max(0, zip_info.file_size)
+                zip_ref.extract(zip_info, extract_dir)
+    except zipfile.BadZipFile:
+        err_zip = _("Failed to extract {} (Bad Zip File).", path.name)
+        logger.error(err_zip)
+        report_fn(err_zip)
+    return total_extracted_bytes
+
+
 def extract_zips(
     data_dir_str: str,
     max_depth: int = 3,
     report_fn: Callable[[str], None] = print,
+    max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
 ) -> None:
     """
-    Extract zip and tar archives found in the data directory safely without path traversal.
+    Extract zip and tar archives found in the data directory safely without path traversal or zip bombs.
 
     Recursively decompresses nested archives up to max_depth.
 
@@ -72,6 +221,7 @@ def extract_zips(
         data_dir_str: Directory path containing archive files to extract.
         max_depth: Maximum recursion depth for decompressing nested archives.
         report_fn: Progress reporter callback (defaults to `print`).
+        max_decompressed_bytes: Maximum cumulative decompressed size in bytes allowed across archives.
 
     """
     _ = get_translator()
@@ -87,6 +237,7 @@ def extract_zips(
     report_fn(check_msg)
     processed_archives: set[Path] = set()
     found_any = False
+    total_extracted_bytes = 0
     archive_patterns = ("*.zip", "*.tar.gz", "*.tgz", "*.tar.bz2", "*.tar")
 
     for depth in range(max_depth):
@@ -103,17 +254,13 @@ def extract_zips(
 
         for path in unprocessed:
             found_any = True
-            resolved_archive = path.resolve()
-            processed_archives.add(resolved_archive)
+            processed_archives.add(path.resolve())
 
-            # Determine extraction directory
             p_name = path.name.lower()
             if p_name.endswith((".tar.gz", ".tar.bz2")):
-                extract_stem = path.name[:-7]
-                extract_dir = path.parent / extract_stem
+                extract_dir = path.parent / path.name[:-7]
             elif p_name.endswith(".tgz"):
-                extract_stem = path.name[:-4]
-                extract_dir = path.parent / extract_stem
+                extract_dir = path.parent / path.name[:-4]
             else:
                 extract_dir = path.with_suffix("")
 
@@ -126,78 +273,24 @@ def extract_zips(
             extract_dir.mkdir(parents=True, exist_ok=True)
             resolved_extract_dir = extract_dir.resolve()
 
-            is_tar = any(
-                p_name.endswith(ext) for ext in (".tar.gz", ".tgz", ".tar.bz2", ".tar")
-            )
-            if is_tar:
-                try:
-                    with tarfile.open(path, "r:*") as tar_ref:
-                        for tar_member in tar_ref.getmembers():
-                            if tar_member.issym() or tar_member.islnk():
-                                warn_sym = _(
-                                    "Skipping unsafe entry {} in {} (symlink or hardlink detected).",
-                                    tar_member.name,
-                                    path.name,
-                                )
-                                logger.warning(warn_sym)
-                                report_fn(warn_sym)
-                                continue
-                            tar_target = (
-                                resolved_extract_dir / tar_member.name
-                            ).resolve()
-                            is_safe_tar = (
-                                tar_target == resolved_extract_dir
-                                or tar_target.is_relative_to(resolved_extract_dir)
-                            )
-                            if not is_safe_tar:
-                                warn_trav = _(
-                                    "Skipping unsafe entry {} in {} (path traversal detected).",
-                                    tar_member.name,
-                                    path.name,
-                                )
-                                logger.warning(warn_trav)
-                                report_fn(warn_trav)
-                                continue
-                            tar_ref.extract(tar_member, extract_dir)
-                except (tarfile.TarError, EOFError, OSError):
-                    err_tar = _("Failed to extract {} (Bad Archive File).", path.name)
-                    logger.error(err_tar)
-                    report_fn(err_tar)
+            if p_name.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar")):
+                total_extracted_bytes = _extract_tar_archive(
+                    path,
+                    extract_dir,
+                    resolved_extract_dir,
+                    total_extracted_bytes,
+                    max_decompressed_bytes,
+                    report_fn,
+                )
             else:
-                try:
-                    with zipfile.ZipFile(path, "r") as zip_ref:
-                        for zip_info in zip_ref.infolist():
-                            # Reject zip symlinks (mode 0o120000)
-                            if (zip_info.external_attr >> 16) & 0o170000 == 0o120000:
-                                warn_zsym = _(
-                                    "Skipping unsafe entry {} in {} (symlink detected).",
-                                    zip_info.filename,
-                                    path.name,
-                                )
-                                logger.warning(warn_zsym)
-                                report_fn(warn_zsym)
-                                continue
-                            zip_target = (
-                                resolved_extract_dir / zip_info.filename
-                            ).resolve()
-                            is_safe_zip = (
-                                zip_target == resolved_extract_dir
-                                or zip_target.is_relative_to(resolved_extract_dir)
-                            )
-                            if not is_safe_zip:
-                                warn_ztrav = _(
-                                    "Skipping unsafe entry {} in {} (path traversal detected).",
-                                    zip_info.filename,
-                                    path.name,
-                                )
-                                logger.warning(warn_ztrav)
-                                report_fn(warn_ztrav)
-                                continue
-                            zip_ref.extract(zip_info, extract_dir)
-                except zipfile.BadZipFile:
-                    err_zip = _("Failed to extract {} (Bad Zip File).", path.name)
-                    logger.error(err_zip)
-                    report_fn(err_zip)
+                total_extracted_bytes = _extract_zip_archive(
+                    path,
+                    extract_dir,
+                    resolved_extract_dir,
+                    total_extracted_bytes,
+                    max_decompressed_bytes,
+                    report_fn,
+                )
 
     if not found_any:
         no_zips_msg = _("No zip files found to extract.")
@@ -313,6 +406,7 @@ def get_ingestion_manifest(db_path: str) -> list[IngestionManifestRecord]:
 
 _NUMERIC_CLINICAL_CONCEPTS = {
     "age",
+    "ageasofranddt",
     "hba1c",
     "c_peptide",
     "glucose",
@@ -325,6 +419,36 @@ _NUMERIC_CLINICAL_CONCEPTS = {
     "numsevhypo",
     "numhospdka",
 }
+
+
+def get_supported_tabular_globs(
+    include_sas: bool = False,
+    include_spss: bool = False,
+) -> List[str]:
+    """
+    Return the ordered list of supported tabular file glob patterns for dataset discovery.
+
+    Args:
+    ----
+        include_sas: Whether to include SAS dataset patterns (`*.sas7bdat`, `*.xpt`).
+        include_spss: Whether to include SPSS dataset patterns (`*.sav`).
+
+    Returns:
+    -------
+        List[str]: Glob pattern strings suitable for `Path.rglob`.
+
+    """
+    base_exts = ["csv", "txt", "parquet", "csv.gz"]
+    if include_sas:
+        base_exts.extend(["sas7bdat", "xpt"])
+    if include_spss:
+        base_exts.append("sav")
+
+    patterns: List[str] = []
+    for ext in base_exts:
+        patterns.append(f"*.{ext}")
+        patterns.append(f"*.{ext.upper()}")
+    return patterns
 
 
 def get_clinical_variable_mappings() -> Dict[str, List[str]]:
@@ -428,6 +552,284 @@ def _detect_csv_encoding_and_delimiter(csv_path: Path) -> Tuple[str, str, str]:
     return py_encoding, duckdb_encoding, duckdb_sep
 
 
+def _load_csv_or_parquet(
+    conn: duckdb.DuckDBPyConnection,
+    data_file: Path,
+    table_name: str,
+    report_fn: Callable[[str], None],
+) -> None:
+    """
+    Create or replace `temp_view` in DuckDB for a Parquet, CSV.GZ, or CSV/TXT dataset file.
+
+    Args:
+    ----
+        conn: Active DuckDB connection.
+        data_file: Path to the tabular dataset file.
+        table_name: Target DuckDB table name for progress logging.
+        report_fn: Progress reporter callback.
+
+    """
+    _ = get_translator()
+    escaped_path = escape_sql_literal(str(data_file))
+    if data_file.suffix.lower() == ".parquet":
+        load_pq_msg = _(
+            "Loading {} (parquet) into table {}...",
+            data_file.name,
+            table_name,
+        )
+        logger.info(load_pq_msg)
+        report_fn(load_pq_msg)
+        conn.execute(
+            f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_parquet('{escaped_path}')"
+        )
+    elif data_file.name.endswith(".csv.gz"):
+        load_gz_msg = _(
+            "Loading {} (csv.gz) into table {}...",
+            data_file.name,
+            table_name,
+        )
+        logger.info(load_gz_msg)
+        report_fn(load_gz_msg)
+        conn.execute(
+            f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true)"
+        )
+    else:
+        _py_enc, duckdb_encoding, duckdb_sep = _detect_csv_encoding_and_delimiter(
+            data_file
+        )
+        load_csv_msg = _(
+            "Loading {} (encoding={}, sep='{}') into table {}...",
+            data_file.name,
+            duckdb_encoding,
+            duckdb_sep,
+            table_name,
+        )
+        logger.info(load_csv_msg)
+        report_fn(load_csv_msg)
+        escaped_sep = escape_sql_literal(duckdb_sep)
+        escaped_enc = escape_sql_literal(duckdb_encoding)
+        conn.execute(
+            f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sep='{escaped_sep}', encoding='{escaped_enc}')"
+        )
+
+
+def _resolve_target_table_stem(
+    data_file: Path,
+    data_dir: Path,
+    prefix_subdirs: bool,
+    stem_counts: dict[str, int],
+) -> str:
+    """
+    Derive a sanitized SQL table name stem for `data_file`.
+
+    Args:
+    ----
+        data_file: Source tabular file path.
+        data_dir: Root ingestion directory path.
+        prefix_subdirs: Whether to prefix table names with relative subdirectory names.
+        stem_counts: Frequency map of normalized file stems.
+
+    Returns:
+    -------
+        str: Valid SQL table identifier starting with an alphabetic character.
+
+    """
+    s_name = (
+        Path(data_file.stem).stem
+        if data_file.name.endswith(".csv.gz")
+        else data_file.stem
+    )
+    raw_stem = re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
+    safe_stem = raw_stem
+    if prefix_subdirs or stem_counts.get(raw_stem, 0) > 1:
+        rel_parent = data_file.parent.relative_to(data_dir)
+        if rel_parent != Path():
+            prefix = re.sub(r"[^a-zA-Z0-9_]", "_", str(rel_parent)).strip("_").lower()
+            safe_stem = f"{prefix}_{raw_stem}" if prefix else raw_stem
+
+    table_name = safe_stem.strip("_") or "dataset"
+    return table_name if table_name[0].isalpha() else f"t_{table_name}"
+
+
+def _build_column_select_expressions(
+    cols: List[Tuple[str, ...]],
+    reverse_map: Dict[str, str],
+) -> List[str]:
+    """
+    Build standardized DuckDB `SELECT` column expressions for `temp_view`.
+
+    Args:
+    ----
+        cols: Output rows from `DESCRIBE temp_view`.
+        reverse_map: Lowercase original column name to standardized clinical column name mapping.
+
+    Returns:
+    -------
+        List[str]: SQL column projection expressions.
+
+    """
+    select_exprs: List[str] = []
+    seen_std_names: set[str] = set()
+    for c in cols:
+        orig_col = str(c[0])
+        col_type = str(c[1]).upper() if len(c) > 1 else ""
+        std_name = reverse_map.get(orig_col.lower(), orig_col)
+
+        if std_name.lower() in seen_std_names:
+            std_name = orig_col
+
+        counter = 1
+        base_std_name = std_name
+        while std_name.lower() in seen_std_names:
+            counter += 1
+            std_name = f"{base_std_name}_{counter}"
+
+        seen_std_names.add(std_name.lower())
+
+        escaped_orig = escape_sql_identifier(orig_col)
+        escaped_std = escape_sql_identifier(std_name)
+        col_expr = f'"{escaped_orig}"'
+        if std_name.lower() in _NUMERIC_CLINICAL_CONCEPTS and "CHAR" in col_type:
+            col_expr = f"TRY_CAST(NULLIF(TRIM(\"{escaped_orig}\"), '') AS DOUBLE)"
+        if std_name != orig_col or col_expr != f'"{escaped_orig}"':
+            select_exprs.append(f'{col_expr} AS "{escaped_std}"')
+        else:
+            select_exprs.append(f'"{escaped_orig}"')
+    return select_exprs
+
+
+def _ingest_single_tabular_file(
+    conn: duckdb.DuckDBPyConnection,
+    data_file: Path,
+    data_dir: Path,
+    prefix_subdirs: bool,
+    stem_counts: dict[str, int],
+    reverse_map: Dict[str, str],
+    existing_tables: list[str],
+    existing_views: set[str],
+    loaded_tables: list[str],
+    report_fn: Callable[[str], None],
+) -> None:
+    """
+    Ingest a single tabular file into `conn` and record its manifest entry.
+
+    Args:
+    ----
+        conn: Open writable DuckDB connection.
+        data_file: Source tabular file path.
+        data_dir: Root ingestion directory path.
+        prefix_subdirs: Whether to prefix table names with relative subdirectory names.
+        stem_counts: Frequency map of normalized file stems.
+        reverse_map: Lowercase original column name to standardized clinical column name mapping.
+        existing_tables: Existing table names before ingestion.
+        existing_views: Existing view names in `conn`.
+        loaded_tables: Mutable list of loaded table names.
+        report_fn: Progress reporter callback.
+
+    """
+    _ = get_translator()
+    current_source = str(data_file.resolve())
+    table_name = _resolve_target_table_stem(
+        data_file, data_dir, prefix_subdirs, stem_counts
+    )
+    counter = 1
+    base_tbl = table_name
+    is_already_loaded = False
+
+    try:
+        current_hash = compute_file_hash(data_file)
+        manifest_row = conn.execute(
+            "SELECT table_name FROM _t1d_ingestion_manifest WHERE source_file = ? AND file_hash = ?",
+            [current_source, current_hash],
+        ).fetchone()
+
+        while table_name in existing_tables or table_name in loaded_tables:
+            row = conn.execute(
+                "SELECT comment FROM duckdb_tables() WHERE table_name = ?",
+                [table_name],
+            ).fetchone()
+            existing_comment = row[0] if row else None
+            if existing_comment == current_source or (
+                manifest_row and manifest_row[0] == table_name
+            ):
+                is_already_loaded = True
+                break
+            counter += 1
+            table_name = f"{base_tbl}_{counter}"
+
+        if is_already_loaded:
+            skip_msg = _("Table {} already exists, skipping...", table_name)
+            logger.info(skip_msg)
+            report_fn(skip_msg)
+            return
+
+        if table_name in existing_views:
+            safe_view_name = escape_sql_identifier(table_name)
+            conn.execute(f'DROP VIEW IF EXISTS "{safe_view_name}"')
+            existing_views.discard(table_name)
+
+        is_clinical = data_file.suffix.lower() in (".sas7bdat", ".xpt", ".sav")
+        if is_clinical:
+            load_clin_msg = _(
+                "Loading {} (clinical) into table {}...",
+                data_file.name,
+                table_name,
+            )
+            logger.info(load_clin_msg)
+            report_fn(load_clin_msg)
+            clinical_df = _read_clinical_dataframe(data_file)
+            conn.register("_clinical_df", clinical_df)
+            conn.execute(
+                "CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM _clinical_df"
+            )
+        else:
+            _load_csv_or_parquet(
+                conn=conn,
+                data_file=data_file,
+                table_name=table_name,
+                report_fn=report_fn,
+            )
+        cols = conn.execute("DESCRIBE temp_view").fetchall()
+        select_exprs = _build_column_select_expressions(cols, reverse_map)
+
+        nl = chr(10)
+        select_sql = f",{nl}                ".join(select_exprs)
+        escaped_table = escape_sql_identifier(table_name)
+
+        query = (
+            f'CREATE TABLE "{escaped_table}" AS SELECT {nl}'
+            f"                {select_sql} {nl}"
+            f"            FROM temp_view"
+        )
+        conn.execute(query)
+        conn.execute("DROP VIEW temp_view")
+        if is_clinical:
+            conn.unregister("_clinical_df")
+
+        escaped_source = escape_sql_literal(current_source)
+        conn.execute(f"COMMENT ON TABLE \"{escaped_table}\" IS '{escaped_source}'")
+
+        row_count_res = conn.execute(
+            f'SELECT COUNT(*) FROM "{escaped_table}"'
+        ).fetchone()
+        row_count = row_count_res[0] if row_count_res else 0
+        file_size = data_file.stat().st_size
+        conn.execute(
+            "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR table_name = ?",
+            [current_source, table_name],
+        )
+        conn.execute(
+            "INSERT INTO _t1d_ingestion_manifest VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+            [current_source, table_name, current_hash, row_count, file_size],
+        )
+
+        loaded_tables.append(table_name)
+    except Exception as e:
+        err_load = _("Failed to load {}: {}", data_file.name, e)
+        logger.error(err_load)
+        report_fn(err_load)
+
+
 def load_data_to_duckdb(
     data_dir_str: str,
     db_path: str,
@@ -471,30 +873,17 @@ def load_data_to_duckdb(
         scan_msg = _("Scanning for tabular files (CSV, TXT, Parquet, GZ)...")
         logger.info(scan_msg)
         report_fn(scan_msg)
-        patterns = [
-            "*.csv",
-            "*.CSV",
-            "*.txt",
-            "*.TXT",
-            "*.parquet",
-            "*.PARQUET",
-            "*.csv.gz",
-            "*.CSV.GZ",
-        ]
-        if include_sas:
-            patterns.extend(["*.sas7bdat", "*.SAS7BDAT", "*.xpt", "*.XPT"])
-        if include_spss:
-            patterns.extend(["*.sav", "*.SAV"])
+        patterns = get_supported_tabular_globs(
+            include_sas=include_sas,
+            include_spss=include_spss,
+        )
 
         raw_files: list[Path] = []
         for pat in patterns:
             raw_files.extend(data_dir.rglob(pat))
-        data_files = list(dict.fromkeys(raw_files))
-
-        # Filter out MacOS hidden files or unhelpful docs
         data_files = [
             f
-            for f in data_files
+            for f in dict.fromkeys(raw_files)
             if not f.name.startswith("._")
             and "Glossary" not in f.name
             and "Protocol" not in f.name
@@ -506,12 +895,11 @@ def load_data_to_duckdb(
             report_fn(no_files_msg)
             return
 
-        # Load reverse map for column renaming
-        reverse_map: Dict[str, str] = {}
-        matches = get_clinical_variable_mappings()
-        for std_name, orig_names in matches.items():
-            for orig in orig_names:
-                reverse_map[orig.lower()] = std_name
+        reverse_map: Dict[str, str] = {
+            orig.lower(): std_name
+            for std_name, orig_names in get_clinical_variable_mappings().items()
+            for orig in orig_names
+        }
 
         stem_counts: dict[str, int] = {}
         for df in data_files:
@@ -532,203 +920,18 @@ def load_data_to_duckdb(
         ]
         loaded_tables = list(existing_tables)
         for data_file in data_files:
-            s_name = (
-                Path(data_file.stem).stem
-                if data_file.name.endswith(".csv.gz")
-                else data_file.stem
+            _ingest_single_tabular_file(
+                conn=conn,
+                data_file=data_file,
+                data_dir=data_dir,
+                prefix_subdirs=prefix_subdirs,
+                stem_counts=stem_counts,
+                reverse_map=reverse_map,
+                existing_tables=existing_tables,
+                existing_views=existing_views,
+                loaded_tables=loaded_tables,
+                report_fn=report_fn,
             )
-            raw_stem = (
-                re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
-            )
-            safe_stem = raw_stem
-            if prefix_subdirs or stem_counts.get(raw_stem, 0) > 1:
-                rel_parent = data_file.parent.relative_to(data_dir)
-                if rel_parent != Path("."):
-                    prefix = (
-                        re.sub(r"[^a-zA-Z0-9_]", "_", str(rel_parent))
-                        .strip("_")
-                        .lower()
-                    )
-                    safe_stem = f"{prefix}_{raw_stem}" if prefix else raw_stem
-
-            current_source = str(data_file.resolve())
-            table_name = safe_stem.strip("_") or "dataset"
-            # Ensure it starts with a letter
-            if not table_name[0].isalpha():
-                table_name = "t_" + table_name
-
-            counter = 1
-            base_tbl = table_name
-            is_already_loaded = False
-
-            try:
-                current_hash = compute_file_hash(data_file)
-                manifest_row = conn.execute(
-                    "SELECT table_name FROM _t1d_ingestion_manifest WHERE source_file = ? AND file_hash = ?",
-                    [current_source, current_hash],
-                ).fetchone()
-
-                while table_name in existing_tables or table_name in loaded_tables:
-                    row = conn.execute(
-                        "SELECT comment FROM duckdb_tables() WHERE table_name = ?",
-                        [table_name],
-                    ).fetchone()
-                    existing_comment = row[0] if row else None
-
-                    if existing_comment == current_source or (
-                        manifest_row and manifest_row[0] == table_name
-                    ):
-                        is_already_loaded = True
-                        break
-
-                    counter += 1
-                    table_name = f"{base_tbl}_{counter}"
-
-                if is_already_loaded:
-                    skip_msg = _("Table {} already exists, skipping...", table_name)
-                    logger.info(skip_msg)
-                    report_fn(skip_msg)
-                    continue
-
-                if table_name in existing_views:
-                    safe_view_name = escape_sql_identifier(table_name)
-                    conn.execute(f'DROP VIEW IF EXISTS "{safe_view_name}"')
-                    existing_views.discard(table_name)
-
-                escaped_path = str(data_file).replace("'", "''")
-                is_clinical = data_file.suffix.lower() in (
-                    ".sas7bdat",
-                    ".xpt",
-                    ".sav",
-                )
-                if data_file.suffix.lower() == ".parquet":
-                    load_pq_msg = _(
-                        "Loading {} (parquet) into table {}...",
-                        data_file.name,
-                        table_name,
-                    )
-                    logger.info(load_pq_msg)
-                    report_fn(load_pq_msg)
-                    conn.execute(
-                        f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_parquet('{escaped_path}')"
-                    )
-                elif data_file.name.endswith(".csv.gz"):
-                    load_gz_msg = _(
-                        "Loading {} (csv.gz) into table {}...",
-                        data_file.name,
-                        table_name,
-                    )
-                    logger.info(load_gz_msg)
-                    report_fn(load_gz_msg)
-                    conn.execute(
-                        f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true)"
-                    )
-                elif is_clinical:
-                    load_clin_msg = _(
-                        "Loading {} (clinical) into table {}...",
-                        data_file.name,
-                        table_name,
-                    )
-                    logger.info(load_clin_msg)
-                    report_fn(load_clin_msg)
-                    clinical_df = _read_clinical_dataframe(data_file)
-                    conn.register("_clinical_df", clinical_df)
-                    conn.execute(
-                        "CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM _clinical_df"
-                    )
-                else:
-                    _py_enc, duckdb_encoding, duckdb_sep = (
-                        _detect_csv_encoding_and_delimiter(data_file)
-                    )
-                    load_csv_msg = _(
-                        "Loading {} (encoding={}, sep='{}') into table {}...",
-                        data_file.name,
-                        duckdb_encoding,
-                        duckdb_sep,
-                        table_name,
-                    )
-                    logger.info(load_csv_msg)
-                    report_fn(load_csv_msg)
-
-                    # Create temp view to inspect columns
-                    conn.execute(
-                        f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sep='{duckdb_sep}', encoding='{duckdb_encoding}')"
-                    )
-                cols = conn.execute("DESCRIBE temp_view").fetchall()
-
-                select_exprs = []
-                seen_std_names = set()
-                for c in cols:
-                    orig_col = str(c[0])
-                    col_type = str(c[1]).upper() if len(c) > 1 else ""
-                    std_name = reverse_map.get(orig_col.lower(), orig_col)
-
-                    # Failsafe: avoid duplicate column names in the same table
-                    if std_name.lower() in seen_std_names:
-                        std_name = orig_col  # fallback to original if collision still happens somehow
-
-                    # If still duplicate (e.g. original name conflicts with a mapped name)
-                    counter = 1
-                    base_std_name = std_name
-                    while std_name.lower() in seen_std_names:
-                        counter += 1
-                        std_name = f"{base_std_name}_{counter}"
-
-                    seen_std_names.add(std_name.lower())
-
-                    escaped_orig = escape_sql_identifier(orig_col)
-                    escaped_std = escape_sql_identifier(std_name)
-                    col_expr = f'"{escaped_orig}"'
-                    if (
-                        std_name.lower() in _NUMERIC_CLINICAL_CONCEPTS
-                        and "CHAR" in col_type
-                    ):
-                        col_expr = (
-                            f"TRY_CAST(NULLIF(TRIM(\"{escaped_orig}\"), '') AS DOUBLE)"
-                        )
-                    if std_name != orig_col or col_expr != f'"{escaped_orig}"':
-                        select_exprs.append(f'{col_expr} AS "{escaped_std}"')
-                    else:
-                        select_exprs.append(f'"{escaped_orig}"')
-
-                nl = chr(10)
-                select_sql = f",{nl}                ".join(select_exprs)
-                escaped_table = escape_sql_identifier(table_name)
-
-                query = (
-                    f'CREATE TABLE "{escaped_table}" AS SELECT {nl}'
-                    f"                {select_sql} {nl}"
-                    f"            FROM temp_view"
-                )
-                conn.execute(query)
-                conn.execute("DROP VIEW temp_view")
-                if is_clinical:
-                    conn.unregister("_clinical_df")
-
-                escaped_source = current_source.replace("'", "''")
-                conn.execute(
-                    f"COMMENT ON TABLE \"{escaped_table}\" IS '{escaped_source}'"
-                )
-
-                row_count_res = conn.execute(
-                    f'SELECT COUNT(*) FROM "{escaped_table}"'
-                ).fetchone()
-                row_count = row_count_res[0] if row_count_res else 0
-                file_size = data_file.stat().st_size
-                conn.execute(
-                    "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR table_name = ?",
-                    [current_source, table_name],
-                )
-                conn.execute(
-                    "INSERT INTO _t1d_ingestion_manifest VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
-                    [current_source, table_name, current_hash, row_count, file_size],
-                )
-
-                loaded_tables.append(table_name)
-            except Exception as e:
-                err_load = _("Failed to load {}: {}", data_file.name, e)
-                logger.error(err_load)
-                report_fn(err_load)
 
         if loaded_tables:
             pop_msg = _(

@@ -153,9 +153,14 @@ def test_main_full_success() -> None:
             side_effect=lambda name, *args, **kwargs: f"/usr/bin/{name}",
         ),
         patch("scripts.run_tests.run_cmd") as mock_rc,
-        patch("os.makedirs"),
-        patch("os.path.exists", side_effect=lambda p: p == "ci_test.duckdb"),
-        patch("os.remove") as mock_remove,
+        patch.object(Path, "mkdir"),
+        patch.object(
+            Path,
+            "exists",
+            autospec=True,
+            side_effect=lambda self_p: str(self_p) == "ci_test.duckdb",
+        ),
+        patch.object(Path, "unlink") as mock_unlink,
         patch("subprocess.Popen") as mock_popen,
         patch("subprocess.run") as mock_run,
         patch("urllib.request.urlopen") as mock_urlopen,
@@ -199,7 +204,7 @@ def test_main_full_success() -> None:
             main()
 
         assert mock_rc.call_count >= 5
-        mock_remove.assert_called_once_with("ci_test.duckdb")
+        mock_unlink.assert_called_once()
         assert mock_proc_backend.terminate.called
         assert mock_proc_frontend.terminate.called
 

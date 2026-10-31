@@ -39,7 +39,7 @@ def parse_lcov_files(
     )
     for lcov_file in lcov_paths:
         try:
-            with open(lcov_file, "r") as f:
+            with open(lcov_file, "r", encoding="utf-8") as f:
                 current_file: str = ""
                 for line in f:
                     line = line.strip()
@@ -57,11 +57,17 @@ def parse_lcov_files(
     return cov_data
 
 
+class _UrlOpenResultProtocol:
+    """Marker protocol for `urlopen_fn` return values in `wait_for_service_ready`."""
+
+
 def wait_for_service_ready(
     url: str,
     max_attempts: int = 30,
     sleep_seconds: float = 1.0,
-    urlopen_fn: Callable[..., object] = urllib.request.urlopen,
+    urlopen_fn: Callable[
+        ..., Union[_UrlOpenResultProtocol, str, bytes, None]
+    ] = urllib.request.urlopen,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> bool:
     """
@@ -102,7 +108,7 @@ def extract_pytest_coverage_percent(coverage_json_path: Union[str, Path]) -> int
         int: Integer coverage percentage (0–100).
 
     """
-    with open(coverage_json_path) as f:
+    with open(coverage_json_path, encoding="utf-8") as f:
         data = json.load(f)
         return int(float(data["totals"]["percent_covered"]))
 
@@ -262,9 +268,9 @@ def main() -> None:
     print("Running web install and build...")
     npm_cmd = shutil.which("npm") or "npm"
     env = os.environ.copy()
-    python_bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+    python_bin_dir = str(Path(sys.executable).resolve().parent)
     env["PATH"] = f"{python_bin_dir}{os.pathsep}{env.get('PATH', '')}"
-    env["PYTHONPATH"] = os.path.abspath(os.path.join("t1d-analytics-backend", "src"))
+    env["PYTHONPATH"] = str((Path("t1d-analytics-backend") / "src").resolve())
 
     pytest_cmd = shutil.which("pytest", path=env["PATH"]) or "pytest"
     cmds = build_test_commands(npm_cmd=npm_cmd, pytest_cmd=pytest_cmd)
@@ -282,17 +288,23 @@ def main() -> None:
     run_cmd(list(cmds["web_coverage"]), cwd="t1d-analytics-web")
 
     print("Running e2e tests...")
-    os.makedirs("t1d-analytics-backend/tests/test_data", exist_ok=True)
+    shutil.rmtree(Path("t1d-analytics-web") / ".nyc_output", ignore_errors=True)
+    Path("t1d-analytics-backend/tests/test_data").mkdir(parents=True, exist_ok=True)
 
-    with open("t1d-analytics-backend/tests/test_data/patients.csv", "w") as f:
+    with open(
+        "t1d-analytics-backend/tests/test_data/patients.csv", "w", encoding="utf-8"
+    ) as f:
         f.write("id,name,age\n1,Alice,30\n2,Bob,40\n")
 
-    with open("t1d-analytics-backend/tests/test_data/tiny.csv", "w") as f:
+    with open(
+        "t1d-analytics-backend/tests/test_data/tiny.csv", "w", encoding="utf-8"
+    ) as f:
         f.write("id,name,value\n1,Test A,100\n2,Test B,200\n")
 
     for db_artifact in ("ci_test.duckdb", "ci_test.duckdb.wal"):
-        if os.path.exists(db_artifact):
-            os.remove(db_artifact)
+        db_p = Path(db_artifact)
+        if db_p.exists():
+            db_p.unlink()
 
     system_python = sys.executable
     run_cmd(
@@ -377,15 +389,15 @@ def main() -> None:
         sys.exit(coverage_result.returncode)
 
     print("Merging coverage...")
-    lcov_files = [
+    lcov_files: Sequence[Union[str, Path]] = [
         "coverage.lcov",
-        os.path.join("t1d-analytics-web", "coverage", "lcov.info"),
-        os.path.join("t1d-analytics-web", "coverage", "e2e", "lcov.info"),
+        Path("t1d-analytics-web") / "coverage" / "lcov.info",
+        Path("t1d-analytics-web") / "coverage" / "e2e" / "lcov.info",
     ]
     cov_data = parse_lcov_files(lcov_files)
 
     total_found, total_hit, combined_lcov_text = compute_combined_coverage(cov_data)
-    with open("combined-coverage.lcov", "w") as out:
+    with open("combined-coverage.lcov", "w", encoding="utf-8") as out:
         out.write(combined_lcov_text)
 
     if total_found == 0:
@@ -419,7 +431,7 @@ def main() -> None:
         sys.exit(1)
 
     readme_path = "README.md"
-    with open(readme_path, "r") as f:
+    with open(readme_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     updated_content, license_found = update_readme_badges(
@@ -430,7 +442,7 @@ def main() -> None:
     if not license_found:
         print("License shield not found in README.md")
 
-    with open(readme_path, "w") as f:
+    with open(readme_path, "w", encoding="utf-8") as f:
         f.write(updated_content)
 
     print("Pre-commit checks passed successfully!")

@@ -82,6 +82,22 @@ def escape_sql_identifier(identifier: str) -> str:
     return identifier.replace('"', '""')
 
 
+def escape_sql_literal(literal: str) -> str:
+    """
+    Escape single quotes inside a SQL string literal for safe ANSI single-quoted interpolation.
+
+    Args:
+    ----
+        literal: Raw string value to embed inside single quotes.
+
+    Returns:
+    -------
+        str: Escaped string value with internal single quotes doubled.
+
+    """
+    return literal.replace("'", "''")
+
+
 def normalize_sql(sql: str) -> str:
     """
     Normalize a SQL query string for exact-match comparison.
@@ -150,6 +166,9 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
     return _NUMERIC_AGG_RE.sub(_replace_match, query)
 
 
+rewrite_varchar_numeric_aggregates = coerce_numeric_aggregates_in_sql
+
+
 def strip_sql_comments_and_parens(query: str) -> str:
     """
     Strip SQL line/block comments (including nested block comments) and outer parentheses from a query string.
@@ -194,6 +213,8 @@ _FORBIDDEN_WRITE_STATEMENT_RE = re.compile(
     r"READ_PARQUET\s*\(|"
     r"READ_JSON(?:_AUTO)?\s*\(|"
     r"READ_TEXT\s*\(|"
+    r"READ_BLOB\s*\(|"
+    r"GLOB\s*\(|"
     r"SNIFF_CSV\s*\(|"
     r"POSTGRES_SCAN\s*\(|"
     r"SQLITE_SCAN\s*\("
@@ -467,17 +488,99 @@ def sanitize_spreadsheet_cell(val: SqlRawInputValue) -> SqlValue:
     if isinstance(val, (int, float, bool)):
         return val
     s_val = str(val)
-    if s_val and s_val[0] in ("=", "+", "-", "@", chr(9), chr(13)):
+    if not s_val:
+        return s_val
+    first_char = s_val[0]
+    stripped_leading = s_val.lstrip(" ")
+    trigger_char = stripped_leading[0] if stripped_leading else ""
+    if first_char in (chr(9), chr(13), chr(10)) or trigger_char in (
+        "=",
+        "+",
+        "-",
+        "@",
+        chr(9),
+        chr(13),
+        chr(10),
+    ):
         is_numeric = False
-        if s_val[0] in ("+", "-"):
+        if trigger_char in ("+", "-"):
             try:
-                float(s_val)
+                float(stripped_leading)
                 is_numeric = True
             except ValueError:
                 is_numeric = False
         if not is_numeric:
             s_val = f"'{s_val}"
     return s_val
+
+
+def _is_duckdb_lock_error(exc: duckdb.IOException) -> bool:
+    """
+    Determine whether a `duckdb.IOException` was caused by transient file lock contention.
+
+    Args:
+    ----
+        exc: The DuckDB I/O exception to inspect.
+
+    Returns:
+    -------
+        bool: True if the error indicates file lock contention, False otherwise.
+
+    """
+    err_msg = str(exc).lower()
+    return (
+        "lock" in err_msg
+        or "conflicting" in err_msg
+        or "resource temporarily unavailable" in err_msg
+    )
+
+
+@contextmanager
+def connect_duckdb_with_retry(
+    db_path: Union[str, Path],
+    read_only: bool = True,
+    max_attempts: int = 5,
+    base_delay_seconds: float = 0.05,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    """
+    Acquire a DuckDB connection with retry backoff on lock contention and close on context exit.
+
+    Connection acquisition is strictly separated from the `yield` block so that exceptions
+    raised inside the caller's `with` body never trigger generator re-entry errors.
+
+    Args:
+    ----
+        db_path: Path to the DuckDB database file.
+        read_only: Whether to open the database in read-only mode.
+        max_attempts: Maximum number of connection attempts on lock contention.
+        base_delay_seconds: Initial backoff delay in seconds.
+        sleep_fn: Injectable sleep callable for backoff delays.
+
+    Yields:
+    ------
+        duckdb.DuckDBPyConnection: Open DuckDB connection guaranteed to close on exit.
+
+    Raises:
+    ------
+        duckdb.IOException: If a non-lock I/O error occurs or lock retries are exhausted.
+
+    """
+    attempt = 0
+    while True:
+        try:
+            conn = duckdb.connect(str(db_path), read_only=read_only)
+            break
+        except duckdb.IOException as e:
+            if not _is_duckdb_lock_error(e) or attempt >= max_attempts - 1:
+                raise
+            sleep_fn(base_delay_seconds * (attempt + 1))
+            attempt += 1
+
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @contextmanager
@@ -537,6 +640,39 @@ def is_internal_table(table_name: str, exclude_training_tables: bool = True) -> 
     )
 
 
+def extract_table_columns_map(
+    conn: duckdb.DuckDBPyConnection,
+    exclude_internal: bool = False,
+    exclude_training_tables: bool = False,
+) -> dict[str, list[tuple[str, str]]]:
+    """
+    Extract ordered `(column_name, column_type)` tuples per table from an active DuckDB connection.
+
+    Args:
+    ----
+        conn: Active DuckDB connection.
+        exclude_internal: Whether to exclude `_t1d_` internal tables.
+        exclude_training_tables: Whether to also exclude `chat_sessions` and training tables.
+
+    Returns:
+    -------
+        dict[str, list[tuple[str, str]]]: Mapping from table name to list of `(column_name, column_type)` pairs.
+
+    """
+    result: dict[str, list[tuple[str, str]]] = {}
+    tables = conn.execute("SHOW TABLES").fetchall()
+    for row in tables:
+        table_name = str(row[0])
+        if (exclude_internal or exclude_training_tables) and is_internal_table(
+            table_name, exclude_training_tables=exclude_training_tables
+        ):
+            continue
+        escaped_name = escape_sql_identifier(table_name)
+        columns = conn.execute(f'DESCRIBE "{escaped_name}"').fetchall()
+        result[table_name] = [(str(col[0]), str(col[1])) for col in columns]
+    return result
+
+
 def extract_table_schemas(
     conn: duckdb.DuckDBPyConnection,
     exclude_training_tables: bool = True,
@@ -555,18 +691,15 @@ def extract_table_schemas(
 
     """
     schema: dict[str, str] = {}
-    tables = conn.execute("SHOW TABLES").fetchall()
-    for row in tables:
-        table_name = str(row[0])
-        if is_internal_table(
-            table_name, exclude_training_tables=exclude_training_tables
-        ):
-            continue
-        escaped_name = escape_sql_identifier(table_name)
-        columns = conn.execute(f'DESCRIBE "{escaped_name}"').fetchall()
+    cols_map = extract_table_columns_map(
+        conn,
+        exclude_internal=True,
+        exclude_training_tables=exclude_training_tables,
+    )
+    for table_name, columns in cols_map.items():
         schema_desc = f"Table: {table_name}\nColumns:\n"
-        for col in columns:
-            schema_desc += f"- {col[0]} ({col[1]})\n"
+        for col_name, col_type in columns:
+            schema_desc += f"- {col_name} ({col_type})\n"
         schema[table_name] = schema_desc
     return schema
 

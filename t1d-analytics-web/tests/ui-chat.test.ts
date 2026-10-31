@@ -38,7 +38,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
   });
 
   afterEach(() => {
-    ui.destroy();
+    ui.dispose();
     localStorage.clear();
     document.body.innerHTML = "";
     vi.restoreAllMocks();
@@ -420,7 +420,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     );
     expect(document.activeElement).toBe(items[2]);
 
-    ui["closeAllDropdowns"]();
+    ui.sidebarController.closeAllDropdowns();
     dropdownBtn.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "ArrowUp",
@@ -488,13 +488,13 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     const orphanMenu = document.createElement("div");
     orphanMenu.className = "dropdown-menu show";
     document.body.appendChild(orphanMenu);
-    ui["closeAllDropdowns"]();
+    ui.sidebarController.closeAllDropdowns();
     expect(orphanMenu.classList.contains("show")).toBe(false);
     orphanMenu.remove();
   });
 
   it("handles hashchange, document.title, chips, theme toggle, language switch, and Enter submission", async () => {
-    ui["renderMessages"]();
+    ui.messageRenderer.renderActiveChat();
     expect(document.getElementById("messages-container")?.innerHTML).toContain(
       "Select or create a chat to begin.",
     );
@@ -548,8 +548,26 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(document.body.classList.contains("light-mode")).toBe(false);
     themeBtn.click();
     expect(document.body.classList.contains("light-mode")).toBe(true);
-    themeBtn.click();
+    expect(localStorage.getItem("t1d_theme")).toBe("light");
+
+    // Re-instantiating ChatUI hydrates light theme and initial window.location.hash
+    window.location.hash = `#${chat2.id}`;
+    const lightUi = new ChatUI(state);
+    expect(document.body.classList.contains("light-mode")).toBe(true);
+    expect(state.activeChatId).toBe(chat2.id);
+    lightUi.dispose();
+
+    const freshThemeBtn = getTestElement<HTMLButtonElement>("theme-toggle-btn");
+    localStorage.setItem("t1d_theme", "dark");
+    state.setActiveChat(chat1.id);
+    window.location.hash = "";
+    const darkUi = new ChatUI(state);
     expect(document.body.classList.contains("light-mode")).toBe(false);
+    freshThemeBtn.click();
+    expect(document.body.classList.contains("light-mode")).toBe(true);
+    freshThemeBtn.click();
+    expect(document.body.classList.contains("light-mode")).toBe(false);
+    ui = darkUi;
 
     let submitted = false;
     const form = getTestElement<HTMLFormElement>("chat-form");
@@ -582,20 +600,13 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(renderSpy).toHaveBeenCalled();
     expect(document.documentElement.lang).toBe("ja");
 
-    // Language switch while table modal is open (with and without modal-title)
+    // Language switch while table modal is open
     const tableModal = getTestElement("table-modal");
-    tableModal.removeAttribute("aria-hidden");
-    ui["currentTable"] = "patients";
+    tableModal.setAttribute("aria-hidden", "false");
+    ui.tableModalController.currentTable = "patients";
     langSelect.value = "en";
     langSelect.dispatchEvent(new Event("change"));
     await flushPromises();
-
-    const modalTitle = document.getElementById("modal-title");
-    modalTitle?.remove();
-    langSelect.value = "ja";
-    langSelect.dispatchEvent(new Event("change"));
-    await flushPromises();
-    if (modalTitle) tableModal.prepend(modalTitle);
     tableModal.setAttribute("aria-hidden", "true");
 
     await i18next.changeLanguage("en");
@@ -613,7 +624,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     };
     Reflect.deleteProperty(cgmMsg, "content");
     chat1.messages.push(cgmMsg);
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     expect(document.querySelector(".cgm-analytics-card")).not.toBeNull();
   });
 
@@ -621,7 +632,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     mockFetch.mockImplementationOnce(async () => {
       throw new Error("Network Error");
     });
-    await ui["loadSchema"]();
+    await ui.schemaExplorerController.loadSchema();
     expect(document.getElementById("schema-content")?.innerHTML).toContain(
       "error-text",
     );
@@ -630,19 +641,19 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       ok: true,
       json: () => Promise.resolve({ tables: [] }),
     });
-    await ui["loadSchema"]();
+    await ui.schemaExplorerController.loadSchema();
     expect(document.getElementById("schema-content")?.innerHTML).toContain(
       "No tables found",
     );
 
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-    await ui["loadSchema"]();
+    await ui.schemaExplorerController.loadSchema();
     expect(document.getElementById("schema-content")?.innerHTML).toContain(
       "error-text",
     );
 
     mockFetch.mockRejectedValueOnce(new Error("Network Error"));
-    await ui["loadModels"]();
+    await ui.modelSelectorController.loadModels();
 
     const chat = state.createChat();
     chat.model = "missing_model";
@@ -651,8 +662,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       ok: true,
       json: () => Promise.resolve({ models: [{ name: "gemma4" }] }),
     });
-    await ui["loadModels"]();
-    expect(ui["modelSelect"].value).toBe("gemma4");
+    await ui.modelSelectorController.loadModels();
+    expect(ui.modelSelect.value).toBe("gemma4");
 
     // Unconfigured cloud model when chat is empty -> falls back to "sql"
     chat.model = "missing_model";
@@ -671,8 +682,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           ],
         }),
     });
-    await ui["loadModels"]();
-    expect(ui["modelSelect"].value).toBe("sql");
+    await ui.modelSelectorController.loadModels();
+    expect(ui.modelSelect.value).toBe("sql");
     expect(chat.model).toBe("sql");
 
     // Unconfigured cloud model when chat has messages -> falls back to modelsList[0].name
@@ -692,8 +703,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           ],
         }),
     });
-    await ui["loadModels"]();
-    expect(ui["modelSelect"].value).toBe("openai/gpt-4o");
+    await ui.modelSelectorController.loadModels();
+    expect(ui.modelSelect.value).toBe("openai/gpt-4o");
 
     // Unconfigured cloud model on server but localStorage key exists -> treated as ready
     state.setApiKey("openai", "sk-test");
@@ -719,8 +730,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           ],
         }),
     });
-    await ui["loadModels"]();
-    expect(ui["modelSelect"].value).toBe("openai/gpt-4o");
+    await ui.modelSelectorController.loadModels();
+    expect(ui.modelSelect.value).toBe("openai/gpt-4o");
     state.removeApiKey("openai");
 
     // Unconfigured local model without slash when no API key is set
@@ -740,8 +751,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           ],
         }),
     });
-    await ui["loadModels"]();
-    expect(ui["modelSelect"].value).toBe("sql");
+    await ui.modelSelectorController.loadModels();
+    expect(ui.modelSelect.value).toBe("sql");
 
     // Empty modelsList when chat.model is not in options -> falls back to "sql"
     chat.model = "missing_model";
@@ -749,19 +760,19 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       ok: true,
       json: () => Promise.resolve({ models: [] }),
     });
-    await ui["loadModels"]();
-    expect(ui["modelSelect"].value).toBe("sql");
+    await ui.modelSelectorController.loadModels();
+    expect(ui.modelSelect.value).toBe("sql");
     expect(chat.model).toBe("sql");
 
     // renderActiveChat and NLP chip click when "gemma4" option is absent from #model-select
     chat.model = "gemma4";
     chat.messages = [];
     ui.render();
-    expect(ui["modelSelect"].value).toBe("sql");
+    expect(ui.modelSelect.value).toBe("sql");
     const nlpChipOffline =
       document.querySelectorAll<HTMLButtonElement>(".empty-state .chip")[4];
     nlpChipOffline?.click();
-    expect(ui["modelSelect"].value).toBe("sql");
+    expect(ui.modelSelect.value).toBe("sql");
     expect(chat.model).toBe("sql");
 
     chat.model = "gemma4";
@@ -770,8 +781,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       json: () =>
         Promise.resolve({ models: [{ name: "gemma4" }, { name: "other" }] }),
     });
-    await ui["loadModels"]();
-    expect(ui["modelSelect"].value).toBe("gemma4");
+    await ui.modelSelectorController.loadModels();
+    expect(ui.modelSelect.value).toBe("gemma4");
 
     // Table header expand/collapse and table view button
     mockFetch.mockResolvedValueOnce({
@@ -781,9 +792,10 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           tables: [
             { name: "users", columns: [{ name: "id", type: "INTEGER" }] },
           ],
+          database: { status_code: "healthy" },
         }),
     });
-    await ui["loadSchema"]();
+    await ui.schemaExplorerController.loadSchema();
 
     const toggleHeaderBtn = document.querySelector(
       ".schema-table-header-toggle",
@@ -830,14 +842,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       .getElementById("toggle-schema-btn")
       ?.dispatchEvent(new MouseEvent("click"));
     expect(explorer?.classList.contains("collapsed")).toBe(false);
-    ui2.destroy();
-
-    document.getElementById("schema-explorer")?.remove();
-    const sidebar = document.getElementById("sidebar");
-    if (sidebar) sidebar.id = "sidebar-renamed";
-    const ui3 = new ChatUI(state);
-    await ui3["loadSchema"]();
-    ui3.destroy();
+    ui2.dispose();
   });
 
   it("handles copy-sql-btn, play-sql-btn, and refresh button interactions", async () => {
@@ -857,7 +862,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       },
     ];
     state.activeChatId = "chat-1";
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
 
     vi.useFakeTimers();
     const writeTextMock = vi.fn().mockResolvedValue(undefined);
@@ -893,7 +898,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     chat.model = "sql";
     chat.messages.push({ role: "user", content: "SELECT 1" });
     state.setActiveChat(chat.id);
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
 
     const wrapper = document.querySelector(".sql-user-query-wrapper");
     expect(wrapper).not.toBeNull();
@@ -910,7 +915,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
 
     // Play SQL error from backend
     chat.messages = [{ role: "user", content: "SELECT 1" }];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ error: "backend.syntaxError" }),
@@ -921,7 +926,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
 
     // Play SQL no rows
     chat.messages = [{ role: "user", content: "SELECT 1" }];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ sqlResult: [] }),
@@ -934,7 +939,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
 
     // Play SQL multiple columns
     chat.messages = [{ role: "user", content: "SELECT 1" }];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ sqlResult: [{ a: 1, b: 2 }] }),
@@ -947,7 +952,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
 
     // Play SQL null scalar
     chat.messages = [{ role: "user", content: "SELECT NULL" }];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ sqlResult: [{ val: null }] }),
@@ -958,14 +963,14 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
 
     // Play SQL network Error & string rejection
     chat.messages = [{ role: "user", content: "SELECT 1" }];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     mockFetch.mockRejectedValueOnce(new Error("Network Error"));
     queryTestElement<HTMLButtonElement>(".play-sql-btn").click();
     await flushPromises();
     expect(state.getActiveChat()?.messages[1]?.isError).toBe(true);
 
     chat.messages = [{ role: "user", content: "SELECT 1" }];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     mockFetch.mockRejectedValueOnce("Network Error String");
     queryTestElement<HTMLButtonElement>(".play-sql-btn").click();
     await flushPromises();
@@ -983,7 +988,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
         model: "sql",
       },
     ];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     const getRefreshBtn = () =>
       queryTestElement<HTMLButtonElement>("button[aria-label='Refresh Query']");
 
@@ -1097,7 +1102,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       ok: true,
       json: () => Promise.resolve({ response: "hello", sql_query: "" }),
     });
-    await ui["handleSendMessage"]("override text");
+    await ui.handleSendMessage("override text");
     expect(input.value).toBe("some typed text");
 
     // Scalar result with non-empty content, empty content, and null value
@@ -1110,7 +1115,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           sqlResult: [{ count: 42 }],
         }),
     });
-    await ui["handleSendMessage"]("how many patients?");
+    await ui.handleSendMessage("how many patients?");
     expect(chat.messages[chat.messages.length - 1]?.content).toBe(
       "Generated SQL: **count:** 42",
     );
@@ -1124,7 +1129,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           sqlResult: [{ val: 99 }],
         }),
     });
-    await ui["handleSendMessage"]("SELECT 99");
+    await ui.handleSendMessage("SELECT 99");
     expect(chat.messages[chat.messages.length - 1]?.content).toBe("99");
 
     mockFetch.mockResolvedValueOnce({
@@ -1136,16 +1141,16 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
           sqlResult: [{ val: null }],
         }),
     });
-    await ui["handleSendMessage"]("SELECT NULL");
+    await ui.handleSendMessage("SELECT NULL");
     expect(chat.messages[chat.messages.length - 1]?.content).toBe("NULL");
   });
 
   it("handles SSE streaming toggle, stream consumption, and fallback to batch /api/chat", async () => {
     const streamBtn = getTestElement<HTMLButtonElement>("streaming-toggle-btn");
-    expect(ui["streamingEnabled"]).toBe(false);
+    expect(ui.streamingEnabled).toBe(false);
 
     streamBtn.click();
-    expect(ui["streamingEnabled"]).toBe(true);
+    expect(ui.streamingEnabled).toBe(true);
     expect(streamBtn.classList.contains("active")).toBe(true);
 
     const chat = state.createChat();
@@ -1206,7 +1211,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
         error: null,
       }),
     });
-    await ui["handleSendMessage"]("stream 500 fallback");
+    await ui.handleSendMessage("stream 500 fallback");
     expect(chat.messages[chat.messages.length - 1]?.content).toContain(
       "Fallback from 500 stream",
     );
@@ -1257,7 +1262,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
         }),
       },
     });
-    await ui["handleSendMessage"]("stream err");
+    await ui.handleSendMessage("stream err");
     expect(chat.messages[chat.messages.length - 1]?.isError).toBe(true);
 
     const streamScalarChunks = [
@@ -1283,7 +1288,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
         }),
       },
     });
-    await ui["handleSendMessage"]("stream scalar");
+    await ui.handleSendMessage("stream scalar");
     expect(chat.messages[chat.messages.length - 1]?.content).toContain(
       "**count:** 42",
     );
@@ -1311,7 +1316,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
         }),
       },
     });
-    await ui["handleSendMessage"]("stream null scalar");
+    await ui.handleSendMessage("stream null scalar");
     expect(chat.messages[chat.messages.length - 1]?.content).toBe("NULL");
 
     // Multi-event single chunk with double newline
@@ -1340,7 +1345,7 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
         }),
       },
     });
-    await ui["handleSendMessage"]("trailing buffer");
+    await ui.handleSendMessage("trailing buffer");
     expect(chat.messages[chat.messages.length - 1]?.content).toBe(
       "Trailing done",
     );
@@ -1372,7 +1377,7 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
         }),
       },
     });
-    await ui["handleSendMessage"]("stream token fallback");
+    await ui.handleSendMessage("stream token fallback");
     expect(chat.messages[chat.messages.length - 1]?.content).toBe(
       "Streamed text",
     );
@@ -1403,8 +1408,56 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
         }),
       },
     });
-    await ui["handleSendMessage"]("stream empty done");
+    await ui.handleSendMessage("stream empty done");
     expect(chat.messages[chat.messages.length - 1]?.content).toBe("");
+
+    // Stream without done event falls back to batch /api/chat
+    const incompleteStreamChunks = [
+      `data: {"event":"token","token":"partial"}\n\n`,
+    ];
+    let incompleteIdx = 0;
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => "text/event-stream" },
+      body: {
+        getReader: () => ({
+          read: vi.fn().mockImplementation(async () => {
+            if (incompleteIdx < incompleteStreamChunks.length) {
+              const val = new TextEncoder().encode(
+                incompleteStreamChunks[incompleteIdx++],
+              );
+              return { done: false, value: val };
+            }
+            return { done: true, value: undefined };
+          }),
+        }),
+      },
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: "Batch fallback after incomplete stream",
+        error: { error_code: "custom.untranslated_code", params: { k: "v" } },
+      }),
+    });
+    await ui.handleSendMessage("incomplete stream fallback");
+    expect(chat.messages[chat.messages.length - 1]?.content).toContain(
+      "custom.untranslated_code",
+    );
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: { get: () => "application/json" },
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: "Batch after non-sse header",
+        error: 404,
+      }),
+    });
+    await ui.handleSendMessage("non-sse header fallback");
+    expect(chat.messages[chat.messages.length - 1]?.content).toContain("404");
 
     // Direct consumeSseChatStream unit coverage for non-object JSON and empty token
     const nonObjChunks = [
@@ -1430,7 +1483,7 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     expect(resNo.streamText).toBe("");
 
     streamBtn.click();
-    expect(ui["streamingEnabled"]).toBe(false);
+    expect(ui.streamingEnabled).toBe(false);
   });
 
   it("handles database switcher dropdown, session sync, and custom API key headers", async () => {
@@ -1448,7 +1501,7 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
         current_db: "t1d.duckdb",
       }),
     });
-    await ui.fetchDatabases();
+    await ui.schemaExplorerController.fetchDatabases();
 
     const dbSelect = getTestElement<HTMLSelectElement>("db-select");
     expect(dbSelect.options.length).toBe(2);
@@ -1463,16 +1516,16 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     expect(state.currentDb).toBe("cohort_2025.duckdb");
 
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-    await ui.fetchDatabases();
+    await ui.schemaExplorerController.fetchDatabases();
     mockFetch.mockRejectedValueOnce(new Error("DB list failed"));
-    await ui.fetchDatabases();
+    await ui.schemaExplorerController.fetchDatabases();
 
     state.setCurrentDb("");
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({}),
     });
-    await ui.fetchDatabases();
+    await ui.schemaExplorerController.fetchDatabases();
     expect(dbSelect.value).toBe("t1d.duckdb");
 
     state.setCurrentDb("custom_saved.duckdb");
@@ -1482,14 +1535,7 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
         databases: [],
       }),
     });
-    await ui.fetchDatabases();
-    expect(dbSelect.value).toBe("custom_saved.duckdb");
-
-    const origDbSelect = ui["dbSelect"];
-    ui["dbSelect"] = null;
-    await ui.fetchDatabases();
-    ui.renderDatabaseDropdown();
-    ui["dbSelect"] = origDbSelect;
+    await ui.schemaExplorerController.fetchDatabases();
 
     // Session sync
     state.chats = [];
@@ -1521,7 +1567,7 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
       ok: true,
       json: async () => ({ content: "No active chat reply" }),
     });
-    await ui["handleSendMessage"]("Hello without active chat");
+    await ui.handleSendMessage("Hello without active chat");
     expect(state.chats.length).toBe(0);
     state.createChat();
 
@@ -1530,7 +1576,7 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
       ok: true,
       json: async () => ({ content: "Synced reply", sessions: [] }),
     });
-    await ui["handleSendMessage"]("Test with sync");
+    await ui.handleSendMessage("Test with sync");
     state.setServerSyncEnabled(false);
 
     // Custom API key header injection for OpenAI, Anthropic, Google, and custom database payload
@@ -1542,58 +1588,58 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
       ok: true,
       json: async () => ({ content: "OpenAI reply" }),
     });
-    await ui["handleSendMessage"]("Hello", "openai/gpt-4o");
+    await ui.handleSendMessage("Hello", "openai/gpt-4o");
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: "Anthropic reply" }),
     });
-    await ui["handleSendMessage"]("Hello", "anthropic/claude-3-5-sonnet");
+    await ui.handleSendMessage("Hello", "anthropic/claude-3-5-sonnet");
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: "Google reply" }),
     });
-    await ui["handleSendMessage"]("Hello", "google/gemini-2.5-pro");
+    await ui.handleSendMessage("Hello", "google/gemini-2.5-pro");
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: null }),
     });
-    await ui["handleSendMessage"]("Hello", "gemma4");
+    await ui.handleSendMessage("Hello", "gemma4");
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: "Hello" }),
     });
-    await ui["handleSendMessage"]("Hi", "plainmodel");
+    await ui.handleSendMessage("Hi", "plainmodel");
 
     state.setCurrentDb("custom_clinical.duckdb");
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: "Hello custom db" }),
     });
-    await ui["handleSendMessage"]("Hi", "sql");
+    await ui.handleSendMessage("Hi", "sql");
 
     const triggerBtn = document.createElement("button");
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ sqlResult: [{ a: 1 }] }),
     });
-    await ui["executeDirectSqlAction"]("SELECT 1", triggerBtn);
+    await ui.messageRenderer.executeDirectSqlAction("SELECT 1", triggerBtn);
   });
 
   it("announces messages and sanitizes untrusted markdown HTML against XSS", async () => {
     vi.useFakeTimers();
 
-    // Null announcer guard
+    //Null announcer guard
     const announcer = document.getElementById("a11y-announcer");
     announcer?.remove();
-    ui["announce"]("Should not throw when announcer is missing");
+    ui.announce("Should not throw when announcer is missing");
     if (announcer) document.body.appendChild(announcer);
 
     // Assertive announcer branch
-    ui["announce"]("Critical error occurred", true);
+    ui.announce("Critical error occurred", true);
     await vi.advanceTimersByTimeAsync(60);
     expect(
       document.getElementById("a11y-announcer")?.getAttribute("aria-live"),

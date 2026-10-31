@@ -258,9 +258,15 @@ def test_validate_db_path_null_byte() -> None:
     assert exc_info.value.error_code == "backend.invalidDatabasePath"
 
 
-def test_validate_db_path_traversal() -> None:
-    """Test validate_db_path rejects paths outside allowed directory containment."""
+def test_validate_db_path_traversal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Test validate_db_path and validate_workspace_artifact_path reject paths outside allowed directories or invalid extensions."""
     from t1d_analytics.api import validate_db_path
+    from t1d_analytics.db_security import (
+        get_allowed_db_roots,
+        validate_workspace_artifact_path,
+    )
     from t1d_analytics.errors import InvalidDatabasePathError
 
     allowed = [Path("/mock/allowed/dir")]
@@ -268,6 +274,25 @@ def test_validate_db_path_traversal() -> None:
         validate_db_path("/etc/passwd", allowed_dirs=allowed)
     assert exc_info.value.status_code == 400
     assert exc_info.value.error_code == "backend.invalidDatabasePath"
+
+    # Reject non-.duckdb / non-.db files even inside an allowed directory
+    bad_ext = tmp_path / "secret.txt"
+    bad_ext.write_text("secret", encoding="utf-8")
+    with pytest.raises(InvalidDatabasePathError):
+        validate_db_path(str(bad_ext), allowed_dirs=[tmp_path])
+
+    # validate_workspace_artifact_path allows JSONL/directories inside allowed roots, rejects empty or traversal
+    valid_art = tmp_path / "train.jsonl"
+    assert validate_workspace_artifact_path(
+        str(valid_art), allowed_dirs=[tmp_path]
+    ) == str(valid_art.resolve())
+    with pytest.raises(InvalidDatabasePathError):
+        validate_workspace_artifact_path("   ", allowed_dirs=[tmp_path])
+
+    # T1D_ALLOWED_DB_DIR overrides default allowed roots
+    monkeypatch.setenv("T1D_ALLOWED_DB_DIR", str(tmp_path))
+    assert get_allowed_db_roots() == [tmp_path.resolve()]
+    monkeypatch.delenv("T1D_ALLOWED_DB_DIR", raising=False)
 
 
 def test_validate_db_path_env_var(
@@ -409,6 +434,9 @@ def test_get_providers_status_unprefixed_host_and_non_200(
 def test_debug_static_mount() -> None:
     """Test static mount behavior in debug mode."""
     import t1d_analytics.api
+
+    with patch.dict(os.environ, {}, clear=True):
+        t1d_analytics.api._setup_debug()
 
     with (
         patch.dict(os.environ, {"DEBUG": "1"}),

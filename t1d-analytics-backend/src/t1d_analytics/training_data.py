@@ -4,9 +4,7 @@ import csv
 import io
 import json
 import logging
-import os
 import re
-import urllib.error
 import urllib.request
 from pathlib import Path
 from types import TracebackType
@@ -25,21 +23,22 @@ import duckdb
 from pydantic import TypeAdapter
 from typing_extensions import TypedDict
 
-from t1d_analytics.errors import (
-    LlmProviderError,
-    MissingApiKeyError,
-    MissingSdkError,
-)
+from t1d_analytics.errors import LlmProviderError
 from t1d_analytics.llm_client import (
     PROVIDER_ENV_KEYS,
-    normalize_ollama_host,
+    create_any_llm_transport,
+    extract_stream_delta,
+    generate_ollama_json_completion,
+)
+from t1d_analytics.llm_client import (
+    validate_provider_readiness as validate_provider_readiness,
 )
 from t1d_analytics.sql_utils import (
     SqlValue,
     extract_table_schemas,
 )
 from t1d_analytics.sql_utils import (
-    normalize_sql as _shared_normalize_sql,
+    normalize_sql as normalize_sql,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,22 +74,6 @@ class TextToSqlEvalReportDict(TypedDict):
     results: List[EvalItemResultDict]
     markdown_report: str
     csv_report: str
-
-
-def normalize_sql(sql: str) -> str:
-    """
-    Normalize SQL query for exact-match comparison.
-
-    Args:
-    ----
-        sql: SQL query string.
-
-    Returns:
-    -------
-        str: Normalized query string.
-
-    """
-    return _shared_normalize_sql(sql)
 
 
 def _make_hashable(val: HashableInput) -> HashableResult:
@@ -162,39 +145,6 @@ def _parse_llm_json_array(content_str: str) -> Optional[list[SqlValue]]:
 
 
 PROVIDER_KEY_ENV_VARS: dict[str, str] = PROVIDER_ENV_KEYS
-
-
-def validate_provider_readiness(provider: str) -> None:
-    """
-    Validate that the requested LLM provider is available and properly configured.
-
-    Args:
-    ----
-        provider: Provider identifier (e.g. 'ollama', 'openai', 'anthropic', 'google').
-
-    Raises:
-    ------
-        RuntimeError: If dependencies or API credentials are missing.
-
-    """
-    prov = provider.lower()
-    if prov != "ollama":
-        try:
-            import any_llm
-
-            _ = any_llm
-        except ImportError as exc:
-            raise MissingSdkError(
-                f"Provider '{provider}' requires any-llm-sdk. Install with: pip install any-llm-sdk[{provider}]",
-                params={"provider": provider},
-            ) from exc
-        if prov in PROVIDER_KEY_ENV_VARS:
-            env_var = PROVIDER_KEY_ENV_VARS[prov]
-            if not os.environ.get(env_var):
-                raise MissingApiKeyError(
-                    f"Provider '{provider}' requires environment variable '{env_var}' to be set.",
-                    params={"provider": provider, "env_var": env_var},
-                )
 
 
 class TrainingDataGenerator:
@@ -272,16 +222,7 @@ class TrainingDataGenerator:
         """
         return extract_table_schemas(self.conn, exclude_training_tables=True)
 
-    def _extract_schema(self) -> dict[str, str]:
-        """
-        Extract the database schema using SHOW TABLES and DESCRIBE (alias for extract_schema).
-
-        Returns
-        -------
-            dict[str, str]: A dictionary mapping table names to their textual schema descriptions.
-
-        """
-        return self.extract_schema()
+    _extract_schema = extract_schema
 
     def build_generation_prompt(
         self,
@@ -346,7 +287,7 @@ class TrainingDataGenerator:
         custom_prompt_template: Optional[str] = None,
     ) -> list[tuple[str, str, str]]:
         """
-        Generate (prompt, chosen_sql, rejected_sql) pairs using the LLM.
+        Generate (prompt, chosen_sql, rejected_sql) pairs using the configured LLM transport.
 
         Args:
         ----
@@ -373,6 +314,62 @@ class TrainingDataGenerator:
             custom_prompt_template=custom_prompt_template,
         )
 
+    def _load_checkpoint_pairs(
+        self,
+        checkpoint_path: Optional[Path],
+    ) -> list[tuple[str, str, str]]:
+        """
+        Load previously generated `(prompt, chosen, rejected)` triples from a JSON checkpoint file.
+
+        Args:
+        ----
+            checkpoint_path: Optional path to checkpoint JSON file.
+
+        Returns:
+        -------
+            list[tuple[str, str, str]]: Loaded triples or empty list.
+
+        """
+        pairs: list[tuple[str, str, str]] = []
+        if checkpoint_path and checkpoint_path.exists():
+            try:
+                ckpt = json.loads(checkpoint_path.read_text())
+                if isinstance(ckpt, list):
+                    for item in ckpt:
+                        if isinstance(item, dict) and "prompt" in item:
+                            pairs.append(
+                                (item["prompt"], item["chosen"], item["rejected"])
+                            )
+            except Exception as e:
+                logger.warning(f"Could not load checkpoint from {checkpoint_path}: {e}")
+        return pairs
+
+    def _save_checkpoint_pairs(
+        self,
+        checkpoint_path: Optional[Path],
+        pairs: list[tuple[str, str, str]],
+    ) -> None:
+        """
+        Persist generated `(prompt, chosen, rejected)` triples to a JSON checkpoint file.
+
+        Args:
+        ----
+            checkpoint_path: Optional path to checkpoint JSON file.
+            pairs: Generated triples to save.
+
+        """
+        if not checkpoint_path:
+            return
+        try:
+            checkpoint_path.write_text(
+                json.dumps(
+                    [{"prompt": p, "chosen": c, "rejected": r} for p, c, r in pairs],
+                    indent=2,
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Could not write checkpoint: {e}")
+
     def _generate_pairs(
         self,
         schema: str,
@@ -384,7 +381,7 @@ class TrainingDataGenerator:
         custom_prompt_template: Optional[str] = None,
     ) -> list[tuple[str, str, str]]:
         """
-        Generate (prompt, chosen_sql, rejected_sql) pairs using the LLM.
+        Generate (prompt, chosen_sql, rejected_sql) pairs using the configured LLM transport.
 
         Args:
         ----
@@ -398,41 +395,26 @@ class TrainingDataGenerator:
 
         Returns:
         -------
-            A list of tuples, each containing:
-            - The natural language prompt
-            - The correct (chosen) SQL query
-            - The incorrect (rejected) SQL query
+            list[tuple[str, str, str]]: Generated (prompt, chosen_sql, rejected_sql) triples.
+
+        Raises:
+        ------
+            LlmProviderError: If initializing the cloud LLM transport fails for a non-Ollama provider.
 
         """
-        pairs: list[tuple[str, str, str]] = []
-        if checkpoint_path and checkpoint_path.exists():
-            try:
-                ckpt = json.loads(checkpoint_path.read_text())
-                if isinstance(ckpt, list):
-                    for item in ckpt:
-                        if isinstance(item, dict) and "prompt" in item:
-                            pairs.append(
-                                (item["prompt"], item["chosen"], item["rejected"])
-                            )
-                if len(pairs) >= count:
-                    return pairs[:count]
-            except Exception as e:
-                logger.warning(f"Could not load checkpoint from {checkpoint_path}: {e}")
-
-        base_url = normalize_ollama_host()
-        api_url = f"{base_url}/api/generate"
+        pairs = self._load_checkpoint_pairs(checkpoint_path)
+        if len(pairs) >= count:
+            return pairs[:count]
 
         use_any_llm = True
-        llm_instance = None
+        llm_transport = None
         try:
-            from any_llm import AnyLLM
-
-            llm_instance = AnyLLM.create(self.provider)
+            llm_transport = create_any_llm_transport(self.provider)
         except Exception as e:
-            logger.debug(f"Failed to create AnyLLM instance: {e}")
+            logger.debug(f"Failed to create AnyLLM transport: {e}")
             use_any_llm = False
 
-        if self.provider != "ollama" and (not use_any_llm or llm_instance is None):
+        if self.provider != "ollama" and (not use_any_llm or llm_transport is None):
             raise LlmProviderError(
                 f"Failed to initialize any-llm for provider '{self.provider}'",
                 params={"provider": self.provider},
@@ -450,41 +432,27 @@ class TrainingDataGenerator:
 
             parsed: Optional[list[SqlValue]] = None
 
-            if use_any_llm and llm_instance is not None:
+            if use_any_llm and llm_transport is not None:
                 try:
-                    resp = llm_instance.completion(
+                    resp = llm_transport.completion(
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=temperature,
-                        max_tokens=max_tokens,
                     )
-                    raw_choice = resp.choices[0].message.content
-                    content_str = (raw_choice or "").strip()
+                    content_str = extract_stream_delta(resp, self.provider).strip()
                     parsed = _parse_llm_json_array(content_str)
                 except Exception as e:
                     logger.warning(f"any-llm generation attempt {attempts} failed: {e}")
 
             if parsed is None and self.provider == "ollama":
-                data = {
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens,
-                    },
-                }
-                req = urllib.request.Request(
-                    api_url,
-                    data=json.dumps(data).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
                 try:
-                    with urllib.request.urlopen(req, timeout=30.0) as response:
-                        result = json.loads(response.read().decode("utf-8"))
-                        generated_text = result.get("response", "[]")
-                        parsed = _parse_llm_json_array(generated_text)
+                    generated_text = generate_ollama_json_completion(
+                        model=self.model,
+                        prompt=prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        urlopen_fn=urllib.request.urlopen,
+                    )
+                    parsed = _parse_llm_json_array(generated_text)
                 except Exception as e:
                     logger.warning(
                         f"Generation attempt {attempts} failed: {e}. Retrying..."
@@ -500,19 +468,7 @@ class TrainingDataGenerator:
                     logger.warning(f"Discarding pair with invalid chosen SQL: {chosen}")
                     continue
                 pairs.append((q, chosen, rej))
-                if checkpoint_path:
-                    try:
-                        checkpoint_path.write_text(
-                            json.dumps(
-                                [
-                                    {"prompt": p, "chosen": c, "rejected": r}
-                                    for p, c, r in pairs
-                                ],
-                                indent=2,
-                            )
-                        )
-                    except Exception as e:
-                        logger.warning(f"Could not write checkpoint: {e}")
+                self._save_checkpoint_pairs(checkpoint_path, pairs)
 
         return pairs
 
@@ -629,6 +585,35 @@ class TrainingDataGenerator:
         )
 
 
+def _execute_eval_sql(
+    conn: duckdb.DuckDBPyConnection,
+    sql_query: str,
+) -> tuple[Optional[list[tuple[SqlValue, ...]]], bool]:
+    """
+    Execute a SQL query on `conn` and return `(rows, had_execution_error)`.
+
+    Args:
+    ----
+        conn: Read-only DuckDB connection.
+        sql_query: SQL query to execute.
+
+    Returns:
+    -------
+        tuple[Optional[list[tuple[SqlValue, ...]]], bool]: `(fetched_rows, had_error)`.
+
+    """
+    if not sql_query:
+        return None, False
+    try:
+        return conn.execute(sql_query).fetchall(), False
+    except duckdb.Error as e:
+        logger.debug(f"Execution error for SQL '{sql_query}': {e}")
+        return None, True
+    except Exception as e:
+        logger.debug(f"Unexpected error for SQL '{sql_query}': {e}")
+        return None, True
+
+
 def evaluate_text_to_sql(
     db_path: str,
     test_data: list[dict[str, str]],
@@ -683,31 +668,12 @@ def evaluate_text_to_sql(
         if em:
             em_count += 1
 
+        pred_rows, syntax_err = _execute_eval_sql(conn, pred_sql)
+        if syntax_err:
+            syntax_error_count += 1
+        gold_rows, _ = _execute_eval_sql(conn, gold_sql)
+
         ex = False
-        syntax_err = False
-        try:
-            pred_rows = conn.execute(pred_sql).fetchall() if pred_sql else None
-        except duckdb.Error as e:
-            logger.debug(f"Execution error for predicted SQL '{pred_sql}': {e}")
-            pred_rows = None
-            syntax_err = True
-            syntax_error_count += 1
-        except Exception as e:
-            logger.debug(f"Unexpected error for predicted SQL '{pred_sql}': {e}")
-            pred_rows = None
-            syntax_err = True
-            syntax_error_count += 1
-
-        gold_rows = None
-        try:
-            gold_rows = conn.execute(gold_sql).fetchall() if gold_sql else None
-        except duckdb.Error as e:
-            logger.debug(f"Execution error for gold SQL '{gold_sql}': {e}")
-            gold_rows = None
-        except Exception as e:
-            logger.debug(f"Unexpected error for gold SQL '{gold_sql}': {e}")
-            gold_rows = None
-
         if pred_rows is not None and gold_rows is not None:
             if "order by" in gold_sql.lower() or "order by" in pred_sql.lower():
                 ex = pred_rows == gold_rows

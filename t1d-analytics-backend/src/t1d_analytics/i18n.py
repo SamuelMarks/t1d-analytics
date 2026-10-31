@@ -84,7 +84,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Loading {} (parquet) into table {}...": "{}（parquet）をテーブル{}に読み込み中...",
         "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "表形式のファイル（CSV、TXT、Parquet、GZ）をスキャン中...",
         "Skipping unsafe entry {} in {} (symlink detected).": "{}内の安全でないエントリ{}をスキップしています（シンボリックリンクが検出されました）。",
-        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "{}内の安全でないエントリ{}をスキップしています（シンボリックリンクまたはハードリンクが検出されました）。",
+        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "{} 内の安全でないエントリ {} をスキップしました（シンボリックリンクまたはハードリンクを検出）。",
+        "Skipping entry {} in {} (decompressed size quota exceeded).": "{} 内のエントリ {} をスキップしました（展開サイズの上限を超過）。",
     },
     "ar": {
         "An error occurred: {}": "حدث خطأ: {}",
@@ -163,7 +164,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Loading {} (parquet) into table {}...": "تحميل {} (parquet) إلى الجدول {}...",
         "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "جاري البحث عن ملفات الجداول (CSV, TXT, Parquet, GZ)...",
         "Skipping unsafe entry {} in {} (symlink detected).": "تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي).",
-        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي أو ثابت).",
+        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "تم تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي أو صلب).",
+        "Skipping entry {} in {} (decompressed size quota exceeded).": "تم تخطي الإدخال {} في {} (تم تجاوز حصة الحجم بعد فك الضغط).",
     },
     "he": {
         "An error occurred: {}": "אירעה שגיאה: {}",
@@ -242,7 +244,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Loading {} (parquet) into table {}...": "טוען {} (parquet) לטבלה {}...",
         "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "סורק קובצי נתונים טבלאיים (CSV, TXT, Parquet, GZ)...",
         "Skipping unsafe entry {} in {} (symlink detected).": "מדלג על רשומה לא בטוחה {} ב-{} (זוהה קישור סימבולי).",
-        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "מדלג על רשומה לא בטוחה {} ב-{} (זוהה קישור סימבולי או קשיח).",
+        "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "דילוג על רשומה לא בטוחה {} ב-{} (זוהה קישור סמלי או קשיח).",
+        "Skipping entry {} in {} (decompressed size quota exceeded).": "דילוג על רשומה {} ב-{} (חריגה ממכסת גודל הפריסה).",
     },
 }
 

@@ -22,4 +22,4 @@ if (appState.chats.length === 0) {
 
 /** Main application UI controller instance. */
 const ui = new ChatUI(appState);
-void ui.fetchDatabases?.();
+void ui.schemaExplorerController?.fetchDatabases();

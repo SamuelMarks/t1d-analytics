@@ -10,16 +10,20 @@ import duckdb
 import pytest
 
 from t1d_analytics.analytics import (
-    extract_zips,
     get_database_schema,
     handle_natural_language,
-    load_data_to_duckdb,
     run_query_repl,
+)
+from t1d_analytics.ingestion import (
+    extract_zips,
+    load_data_to_duckdb,
 )
 
 
-def test_extract_zips(tmp_path: Path) -> None:
-    """Test extracting zip files."""
+def test_extract_zips(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Test extracting zip and tar files including decompressed size quota enforcement."""
+    import tarfile
+
     zip_path = tmp_path / "test_data.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("test.csv", "id,name\n1,test")
@@ -27,6 +31,24 @@ def test_extract_zips(tmp_path: Path) -> None:
     extract_dir = tmp_path / "test_data"
     assert extract_dir.exists()
     assert (extract_dir / "test.csv").exists()
+
+    # Test zip and tar decompressed size quota exceeded
+    quota_dir = tmp_path / "quota_test"
+    quota_dir.mkdir()
+    big_zip = quota_dir / "big_zip.zip"
+    with zipfile.ZipFile(big_zip, "w") as zf:
+        zf.writestr("oversized.csv", "x" * 100)
+    big_tar = quota_dir / "big_tar.tar"
+    payload = b"y" * 100
+    with tarfile.open(big_tar, "w") as tf:
+        info = tarfile.TarInfo(name="oversized_tar.csv")
+        info.size = len(payload)
+        tf.addfile(info, io.BytesIO(payload))
+    extract_zips(str(quota_dir), max_decompressed_bytes=10)
+    out = capsys.readouterr().out
+    assert "decompressed size quota exceeded" in out
+    assert not (quota_dir / "big_zip" / "oversized.csv").exists()
+    assert not (quota_dir / "big_tar" / "oversized_tar.csv").exists()
 
 
 def test_extract_zips_bad_zip(
@@ -420,7 +442,7 @@ def test_extract_zips_already_extracted(tmp_path: Path) -> None:
     """Test extract_zips when the directory already exists."""
     import zipfile
 
-    from t1d_analytics.analytics import extract_zips
+    from t1d_analytics.ingestion import extract_zips
 
     zip_path = tmp_path / "data.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
@@ -438,7 +460,7 @@ def test_load_data_no_matches_file(tmp_path: Path, mocker: MagicMock) -> None:
     """Test load_data_to_duckdb when matches file does not exist."""
     import duckdb
 
-    from t1d_analytics.analytics import load_data_to_duckdb
+    from t1d_analytics.ingestion import load_data_to_duckdb
 
     mocker.patch(
         "pathlib.Path.exists",
@@ -532,7 +554,7 @@ def test_extract_zips_path_traversal_skipped(
 
 def test_is_sql_query() -> None:
     """Test is_sql_query classification logic."""
-    from t1d_analytics.analytics import is_sql_query
+    from t1d_analytics.sql_utils import is_sql_query
 
     assert is_sql_query("SELECT * FROM users")
     assert is_sql_query("WITH cte AS (SELECT 1) SELECT * FROM cte")
@@ -730,7 +752,7 @@ def test_load_data_to_duckdb_numeric_stem_and_root_collision(tmp_path: Path) -> 
 
 def test_is_sql_query_advanced_heuristics() -> None:
     """Test SQL vs Natural language heuristics including DuckDB shorthand and boundary keywords."""
-    from t1d_analytics.analytics import is_sql_query
+    from t1d_analytics.sql_utils import is_sql_query
 
     # Natural language beginning with SQL keywords
     assert not is_sql_query("Select patients with severe hypo events")
@@ -890,7 +912,7 @@ def test_load_data_to_duckdb_repeated_and_disambiguation(
 
 def test_is_sql_query_ddl_and_dml() -> None:
     """Test is_sql_query recognizes standard DDL and DML statements."""
-    from t1d_analytics.analytics import is_sql_query
+    from t1d_analytics.sql_utils import is_sql_query
 
     assert is_sql_query("CREATE TABLE test (id INT, name VARCHAR);")
     assert is_sql_query("DROP TABLE IF EXISTS test;")
@@ -904,7 +926,7 @@ def test_is_sql_query_ddl_and_dml() -> None:
 
 def test_is_sql_query_without_extract_statements() -> None:
     """Test is_sql_query fallback when extract_statements is absent on connection."""
-    from t1d_analytics.analytics import is_sql_query
+    from t1d_analytics.sql_utils import is_sql_query
 
     mock_conn = MagicMock(spec=["execute", "close"])
     mock_conn.execute.return_value = None
@@ -927,7 +949,7 @@ def test_extract_tar_and_nested_archives(
     """Test extracting .tar.gz, .tgz, .tar.bz2, and nested archives recursively."""
     import tarfile
 
-    from t1d_analytics.analytics import extract_zips
+    from t1d_analytics.ingestion import extract_zips
 
     # 1. Create a tar.gz archive
     tar_gz_path = tmp_path / "sample.tar.gz"
@@ -969,7 +991,7 @@ def test_extract_tar_path_traversal(
     """Test path traversal Zip Slip prevention in tar archives."""
     import tarfile
 
-    from t1d_analytics.analytics import extract_zips
+    from t1d_analytics.ingestion import extract_zips
 
     tar_path = tmp_path / "traversal.tar.gz"
     with tarfile.open(tar_path, "w:gz") as tar:
@@ -986,7 +1008,7 @@ def test_extract_bad_tar_archive(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Test handling corrupted tar archives."""
-    from t1d_analytics.analytics import extract_zips
+    from t1d_analytics.ingestion import extract_zips
 
     bad_tar = tmp_path / "corrupt.tar.gz"
     bad_tar.write_bytes(b"not a valid tar gzip stream")
@@ -1003,7 +1025,7 @@ def test_clinical_data_ingestion_and_manifest(
     import pandas as pd
     import pyreadstat
 
-    from t1d_analytics.analytics import get_ingestion_manifest, load_data_to_duckdb
+    from t1d_analytics.ingestion import get_ingestion_manifest, load_data_to_duckdb
 
     data_dir = tmp_path / "clinical_data"
     data_dir.mkdir()
@@ -1089,7 +1111,7 @@ def test_read_clinical_dataframe_edge_cases(tmp_path: Path, mocker: MagicMock) -
 
 def test_get_ingestion_manifest_edge_cases(tmp_path: Path) -> None:
     """Test get_ingestion_manifest with non-existent database or missing table."""
-    from t1d_analytics.analytics import get_ingestion_manifest
+    from t1d_analytics.ingestion import get_ingestion_manifest
 
     assert get_ingestion_manifest(str(tmp_path / "nonexistent.duckdb")) == []
 
@@ -1140,7 +1162,7 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
 
 def test_extract_zips_max_depth_loop_completion(tmp_path: Path) -> None:
     """Test that extract_zips terminates cleanly when max_depth iterations are exhausted."""
-    from t1d_analytics.analytics import extract_zips
+    from t1d_analytics.ingestion import extract_zips
 
     # Create a zip that produces a nested zip
     outer_zip = tmp_path / "depth_test.zip"
@@ -1155,7 +1177,7 @@ def test_extract_zips_max_depth_loop_completion(tmp_path: Path) -> None:
 def test_extract_sql_from_response_variations() -> None:
     """Test extract_sql_from_response under various LLM output formats."""
     # Non-string conversion
-    from t1d_analytics.analytics import extract_sql_from_response
+    from t1d_analytics.sql_utils import extract_sql_from_response
 
     assert extract_sql_from_response(12345) == "12345"
 
@@ -1178,7 +1200,7 @@ Hope this helps!"""
 
 def test_get_clinical_variable_mappings(mocker: MagicMock) -> None:
     """Test get_clinical_variable_mappings handling existing, missing, and malformed files."""
-    from t1d_analytics.analytics import get_clinical_variable_mappings
+    from t1d_analytics.ingestion import get_clinical_variable_mappings
 
     # Normal case
     mappings = get_clinical_variable_mappings()
@@ -1276,7 +1298,7 @@ def test_profile_table_no_numeric_columns(tmp_path: Path) -> None:
 
 def test_extract_sql_from_response_blocks_without_keywords() -> None:
     """Test extract_sql_from_response when code block has non-standard statement."""
-    from t1d_analytics.analytics import extract_sql_from_response
+    from t1d_analytics.sql_utils import extract_sql_from_response
 
     text = "```\nCREATE TABLE foo (a INT);\n```"
     assert extract_sql_from_response(text) == "CREATE TABLE foo (a INT);"
@@ -1314,7 +1336,7 @@ def test_extract_tar_symlink_and_hardlink_skipped(
     import io
     import tarfile
 
-    from t1d_analytics.analytics import extract_zips
+    from t1d_analytics.ingestion import extract_zips
 
     tar_path = tmp_path / "links.tar.gz"
     with tarfile.open(tar_path, "w:gz") as tar:
@@ -1349,7 +1371,7 @@ def test_extract_zip_symlink_skipped(
     """Test that zip archive entries with symlink attribute mode are skipped safely."""
     import zipfile
 
-    from t1d_analytics.analytics import extract_zips
+    from t1d_analytics.ingestion import extract_zips
 
     zip_path = tmp_path / "symlink.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
@@ -1372,7 +1394,7 @@ def test_is_sql_query_fallback_side_effect_free() -> None:
     """Test is_sql_query fallback logic when extract_statements is absent on custom connection."""
     from unittest.mock import MagicMock
 
-    from t1d_analytics.analytics import is_sql_query
+    from t1d_analytics.sql_utils import is_sql_query
 
     mock_conn = MagicMock(spec=[])
     assert is_sql_query("CHECKPOINT", conn=mock_conn)
@@ -1537,7 +1559,7 @@ def test_load_data_to_duckdb_legacy_latin1_encoding(tmp_path: Path) -> None:
     """Test load_data_to_duckdb detects and ingests legacy Latin-1 / Windows-1252 encoded CSVs."""
     import duckdb
 
-    from t1d_analytics.analytics import load_data_to_duckdb
+    from t1d_analytics.ingestion import load_data_to_duckdb
 
     data_dir = tmp_path / "latin1_data"
     data_dir.mkdir()

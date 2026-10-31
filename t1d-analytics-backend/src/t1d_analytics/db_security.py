@@ -8,6 +8,8 @@ from typing import List, Optional
 from t1d_analytics.api_schemas import DatabaseItem, DatabaseListResponse
 from t1d_analytics.errors import InvalidDatabasePathError
 
+ALLOWED_DB_EXTENSIONS = (".duckdb", ".db")
+
 
 def get_allowed_db_roots() -> List[Path]:
     """
@@ -18,6 +20,10 @@ def get_allowed_db_roots() -> List[Path]:
         List[Path]: Resolved allowed directory Paths.
 
     """
+    allowed_env = os.environ.get("T1D_ALLOWED_DB_DIR")
+    if allowed_env:
+        return [Path(allowed_env).resolve()]
+
     cwd = Path.cwd().resolve()
     sys_tmp = Path(tempfile.gettempdir()).resolve()
     allowed_dirs = [
@@ -36,25 +42,17 @@ def get_allowed_db_roots() -> List[Path]:
 get_allowed_db_dirs = get_allowed_db_roots
 
 
-def validate_db_path(
-    db_path: Optional[str] = None,
-    allowed_dirs: Optional[List[Path]] = None,
-) -> str:
+def resolve_default_db_path(db_path: Optional[str] = None) -> str:
     """
-    Validate and resolve a database path against allowed directory containment.
+    Resolve the target DuckDB database path from an explicit argument, `T1D_DB_PATH`, or `data/t1d.duckdb`.
 
     Args:
     ----
-        db_path: The requested database file path, or None for default.
-        allowed_dirs: Optional list of allowed directory roots.
+        db_path: Optional explicit database file path.
 
     Returns:
     -------
-        str: Validated string path to the database file.
-
-    Raises:
-    ------
-        InvalidDatabasePathError: If the path traverses outside allowed boundaries or contains null bytes.
+        str: Resolved candidate path string prior to directory sandboxing.
 
     """
     raw_path = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
@@ -64,7 +62,30 @@ def validate_db_path(
             raw_path = env_db_fallback
         elif not env_db_fallback and Path("data/t1d.duckdb").exists():
             raw_path = "data/t1d.duckdb"
+    return raw_path
 
+
+def _resolve_contained_path(
+    raw_path: str,
+    allowed_dirs: Optional[List[Path]] = None,
+) -> Path:
+    """
+    Validate that `raw_path` contains no null bytes and resolves inside an allowed root directory.
+
+    Args:
+    ----
+        raw_path: Unvalidated path string.
+        allowed_dirs: Optional list of allowed directory roots.
+
+    Returns:
+    -------
+        Path: Resolved filesystem Path within an allowed root.
+
+    Raises:
+    ------
+        InvalidDatabasePathError: If the path contains null bytes or traverses outside allowed roots.
+
+    """
     if "\0" in raw_path:
         raise InvalidDatabasePathError(
             params={"path": raw_path},
@@ -89,6 +110,67 @@ def validate_db_path(
             params={"path": str(raw_path)},
         )
 
+    return resolved_path
+
+
+def validate_db_path(
+    db_path: Optional[str] = None,
+    allowed_dirs: Optional[List[Path]] = None,
+) -> str:
+    """
+    Validate and resolve a DuckDB database path against allowed directory containment and `.duckdb`/`.db` extensions.
+
+    Args:
+    ----
+        db_path: The requested database file path, or None for default.
+        allowed_dirs: Optional list of allowed directory roots.
+
+    Returns:
+    -------
+        str: Validated string path to the database file.
+
+    Raises:
+    ------
+        InvalidDatabasePathError: If the path traverses outside allowed boundaries, contains null bytes,
+            or does not end with `.duckdb` or `.db`.
+
+    """
+    raw_path = resolve_default_db_path(db_path)
+    resolved_path = _resolve_contained_path(raw_path, allowed_dirs=allowed_dirs)
+    if resolved_path.suffix.lower() not in ALLOWED_DB_EXTENSIONS:
+        raise InvalidDatabasePathError(
+            params={"path": str(raw_path)},
+        )
+    return str(resolved_path)
+
+
+def validate_workspace_artifact_path(
+    artifact_path: str,
+    allowed_dirs: Optional[List[Path]] = None,
+) -> str:
+    """
+    Validate and resolve a training dataset or checkpoint directory path against allowed directory containment.
+
+    Args:
+    ----
+        artifact_path: The requested dataset file or output directory path.
+        allowed_dirs: Optional list of allowed directory roots.
+
+    Returns:
+    -------
+        str: Validated string path to the workspace artifact.
+
+    Raises:
+    ------
+        InvalidDatabasePathError: If the path is empty, contains null bytes, or traverses outside allowed roots.
+
+    """
+    cleaned = artifact_path.strip()
+    if not cleaned:
+        raise InvalidDatabasePathError(
+            params={"path": artifact_path},
+        )
+    resolved_path = _resolve_contained_path(cleaned, allowed_dirs=allowed_dirs)
     return str(resolved_path)
 
 
@@ -101,19 +183,13 @@ def discover_workspace_databases() -> DatabaseListResponse:
         DatabaseListResponse: Found database items and current default path.
 
     """
-    default_db = os.environ.get("T1D_DB_PATH", "t1d.duckdb")
-    if (
-        default_db == "t1d.duckdb"
-        and not Path(default_db).exists()
-        and Path("data/t1d.duckdb").exists()
-    ):
-        default_db = "data/t1d.duckdb"
+    default_db = resolve_default_db_path()
     all_files: List[Path] = []
     if default_db:
         p_def = Path(default_db)
         if p_def.exists():
             all_files.append(p_def)
-    for s_dir in (Path("."), Path("./data")):
+    for s_dir in (Path(), Path("./data")):
         if s_dir.exists():
             all_files.extend(
                 p

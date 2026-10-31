@@ -6,7 +6,11 @@ from typing import Callable, Dict, List
 
 import duckdb
 
-from t1d_analytics.errors import DatabaseNotFoundError, SqlExecutionError
+from t1d_analytics.errors import (
+    DatabaseNotFoundError,
+    SqlExecutionError,
+    SqlTimeoutError,
+)
 from t1d_analytics.sql_utils import (
     SqlValue,
     coerce_numeric_aggregates_in_sql,
@@ -84,8 +88,7 @@ def execute_duckdb_query(
         return output
     except duckdb.InterruptException as ie:
         logger.error(f"SQL execution timed out: {ie}")
-        raise SqlExecutionError(
-            error_code="backend.queryTimeout",
+        raise SqlTimeoutError(
             params={"error": "Query execution timed out."},
         ) from ie
     except DatabaseNotFoundError:

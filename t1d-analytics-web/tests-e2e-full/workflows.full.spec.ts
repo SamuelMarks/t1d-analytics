@@ -546,19 +546,21 @@ test.describe("App Workflows Full E2E", () => {
     await page.click("#sync-sessions-btn");
 
     // Verify /api/sessions contains the session on the backend
-    const sessionsResp = await page.request.get("/api/sessions");
-    expect(sessionsResp.ok()).toBe(true);
-    const sessionsPayload = (await sessionsResp.json()) as {
-      sessions: Array<{
-        session_id: string;
-        title: string;
-      }>;
-    };
-    expect(
-      sessionsPayload.sessions.some(
-        (s) => s.title === "Persisted Clinical Session",
-      ),
-    ).toBe(true);
+    await expect
+      .poll(async () => {
+        const sessionsResp = await page.request.get("/api/sessions");
+        if (!sessionsResp.ok()) return false;
+        const sessionsPayload = (await sessionsResp.json()) as {
+          sessions: Array<{
+            session_id: string;
+            title: string;
+          }>;
+        };
+        return sessionsPayload.sessions.some(
+          (s) => s.title === "Persisted Clinical Session",
+        );
+      })
+      .toBe(true);
 
     // Reload page and verify session title and result table are restored
     await page.reload();

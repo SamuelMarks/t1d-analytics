@@ -530,8 +530,30 @@ def test_tpu_workload_status_override_and_xla_preempted() -> None:
             == "PROVISIONING"
         )
 
+    cfg_override = MaxTextConfig(project_id="p1", status_override="PROVISIONING")
+    assert (
+        asyncio.run(runner.poll_workload_status("workload-1", cfg_override))
+        == "PROVISIONING"
+    )
+
     with patch.dict(os.environ, {"T1D_TPU_STATUS_OVERRIDE": ""}):
         with patch("shutil.which", return_value="/usr/bin/xpk"):
+            mock_proc_success = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="Workload workload-1 | Status: SUCCESS | Slice: v4-8",
+                stderr="",
+            )
+            with patch("subprocess.run", return_value=mock_proc_success):
+                assert (
+                    asyncio.run(
+                        runner.poll_workload_status(
+                            "workload-1", max_cfg, timeout_seconds=1
+                        )
+                    )
+                    == "SUCCESS"
+                )
+
             mock_proc_preempt = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
@@ -822,6 +844,102 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
         )
         == "SUCCESS"
     )
+    import threading
+
+    cancel_ev = threading.Event()
+    cancel_ev.set()
+    with patch("shutil.which", return_value="/usr/bin/xpk"):
+        assert runner._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync) is True
+        assert runner._invoke_reclaim_sync("wl-sync", max_cfg_sync) is True
+        with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+            runner._poll_workload_status_sync(
+                "wl-sync", max_cfg_sync, cancel_event=cancel_ev
+            )
+        with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+            asyncio.run(
+                runner.poll_workload_status(
+                    "wl-sync", max_cfg_sync, cancel_event=cancel_ev
+                )
+            )
+
+        # Cancel set mid-loop during XPK describe polling (sync and async)
+        mid_ev_sync = threading.Event()
+
+        def _set_mid_sync(
+            cmd: Sequence[str],
+            capture_output: bool = True,
+            text: bool = True,
+            check: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            """Set cancel event on first describe call."""
+            _ = (cmd, capture_output, text, check)
+            mid_ev_sync.set()
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="Status: PENDING", stderr=""
+            )
+
+        with patch("subprocess.run", side_effect=_set_mid_sync):
+            with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+                runner._poll_workload_status_sync(
+                    "wl-sync",
+                    max_cfg_sync,
+                    timeout_seconds=1.0,
+                    cancel_event=mid_ev_sync,
+                )
+
+        mid_ev_async = threading.Event()
+
+        def _set_mid_async(
+            cmd: Sequence[str],
+            capture_output: bool = True,
+            text: bool = True,
+            check: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            """Set cancel event on first async describe call."""
+            _ = (cmd, capture_output, text, check)
+            mid_ev_async.set()
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="Status: PENDING", stderr=""
+            )
+
+        with (
+            patch("subprocess.run", side_effect=_set_mid_async),
+            patch("asyncio.sleep", return_value=None),
+        ):
+            with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+                asyncio.run(
+                    runner.poll_workload_status(
+                        "wl-sync",
+                        max_cfg_sync,
+                        timeout_seconds=1.0,
+                        cancel_event=mid_ev_async,
+                    )
+                )
+
+    with patch(
+        "shutil.which",
+        side_effect=lambda b: "/usr/bin/gcloud" if b == "gcloud" else None,
+    ):
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=""),
+        ):
+            with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+                runner._poll_gcloud_tpu_status_sync(
+                    "wl-sync",
+                    "us-central2-b",
+                    timeout_seconds=1.0,
+                    cancel_event=cancel_ev,
+                )
+            with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+                asyncio.run(
+                    runner._poll_gcloud_tpu_status(
+                        "wl-sync",
+                        "us-central2-b",
+                        timeout_seconds=1.0,
+                        cancel_event=cancel_ev,
+                    )
+                )
     with patch("shutil.which", return_value="/usr/bin/xpk"):
         assert runner._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync) is True
         assert runner._invoke_reclaim_sync("wl-sync", max_cfg_sync) is True
@@ -899,8 +1017,10 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             runner._invoke_reclaim_sync("wl-sync", max_cfg_sync)
 
 
-def test_tpu_orchestrator_protocol_stubs() -> None:
-    """Test protocol stub methods and properties in tpu_orchestrator."""
+def test_tpu_orchestrator_protocol_stubs(tmp_path: Path) -> None:
+    """Verify GcsClientProtocol and SubprocessExecutorProtocol contracts through upload_dataset_to_gcs and download_artifacts_from_gcs."""
+    import base64
+    import hashlib
     from typing import Iterable, Sequence, Union
 
     from t1d_analytics.tpu_orchestrator import (
@@ -910,40 +1030,78 @@ def test_tpu_orchestrator_protocol_stubs() -> None:
         SubprocessExecutorProtocol,
     )
 
-    class _ConcreteBlob:
-        """Concrete blob satisfying GcsBlobProtocol and Md5BlobProtocol."""
+    uploaded_files: dict[str, bytes] = {}
 
-        name = "blob"
-        md5_hash: Optional[str] = None
+    class _InMemoryBlob:
+        """In-memory GCS blob satisfying GcsBlobProtocol and Md5BlobProtocol."""
 
-        def download_to_filename(self, filename: str) -> None:
-            """No-op download."""
+        def __init__(self, name: str) -> None:
+            """Initialize blob with name."""
+            self.name = name
+            self.md5_hash: Optional[str] = None
 
         def upload_from_filename(self, filename: str) -> None:
-            """No-op upload."""
+            """Store uploaded file bytes and compute base64 MD5 digest."""
+            raw = Path(filename).read_bytes()
+            uploaded_files[self.name] = raw
+            self.md5_hash = base64.b64encode(hashlib.md5(raw).digest()).decode("ascii")
 
-    class _ConcreteBucket:
-        """Concrete bucket satisfying GcsBucketProtocol."""
+        def download_to_filename(self, filename: str) -> None:
+            """Write stored bytes to destination file."""
+            Path(filename).write_bytes(uploaded_files.get(self.name, b"ckpt-weights"))
+
+    blobs_by_name: dict[str, _InMemoryBlob] = {}
+
+    class _InMemoryBucket:
+        """In-memory GCS bucket satisfying GcsBucketProtocol."""
 
         def blob(self, blob_name: str) -> GcsBlobProtocol:
-            """Return concrete blob."""
-            return _ConcreteBlob()
+            """Return or create an in-memory blob."""
+            if blob_name not in blobs_by_name:
+                blobs_by_name[blob_name] = _InMemoryBlob(blob_name)
+            return blobs_by_name[blob_name]
 
-    class _ConcreteClient:
-        """Concrete client satisfying GcsClientProtocol."""
+    class _InMemoryClient:
+        """In-memory GCS client satisfying GcsClientProtocol."""
 
         def bucket(self, bucket_name: str) -> GcsBucketProtocol:
-            """Return concrete bucket."""
-            return _ConcreteBucket()
+            """Return in-memory bucket."""
+            _ = bucket_name
+            return _InMemoryBucket()
 
         def list_blobs(
             self, bucket_or_name: Union[GcsBucketProtocol, str], prefix: str = ""
         ) -> Iterable[GcsBlobProtocol]:
-            """Return empty blob list."""
-            return []
+            """List in-memory blobs matching prefix."""
+            _ = bucket_or_name
+            return [b for name, b in blobs_by_name.items() if name.startswith(prefix)]
 
-    class _ConcreteExecutor:
-        """Concrete executor satisfying SubprocessExecutorProtocol."""
+    client = _InMemoryClient()
+    runner = RemoteTpuMaxTextRunner()
+
+    src_dataset = tmp_path / "train.jsonl"
+    src_dataset.write_text('{"prompt": "hi", "sql": "SELECT 1"}\n', encoding="utf-8")
+    gcs_uri = sync_dataset_to_gcs(
+        src_dataset, "gs://t1d-bucket/datasets", gcs_client=client
+    )
+    assert gcs_uri == "gs://t1d-bucket/datasets/train.jsonl"
+    assert isinstance(blobs_by_name["datasets/train.jsonl"], Md5BlobProtocol)
+
+    dl_dir = tmp_path / "downloaded"
+    resolved_dir = asyncio.run(
+        runner.download_checkpoints_from_gcs(
+            "gs://t1d-bucket/datasets", dl_dir, gcs_client=client
+        )
+    )
+    assert resolved_dir == dl_dir
+    assert (dl_dir / "train.jsonl").read_text(
+        encoding="utf-8"
+    ) == src_dataset.read_text(encoding="utf-8")
+
+    recorded_commands: list[list[str]] = []
+
+    class _EchoExecutor:
+        """Subprocess executor recording commands and returning realistic XPK status output."""
 
         def __call__(
             self,
@@ -952,24 +1110,44 @@ def test_tpu_orchestrator_protocol_stubs() -> None:
             text: bool = True,
             check: bool = False,
         ) -> subprocess.CompletedProcess[str]:
-            """Return completed process."""
+            """Record command arguments and return CompletedProcess."""
+            _ = (capture_output, text, check)
+            recorded_commands.append(list(cmd))
             return subprocess.CompletedProcess(
-                args=cmd, returncode=0, stdout="", stderr=""
+                args=cmd,
+                returncode=0,
+                stdout="Status: SUCCESS\n" + " ".join(cmd),
+                stderr="",
             )
 
-    blob = _ConcreteBlob()
-    bucket = _ConcreteBucket()
-    client = _ConcreteClient()
-    executor = _ConcreteExecutor()
-    blob.download_to_filename("f.txt")
-    blob.upload_from_filename("f.txt")
-    assert isinstance(blob, Md5BlobProtocol)
-    assert isinstance(bucket.blob("b"), _ConcreteBlob)
-    assert isinstance(client.bucket("bkt"), _ConcreteBucket)
-    assert list(client.list_blobs("bkt")) == []
+    executor = _EchoExecutor()
     assert isinstance(executor, SubprocessExecutorProtocol)
-    assert executor(["echo"]).returncode == 0
-    passthrough_proc = subprocess.run(
-        ["echo", "passthrough"], capture_output=True, text=True
+    runner_with_exec = RemoteTpuMaxTextRunner(subprocess_executor=executor)
+    max_cfg_exec = MaxTextConfig(
+        project_id="stanford-t1d",
+        zone="us-central2-b",
+        accelerator_type=TpuAcceleratorType.V4_8,
+        num_slices=1,
+        execute_tpu_dispatch=True,
     )
-    assert passthrough_proc.returncode == 0
+    job_cfg = TrainingJobConfig(
+        model_name="gemma-2b",
+        backend=TrainingBackend.REMOTE_TPU_MAXTEXT,
+        dataset_path=str(src_dataset),
+        output_dir=str(tmp_path / "exec_out"),
+        dry_run=False,
+        maxtext_config=max_cfg_exec,
+    )
+    with patch("shutil.which", return_value="/usr/bin/xpk"):
+        train_res = runner_with_exec.run_training(job_cfg)
+    assert train_res["status"] == "SUCCESS"
+    assert len(recorded_commands) >= 2
+    create_cmd = " ".join(recorded_commands[0])
+    assert "/usr/bin/xpk workload create" in create_cmd
+    assert "--workload=t1d-gemma-2b" in create_cmd
+    assert "--cluster=tpu-cluster-v4-8" in create_cmd
+    assert "--zone=us-central2-b" in create_cmd
+    assert "--tpu-type=v4-8" in create_cmd
+    assert "--num-slices=1" in create_cmd
+    describe_cmd = " ".join(recorded_commands[1])
+    assert "/usr/bin/xpk workload describe" in describe_cmd

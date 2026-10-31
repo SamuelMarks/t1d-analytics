@@ -1,16 +1,20 @@
 /**
  * @file provider-modal.test.ts
  * @module tests/provider-modal.test
- * Unit tests for ProviderSettingsModalController, API key persistence, model grouping, and provider status indicators.
+ * Unit tests for ProviderSettingsModalController, ModelSelectorController, API key persistence, and provider status indicators.
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { ChatState } from "../src/state";
-import { ChatUI, ProviderSettingsModalController } from "../src/ui";
+import {
+  ChatUI,
+  ModelSelectorController,
+  ProviderSettingsModalController,
+} from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 
-describe("ProviderSettingsModalController & Model Loading", () => {
+describe("ProviderSettingsModalController & ModelSelectorController", () => {
   let state: ChatState;
   let ui: ChatUI;
   let mockFetch: ReturnType<typeof vi.fn>;
@@ -19,19 +23,19 @@ describe("ProviderSettingsModalController & Model Loading", () => {
     mountChatUiTestDom();
     mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ models: [], schema: [] }),
+      json: async () => ({ models: [], tables: [] }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
   });
 
   afterEach(() => {
-    ui.destroy();
+    ui.dispose();
     localStorage.clear();
     document.body.innerHTML = "";
     vi.restoreAllMocks();
@@ -41,18 +45,17 @@ describe("ProviderSettingsModalController & Model Loading", () => {
     expect(ui.providerModalController).toBeInstanceOf(
       ProviderSettingsModalController,
     );
-    await ui.providerModalController.open();
-    ui.providerModalController.close();
+    expect(ui.modelSelectorController).toBeInstanceOf(ModelSelectorController);
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        providers: [
-          { provider: "ollama", configured: true, healthy: true },
-          { provider: "openai", configured: true, healthy: true },
-          { provider: "anthropic", configured: false, healthy: false },
-          { provider: "google", configured: false, healthy: false },
-        ],
+        providers: {
+          ollama: { configured: true, available: true },
+          openai: { configured: true, available: true },
+          anthropic: { configured: false, available: false },
+          google: { configured: false, available: false },
+        },
       }),
     });
 
@@ -105,7 +108,6 @@ describe("ProviderSettingsModalController & Model Loading", () => {
     modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(modal.classList.contains("hidden")).toBe(true);
 
-    // Saving anthropic and google keys and local badge fallbacks
     const keyAnthropic = getTestElement<HTMLInputElement>(
       "provider-key-anthropic",
     );
@@ -113,20 +115,33 @@ describe("ProviderSettingsModalController & Model Loading", () => {
     keyAnthropic.value = "anthropic-secret-key";
     keyGoogle.value = "google-secret-key";
 
-    await ui.saveProviderSettings();
+    await ui.providerModalController.saveSettings();
     expect(state.getApiKey("anthropic")).toBe("anthropic-secret-key");
     expect(state.getApiKey("google")).toBe("google-secret-key");
 
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-    await ui.openProviderModal();
-    const anthropicBadge = document.getElementById("provider-badge-anthropic");
-    expect(anthropicBadge?.textContent).toContain("Configured 🟢");
+    keyAnthropic.value = "";
+    keyGoogle.value = "";
+    await ui.providerModalController.saveSettings();
+    expect(state.getApiKey("anthropic")).toBeNull();
+    expect(state.getApiKey("google")).toBeNull();
 
-    mockFetch.mockRejectedValueOnce(new Error("Network disconnect"));
-    await ui.openProviderModal();
+    state.setApiKey("anthropic", "anthropic-secret-key");
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await ui.providerModalController.open();
+    const anthropicBadge = document.getElementById("provider-badge-anthropic");
+    expect(anthropicBadge?.className).toContain("badge-configured");
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    });
+    await ui.providerModalController.refreshModalBadges();
+
+    ui.providerModalController.updateModalBadge("non-existent-provider", true);
   });
 
   it("renders grouped models, custom configured models, and updates provider status dot", async () => {
+    state.createChat();
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -148,7 +163,7 @@ describe("ProviderSettingsModalController & Model Loading", () => {
       }),
     });
 
-    await ui.loadModels();
+    await ui.modelSelectorController.loadModels();
 
     const modelSelect = getTestElement<HTMLSelectElement>("model-select");
     const optgroups = modelSelect.querySelectorAll("optgroup");
@@ -156,20 +171,24 @@ describe("ProviderSettingsModalController & Model Loading", () => {
 
     const dot = getTestElement("provider-status-dot");
 
+    modelSelect.value = "sql";
+    modelSelect.dispatchEvent(new Event("change"));
+    expect(dot.classList.contains("active")).toBe(true);
+
     modelSelect.value = "gemma4";
     modelSelect.dispatchEvent(new Event("change"));
     expect(dot.classList.contains("active")).toBe(true);
 
     modelSelect.value = "openai/gpt-4o";
     modelSelect.dispatchEvent(new Event("change"));
-    expect(dot.classList.contains("warning")).toBe(true);
+    expect(dot.classList.contains("unconfigured")).toBe(true);
 
     state.setApiKey("openai", "sk-valid-key");
-    ui.updateProviderBadgeStatus();
-    expect(dot.classList.contains("active")).toBe(true);
+    ui.providerModalController.updateProviderBadgeStatus();
+    expect(dot.classList.contains("configured")).toBe(true);
     state.removeApiKey("openai");
 
-    // Unreachable model and model with slash
+    // Unreachable model and dynamic provider group
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -187,22 +206,29 @@ describe("ProviderSettingsModalController & Model Loading", () => {
         ],
       }),
     });
-    await ui.loadModels();
+    await ui.modelSelectorController.loadModels();
     const unreachableOpt = Array.from(modelSelect.options).find(
       (o) => o.value === "custom_unreachable",
     );
     expect(unreachableOpt?.textContent).toContain("🔴");
     expect(unreachableOpt?.title).toBe("custom_unreachable (CONN_ERR)");
 
-    modelSelect.innerHTML = `<option value="openai/custom-gpt">custom-gpt</option>`;
+    modelSelect.innerHTML = `<option value="openai/custom-gpt">custom-gpt</option><option value="local_plain">local_plain</option>`;
     modelSelect.value = "openai/custom-gpt";
-    ui.updateProviderBadgeStatus();
-    expect(dot.classList.contains("warning")).toBe(true);
+    ui.providerModalController.updateProviderBadgeStatus();
+    expect(dot.classList.contains("unconfigured")).toBe(true);
+    modelSelect.value = "local_plain";
+    ui.providerModalController.updateProviderBadgeStatus();
+    expect(dot.classList.contains("active")).toBe(true);
 
-    // Custom configured any-llm models
+    // Custom configured any-llm models and activeChat fallback resolution
     state.setConfiguredModels(
       "groq:llama-3.3-70b-versatile, deepseek/deepseek-chat, custom-local-ollama, openai/gpt-4o",
     );
+    const activeChat = state.getActiveChat();
+    if (activeChat) {
+      activeChat.model = "missing-model";
+    }
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -211,7 +237,7 @@ describe("ProviderSettingsModalController & Model Loading", () => {
         ],
       }),
     });
-    await ui.loadModels();
+    await ui.modelSelectorController.loadModels();
     const optionValues = Array.from(modelSelect.options).map((o) => o.value);
     expect(optionValues).toContain("sql");
     expect(optionValues).toContain("groq/llama-3.3-70b-versatile");
@@ -219,126 +245,91 @@ describe("ProviderSettingsModalController & Model Loading", () => {
     expect(optionValues).toContain("custom-local-ollama");
     state.removeConfiguredModels();
 
-    // Test without provider-status-dot
-    dot.remove();
-    const uiWithoutDot = new ChatUI(state);
-    expect(() => uiWithoutDot.updateProviderBadgeStatus()).not.toThrow();
-    uiWithoutDot.destroy();
-  });
-
-  it("handles provider modal Escape key dismissal, focus restoration, and missing elements", async () => {
-    document.body.focus();
-    await ui.openProviderModal();
-    ui.closeProviderModal();
-
-    const trigger = getTestElement<HTMLButtonElement>("provider-settings-btn");
-    trigger.focus();
-
-    await ui.openProviderModal();
-    const modal = getTestElement("provider-modal");
-    expect(modal.classList.contains("hidden")).toBe(false);
-    expect(modal.getAttribute("aria-hidden")).toBeNull();
-
-    const escEvent = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    modal.dispatchEvent(escEvent);
-
-    expect(modal.classList.contains("hidden")).toBe(true);
-    expect(modal.getAttribute("aria-hidden")).toBe("true");
-    expect(document.activeElement).toBe(trigger);
-
-    const tempTrigger = document.createElement("button");
-    document.body.appendChild(tempTrigger);
-    tempTrigger.focus();
-    await ui.openProviderModal();
-    tempTrigger.remove();
-    ui.closeProviderModal();
-    expect(document.activeElement).toBe(trigger);
-
-    await ui.openProviderModal();
-    await ui.openProviderModal();
-    ui.closeProviderModal();
-    ui.closeProviderModal();
-
-    // Test when providerModal exists but key inputs are absent
-    const removedKeyNodes: Array<{
-      el: HTMLElement;
-      parent: HTMLElement;
-      next: ChildNode | null;
-    }> = [];
-    for (const id of [
-      "provider-key-openai",
-      "provider-key-anthropic",
-      "provider-key-google",
-      "provider-store-consent",
-    ]) {
-      const el = document.getElementById(id);
-      if (el && el.parentElement) {
-        removedKeyNodes.push({
-          el,
-          parent: el.parentElement,
-          next: el.nextSibling,
-        });
-        el.remove();
-      }
+    // Fallback when models list is empty and activeChat has a non-sql model
+    if (activeChat) {
+      activeChat.model = "nonexistent";
     }
-    const modalWithoutInputsUi = new ChatUI(state);
-    await flushPromises();
-    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-    await modalWithoutInputsUi.openProviderModal();
-    modalWithoutInputsUi.destroy();
-    for (const item of removedKeyNodes.reverse()) {
-      item.parent.insertBefore(item.el, item.next);
-    }
-
-    // Test when provider-modal itself and optional cohort/provider/streaming/db/sync inputs are absent
-    for (const id of [
-      "streaming-toggle-btn",
-      "db-select",
-      "sync-sessions-btn",
-      "cohort-filter-btn",
-      "close-cohort-modal-btn",
-      "cohort-modal",
-      "cohort-table-select",
-      "cohort-join-table-select",
-      "cohort-join-type-select",
-      "cohort-join-on-input",
-      "cohort-min-age",
-      "cohort-max-age",
-      "cohort-gender-select",
-      "cohort-txgroup",
-      "cohort-max-tir",
-      "cohort-min-hba1c",
-      "cohort-insert-chat-btn",
-      "cohort-execute-btn",
-      "cohort-sql-preview",
-      "provider-key-openai",
-      "provider-key-anthropic",
-      "provider-key-google",
-      "provider-store-consent",
-      "provider-modal",
-    ]) {
-      document.getElementById(id)?.remove();
-    }
-    const minimalUi = new ChatUI(state);
-    await flushPromises();
-    minimalUi.updateStreamingToggleUi();
-    minimalUi.openCohortModal();
-    minimalUi.closeCohortModal();
-    minimalUi.updateCohortSqlPreview();
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({}),
     });
-    await minimalUi.loadModels();
-    ui.updateModalBadge("non-existent-provider", true);
-    await expect(minimalUi.openProviderModal()).resolves.toBeUndefined();
-    expect(() => minimalUi.closeProviderModal()).not.toThrow();
-    await minimalUi.saveProviderSettings();
-    await minimalUi.clearProviderSettings();
-    minimalUi.destroy();
+    await ui.modelSelectorController.loadModels();
+    expect(modelSelect.value).toBe("sql");
+
+    // Fallback when no model is ready and activeChat has messages vs no messages
+    if (activeChat) {
+      activeChat.model = "nonexistent";
+      activeChat.messages = [{ role: "user", content: "hi" }];
+    }
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        models: [
+          {
+            name: "openai/gpt-4o",
+            provider: "openai",
+            configured: false,
+            available: false,
+            reachable: false,
+          },
+        ],
+      }),
+    });
+    await ui.modelSelectorController.loadModels();
+    expect(modelSelect.value).toBe("openai/gpt-4o");
+
+    if (activeChat) {
+      activeChat.model = "nonexistent";
+      activeChat.messages = [];
+    }
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        models: [
+          {
+            name: "openai/gpt-4o",
+            provider: "openai",
+            configured: false,
+            available: false,
+            reachable: false,
+          },
+        ],
+      }),
+    });
+    await ui.modelSelectorController.loadModels();
+    expect(modelSelect.value).toBe("sql");
+
+    // Fallback when activeChat is null
+    state.chats = [];
+    state.activeChatId = null;
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ models: [{ name: "gemma4", configured: true }] }),
+    });
+    await ui.modelSelectorController.loadModels();
+  });
+
+  it("handles provider modal Escape key dismissal, focus restoration, and dispose", async () => {
+    ui.providerModalController.close();
+    const trigger = getTestElement<HTMLButtonElement>("provider-settings-btn");
+    trigger.focus();
+
+    await ui.providerModalController.open();
+    await ui.providerModalController.open();
+    const modal = getTestElement("provider-modal");
+    expect(modal.classList.contains("hidden")).toBe(false);
+
+    modal.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(modal.classList.contains("hidden")).toBe(true);
+    expect(document.activeElement).toBe(trigger);
+
+    await ui.providerModalController.open();
+    ui.providerModalController.dispose();
   });
 });

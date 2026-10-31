@@ -26,10 +26,18 @@ const CRLF = CR_CHAR + LF_CHAR;
  * @returns {string} Sanitized string safe for spreadsheet opening.
  */
 export function sanitizeSpreadsheetCell(strVal: string): string {
-  if (strVal && ["=", "+", "-", "@", TAB_CHAR, CR_CHAR].includes(strVal[0])) {
+  if (!strVal) {
+    return strVal;
+  }
+  const strippedLeading = strVal.replace(/^ +/, "");
+  const triggerChar = strippedLeading ? strippedLeading[0] : "";
+  if (
+    [TAB_CHAR, CR_CHAR, LF_CHAR].includes(strVal[0]) ||
+    ["=", "+", "-", "@", TAB_CHAR, CR_CHAR, LF_CHAR].includes(triggerChar)
+  ) {
     let isNumeric = false;
-    if (strVal[0] === "+" || strVal[0] === "-") {
-      const num = Number(strVal);
+    if (triggerChar === "+" || triggerChar === "-") {
+      const num = Number(strippedLeading);
       isNumeric = !isNaN(num) && isFinite(num);
     }
     if (!isNumeric) {

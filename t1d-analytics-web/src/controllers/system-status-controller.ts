@@ -8,7 +8,10 @@
 import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
 import { formatNumber } from "../formatters";
+import { requireElementById } from "../modal-utils";
 import { type ChatState } from "../state";
+import { type ModelSelectorController } from "./model-selector-controller";
+import { type SchemaExplorerController } from "./schema-explorer-controller";
 
 /**
  * Known database diagnostic status codes returned by the backend.
@@ -22,16 +25,6 @@ export type DbStatusCode =
   | "not_configured"
   | "unknown";
 
-const VALID_DB_STATUS_CODES: ReadonlySet<DbStatusCode> = new Set<DbStatusCode>([
-  "healthy",
-  "missing_file",
-  "empty_db",
-  "missing_initial_data",
-  "corrupted_or_unreadable",
-  "not_configured",
-  "unknown",
-]);
-
 /**
  * Type guard checking whether a string is a valid `DbStatusCode`.
  * @param {string | undefined} code - Raw status code from API response.
@@ -39,7 +32,13 @@ const VALID_DB_STATUS_CODES: ReadonlySet<DbStatusCode> = new Set<DbStatusCode>([
  */
 export function isDbStatusCode(code: string | undefined): code is DbStatusCode {
   return (
-    typeof code === "string" && VALID_DB_STATUS_CODES.has(code as DbStatusCode)
+    code === "healthy" ||
+    code === "missing_file" ||
+    code === "empty_db" ||
+    code === "missing_initial_data" ||
+    code === "corrupted_or_unreadable" ||
+    code === "not_configured" ||
+    code === "unknown"
   );
 }
 
@@ -100,30 +99,14 @@ export interface SystemStatusApiResponse {
 export interface SystemStatusHost {
   /** Global application state store. */
   state: ChatState;
-  /** Header status chip button displaying system health. */
-  systemStatusChip: HTMLButtonElement | null;
-  /** Text span inside the system status chip. */
-  statusChipText: HTMLElement | null;
-  /** Alert banner element for displaying database or backend warnings. */
-  systemStatusBanner: HTMLElement | null;
-  /** Heading element inside the system status banner. */
-  bannerTitle: HTMLElement | null;
-  /** Description paragraph inside the system status banner. */
-  bannerDesc: HTMLElement | null;
-  /** Icon span inside the system status banner. */
-  bannerIcon: HTMLElement | null;
-  /** Retry connection button inside the system status banner. */
-  bannerRetryBtn: HTMLButtonElement | null;
-  /** Button to toggle setup instructions inside the system status banner. */
-  bannerInstructionsBtn: HTMLButtonElement | null;
-  /** Collapsible drawer containing CLI setup instructions. */
-  bannerInstructionsDrawer: HTMLElement | null;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   modelSelect: HTMLSelectElement;
+  /** Model selector sub-controller. */
+  modelSelectorController: ModelSelectorController;
+  /** Schema explorer sub-controller. */
+  schemaExplorerController: SchemaExplorerController;
   /** Re-renders the host UI. */
   render(): void;
-  /** Checks system status (allows host spy delegation). */
-  checkSystemStatus(isManualRetry?: boolean, dbPath?: string): Promise<void>;
 }
 
 /**
@@ -132,8 +115,28 @@ export interface SystemStatusHost {
 export class SystemStatusController {
   /** Host UI reference. */
   private readonly ui: SystemStatusHost;
+  /** Header status chip button displaying system health. */
+  public readonly systemStatusChip: HTMLButtonElement;
+  /** Text span inside the system status chip. */
+  public readonly statusChipText: HTMLElement;
+  /** Alert banner element for displaying database or backend warnings. */
+  public readonly systemStatusBanner: HTMLElement;
+  /** Heading element inside the system status banner. */
+  public readonly bannerTitle: HTMLElement;
+  /** Description paragraph inside the system status banner. */
+  public readonly bannerDesc: HTMLElement;
+  /** Icon span inside the system status banner. */
+  public readonly bannerIcon: HTMLElement;
+  /** Retry connection button inside the system status banner. */
+  public readonly bannerRetryBtn: HTMLButtonElement;
+  /** Button to toggle setup instructions inside the system status banner. */
+  public readonly bannerInstructionsBtn: HTMLButtonElement;
+  /** Collapsible drawer containing CLI setup instructions. */
+  public readonly bannerInstructionsDrawer: HTMLElement;
+  /** Button to dismiss the system status alert banner. */
+  public readonly bannerDismissBtn: HTMLButtonElement;
   /** Interval timer ID for periodic system status polling, or null when inactive. */
-  private statusPollTimer: number | null = null;
+  private statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Creates a new `SystemStatusController`.
@@ -141,17 +144,66 @@ export class SystemStatusController {
    */
   constructor(ui: SystemStatusHost) {
     this.ui = ui;
+    this.systemStatusChip =
+      requireElementById<HTMLButtonElement>("system-status-chip");
+    this.statusChipText = requireElementById<HTMLElement>("status-chip-text");
+    this.systemStatusBanner = requireElementById<HTMLElement>(
+      "system-status-banner",
+    );
+    this.bannerTitle = requireElementById<HTMLElement>("banner-title");
+    this.bannerDesc = requireElementById<HTMLElement>("banner-desc");
+    this.bannerIcon = requireElementById<HTMLElement>("banner-icon");
+    this.bannerRetryBtn =
+      requireElementById<HTMLButtonElement>("banner-retry-btn");
+    this.bannerInstructionsBtn = requireElementById<HTMLButtonElement>(
+      "banner-instructions-btn",
+    );
+    this.bannerInstructionsDrawer = requireElementById<HTMLElement>(
+      "banner-instructions-drawer",
+    );
+    this.bannerDismissBtn =
+      requireElementById<HTMLButtonElement>("banner-dismiss-btn");
+
+    this.bindEvents();
+  }
+
+  /**
+   * Binds DOM event listeners for the status chip and diagnostic alert banner.
+   * @returns {void}
+   */
+  private bindEvents(): void {
+    this.bannerRetryBtn.addEventListener("click", () => {
+      void this.check(true);
+      void this.ui.modelSelectorController.loadModels();
+      void this.ui.schemaExplorerController.loadSchema();
+    });
+
+    this.bannerInstructionsBtn.addEventListener("click", () => {
+      const isHidden = this.bannerInstructionsDrawer.classList.toggle("hidden");
+      this.bannerInstructionsBtn.setAttribute(
+        "aria-expanded",
+        isHidden ? "false" : "true",
+      );
+    });
+
+    this.bannerDismissBtn.addEventListener("click", () => {
+      this.hideBanner();
+    });
+
+    this.systemStatusChip.addEventListener("click", () => {
+      void this.check(true);
+    });
   }
 
   /**
    * Starts periodic background polling of `/api/status`.
-   * @param {number} intervalMs - Polling interval in milliseconds.
+   * @param {number} [intervalMs=30000] - Polling interval in milliseconds.
    * @returns {void}
    */
-  public startPolling(intervalMs: number): void {
+  public startPolling(intervalMs: number = 30000): void {
     this.stopPolling();
-    this.statusPollTimer = window.setInterval(() => {
-      void this.ui.checkSystemStatus();
+    this.statusPollTimer = setInterval(() => {
+      void this.check();
     }, intervalMs);
   }
 
@@ -161,7 +213,7 @@ export class SystemStatusController {
    */
   public stopPolling(): void {
     if (this.statusPollTimer !== null) {
-      window.clearInterval(this.statusPollTimer);
+      clearInterval(this.statusPollTimer);
       this.statusPollTimer = null;
     }
   }
@@ -171,33 +223,28 @@ export class SystemStatusController {
    * @param {"danger" | "warning" | "info"} severity - The alert level.
    * @param {string} title - The title to display.
    * @param {string} desc - The description message.
-   * @param {string} icon - The icon to render.
-   * @param {boolean} showRetry - Whether to show the retry button.
+   * @param {string} [icon="⚠️"] - The icon to render.
+   * @param {boolean} [showRetry=true] - Whether to show the retry button.
    * @returns {void}
    */
   public showBanner(
     severity: "danger" | "warning" | "info",
     title: string,
     desc: string,
-    icon: string,
-    showRetry: boolean,
+    icon: string = "⚠️",
+    showRetry: boolean = true,
   ): void {
-    if (!this.ui.systemStatusBanner) return;
-    this.ui.systemStatusBanner.className = `system-status-banner banner-${severity}`;
-    if (this.ui.bannerIcon) this.ui.bannerIcon.textContent = icon;
-    if (this.ui.bannerTitle) this.ui.bannerTitle.textContent = title;
-    if (this.ui.bannerDesc) this.ui.bannerDesc.textContent = desc;
-    if (this.ui.bannerRetryBtn) {
-      this.ui.bannerRetryBtn.style.display = showRetry
-        ? "inline-block"
-        : "none";
-    }
+    this.systemStatusBanner.className = `system-status-banner banner-${severity}`;
+    this.bannerIcon.textContent = icon;
+    this.bannerTitle.textContent = title;
+    this.bannerDesc.textContent = desc;
+    this.bannerRetryBtn.style.display = showRetry ? "inline-block" : "none";
     if (!showRetry) {
-      this.ui.bannerInstructionsDrawer?.classList.add("hidden");
-      this.ui.bannerInstructionsBtn?.setAttribute("aria-expanded", "false");
+      this.bannerInstructionsDrawer.classList.add("hidden");
+      this.bannerInstructionsBtn.setAttribute("aria-expanded", "false");
     }
-    this.ui.systemStatusBanner.classList.remove("hidden");
-    this.ui.systemStatusBanner.removeAttribute("aria-hidden");
+    this.systemStatusBanner.classList.remove("hidden");
+    this.systemStatusBanner.removeAttribute("aria-hidden");
   }
 
   /**
@@ -205,12 +252,10 @@ export class SystemStatusController {
    * @returns {void}
    */
   public hideBanner(): void {
-    if (this.ui.systemStatusBanner) {
-      this.ui.systemStatusBanner.classList.add("hidden");
-      this.ui.systemStatusBanner.setAttribute("aria-hidden", "true");
-    }
-    this.ui.bannerInstructionsDrawer?.classList.add("hidden");
-    this.ui.bannerInstructionsBtn?.setAttribute("aria-expanded", "false");
+    this.systemStatusBanner.classList.add("hidden");
+    this.systemStatusBanner.setAttribute("aria-hidden", "true");
+    this.bannerInstructionsDrawer.classList.add("hidden");
+    this.bannerInstructionsBtn.setAttribute("aria-expanded", "false");
   }
 
   /**
@@ -223,8 +268,7 @@ export class SystemStatusController {
     level: "healthy" | "degraded" | "error" | "offline",
     text: string,
   ): void {
-    if (!this.ui.systemStatusChip) return;
-    this.ui.systemStatusChip.className = `status-chip status-${level}`;
+    this.systemStatusChip.className = `status-chip status-${level}`;
     let tooltip: string;
     if (this.ui.state.systemStatus.dbFileSizeBytes) {
       const mbNum = this.ui.state.systemStatus.dbFileSizeBytes / (1024 * 1024);
@@ -245,10 +289,65 @@ export class SystemStatusController {
         defaultValue: `System status: ${text}`,
       });
     }
-    this.ui.systemStatusChip.setAttribute("aria-label", tooltip);
-    this.ui.systemStatusChip.setAttribute("title", tooltip);
-    if (this.ui.statusChipText) {
-      this.ui.statusChipText.textContent = text;
+    this.systemStatusChip.setAttribute("aria-label", tooltip);
+    this.systemStatusChip.setAttribute("title", tooltip);
+    this.statusChipText.textContent = text;
+  }
+
+  /**
+   * Applies banner and status chip updates for a parsed `SystemStatusApiResponse`.
+   * @param {SystemStatusApiResponse} health - Parsed `/api/status` response.
+   * @returns {void}
+   */
+  private applyStatusBannerAndChip(health: SystemStatusApiResponse): void {
+    if (health.database?.status_code === "missing_file") {
+      this.showBanner(
+        "warning",
+        i18next.t("status.dbMissingTitle"),
+        i18next.t("status.dbMissingDesc", {
+          path: health.database.configured_path,
+        }),
+        "📁",
+        true,
+      );
+      this.updateStatusChip("error", i18next.t("status.dbMissingTitle"));
+    } else if (health.database?.status_code === "empty_db") {
+      this.showBanner(
+        "warning",
+        i18next.t("status.dbEmptyTitle"),
+        i18next.t("status.dbEmptyDesc"),
+        "🗄️",
+        true,
+      );
+      this.updateStatusChip("degraded", i18next.t("status.dbEmptyTitle"));
+    } else if (health.database?.status_code === "missing_initial_data") {
+      this.showBanner(
+        "warning",
+        i18next.t("status.dbMissingDataTitle"),
+        i18next.t("status.dbMissingDataDesc"),
+        "📊",
+        true,
+      );
+      this.updateStatusChip("degraded", i18next.t("status.dbMissingDataTitle"));
+    } else if (!health.ollama?.accessible) {
+      this.showBanner(
+        "info",
+        i18next.t("status.ollamaOfflineTitle"),
+        i18next.t("status.ollamaOfflineDesc"),
+        "ℹ️",
+        false,
+      );
+      this.updateStatusChip("degraded", i18next.t("status.ollamaOfflineTitle"));
+      if (this.ui.modelSelect.value !== "sql") {
+        this.ui.modelSelect.value = "sql";
+        const currentChat = this.ui.state.getActiveChat();
+        if (currentChat && currentChat.messages.length === 0) {
+          this.ui.state.setActiveChatModel("sql");
+        }
+      }
+    } else {
+      this.hideBanner();
+      this.updateStatusChip("healthy", i18next.t("status.systemHealthy"));
     }
   }
 
@@ -262,14 +361,14 @@ export class SystemStatusController {
     isManualRetry: boolean = false,
     dbPath?: string,
   ): Promise<void> {
-    if (isManualRetry && this.ui.bannerRetryBtn) {
-      this.ui.bannerRetryBtn.textContent = i18next.t("status.reconnecting");
+    if (isManualRetry) {
+      this.bannerRetryBtn.textContent = i18next.t("status.reconnecting");
     }
 
     try {
       const targetDb = dbPath || this.ui.state.currentDb;
       const url =
-        targetDb && targetDb !== "t1d.duckdb"
+        targetDb !== "t1d.duckdb"
           ? `/api/status?db_path=${encodeURIComponent(targetDb)}`
           : "/api/status";
       const response = await fetchWithBackendError(url);
@@ -298,62 +397,7 @@ export class SystemStatusController {
         ollamaVersion: health.ollama?.version || null,
       });
 
-      if (health.database?.status_code === "missing_file") {
-        this.showBanner(
-          "warning",
-          i18next.t("status.dbMissingTitle"),
-          i18next.t("status.dbMissingDesc", {
-            path: health.database.configured_path,
-          }),
-          "📁",
-          true,
-        );
-        this.updateStatusChip("error", i18next.t("status.dbMissingTitle"));
-      } else if (health.database?.status_code === "empty_db") {
-        this.showBanner(
-          "warning",
-          i18next.t("status.dbEmptyTitle"),
-          i18next.t("status.dbEmptyDesc"),
-          "🗄️",
-          true,
-        );
-        this.updateStatusChip("degraded", i18next.t("status.dbEmptyTitle"));
-      } else if (health.database?.status_code === "missing_initial_data") {
-        this.showBanner(
-          "warning",
-          i18next.t("status.dbMissingDataTitle"),
-          i18next.t("status.dbMissingDataDesc"),
-          "📊",
-          true,
-        );
-        this.updateStatusChip(
-          "degraded",
-          i18next.t("status.dbMissingDataTitle"),
-        );
-      } else if (!health.ollama?.accessible) {
-        this.showBanner(
-          "info",
-          i18next.t("status.ollamaOfflineTitle"),
-          i18next.t("status.ollamaOfflineDesc"),
-          "ℹ️",
-          false,
-        );
-        this.updateStatusChip(
-          "degraded",
-          i18next.t("status.ollamaOfflineTitle"),
-        );
-        if (this.ui.modelSelect && this.ui.modelSelect.value !== "sql") {
-          this.ui.modelSelect.value = "sql";
-          const currentChat = this.ui.state.getActiveChat();
-          if (currentChat && currentChat.messages.length === 0) {
-            this.ui.state.setActiveChatModel("sql");
-          }
-        }
-      } else {
-        this.hideBanner();
-        this.updateStatusChip("healthy", i18next.t("status.systemHealthy"));
-      }
-
+      this.applyStatusBannerAndChip(health);
       this.ui.render();
     } catch {
       this.ui.state.setSystemStatus({
@@ -371,9 +415,7 @@ export class SystemStatusController {
       this.updateStatusChip("offline", i18next.t("status.systemOffline"));
       this.ui.render();
     } finally {
-      if (this.ui.bannerRetryBtn) {
-        this.ui.bannerRetryBtn.textContent = i18next.t("status.retry");
-      }
+      this.bannerRetryBtn.textContent = i18next.t("status.retry");
     }
   }
 }

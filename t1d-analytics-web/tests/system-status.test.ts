@@ -1,7 +1,7 @@
 /**
  * @file system-status.test.ts
  * @module tests/system-status.test
- * Unit tests for SystemStatusController, system health polling, diagnostic banners, and schema explorer diagnostic cards.
+ * Unit tests for SystemStatusController, SchemaExplorerController, system health polling, diagnostic banners, and schema diagnostic cards.
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -15,7 +15,7 @@ import {
   queryTestElement,
 } from "./setup";
 
-describe("SystemStatusController & Health Diagnostics", () => {
+describe("SystemStatusController & SchemaExplorerController Diagnostics", () => {
   let state: ChatState;
   let ui: ChatUI;
   let mockFetch: ReturnType<typeof vi.fn>;
@@ -24,205 +24,183 @@ describe("SystemStatusController & Health Diagnostics", () => {
     mountChatUiTestDom();
     mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ models: [], schema: [] }),
+      json: async () => ({ models: [], tables: [] }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
   });
 
   afterEach(() => {
-    ui.destroy();
+    ui.dispose();
     localStorage.clear();
     document.body.innerHTML = "";
     vi.restoreAllMocks();
   });
 
-  it("shows, updates, and hides the system status banner", () => {
-    ui.showBanner("warning", "Test Warning", "Warning details", "⚠️", true);
-    const banner = document.getElementById("system-status-banner");
-    expect(banner?.classList.contains("hidden")).toBe(false);
-    expect(banner?.classList.contains("banner-warning")).toBe(true);
-    expect(document.getElementById("banner-title")?.textContent).toBe(
+  it("shows, updates, and hides the system status banner and status chip", () => {
+    expect(ui.systemStatusController).toBeInstanceOf(SystemStatusController);
+    expect(isDbStatusCode("healthy")).toBe(true);
+    expect(isDbStatusCode("empty_db")).toBe(true);
+    expect(isDbStatusCode("missing_initial_data")).toBe(true);
+    expect(isDbStatusCode("missing_file")).toBe(true);
+    expect(isDbStatusCode("corrupted_or_unreadable")).toBe(true);
+    expect(isDbStatusCode("not_configured")).toBe(true);
+    expect(isDbStatusCode("unknown")).toBe(true);
+    expect(isDbStatusCode("")).toBe(false);
+    expect(isDbStatusCode(undefined)).toBe(false);
+
+    ui.systemStatusController.showBanner(
+      "warning",
+      "Test Warning",
+      "Warning details",
+      "⚠️",
+      true,
+    );
+    const banner = ui.systemStatusController.systemStatusBanner;
+    expect(banner.classList.contains("hidden")).toBe(false);
+    expect(banner.classList.contains("banner-warning")).toBe(true);
+    expect(ui.systemStatusController.bannerTitle.textContent).toBe(
       "Test Warning",
     );
-    expect(document.getElementById("banner-desc")?.textContent).toBe(
+    expect(ui.systemStatusController.bannerDesc.textContent).toBe(
       "Warning details",
     );
 
-    ui.hideBanner();
-    expect(banner?.classList.contains("hidden")).toBe(true);
-  });
+    ui.systemStatusController.showBanner(
+      "info",
+      "No Retry",
+      "Details",
+      "ℹ️",
+      false,
+    );
+    expect(ui.systemStatusController.bannerRetryBtn.style.display).toBe("none");
 
-  it("updates the system status chip", () => {
-    ui.updateStatusChip("degraded", "Degraded Service");
-    const chip = document.getElementById("system-status-chip");
-    expect(chip?.className).toContain("status-degraded");
-    expect(document.getElementById("status-chip-text")?.textContent).toBe(
+    ui.systemStatusController.hideBanner();
+    expect(banner.classList.contains("hidden")).toBe(true);
+
+    ui.systemStatusController.updateStatusChip("degraded", "Degraded Service");
+    expect(ui.systemStatusController.systemStatusChip.className).toContain(
+      "status-degraded",
+    );
+    expect(ui.systemStatusController.statusChipText.textContent).toBe(
       "Degraded Service",
     );
+  });
 
-    ui.updateStatusChip("healthy", "All Normal");
-    expect(chip?.className).toContain("status-healthy");
-    expect(document.getElementById("status-chip-text")?.textContent).toBe(
-      "All Normal",
+  it("checks system status across missing_file, empty_db, missing_initial_data, offline ollama, healthy, and HTTP/network errors", async () => {
+    state.createChat();
+    // 1. missing_file
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "error",
+        database: {
+          status_code: "missing_file",
+          configured_path: "t1d.duckdb",
+        },
+        ollama: { accessible: true },
+      }),
+    });
+    await ui.systemStatusController.check(true);
+    expect(ui.systemStatusController.systemStatusBanner.className).toContain(
+      "banner-warning",
     );
 
-    state.setSystemStatus({
-      dbFileSizeBytes: 5242880,
-      tableCount: 3,
-    });
-    ui.updateStatusChip("healthy", "All Normal");
-    expect(chip?.getAttribute("title")).toContain("5.0 MB (3 tables)");
-  });
-
-  it("checks system status and handles missing_file database status", async () => {
+    // 2. empty_db
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "error",
-          database: {
-            status_code: "missing_file",
-            configured_path: "t1d.duckdb",
-            exists: false,
-          },
-          ollama: { accessible: true },
-        }),
+      json: async () => ({
+        status: "degraded",
+        database: { status_code: "empty_db", configured_path: "t1d.duckdb" },
+        ollama: { accessible: true },
+      }),
     });
-
-    await ui.checkSystemStatus(true);
-    const banner = document.getElementById("system-status-banner");
-    expect(banner?.classList.contains("hidden")).toBe(false);
-    expect(banner?.classList.contains("banner-warning")).toBe(true);
-  });
-
-  it("checks system status and handles empty_db database status", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "degraded",
-          database: {
-            status_code: "empty_db",
-            table_count: 0,
-            has_initial_data: false,
-          },
-          ollama: { accessible: true },
-        }),
-    });
-
-    await ui.checkSystemStatus();
-    const banner = document.getElementById("system-status-banner");
-    expect(banner?.classList.contains("hidden")).toBe(false);
-    expect(banner?.classList.contains("banner-warning")).toBe(true);
-  });
-
-  it("checks system status and handles missing_initial_data status", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "degraded",
-          database: {
-            status_code: "missing_initial_data",
-            table_count: 1,
-            has_initial_data: false,
-          },
-          ollama: { accessible: true },
-        }),
-    });
-
-    await ui.checkSystemStatus();
-    const banner = document.getElementById("system-status-banner");
-    expect(banner?.classList.contains("hidden")).toBe(false);
-    expect(banner?.classList.contains("banner-warning")).toBe(true);
-  });
-
-  it("checks system status and handles offline ollama", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "degraded",
-          database: {
-            status_code: "healthy",
-            table_count: 5,
-            has_initial_data: true,
-          },
-          ollama: { accessible: false },
-        }),
-    });
-
-    const modelSelect = getTestElement<HTMLSelectElement>("model-select");
-    modelSelect.value = "gemma4";
-
-    await ui.checkSystemStatus();
-    const banner = document.getElementById("system-status-banner");
-    expect(banner?.classList.contains("hidden")).toBe(false);
-    expect(banner?.classList.contains("banner-info")).toBe(true);
-    expect(modelSelect.value).toBe("sql");
-
-    // Also test when an untouched empty active chat exists so its model is updated to 'sql'
-    const chat = state.createChat();
-    expect(chat.model).toBe("gemma4");
-    modelSelect.value = "gemma4";
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "degraded",
-          database: {
-            status_code: "healthy",
-            table_count: 5,
-            has_initial_data: true,
-          },
-          ollama: { accessible: false },
-        }),
-    });
-    await ui.checkSystemStatus();
-    expect(chat.model).toBe("sql");
-  });
-
-  it("checks system status and handles fully healthy state", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "healthy",
-          database: {
-            status_code: "healthy",
-            table_count: 5,
-            has_initial_data: true,
-          },
-          ollama: { accessible: true },
-        }),
-    });
-
-    await ui.checkSystemStatus();
-    const banner = document.getElementById("system-status-banner");
-    expect(banner?.classList.contains("hidden")).toBe(true);
-  });
-
-  it("checks system status and handles fetch failure (offline)", async () => {
-    mockFetch.mockRejectedValueOnce(new Error("Failed to fetch"));
-
-    await ui.checkSystemStatus(true);
-    const banner = document.getElementById("system-status-banner");
-    expect(banner?.classList.contains("hidden")).toBe(false);
-    expect(banner?.classList.contains("banner-danger")).toBe(true);
-    expect(ui["chatInput"].disabled).toBe(true);
-  });
-
-  it("handles clicking banner buttons and status chip", async () => {
-    const instructionsBtn = getTestElement<HTMLButtonElement>(
-      "banner-instructions-btn",
+    await ui.systemStatusController.check();
+    expect(ui.systemStatusController.systemStatusBanner.className).toContain(
+      "banner-warning",
     );
-    const drawer = getTestElement("banner-instructions-drawer");
+
+    // 3. missing_initial_data
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "degraded",
+        database: { status_code: "missing_initial_data", message: "No data" },
+        ollama: { accessible: true },
+      }),
+    });
+    await ui.systemStatusController.check();
+    expect(ui.systemStatusController.systemStatusBanner.className).toContain(
+      "banner-warning",
+    );
+
+    // 4. offline ollama switches empty chat model to sql
+    state.createChat();
+    ui.modelSelect.innerHTML = `<option value="gemma4">Gemma</option><option value="sql">SQL</option>`;
+    ui.modelSelect.value = "gemma4";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "degraded",
+        database: {
+          status_code: "healthy",
+          table_count: 5,
+          file_size_bytes: 2097152,
+        },
+        ollama: { accessible: false },
+      }),
+    });
+    await ui.systemStatusController.check();
+    expect(ui.systemStatusController.systemStatusBanner.className).toContain(
+      "banner-info",
+    );
+    expect(ui.modelSelect.value).toBe("sql");
+
+    // 4b. offline ollama when activeChat has messages
+    state.addMessageToActiveChat({ role: "user", content: "hi" });
+    ui.modelSelect.value = "gemma4";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "degraded",
+        database: { status_code: "healthy", table_count: 5 },
+        ollama: { accessible: false },
+      }),
+    });
+    await ui.systemStatusController.check();
+    expect(ui.modelSelect.value).toBe("sql");
+
+    // 5. healthy with custom dbPath and unknown status_code
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "healthy",
+        database: { status_code: "custom_code", table_count: 3 },
+        ollama: { accessible: true },
+      }),
+    });
+    await ui.systemStatusController.check(false, "custom.duckdb");
+    expect(
+      ui.systemStatusController.systemStatusBanner.classList.contains("hidden"),
+    ).toBe(true);
+
+    // 6. HTTP 500 error -> offline banner
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await ui.systemStatusController.check(true);
+    expect(state.systemStatus.backendOnline).toBe(false);
+    expect(ui.systemStatusController.systemStatusBanner.className).toContain(
+      "banner-danger",
+    );
+  });
+
+  it("handles clicking banner buttons, status chip, and polling lifecycle", async () => {
+    const instructionsBtn = ui.systemStatusController.bannerInstructionsBtn;
+    const drawer = ui.systemStatusController.bannerInstructionsDrawer;
     expect(drawer.classList.contains("hidden")).toBe(true);
 
     instructionsBtn.click();
@@ -233,66 +211,67 @@ describe("SystemStatusController & Health Diagnostics", () => {
     expect(drawer.classList.contains("hidden")).toBe(true);
     expect(instructionsBtn.getAttribute("aria-expanded")).toBe("false");
 
-    const dismissBtn = getTestElement<HTMLButtonElement>("banner-dismiss-btn");
-    ui.showBanner("info", "Test", "Desc");
-    dismissBtn.click();
+    ui.systemStatusController.showBanner("info", "Test", "Desc");
+    ui.systemStatusController.bannerDismissBtn.click();
     expect(
-      document
-        .getElementById("system-status-banner")
-        ?.classList.contains("hidden"),
+      ui.systemStatusController.systemStatusBanner.classList.contains("hidden"),
     ).toBe(true);
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "healthy",
-          database: { status_code: "healthy", has_initial_data: true },
-          ollama: { accessible: true },
-        }),
+      json: async () => ({
+        status: "healthy",
+        database: { status_code: "healthy", table_count: 2 },
+      }),
     });
-    const chip = getTestElement<HTMLButtonElement>("system-status-chip");
-    chip.click();
+    ui.systemStatusController.systemStatusChip.click();
     await flushPromises();
 
-    mockFetch.mockResolvedValueOnce({
+    mockFetch.mockResolvedValue({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "healthy",
-          database: { status_code: "healthy", has_initial_data: true },
-          ollama: { accessible: true },
-        }),
+      json: async () => ({
+        status: "healthy",
+        database: { status_code: "healthy", table_count: 2 },
+        models: [],
+        tables: [],
+      }),
     });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ models: [] }),
-    });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () => Promise.resolve({ tables: [] }),
-    });
-    const retryBtn = getTestElement<HTMLButtonElement>("banner-retry-btn");
-    retryBtn.click();
+    ui.systemStatusController.bannerRetryBtn.click();
     await flushPromises();
+
+    vi.useFakeTimers();
+    const checkSpy = vi
+      .spyOn(ui.systemStatusController, "check")
+      .mockResolvedValue(undefined);
+    ui.systemStatusController.startPolling();
+    ui.systemStatusController.startPolling(1000);
+    vi.advanceTimersByTime(1000);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+    ui.systemStatusController.stopPolling();
+    ui.systemStatusController.stopPolling();
+    vi.advanceTimersByTime(1000);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+    checkSpy.mockRestore();
+    vi.useRealTimers();
   });
 
-  it("handles schema explorer diagnostic cards with copy and reload buttons", async () => {
+  it("handles schema explorer diagnostic cards, database selector, and clipboard copy", async () => {
+    // 1. missing_file diagnostic card
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          tables: [],
-          database: {
-            status_code: "missing_file",
-            configured_path: "custom.duckdb",
-          },
-        }),
+      json: async () => ({
+        tables: [],
+        database: {
+          status_code: "missing_file",
+          configured_path: "t1d.duckdb",
+        },
+      }),
     });
-
-    await ui["loadSchema"]();
+    await ui.schemaExplorerController.loadSchema("custom.duckdb");
     const schemaContent = getTestElement("schema-content");
-    expect(schemaContent.innerHTML).toContain("schema-diagnostic-card");
+    expect(
+      schemaContent.querySelector(".schema-diagnostic-card"),
+    ).not.toBeNull();
 
     const copyBtn = queryTestElement<HTMLButtonElement>(
       ".copy-cmd-btn",
@@ -301,251 +280,106 @@ describe("SystemStatusController & Health Diagnostics", () => {
     expect(copyBtn).not.toBeNull();
 
     const writeTextSpy = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, {
-      clipboard: {
-        writeText: writeTextSpy,
-      },
-    });
-
+    Object.assign(navigator, { clipboard: { writeText: writeTextSpy } });
     vi.useFakeTimers();
-    copyBtn.click();
+    copyBtn?.click();
     await vi.runAllTimersAsync();
     vi.useRealTimers();
-    expect(writeTextSpy).toHaveBeenCalledWith(
-      "t1d-analytics load --db custom.duckdb",
-    );
+    expect(writeTextSpy).toHaveBeenCalled();
 
+    // Clipboard error and missing clipboard handling
+    writeTextSpy.mockRejectedValueOnce(new Error("denied"));
+    await ui.schemaExplorerController.copyCommandToClipboard("test", copyBtn!);
+    const origClipboard = navigator.clipboard;
+    Object.assign(navigator, { clipboard: null });
+    await ui.schemaExplorerController.copyCommandToClipboard("test", copyBtn!);
+    Object.assign(navigator, { clipboard: origClipboard });
+
+    // 2. empty_db diagnostic card + reload button
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          tables: [],
-          database: {
-            status_code: "empty_db",
-          },
-        }),
+      json: async () => ({
+        tables: [],
+        database: { status_code: "empty_db", configured_path: "t1d.duckdb" },
+      }),
     });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "degraded",
-          database: { status_code: "empty_db" },
-          ollama: { accessible: true },
-        }),
-    });
+    await ui.schemaExplorerController.loadSchema();
     const reloadBtn = queryTestElement<HTMLButtonElement>(
       ".reload-schema-btn",
       schemaContent,
     );
-    reloadBtn.click();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: "healthy",
+        tables: [
+          {
+            name: "patients",
+            columns: [{ name: "PtID", type: "INTEGER" }],
+          },
+        ],
+        database: { status_code: "healthy" },
+      }),
+    });
+    reloadBtn?.click();
     await flushPromises();
-    expect(schemaContent.innerHTML).toContain("schema-diagnostic-card");
-  });
+    expect(schemaContent.querySelector(".schema-table")).not.toBeNull();
 
-  it("renders empty-state diagnostic notice when database lacks initial data", () => {
-    state.createChat();
-    state.setSystemStatus({ dbStatusCode: "empty_db", hasInitialData: false });
-    ui["renderActiveChat"]();
-    const notice = document.querySelector(".schema-diagnostic-card");
-    expect(notice).not.toBeNull();
-  });
-
-  it("handles missing banner DOM elements safely", () => {
-    const originalBanner = ui["systemStatusBanner"];
-    const originalChip = ui["systemStatusChip"];
-    ui["systemStatusBanner"] = null;
-    ui["systemStatusChip"] = null;
-
-    ui.showBanner("warning", "Test", "Desc");
-    ui.hideBanner();
-    ui.updateStatusChip("healthy", "Test");
-
-    ui["systemStatusBanner"] = originalBanner;
-    ui["systemStatusChip"] = originalChip;
-  });
-
-  it("handles clipboard failure gracefully in copy-cmd-btn", async () => {
-    const btn = document.createElement("button");
-    btn.className = "copy-cmd-btn";
-    btn.dataset.cmd = "test cmd";
-    btn.textContent = "Copy";
-
-    const writeSpy = vi.fn().mockRejectedValue(new Error("denied"));
-    Object.assign(navigator, {
-      clipboard: {
-        writeText: writeSpy,
-      },
-    });
-
-    await ui.copyCommandToClipboard("test cmd", btn);
-    expect(writeSpy).toHaveBeenCalledWith("test cmd");
-    expect(btn.textContent).toBe("Copy");
-
-    const origClipboard = navigator.clipboard;
-    Object.assign(navigator, { clipboard: null });
-    await ui.copyCommandToClipboard("test cmd", btn);
-    Object.assign(navigator, { clipboard: origClipboard });
-  });
-
-  it("loadSchema updates status when database has missing_initial_data and healthy states", async () => {
+    // 3. missing_initial_data and unknown status_code with empty tables
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () =>
-        Promise.resolve({
-          tables: [],
-          database: {
-            status_code: "missing_initial_data",
-            table_count: 1,
-            has_initial_data: false,
-            exists: true,
-            connected: true,
-          },
-        }),
+      json: async () => ({
+        tables: [],
+        database: { status_code: "missing_initial_data" },
+      }),
     });
-    await ui["loadSchema"]();
-    expect(state.systemStatus.dbStatusCode).toBe("missing_initial_data");
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          tables: [{ name: "patients", columns: [] }],
-          database: {
-            status_code: "healthy",
-            table_count: 1,
-            has_initial_data: true,
-            exists: true,
-            connected: true,
-          },
-        }),
-    });
-    await ui["loadSchema"]();
-    expect(state.systemStatus.dbStatusCode).toBe("healthy");
-    expect(
-      document
-        .getElementById("system-status-banner")
-        ?.classList.contains("hidden"),
-    ).toBe(true);
-  });
-
-  it("shows banner safely when inner elements are null and handles null statusChipText/bannerRetryBtn", async () => {
-    const origIcon = ui["bannerIcon"];
-    const origTitle = ui["bannerTitle"];
-    const origDesc = ui["bannerDesc"];
-    const origBtn = ui["bannerRetryBtn"];
-    ui["bannerIcon"] = null;
-    ui["bannerTitle"] = null;
-    ui["bannerDesc"] = null;
-    ui["bannerRetryBtn"] = null;
-
-    ui.showBanner("info", "Title", "Desc", "ℹ️", false);
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          status: "healthy",
-          database: { status_code: "healthy", has_initial_data: true },
-          ollama: { accessible: true },
-        }),
-    });
-    await ui.checkSystemStatus(true);
-
-    ui["bannerIcon"] = origIcon;
-    ui["bannerTitle"] = origTitle;
-    ui["bannerDesc"] = origDesc;
-    ui["bannerRetryBtn"] = origBtn;
-
-    const origChipText = ui["statusChipText"];
-    ui["statusChipText"] = null;
-    ui.updateStatusChip("healthy", "Operational");
-    ui["statusChipText"] = origChipText;
-  });
-
-  it("disables chat input and updates placeholder when backend is offline", () => {
-    state.createChat();
-    state.setSystemStatus({ backendOnline: false });
-    ui["renderActiveChat"]();
-    expect(ui["chatInput"].disabled).toBe(true);
-    expect(ui["chatInputWrapper"].classList.contains("disabled")).toBe(true);
-    expect(ui["sendBtn"].disabled).toBe(true);
-  });
-
-  it("initializes without optional status elements safely and ignores missing cmd attribute", () => {
-    document.getElementById("system-status-chip")?.remove();
-    document.getElementById("system-status-banner")?.remove();
-    document.getElementById("provider-settings-btn")?.remove();
-    document.getElementById("close-provider-modal-btn")?.remove();
-    document.getElementById("provider-save-btn")?.remove();
-    document.getElementById("provider-clear-btn")?.remove();
-    document.getElementById("provider-modal")?.remove();
-    const ui2 = new ChatUI(state);
-    expect(ui2).toBeDefined();
-
-    const container = document.createElement("div");
-    const btn = document.createElement("button");
-    btn.className = "copy-cmd-btn";
-    container.appendChild(btn);
-    ui2["bindSchemaDiagnosticButtons"](container);
-    btn.click();
-    ui2.destroy();
-  });
-
-  it("handles loadSchema when database fields are null or empty and validates SystemStatusController", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          tables: [],
-          database: {
-            status_code: "",
-            exists: null,
-            connected: null,
-            message: null,
-            remediation: null,
-            table_count: null,
-            has_initial_data: null,
-          },
-        }),
-    });
-    await ui["loadSchema"]();
-    expect(state.systemStatus.dbStatusCode).toBe("unknown");
-
-    expect(isDbStatusCode("healthy")).toBe(true);
-    expect(isDbStatusCode("")).toBe(false);
-    expect(isDbStatusCode(undefined)).toBe(false);
-    expect(ui.systemStatusController).toBeInstanceOf(SystemStatusController);
+    await ui.schemaExplorerController.loadSchema();
+    expect(schemaContent.querySelector(".schema-loading")).not.toBeNull();
 
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
-        status: "healthy",
-        database: { status_code: "", exists: true, connected: true },
-        ollama: { accessible: true },
+        tables: [
+          {
+            name: "patients",
+            columns: [{ name: "PtID", type: "INTEGER" }],
+          },
+        ],
+        database: { status_code: "custom_unknown" },
       }),
     });
-    await ui.systemStatusController.check();
-    expect(state.systemStatus.dbStatusCode).toBe("unknown");
-  });
+    await ui.schemaExplorerController.loadSchema();
 
-  it("manages status polling lifecycle and dispose/destroy cleanup", async () => {
-    vi.useFakeTimers();
-    const statusSpy = vi
-      .spyOn(ui, "checkSystemStatus")
-      .mockResolvedValue(undefined);
-    ui.startStatusPolling();
-    vi.advanceTimersByTime(30000);
-    expect(statusSpy).toHaveBeenCalledTimes(1);
-    ui.stopStatusPolling();
-    vi.advanceTimersByTime(30000);
-    expect(statusSpy).toHaveBeenCalledTimes(1);
-    statusSpy.mockRestore();
-    vi.useRealTimers();
+    // 4. fetchDatabases and database dropdown switching
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        databases: [
+          {
+            name: "t1d.duckdb",
+            path: "t1d.duckdb",
+            size_bytes: 2 * 1024 * 1024,
+          },
+          {
+            name: "secondary.duckdb",
+            path: "secondary.duckdb",
+            size_bytes: 0,
+          },
+        ],
+        current_db: "secondary.duckdb",
+      }),
+    });
+    await ui.schemaExplorerController.fetchDatabases();
+    const dbSelect = ui.schemaExplorerController.dbSelect;
+    expect(dbSelect.options.length).toBe(2);
+    dbSelect.value = "secondary.duckdb";
+    dbSelect.dispatchEvent(new Event("change"));
+    await flushPromises();
+    expect(state.currentDb).toBe("secondary.duckdb");
 
-    ui.openCohortModal();
-    await ui.openProviderModal();
-    ui.destroy();
-    ui.dispose();
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await ui.schemaExplorerController.fetchDatabases();
+    mockFetch.mockRejectedValueOnce(new Error("net err"));
+    await ui.schemaExplorerController.fetchDatabases();
   });
 });

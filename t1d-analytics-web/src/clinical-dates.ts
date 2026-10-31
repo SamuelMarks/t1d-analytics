@@ -82,18 +82,12 @@ export function parseDateAndMinuteOfDay(
       const seconds = isoMatch[6] ? parseInt(isoMatch[6], 10) : 0;
       const tz = isoMatch[7];
 
-      if (tz && tz.toUpperCase() === "Z") {
-        return {
-          dayKey: `${year}-${month}-${day}`,
-          minuteOfDay: hours * 60 + minutes,
-          epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
-        };
-      } else if (tz) {
+      if (tz && tz.toUpperCase() !== "Z") {
         const d = new Date(trimmed);
         if (!isNaN(d.getTime())) {
           return {
-            dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
-            minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+            dayKey: `${year}-${month}-${day}`,
+            minuteOfDay: hours * 60 + minutes,
             epochMs: d.getTime(),
           };
         }
@@ -124,8 +118,8 @@ export function parseDateAndMinuteOfDay(
         const d = new Date(isoStr);
         if (!isNaN(d.getTime())) {
           return {
-            dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
-            minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+            dayKey: `${year}-${month}-${day}`,
+            minuteOfDay: hours * 60 + minutes,
             epochMs: d.getTime(),
           };
         }
@@ -165,8 +159,8 @@ export function parseDateAndMinuteOfDay(
         const d = new Date(isoStr);
         if (!isNaN(d.getTime())) {
           return {
-            dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
-            minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+            dayKey: `${year}-${month}-${day}`,
+            minuteOfDay: hours * 60 + minutes,
             epochMs: d.getTime(),
           };
         }

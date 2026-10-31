@@ -1,6 +1,5 @@
 """System diagnostics and health validation module for T1D Analytics."""
 
-import json
 import logging
 import os
 import urllib.error
@@ -14,8 +13,13 @@ import duckdb
 from pydantic.dataclasses import dataclass
 
 from t1d_analytics.api_schemas import JsonLevel1, JsonLevel2
+from t1d_analytics.db_security import resolve_default_db_path
 from t1d_analytics.i18n import get_translator
-from t1d_analytics.llm_client import PROVIDER_ENV_KEYS, normalize_ollama_host
+from t1d_analytics.llm_client import (
+    PROVIDER_ENV_KEYS,
+    normalize_ollama_host,
+    probe_ollama_tags_and_version,
+)
 from t1d_analytics.sql_utils import SqlValue
 
 DatabaseDetailsDict = Dict[str, JsonLevel1]
@@ -269,14 +273,7 @@ def check_database_health(
 
     """
     _ = get_translator(lang)
-    target_path_str = db_path or os.environ.get("T1D_DB_PATH", "t1d.duckdb")
-    if (
-        db_path is None
-        and "T1D_DB_PATH" not in os.environ
-        and not Path(target_path_str).exists()
-        and Path("data/t1d.duckdb").exists()
-    ):
-        target_path_str = "data/t1d.duckdb"
+    target_path_str = resolve_default_db_path(db_path)
     target_path = Path(target_path_str)
 
     # 1. Check if database file exists on disk
@@ -537,22 +534,13 @@ def check_ollama_health(
     if ollama_url is None:
         ollama_url = f"{host}/api/tags"
 
-    version: Optional[str] = None
     try:
-        req = urllib.request.Request(ollama_url)
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            data = json.loads(response.read().decode())
-
-        try:
-            v_url = f"{host}/api/version"
-            v_req = urllib.request.Request(v_url)
-            with urllib.request.urlopen(v_req, timeout=timeout) as v_resp:
-                v_data = json.loads(v_resp.read().decode())
-                version = str(v_data.get("version", "")) or None
-        except Exception:
-            version = None
-
-        models = [m.get("name") for m in data.get("models", []) if m.get("name")]
+        model_infos, version = probe_ollama_tags_and_version(
+            ollama_url=ollama_url,
+            timeout=timeout,
+            urlopen_fn=urllib.request.urlopen,
+        )
+        models = [m.name for m in model_infos]
         has_recommended = any(recommended_model in m for m in models)
 
         if not has_recommended:

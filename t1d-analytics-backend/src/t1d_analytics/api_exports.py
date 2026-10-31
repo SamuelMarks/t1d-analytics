@@ -4,6 +4,7 @@ import csv
 import json
 import logging
 import math
+import re
 import tempfile
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional, Sequence, Tuple, Union
@@ -26,6 +27,7 @@ from t1d_analytics.errors import (
     InvalidTableNameError,
     T1DError,
     TableNotFoundError,
+    UnsupportedExportFormatError,
 )
 from t1d_analytics.sql_utils import (
     SqlRawInputValue,
@@ -112,19 +114,21 @@ def export_table(
 
     Raises:
     ------
-        FileNotFoundError: If the database file does not exist.
-        ValueError: If the table identifier is invalid, the table does not exist, or format is unsupported.
+        InvalidTableNameError: If the table identifier is invalid.
+        DatabaseNotFoundError: If the database file does not exist.
+        UnsupportedExportFormatError: If `export_format` is not one of `'excel'`, `'parquet'`, or `'csv'`.
+        TableNotFoundError: If the table does not exist in the database.
 
     """
     if not table_name.isidentifier():
         raise InvalidTableNameError(f"Invalid table identifier: {table_name}")
 
     if not Path(db_path).exists():
-        raise FileNotFoundError(f"Database file not found: {db_path}")
+        raise DatabaseNotFoundError(f"Database file not found: {db_path}")
 
     fmt = export_format.lower().strip()
     if fmt not in ("excel", "parquet", "csv"):
-        raise ExportError(
+        raise UnsupportedExportFormatError(
             f"Unsupported export format: {export_format}. Choose 'excel', 'parquet', or 'csv'."
         )
 
@@ -168,6 +172,25 @@ def export_table(
             )
     finally:
         conn.close()
+
+
+def _build_content_disposition_header(table_name: str, extension: str) -> str:
+    """
+    Build a sanitized `Content-Disposition` attachment header value for a table export.
+
+    Args:
+    ----
+        table_name: Validated table name identifier.
+        extension: File extension without leading dot (e.g. `'xlsx'`, `'parquet'`, `'csv'`, `'json'`).
+
+    Returns:
+    -------
+        str: Formatted `attachment; filename="..."` header string.
+
+    """
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]", "_", table_name)
+    safe_ext = re.sub(r"[^A-Za-z0-9]", "", extension)
+    return f'attachment; filename="{safe_stem}_export.{safe_ext}"'
 
 
 def _validate_table_and_db_path(
@@ -457,7 +480,9 @@ def stream_excel_export(
             _generate_excel_chunks(temp_xlsx_file, conn),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={
-                "Content-Disposition": f'attachment; filename="{table_name}_export.xlsx"'
+                "Content-Disposition": _build_content_disposition_header(
+                    table_name, "xlsx"
+                )
             },
         )
     except T1DError:
@@ -544,7 +569,9 @@ def stream_parquet_export(
             _iter_parquet_chunks(temp_parquet_file, conn),
             media_type="application/vnd.apache.parquet",
             headers={
-                "Content-Disposition": f'attachment; filename="{table_name}_export.parquet"'
+                "Content-Disposition": _build_content_disposition_header(
+                    table_name, "parquet"
+                )
             },
         )
     except T1DError:
@@ -653,7 +680,9 @@ def stream_csv_export(
             _generate_csv_chunks(conn, first_batch),
             media_type="text/csv",
             headers={
-                "Content-Disposition": f'attachment; filename="{table_name}_export.csv"',
+                "Content-Disposition": _build_content_disposition_header(
+                    table_name, "csv"
+                ),
                 "Cache-Control": "no-cache",
             },
         )
@@ -739,7 +768,9 @@ def stream_json_export(
             _generate_json_chunks(conn, first_batch),
             media_type="application/json",
             headers={
-                "Content-Disposition": f'attachment; filename="{table_name}_export.json"',
+                "Content-Disposition": _build_content_disposition_header(
+                    table_name, "json"
+                ),
                 "Cache-Control": "no-cache",
             },
         )

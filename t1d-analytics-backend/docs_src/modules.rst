@@ -16,6 +16,41 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.api_dependencies
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.routers
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.routers.chat_routes
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.routers.session_routes
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.routers.status_routes
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.routers.table_routes
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.routers.training_routes
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.api_exports
    :members:
    :undoc-members:
@@ -32,6 +67,16 @@ t1d_analytics
    :show-inheritance:
 
 .. automodule:: t1d_analytics.cli
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.cli_handlers
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.cli_parser
    :members:
    :undoc-members:
    :show-inheritance:
@@ -62,6 +107,21 @@ t1d_analytics
    :show-inheritance:
 
 .. automodule:: t1d_analytics.gemma_bridge
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.gemma_cli_toolchain
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.gemma_inprocess_fallback
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.gemma_library_adapter
    :members:
    :undoc-members:
    :show-inheritance:

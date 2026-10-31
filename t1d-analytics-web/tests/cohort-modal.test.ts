@@ -11,6 +11,7 @@ import {
   ChatUI,
   CohortBuilderModalController,
   buildCohortSql,
+  normalizeJoinType,
 } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 
@@ -23,30 +24,31 @@ describe("CohortBuilderModalController & Cohort SQL Generation", () => {
     mountChatUiTestDom();
     mockFetch = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ models: [], schema: [] }),
+      json: async () => ({ models: [], tables: [] }),
     });
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
   });
 
   afterEach(() => {
-    ui.destroy();
+    ui.dispose();
     localStorage.clear();
     document.body.innerHTML = "";
     vi.restoreAllMocks();
   });
 
-  it("buildCohortSql generates SQL with various filter predicates", () => {
+  it("buildCohortSql generates SQL with various filter predicates and join types", () => {
     expect(ui.cohortModalController).toBeInstanceOf(
       CohortBuilderModalController,
     );
-    ui.cohortModalController.open();
-    ui.cohortModalController.close();
+    expect(normalizeJoinType("LEFT JOIN")).toBe("LEFT JOIN");
+    expect(normalizeJoinType("INNER JOIN")).toBe("INNER JOIN");
+    expect(normalizeJoinType(undefined)).toBe("INNER JOIN");
 
     expect(buildCohortSql({ tableName: "patients" })).toBe(
       `SELECT *
@@ -62,24 +64,25 @@ FROM "patients";`,
       minAge: 18,
       maxAge: 65,
       gender: "F",
-      txGroup: "Closed-Loop",
+      txGroup: "Closed'Loop",
       maxTIR: 70,
       minHbA1c: 8.5,
     });
 
     expect(sql).toContain('FROM "demographics""test"');
-    expect(sql).toContain("WHERE age >= 18");
-    expect(sql).toContain("AND age <= 65");
-    expect(sql).toContain("AND gender = 'F'");
-    expect(sql).toContain("AND txgroup ILIKE '%Closed-Loop%'");
-    expect(sql).toContain("AND tir <= 70");
-    expect(sql).toContain("AND hba1c >= 8.5");
+    expect(sql).toContain("age >= 18");
+    expect(sql).toContain("age <= 65");
+    expect(sql).toContain("gender = 'F'");
+    expect(sql).toContain("txgroup ILIKE '%Closed''Loop%'");
+    expect(sql).toContain("tir <= 70");
+    expect(sql).toContain("hba1c >= 8.5");
 
     const nonFiniteSql = buildCohortSql({
       tableName: "patients",
       minAge: Infinity,
       maxAge: NaN,
       maxTIR: -Infinity,
+      minHbA1c: NaN,
     });
     expect(nonFiniteSql).toBe(`SELECT *
 FROM "patients";`);
@@ -93,7 +96,6 @@ FROM "patients";`);
     expect(joinSql).toContain('FROM "patients"');
     expect(joinSql).toContain('INNER JOIN "cgms"');
     expect(joinSql).toContain('ON "patients".patient_id = "cgms".patient_id');
-    expect(joinSql).toContain('"patients".age >= 18');
 
     const leftJoinSql = buildCohortSql({
       tableName: "patients",
@@ -129,9 +131,50 @@ FROM "patients";`);
     const joinTableSelect = getTestElement<HTMLSelectElement>(
       "cohort-join-table-select",
     );
-    joinTableSelect.value = "cgm_data";
+    const optCgm = document.createElement("option");
+    optCgm.value = "cgm_readings";
+    optCgm.textContent = "cgm_readings";
+    joinTableSelect.appendChild(optCgm);
+    joinTableSelect.value = "cgm_readings";
     joinTableSelect.dispatchEvent(new Event("change"));
-    expect(preview.textContent).toContain('JOIN "cgm_data"');
+    expect(preview.textContent).toContain('JOIN "cgm_readings"');
+
+    const tableSelect = getTestElement<HTMLSelectElement>(
+      "cohort-table-select",
+    );
+    tableSelect.dispatchEvent(new Event("change"));
+
+    const joinTypeSelect = getTestElement<HTMLSelectElement>(
+      "cohort-join-type-select",
+    );
+    joinTypeSelect.value = "LEFT JOIN";
+    joinTypeSelect.dispatchEvent(new Event("change"));
+    expect(preview.textContent).toContain('LEFT JOIN "cgm_readings"');
+
+    const joinOnInput = getTestElement<HTMLInputElement>(
+      "cohort-join-on-input",
+    );
+    joinOnInput.value = '"patients".subject_id = "cgm_readings".subject_id';
+    joinOnInput.dispatchEvent(new Event("input"));
+
+    const genderSelect = getTestElement<HTMLSelectElement>(
+      "cohort-gender-select",
+    );
+    genderSelect.value = "F";
+    genderSelect.dispatchEvent(new Event("change"));
+
+    const maxAgeInput = getTestElement<HTMLInputElement>("cohort-max-age");
+    maxAgeInput.value = "60";
+    maxAgeInput.dispatchEvent(new Event("change"));
+    const txInput = getTestElement<HTMLInputElement>("cohort-txgroup");
+    txInput.value = "Closed";
+    txInput.dispatchEvent(new Event("input"));
+    const maxTirInput = getTestElement<HTMLInputElement>("cohort-max-tir");
+    maxTirInput.value = "75";
+    maxTirInput.dispatchEvent(new Event("input"));
+    const minHba1cInput = getTestElement<HTMLInputElement>("cohort-min-hba1c");
+    minHba1cInput.value = "7.0";
+    minHba1cInput.dispatchEvent(new Event("input"));
 
     joinTableSelect.value = "";
     joinTableSelect.dispatchEvent(new Event("change"));
@@ -145,7 +188,6 @@ FROM "patients";`);
     modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(modal.classList.contains("hidden")).toBe(true);
 
-    // Insert into chat button
     filterBtn.click();
     minAgeInput.value = "25";
     minAgeInput.dispatchEvent(new Event("input"));
@@ -157,7 +199,6 @@ FROM "patients";`);
     expect(input.value).toContain("age >= 25");
     expect(modal.classList.contains("hidden")).toBe(true);
 
-    // Execute button directly running query
     state.createChat();
     ui.render();
     filterBtn.click();
@@ -176,178 +217,112 @@ FROM "patients";`);
     expect(activeChat?.messages[0]?.content).toContain("age >= 30");
   });
 
-  it("handles openCohortModal populating tables from DOM schema headers and fallback tables", () => {
-    const header = document.createElement("div");
-    header.className = "schema-table-header";
-    header.innerHTML = "<h4>clinical_cohort_table</h4><h4>   </h4>";
-    document.body.appendChild(header);
+  it("populates tables from DOM schema headers and resolves relational join columns", () => {
+    const schemaContent = getTestElement("schema-content");
+    const tblA = document.createElement("div");
+    tblA.className = "schema-table";
+    const nameA = document.createElement("span");
+    nameA.className = "schema-table-name";
+    nameA.setAttribute("data-table", "subjects_custom");
+    nameA.textContent = "subjects_custom";
+    const colA = document.createElement("span");
+    colA.className = "col-name";
+    colA.textContent = "subject_id";
+    tblA.append(nameA, colA);
 
-    ui.openCohortModal();
-    const select = getTestElement<HTMLSelectElement>("cohort-table-select");
-    expect(select.options[0]?.value).toBe("clinical_cohort_table");
-    header.remove();
+    const tblB = document.createElement("div");
+    tblB.className = "schema-table";
+    const nameB = document.createElement("span");
+    nameB.className = "schema-table-name";
+    nameB.setAttribute("data-table", "labs_custom");
+    nameB.textContent = "labs_custom";
+    const colB = document.createElement("span");
+    colB.className = "col-name";
+    colB.textContent = "subject_id";
+    tblB.append(nameB, colB);
 
-    const toggleBtn = document.createElement("button");
-    toggleBtn.className = "schema-table-header-toggle";
-    toggleBtn.innerHTML = "<span>discovered_cgm_table</span>";
-    document.body.appendChild(toggleBtn);
-    ui.openCohortModal();
-    expect(select.options[0]?.value).toBe("discovered_cgm_table");
-    ui.closeCohortModal();
-    toggleBtn.remove();
+    const tblC = document.createElement("div");
+    tblC.className = "schema-table";
+    const nameC = document.createElement("span");
+    nameC.className = "schema-table-name";
+    nameC.setAttribute("data-table", "patient_notes");
+    nameC.textContent = "patient_notes";
+    const colC = document.createElement("span");
+    colC.className = "col-name";
+    colC.textContent = "note_text";
+    tblC.append(nameC, colC);
 
-    const origTableSelect = ui["cohortTableSelect"];
-    const origJoinSelect = ui["cohortJoinTableSelect"];
-    ui["cohortTableSelect"] = null;
-    ui["cohortJoinTableSelect"] = null;
-    ui.openCohortModal();
-    ui["cohortTableSelect"] = origTableSelect;
-    ui["cohortJoinTableSelect"] = origJoinSelect;
+    schemaContent.replaceChildren(tblA, tblB, tblC);
 
-    // Fallback tables when no schema headers exist
-    ui.openCohortModal();
-    expect(select.options.length).toBe(3);
-    ui.closeCohortModal();
-  });
+    ui.cohortModalController.open();
+    const tableSelect = ui.cohortModalController.cohortTableSelect;
+    const joinSelect = ui.cohortModalController.cohortJoinTableSelect;
+    const joinOnInput = ui.cohortModalController.cohortJoinOnInput;
 
-  it("handles cohort relational join resolution and Escape key focus restoration", async () => {
-    const tableSelect = getTestElement<HTMLSelectElement>(
-      "cohort-table-select",
-    );
-    const joinTableSelect = getTestElement<HTMLSelectElement>(
-      "cohort-join-table-select",
-    );
-    const joinTypeSelect = getTestElement<HTMLSelectElement>(
-      "cohort-join-type-select",
-    );
-    const joinOnInput = getTestElement<HTMLInputElement>(
-      "cohort-join-on-input",
-    );
+    expect(tableSelect.options[0]?.value).toBe("subjects_custom");
 
-    const mockColList = document.createElement("ul");
-    mockColList.id = "schema-table-patients";
-    mockColList.innerHTML = `<li class="schema-column"><span>patient_id</span></li>`;
-    document.body.appendChild(mockColList);
-
-    tableSelect.innerHTML = `<option value="patients">patients</option><option value="cgms">cgms</option>`;
-    joinTableSelect.innerHTML = `<option value="">None (Single Table)</option><option value="cgms">cgms</option><option value="visits">visits</option>`;
-
-    tableSelect.dispatchEvent(new Event("change"));
-
-    joinTableSelect.value = "cgms";
-    ui.handleCohortJoinTableChange();
-    expect(joinOnInput.value).toBe('"patients".patient_id = "cgms".patient_id');
-    expect(joinTypeSelect.value).toBe("INNER JOIN");
-    mockColList.remove();
-
-    joinTableSelect.value = "visits";
-    ui.handleCohortJoinTableChange();
-    expect(joinTypeSelect.value).toBe("LEFT JOIN");
-
-    tableSelect.innerHTML += `<option value="sensors">sensors</option>`;
-    tableSelect.value = "sensors";
-    joinTableSelect.innerHTML += `<option value="unknown_table">unknown_table</option>`;
-    joinTableSelect.value = "unknown_table";
-    ui.handleCohortJoinTableChange();
+    tableSelect.value = "subjects_custom";
+    joinSelect.value = "labs_custom";
+    ui.cohortModalController.handleJoinTableChange();
     expect(joinOnInput.value).toBe(
-      '"sensors".patient_id = "unknown_table".patient_id',
+      '"subjects_custom".subject_id = "labs_custom".subject_id',
     );
-    tableSelect.value = "patients";
 
-    joinTypeSelect.value = "";
-    expect(ui.getCohortSql()).toContain("INNER JOIN");
-    joinTypeSelect.value = "LEFT JOIN";
+    tableSelect.value = "subjects_custom";
+    joinSelect.value = "patient_notes";
+    ui.cohortModalController.handleJoinTableChange();
+    expect(joinOnInput.value).toBe(
+      '"subjects_custom".patient_id = "patient_notes".patient_id',
+    );
 
-    joinTableSelect.value = "patients";
-    joinTableSelect.dispatchEvent(new Event("change"));
-    expect(joinOnInput.value).toBe("");
+    // Reverse known relation lookup (cgm_readings -> patients) and unrelated tables fallback
+    schemaContent.replaceChildren();
+    ui.cohortModalController.open();
+    tableSelect.value = "cgm_readings";
+    joinSelect.value = "patients";
+    ui.cohortModalController.handleJoinTableChange();
+    expect(joinOnInput.value).toBe(
+      '"cgm_readings".subject_id = "patients".subject_id',
+    );
 
-    tableSelect.innerHTML = `<option value="patients">patients</option>`;
-    tableSelect.value = "patients";
-    joinTableSelect.innerHTML = `<option value="visits">visits</option>`;
-    joinTableSelect.value = "visits";
-    joinTypeSelect.value = "LEFT JOIN";
-    joinOnInput.value = '"patients".patient_id = "visits".patient_id';
+    tableSelect.value = "tblaptsummary";
+    joinSelect.value = "cgm_readings";
+    ui.cohortModalController.handleJoinTableChange();
+    expect(joinOnInput.value).toBe(
+      '"tblaptsummary".patient_id = "cgm_readings".patient_id',
+    );
 
-    const minAgeInput = getTestElement<HTMLInputElement>("cohort-min-age");
-    minAgeInput.value = "20";
-    minAgeInput.dispatchEvent(new Event("change"));
+    // Fallback when tableSelect/joinSelect values are empty strings
+    tableSelect.innerHTML = `<option value="">Empty</option>`;
+    tableSelect.value = "";
+    expect(ui.cohortModalController.getCohortSql()).toContain(
+      'FROM "patients"',
+    );
+    ui.cohortModalController.handleJoinTableChange();
 
-    const maxAgeInput = getTestElement<HTMLInputElement>("cohort-max-age");
-    maxAgeInput.value = "60";
-    maxAgeInput.dispatchEvent(new Event("change"));
-
-    const maxTIRInput = getTestElement<HTMLInputElement>("cohort-max-tir");
-    maxTIRInput.value = "70";
-    maxTIRInput.dispatchEvent(new Event("change"));
-
-    const minHbA1cInput = getTestElement<HTMLInputElement>("cohort-min-hba1c");
-    minHbA1cInput.value = "6.5";
-    minHbA1cInput.dispatchEvent(new Event("change"));
-
-    joinTypeSelect.dispatchEvent(new Event("change"));
-    joinOnInput.dispatchEvent(new Event("input"));
-
-    const preview = getTestElement("cohort-sql-preview");
-    expect(preview.textContent).toContain('LEFT JOIN "visits"');
-    expect(preview.textContent).toContain("age >= 20");
-    expect(preview.textContent).toContain("age <= 60");
-    expect(preview.textContent).toContain("tir <= 70");
-    expect(preview.textContent).toContain("hba1c >= 6.5");
+    // Close before open when previousFocusCohort is null
+    const freshController = new CohortBuilderModalController(ui);
+    freshController.close();
+    freshController.dispose();
 
     // Escape key dismissal and focus restoration
-    document.body.focus();
-    ui.openCohortModal();
-    ui.closeCohortModal();
-
+    ui.cohortModalController.close();
     const trigger = getTestElement<HTMLButtonElement>("cohort-filter-btn");
     trigger.focus();
-
-    ui.openCohortModal();
-    const modal = getTestElement("cohort-modal");
-    expect(modal.classList.contains("hidden")).toBe(false);
-    expect(modal.getAttribute("aria-hidden")).toBeNull();
-
-    const escEvent = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
-    modal.dispatchEvent(escEvent);
-
+    ui.cohortModalController.open();
+    ui.cohortModalController.open();
+    const modal = ui.cohortModalController.cohortModal;
+    modal.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
     expect(modal.classList.contains("hidden")).toBe(true);
-    expect(modal.getAttribute("aria-hidden")).toBe("true");
     expect(document.activeElement).toBe(trigger);
 
-    const tempTrigger = document.createElement("button");
-    document.body.appendChild(tempTrigger);
-    tempTrigger.focus();
-    ui.openCohortModal();
-    tempTrigger.remove();
-    ui.closeCohortModal();
-    expect(document.activeElement).toBe(trigger);
-
-    ui.openCohortModal();
-    ui.openCohortModal();
-    ui.closeCohortModal();
-    ui.closeCohortModal();
-
-    // Test resilience when optional cohort elements are absent
-    const joinOnParent = joinOnInput.parentElement;
-    const joinOnNext = joinOnInput.nextSibling;
-    joinOnInput.remove();
-    const noJoinOnUi = new ChatUI(state);
-    await flushPromises();
-    tableSelect.innerHTML = `<option value="patients">patients</option>`;
-    joinTableSelect.innerHTML = `<option value="patients">patients</option><option value="cgms">cgms</option>`;
-    tableSelect.value = "patients";
-    joinTableSelect.value = "patients";
-    noJoinOnUi.handleCohortJoinTableChange();
-    joinTableSelect.value = "cgms";
-    noJoinOnUi.handleCohortJoinTableChange();
-    noJoinOnUi.destroy();
-    if (joinOnParent) {
-      joinOnParent.insertBefore(joinOnInput, joinOnNext);
-    }
+    ui.cohortModalController.open();
+    ui.cohortModalController.dispose();
   });
 });

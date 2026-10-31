@@ -497,6 +497,49 @@ describe("CGM Charting Module", () => {
     const explicitWear = calculateActiveWear(sparseRows, "time", 288, 30);
     expect(explicitWear.calendarDays).toBe(30);
     expect(explicitWear.expectedReadings).toBe(30 * 288);
+
+    // Unordered 15-minute FreeStyle Libre readings auto-detected (96 readings/day)
+    const libreBaseMs = Date.UTC(2024, 0, 1, 8, 0, 0);
+    const libreRows = Array.from({ length: 80 }, (_, idx) => ({
+      time: libreBaseMs + idx * 15 * 60 * 1000,
+      glucose: 5.5,
+    })).reverse();
+    const libreWear = calculateActiveWear(libreRows, "time");
+    expect(libreWear.expectedReadings).toBe(96);
+    expect(libreWear.isValidWear).toBe(true);
+
+    // 1-minute sensor interval auto-detected (1440 readings/day) and explicit intervalMinutes override
+    const oneMinRows = [
+      { time: libreBaseMs, glucose: 110 },
+      { time: libreBaseMs + 60 * 1000, glucose: 112 },
+      { time: libreBaseMs + 120 * 1000, glucose: 114 },
+    ];
+    const oneMinWear = calculateActiveWear(oneMinRows, "time");
+    expect(oneMinWear.expectedReadings).toBe(1440);
+
+    const explicitIntervalWear = calculateActiveWear(
+      oneMinRows,
+      "time",
+      undefined,
+      1,
+      15,
+    );
+    expect(explicitIntervalWear.expectedReadings).toBe(96);
+
+    // Sub-day trace crossing midnight stays 1 calendar day
+    const overnightRows = [
+      { time: "2024-01-01T23:00:00Z", glucose: 5.5 },
+      { time: "2024-01-02T01:00:00Z", glucose: 6.2 },
+    ];
+    const overnightWear = calculateActiveWear(overnightRows, "time", 288);
+    expect(overnightWear.calendarDays).toBe(1);
+    expect(overnightWear.activeDays).toBe(2);
+
+    // AGP and histogram normalize mmol/L values to mg/dL
+    const mmolAgp = calculateAGP(overnightRows, "time", "glucose", 60);
+    expect(mmolAgp?.intervals.some((intv) => intv.p50 > 90)).toBe(true);
+    const mmolHist = renderHistogramSvg([5.5, 6.0, 6.5, 7.0]);
+    expect(mmolHist.querySelectorAll("rect").length).toBeGreaterThan(0);
   });
 
   it("covers additional edge branches for 14-day window and active wear", () => {
@@ -820,14 +863,33 @@ describe("CGM Charting Module", () => {
     expect(dn.day.count).toBe(2);
     expect(dn.night.count).toBe(2);
 
-    // 4. Daylight saving transition timezone strings
+    // 4. Daylight saving transition timezone strings preserve local wall-clock minuteOfDay
     const dst1 = parseDateAndMinuteOfDay("2024-03-10T01:59:00-05:00");
     expect(dst1).not.toBeNull();
+    expect(dst1?.minuteOfDay).toBe(1 * 60 + 59);
+    expect(dst1?.dayKey).toBe("2024-2-10");
     expect(dst1?.epochMs).toBeGreaterThan(0);
 
     const dst2 = parseDateAndMinuteOfDay("2024-03-10T03:00:00-04:00");
     expect(dst2).not.toBeNull();
+    expect(dst2?.minuteOfDay).toBe(3 * 60);
     expect(dst2?.epochMs).toBeGreaterThan(0);
+
+    // 5. Multiple CGM cards with idSuffix have distinct non-colliding SVG title/desc IDs
+    const cardA = renderCgmCard(
+      [{ time: "2024-01-01T10:00:00Z", glucose: 120 }],
+      14,
+      "",
+    );
+    const cardB = renderCgmCard(
+      [{ time: "2024-01-01T10:00:00Z", glucose: 120 }],
+      14,
+      "card-1",
+    );
+    expect(cardA?.querySelector("#tir-svg-title")).not.toBeNull();
+    expect(cardB?.querySelector("#tir-svg-title-card-1")).not.toBeNull();
+    expect(cardB?.querySelector("#agp-svg-title-card-1")).not.toBeNull();
+    expect(cardB?.querySelector("#hist-svg-title-card-1")).not.toBeNull();
   });
 
   it("renders localized SVG headers, tooltips, Day/Night TIR badge, and accessible windowSelect across LTR and RTL locales", async () => {

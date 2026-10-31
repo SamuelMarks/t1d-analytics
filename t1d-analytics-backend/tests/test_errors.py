@@ -8,9 +8,11 @@ from t1d_analytics.errors import (
     ChecksumMismatchError,
     CliValidationError,
     ConfigFileNotFoundError,
+    ConfigurationError,
     DatabaseError,
     DatabaseLockedError,
     DatabaseNotFoundError,
+    DatasetNotFoundError,
     DownloadError,
     EmptyQueryError,
     ExportError,
@@ -47,6 +49,7 @@ from t1d_analytics.errors import (
     SeedVerificationError,
     SessionNotFoundError,
     SqlExecutionError,
+    SqlTimeoutError,
     SubprocessTimeoutError,
     T1DError,
     TableNotFoundError,
@@ -58,6 +61,8 @@ from t1d_analytics.errors import (
     TrainingError,
     TrainingExecutionError,
     TrainingJobNotFoundError,
+    UnsupportedExportFormatError,
+    exception_to_error_detail,
 )
 
 
@@ -322,3 +327,19 @@ def test_t1d_error_fastapi_exception_handler() -> None:
     api_err = parse_error(exc)
     assert api_err.error_code == "backend.dbNotFound"
     assert api_err.params == {"path": "missing.duckdb"}
+
+    from t1d_analytics import cli
+
+    assert cli.TrainingExecutionError is TrainingExecutionError
+    assert ConfigurationError("bad cfg").status_code == 400
+    assert DatasetNotFoundError("no ds").status_code == 404
+    assert SqlTimeoutError("timeout").status_code == 504
+    assert UnsupportedExportFormatError("bad fmt").status_code == 400
+    assert exception_to_error_detail(exc) == {
+        "error_code": "backend.dbNotFound",
+        "params": {"path": "missing.duckdb"},
+    }
+    assert exception_to_error_detail(RuntimeError("boom")) == {
+        "error_code": "backend.errorUnexpected",
+        "params": {"error": "boom"},
+    }

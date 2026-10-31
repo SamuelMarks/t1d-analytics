@@ -120,7 +120,7 @@ def test_main_exception(mock_fetch: MagicMock, capsys: CaptureFixture[str]) -> N
     assert "Test Error" in capsys.readouterr().err
 
 
-@patch("t1d_analytics.analytics.extract_zips")
+@patch("t1d_analytics.ingestion.extract_zips")
 def test_extract_subcommand(mock_extract: MagicMock) -> None:
     """Test successful CLI execution for extract."""
     with patch("sys.argv", ["t1d-analytics", "extract", "--data-dir", "./test_data"]):
@@ -129,7 +129,7 @@ def test_extract_subcommand(mock_extract: MagicMock) -> None:
     mock_extract.assert_called_once_with("./test_data")
 
 
-@patch("t1d_analytics.analytics.load_data_to_duckdb")
+@patch("t1d_analytics.ingestion.load_data_to_duckdb")
 def test_load_subcommand(mock_load: MagicMock) -> None:
     """Test successful CLI execution for load."""
     with patch(
@@ -147,7 +147,7 @@ def test_load_subcommand(mock_load: MagicMock) -> None:
     )
 
 
-@patch("t1d_analytics.analytics.load_data_to_duckdb")
+@patch("t1d_analytics.ingestion.load_data_to_duckdb")
 def test_load_subcommand_with_flags(mock_load: MagicMock) -> None:
     """Test load CLI execution with clinical and prefix flags."""
     with patch(
@@ -175,7 +175,7 @@ def test_load_subcommand_with_flags(mock_load: MagicMock) -> None:
     )
 
 
-@patch("t1d_analytics.analytics.get_ingestion_manifest")
+@patch("t1d_analytics.ingestion.get_ingestion_manifest")
 def test_manifest_subcommand_empty(
     mock_manifest: MagicMock, capsys: CaptureFixture[str]
 ) -> None:
@@ -188,7 +188,7 @@ def test_manifest_subcommand_empty(
     assert "No ingestion manifest records found." in capsys.readouterr().out
 
 
-@patch("t1d_analytics.analytics.get_ingestion_manifest")
+@patch("t1d_analytics.ingestion.get_ingestion_manifest")
 def test_manifest_subcommand_with_records(
     mock_manifest: MagicMock, capsys: CaptureFixture[str]
 ) -> None:
@@ -339,7 +339,7 @@ def test_evaluate_subcommand(
     mock_eval: MagicMock, tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
     """Test CLI evaluate subcommand with JSON array, JSONL, and output export."""
-    # 1. Missing test file
+    # 1. Missing test file exits non-zero
     with patch(
         "sys.argv",
         [
@@ -351,8 +351,13 @@ def test_evaluate_subcommand(
             str(tmp_path / "nonexistent.json"),
         ],
     ):
-        main()
-    assert "does not exist" in capsys.readouterr().out
+        with pytest.raises(SystemExit) as exc_eval:
+            main()
+        assert exc_eval.value.code == 1
+    captured_eval = capsys.readouterr()
+    assert (
+        "does not exist" in captured_eval.out or "does not exist" in captured_eval.err
+    )
 
     # 2. JSON array test set with CSV output
     test_file_json = tmp_path / "test_set.json"
@@ -703,9 +708,9 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     conn_init.close()
 
     # Iteration 1 detects sample_file, unlinks it during load so iteration 2 detects deletion
-    from t1d_analytics import analytics
+    from t1d_analytics import ingestion
 
-    orig_load = analytics.load_data_to_duckdb
+    orig_load = ingestion.load_data_to_duckdb
 
     def side_effect_load(
         data_dir: str,
@@ -725,7 +730,7 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
         )
 
     with patch(
-        "t1d_analytics.analytics.load_data_to_duckdb", side_effect=side_effect_load
+        "t1d_analytics.ingestion.load_data_to_duckdb", side_effect=side_effect_load
     ):
         with patch(
             "sys.argv",
@@ -771,7 +776,7 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
             ],
         ):
             with patch(
-                "t1d_analytics.analytics.load_data_to_duckdb",
+                "t1d_analytics.ingestion.load_data_to_duckdb",
                 side_effect=lambda *a, **k: (
                     sample_file2.unlink() if sample_file2.exists() else None
                 ),
@@ -797,7 +802,7 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
             ],
         ):
             with patch(
-                "t1d_analytics.analytics.load_data_to_duckdb",
+                "t1d_analytics.ingestion.load_data_to_duckdb",
                 side_effect=lambda *a, **k: (
                     sample_file3.unlink() if sample_file3.exists() else None
                 ),
@@ -824,7 +829,7 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
         ],
     ):
         with patch(
-            "t1d_analytics.analytics.load_data_to_duckdb",
+            "t1d_analytics.ingestion.load_data_to_duckdb",
             side_effect=lambda *a, **k: sample_file3.unlink(),
         ):
             main()
@@ -1672,7 +1677,7 @@ def test_seed_subcommand_and_doctor_thresholds(
     c_tv2.close()
 
     # Test load_data_to_duckdb drops existing compatibility view when real CSV for that stem arrives
-    from t1d_analytics.analytics import load_data_to_duckdb
+    from t1d_analytics.ingestion import load_data_to_duckdb
 
     (data_dir / "tblaptsummary.csv").write_text(
         "PtID,TxGroup\n501,RealTable\n", encoding="utf-8"

@@ -2,7 +2,7 @@
 
 import os
 from types import SimpleNamespace
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 from unittest.mock import patch
 
 from t1d_analytics.llm_client import (
@@ -29,11 +29,50 @@ class _EmptyChunk:
 
 
 def test_normalize_ollama_host() -> None:
-    """Test normalize_ollama_host with and without scheme."""
+    """Test resolve_ollama_base_url, configure_ollama_env, and normalize_ollama_host."""
+    from t1d_analytics.llm_client import (
+        configure_ollama_env,
+        probe_ollama_tags_and_version,
+        resolve_ollama_base_url,
+    )
+
     with patch.dict(os.environ, {"OLLAMA_HOST": "127.0.0.1:11434/"}):
         assert normalize_ollama_host() == "http://127.0.0.1:11434"
-    with patch.dict(os.environ, {"OLLAMA_HOST": "https://ollama.example.com/"}):
-        assert normalize_ollama_host() == "https://ollama.example.com"
+        assert (
+            resolve_ollama_base_url("custom.ollama:11434/")
+            == "http://custom.ollama:11434"
+        )
+        configured = configure_ollama_env("https://ollama.example.com/")
+        assert configured == "https://ollama.example.com"
+        assert os.environ["OLLAMA_HOST"] == "https://ollama.example.com"
+        assert os.environ["OLLAMA_API_BASE"] == "https://ollama.example.com"
+
+    class _BadStatusResp:
+        """Mock response returning HTTP 503."""
+
+        status = 503
+
+        def __enter__(self) -> "_BadStatusResp":
+            """Enter context."""
+            return self
+
+        def __exit__(
+            self,
+            exc_type: Optional[type],
+            exc_val: Optional[BaseException],
+            exc_tb: Optional[Union[str, int, float, bool]],
+        ) -> Optional[bool]:
+            """Exit context."""
+            return None
+
+    import urllib.error
+
+    import pytest
+
+    with pytest.raises(urllib.error.URLError, match="HTTP 503"):
+        probe_ollama_tags_and_version(
+            urlopen_fn=lambda req, timeout=2.0: _BadStatusResp()
+        )
 
 
 def test_resolve_provider_and_model_and_keys() -> None:
@@ -310,33 +349,26 @@ def test_complete_llm_prompt_and_stream_llm_factory() -> None:
 
 
 def test_llm_client_protocol_stubs() -> None:
-    """Verify concrete implementations satisfy runtime-checkable protocols in t1d_analytics.llm_client."""
+    """Verify protocol-compliant URL responses and transports integrate with fetch_available_models, probe_providers_status, and complete_llm_prompt."""
     from typing import Mapping, Union
 
     from t1d_analytics.llm_client import (
-        AnyLlmFactoryProtocol,
         LlmTransportProtocol,
-        _AnyLlmListModelsFn,
-        _AnyLlmModelProtocol,
-        _UrlResponseProtocol,
+        complete_llm_prompt,
+        fetch_available_models,
+        probe_providers_status,
     )
 
-    _ = (
-        AnyLlmFactoryProtocol,
-        _AnyLlmListModelsFn,
-        _UrlResponseProtocol,
-    )
-
-    class _ConcreteUrlResponse:
-        """Helper satisfying _UrlResponseProtocol."""
+    class _ContractUrlResponse:
+        """Protocol-compliant URL response returning valid Ollama tags JSON."""
 
         status = 200
 
         def read(self) -> bytes:
-            """Return empty bytes."""
-            return b""
+            """Return serialized Ollama tags payload."""
+            return b'{"models": [{"name": "gemma4:latest", "size": 4096}]}'
 
-        def __enter__(self) -> "_ConcreteUrlResponse":
+        def __enter__(self) -> "_ContractUrlResponse":
             """Enter context."""
             return self
 
@@ -349,8 +381,8 @@ def test_llm_client_protocol_stubs() -> None:
             """Exit context."""
             return None
 
-    class _ConcreteTransport:
-        """Helper satisfying LlmTransportProtocol."""
+    class _ContractTransport:
+        """Protocol-compliant LLM transport echoing the last user message."""
 
         def completion(
             self,
@@ -359,36 +391,30 @@ def test_llm_client_protocol_stubs() -> None:
             messages: Sequence[Mapping[str, str]],
             stream: bool = False,
         ) -> str:
-            """Return empty completion."""
-            return ""
+            """Return SQL statement derived from prompt."""
+            _ = (model, stream)
+            user_msg = messages[-1]["content"] if messages else ""
+            return f"SELECT '{user_msg}' AS q;"
 
-    class _ConcreteListModels:
-        """Helper satisfying _AnyLlmListModelsFn."""
-
-        def __call__(
-            self, provider: str, api_key: Optional[str] = None
-        ) -> Sequence[_AnyLlmModelProtocol]:
-            """Return empty sequence."""
-            return []
-
-    class _ConcreteFactory:
-        """Helper satisfying AnyLlmFactoryProtocol."""
-
-        def __call__(
-            self, provider: str, api_key: Optional[str] = None
-        ) -> LlmTransportProtocol:
-            """Return concrete transport."""
-            return _ConcreteTransport()
-
-    resp = _ConcreteUrlResponse()
-    transport = _ConcreteTransport()
-    list_models = _ConcreteListModels()
-    factory = _ConcreteFactory()
-    assert resp.read() == b""
-    assert resp.status == 200
-    with resp as entered:
-        assert entered is resp
+    transport = _ContractTransport()
     assert isinstance(transport, LlmTransportProtocol)
-    assert transport.completion(model="m", messages=[], stream=False) == ""
-    assert list_models("openai") == []
-    assert isinstance(factory("openai"), _ConcreteTransport)
+
+    status_resp = probe_providers_status(
+        urlopen_fn=lambda req, timeout=2: _ContractUrlResponse()
+    )
+    assert any(p.provider == "ollama" and p.healthy for p in status_resp.providers)
+
+    models_resp = fetch_available_models(
+        include_cloud=False,
+        urlopen_fn=lambda req, timeout=5: _ContractUrlResponse(),
+    )
+    assert len(models_resp.models) == 1
+    assert models_resp.models[0].name == "gemma4:latest"
+
+    sql_out = complete_llm_prompt(
+        prompt="patients",
+        model_name="openai/gpt-4o",
+        api_key="sk-contract",
+        llm_factory=lambda provider, api_key=None: transport,
+    )
+    assert sql_out == "SELECT 'patients' AS q;"

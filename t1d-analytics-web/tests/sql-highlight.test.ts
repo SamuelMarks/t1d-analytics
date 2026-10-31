@@ -36,7 +36,7 @@ describe("SQL Highlight & Modal Focus Utilities", () => {
   });
 
   afterEach(() => {
-    ui.destroy();
+    ui.dispose();
     localStorage.clear();
     document.body.innerHTML = "";
     vi.restoreAllMocks();
@@ -117,7 +117,7 @@ ${fence}`,
       },
     ];
     state.activeChatId = "chat-3";
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
 
     const msgBlock = document.querySelector(".message.assistant");
     expect(msgBlock).not.toBeNull();
@@ -133,7 +133,7 @@ ${fence}`,
 ${fence}`,
     });
     state.setActiveChat(chat.id);
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     expect(document.querySelector(".sql-query-container")).not.toBeNull();
 
     chat.messages = [
@@ -145,7 +145,7 @@ ${fence}`,
         model: "gemma",
       },
     ];
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
     expect(document.querySelector(".language-python")).toBeTruthy();
   });
 
@@ -160,7 +160,7 @@ SELECT * FROM users;
 ${fence}`,
       sqlQuery: "SELECT * FROM users;",
     });
-    ui["renderMessages"]();
+    ui.messageRenderer.renderMessages();
 
     const containers = document.querySelectorAll(".sql-query-container");
     expect(containers.length).toBe(1);
