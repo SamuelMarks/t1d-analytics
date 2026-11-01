@@ -49,7 +49,7 @@ jobs:
           echo "2,Test B,200" >> t1d-analytics-backend/tests/test_data/tiny.csv
 
           # Load tiny dataset into DuckDB
-          python -c "from t1d_analytics.analytics import load_data_to_duckdb; load_data_to_duckdb('t1d-analytics-backend/tests/test_data/', 'ci_test.duckdb')"
+          python -c "from t1d_analytics.ingestion import load_data_to_duckdb; load_data_to_duckdb('t1d-analytics-backend/tests/test_data/', 'ci_test.duckdb')"
 
           # Verify the database has the data
           python -c "import duckdb; conn = duckdb.connect('ci_test.duckdb'); res = conn.execute('SELECT count(*) FROM tiny').fetchone()[0]; assert res == 2, f'Expected 2 rows, got {res}'"
@@ -113,14 +113,12 @@ jobs:
 
       - name: Setup Backend for Full E2E
         run: |
+          rm -f ci_test.duckdb t1d-analytics-backend/tests/test_data/sessions.duckdb
           mkdir -p t1d-analytics-backend/tests/test_data
           echo "id,name,value" > t1d-analytics-backend/tests/test_data/tiny.csv
           echo "1,Test A,100" >> t1d-analytics-backend/tests/test_data/tiny.csv
           echo "2,Test B,200" >> t1d-analytics-backend/tests/test_data/tiny.csv
-          echo "id,name,age" > t1d-analytics-backend/tests/test_data/patients.csv
-          echo "1,Alice,30" >> t1d-analytics-backend/tests/test_data/patients.csv
-          echo "2,Bob,40" >> t1d-analytics-backend/tests/test_data/patients.csv
-          t1d-analytics load -d t1d-analytics-backend/tests/test_data --db ci_test.duckdb
+          t1d-analytics seed -d t1d-analytics-backend/tests/test_data --db ci_test.duckdb --sessions-db t1d-analytics-backend/tests/test_data/sessions.duckdb --overwrite
 
       - name: Run Web E2E Full Stack Tests (Playwright)
         working-directory: ./t1d-analytics-web

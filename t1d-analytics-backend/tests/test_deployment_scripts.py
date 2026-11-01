@@ -705,6 +705,16 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert "./libscript.sh train" in report_md
     assert "./stacks/" not in report_md
 
+    ci_yml = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "from t1d_analytics.ingestion import load_data_to_duckdb" in ci_yml
+    assert "from t1d_analytics.analytics import load_data_to_duckdb" not in ci_yml
+    assert (
+        "t1d-analytics seed -d t1d-analytics-backend/tests/test_data --db ci_test.duckdb"
+        in ci_yml
+    )
+
     sample_env = (
         REPO_ROOT
         / "t1d-analytics-backend"
