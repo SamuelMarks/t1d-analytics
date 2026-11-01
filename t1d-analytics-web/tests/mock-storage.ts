@@ -15,6 +15,11 @@ if (typeof document === "undefined") {
   vi.stubGlobal("document", mockDoc);
 }
 
+if (typeof navigator === "undefined") {
+  /** Minimal navigator stub for tests running in the `@vitest-environment node` context on Node 20. */
+  vi.stubGlobal("navigator", { language: "en-US" });
+}
+
 /**
  * In-memory Web Storage API implementation for testing.
  */

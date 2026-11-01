@@ -1,9 +1,12 @@
 """Unit tests for centralized LLM client utilities in t1d_analytics.llm_client."""
 
 import os
+import urllib.error
 from types import SimpleNamespace
-from typing import Optional, Sequence, Union
-from unittest.mock import patch
+from typing import Optional, Sequence
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from t1d_analytics.llm_client import (
     _AnyLlmModelProtocol,
@@ -47,32 +50,11 @@ def test_normalize_ollama_host() -> None:
         assert os.environ["OLLAMA_HOST"] == "https://ollama.example.com"
         assert os.environ["OLLAMA_API_BASE"] == "https://ollama.example.com"
 
-    class _BadStatusResp:
-        """Mock response returning HTTP 503."""
-
-        status = 503
-
-        def __enter__(self) -> "_BadStatusResp":
-            """Enter context."""
-            return self
-
-        def __exit__(
-            self,
-            exc_type: Optional[type],
-            exc_val: Optional[BaseException],
-            exc_tb: Optional[Union[str, int, float, bool]],
-        ) -> Optional[bool]:
-            """Exit context."""
-            return None
-
-    import urllib.error
-
-    import pytest
+    bad_resp = MagicMock(status=503)
+    bad_resp.__enter__.return_value = bad_resp
 
     with pytest.raises(urllib.error.URLError, match="HTTP 503"):
-        probe_ollama_tags_and_version(
-            urlopen_fn=lambda req, timeout=2.0: _BadStatusResp()
-        )
+        probe_ollama_tags_and_version(urlopen_fn=lambda req, timeout=2.0: bad_resp)
 
 
 def test_resolve_provider_and_model_and_keys() -> None:

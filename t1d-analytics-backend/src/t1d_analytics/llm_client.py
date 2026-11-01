@@ -166,21 +166,14 @@ class _HttpStatusProtocol(Protocol):
         ...
 
 
-@runtime_checkable
-class _HttpReadableProtocol(Protocol):
-    """Protocol for an HTTP response exposing a `read()` method."""
+class _UrlResponseProtocol(Protocol):
+    """Protocol for an HTTP response context manager returned by `urlopen`."""
 
     def read(self) -> bytes:
         """Read response body bytes."""
         ...
 
-
-class _UrlResponseProtocol(Protocol):
-    """Protocol for an HTTP response context manager returned by `urlopen`."""
-
-    def __enter__(
-        self,
-    ) -> Union["_UrlResponseProtocol", _HttpStatusProtocol, _HttpReadableProtocol]:
+    def __enter__(self) -> "_UrlResponseProtocol":
         """Enter context manager."""
         ...
 
@@ -1183,11 +1176,7 @@ def probe_ollama_tags_and_version(
             and response.status != 200
         ):
             raise urllib.error.URLError(f"HTTP {response.status}")
-        raw_bytes = (
-            response.read()
-            if isinstance(response, _HttpReadableProtocol)
-            else b'{"models": []}'
-        )
+        raw_bytes = response.read()
         data = json.loads(raw_bytes.decode("utf-8"))
 
     version: Optional[str] = None
@@ -1195,11 +1184,7 @@ def probe_ollama_tags_and_version(
         try:
             v_req = urllib.request.Request(f"{host}/api/version")
             with urlopen_fn(v_req, timeout=timeout) as v_resp:
-                v_raw = (
-                    v_resp.read()
-                    if isinstance(v_resp, _HttpReadableProtocol)
-                    else b"{}"
-                )
+                v_raw = v_resp.read()
                 v_data = json.loads(v_raw.decode("utf-8"))
                 version = str(v_data.get("version", "")) or None
         except Exception:
@@ -1265,9 +1250,7 @@ def generate_ollama_json_completion(
         headers={"Content-Type": "application/json"},
     )
     with urlopen_fn(req, timeout=timeout) as response:
-        raw_body = (
-            response.read() if isinstance(response, _HttpReadableProtocol) else b"{}"
-        )
+        raw_body = response.read()
         result = json.loads(raw_body.decode("utf-8"))
         return str(result.get("response", "[]"))
 

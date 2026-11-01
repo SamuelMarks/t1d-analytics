@@ -341,6 +341,10 @@ def test_get_providers_status_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
 
         status = 200
 
+        def read(self) -> bytes:
+            """Return empty Ollama models JSON payload."""
+            return b'{"models": []}'
+
         def __enter__(self) -> "MockResp":
             """Enter context."""
             return self

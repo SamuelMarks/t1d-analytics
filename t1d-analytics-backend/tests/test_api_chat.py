@@ -520,6 +520,14 @@ def test_chat_stream_nl_no_sql_generated(mock_stream: MagicMock, mock_db: str) -
     assert resp.status_code == 200
     assert "I cannot answer this with SQL" in resp.text
 
+    mock_stream.return_value = iter(["```sql\n```"])
+    resp_empty_sql = client.post(
+        "/api/chat/stream",
+        json={"message": "hello", "model": "gemma4", "db_path": mock_db},
+    )
+    assert resp_empty_sql.status_code == 200
+    assert "sql_generated" not in resp_empty_sql.text
+
 
 @patch("t1d_analytics.api.stream_llm_tokens")
 def test_chat_stream_nl_sql_execution_error(
@@ -771,6 +779,7 @@ def test_multi_turn_history_in_prompt_and_chat(mock_db: str, mocker: MagicMock) 
         },
     ) as stream_resp:
         assert stream_resp.status_code == 200
+        stream_resp.read()
 
 
 def test_multiprovider_llm_validation(

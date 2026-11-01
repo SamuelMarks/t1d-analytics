@@ -301,15 +301,16 @@ def test_generate_pairs_any_llm_success(
 ) -> None:
     """Test generating training pairs via any-llm."""
     mock_llm = MagicMock()
-    mock_resp = MagicMock()
-    mock_resp.choices = [MagicMock()]
-    mock_resp.choices[0].message.content = json.dumps(
-        [
-            "What is patient age?",
-            "SELECT age FROM demographics;",
-            "SELECT invalid_col FROM demographics;",
-        ]
+    mock_msg = MagicMock(
+        content=json.dumps(
+            [
+                "What is patient age?",
+                "SELECT age FROM demographics;",
+                "SELECT invalid_col FROM demographics;",
+            ]
+        )
     )
+    mock_resp = MagicMock(choices=[MagicMock(message=mock_msg)])
     mock_llm.completion.return_value = mock_resp
     mock_create.return_value = mock_llm
 
@@ -690,9 +691,10 @@ def test_generate_pairs_checkpointing_and_custom_template(
     assert cached_pairs[0][0] == "Count users"
 
     mock_llm = MagicMock()
-    mock_choice = MagicMock()
-    mock_choice.message.content = (
-        '["New Question", "SELECT id FROM users", "SELECT bad"]'
+    mock_choice = MagicMock(
+        message=MagicMock(
+            content='["New Question", "SELECT id FROM users", "SELECT bad"]'
+        )
     )
     mock_llm.completion.return_value = MagicMock(choices=[mock_choice])
 
