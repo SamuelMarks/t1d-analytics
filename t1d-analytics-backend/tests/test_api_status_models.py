@@ -294,6 +294,19 @@ def test_validate_db_path_traversal(
     assert get_allowed_db_roots() == [tmp_path.resolve()]
     monkeypatch.delenv("T1D_ALLOWED_DB_DIR", raising=False)
 
+    # T1D_JAEB_DIR adds existing external Jaeb root and ignores non-existent root
+    from t1d_analytics.db_security import get_jaeb_external_root
+
+    jaeb_dir = tmp_path / "jaeb_ext"
+    jaeb_dir.mkdir()
+    monkeypatch.setenv("T1D_JAEB_DIR", str(jaeb_dir))
+    assert get_jaeb_external_root() == jaeb_dir
+    assert jaeb_dir.resolve() in get_allowed_db_roots()
+
+    monkeypatch.setenv("T1D_JAEB_DIR", str(tmp_path / "missing_jaeb_ext"))
+    assert (tmp_path / "missing_jaeb_ext").resolve() not in get_allowed_db_roots()
+    monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
+
 
 def test_validate_db_path_env_var(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

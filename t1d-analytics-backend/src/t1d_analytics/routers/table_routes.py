@@ -23,7 +23,10 @@ from t1d_analytics.api_schemas import (
     TableInfo,
 )
 from t1d_analytics.diagnostics import check_database_health
-from t1d_analytics.sql_utils import extract_table_columns_map
+from t1d_analytics.sql_utils import (
+    connect_duckdb_read_only_pooled,
+    extract_table_columns_map,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -222,12 +225,15 @@ def _build_schema_response(target_db: str, lang: str = "en") -> SchemaResponse:
 
     db_health = check_database_health(target_db, lang=lang)
 
-    conn = None
     try:
-        conn = api_mod.duckdb.connect(target_db, read_only=True)
-        cols_map = extract_table_columns_map(
-            conn, exclude_internal=False, exclude_training_tables=False
-        )
+        with connect_duckdb_read_only_pooled(
+            db_path=target_db,
+            connect_fn=api_mod.duckdb.connect,
+            disable_external_access=True,
+        ) as conn:
+            cols_map = extract_table_columns_map(
+                conn, exclude_internal=False, exclude_training_tables=False
+            )
         schema_data = [
             TableInfo(
                 name=table,
@@ -242,9 +248,6 @@ def _build_schema_response(target_db: str, lang: str = "en") -> SchemaResponse:
     except Exception as e:
         logger.error(f"Error fetching schema: {e}")
         return SchemaResponse(tables=[], database=db_health.to_dict())
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 @tables_router.get("/api/schema", response_model=SchemaResponse)

@@ -407,18 +407,79 @@ def get_ingestion_manifest(db_path: str) -> list[IngestionManifestRecord]:
 _NUMERIC_CLINICAL_CONCEPTS = {
     "age",
     "ageasofranddt",
+    "agebaseline",
     "hba1c",
+    "a1c",
+    "a1cval",
     "c_peptide",
     "glucose",
+    "glucose_value",
+    "sensorglucose",
+    "historicglucose",
+    "meancgm",
+    "meanglucose",
+    "mean_glucose",
+    "tir",
+    "tbr",
+    "tar",
     "bmi",
+    "bmibaseline",
+    "bodymassindex",
+    "bmi_kg_m2",
+    "t1d_duration_years",
+    "duration",
+    "diagduration",
+    "yrsdiag",
+    "t1dduration",
+    "pt_duration",
+    "total_daily_insulin",
+    "tdd",
+    "totaldailydose",
+    "unitsperkg",
+    "basalbolustotal",
+    "cgm_active_wear_pct",
+    "pctwear",
+    "activewear",
+    "sensorwearpct",
+    "validcgmdays",
     "weight_kg",
     "height_cm",
     "insulin_total_daily",
+    "insulin_total_daily_units",
     "insulin_basal",
     "insulin_bolus",
     "numsevhypo",
+    "pt_numsevhypo",
     "numhospdka",
+    "pt_numhospdka",
 }
+_CLINICAL_NUMERIC_COLUMNS = _NUMERIC_CLINICAL_CONCEPTS
+
+
+def coerce_known_clinical_numeric_columns(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+) -> None:
+    """
+    Alter known clinical numeric columns stored as `VARCHAR` in an ingested DuckDB table to `DOUBLE`.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        table_name: Target DuckDB table identifier.
+
+    """
+    safe_tbl = escape_sql_identifier(table_name)
+    cols = conn.execute(f'DESCRIBE "{safe_tbl}"').fetchall()
+    for col_row in cols:
+        col_name = str(col_row[0])
+        col_type = str(col_row[1]).upper()
+        if col_name.lower() in _NUMERIC_CLINICAL_CONCEPTS and "CHAR" in col_type:
+            safe_col = escape_sql_identifier(col_name)
+            conn.execute(
+                f'ALTER TABLE "{safe_tbl}" ALTER COLUMN "{safe_col}" '
+                f"TYPE DOUBLE USING TRY_CAST(NULLIF(TRIM(\"{safe_col}\"), '') AS DOUBLE)"
+            )
 
 
 def get_supported_tabular_globs(
@@ -591,7 +652,7 @@ def _load_csv_or_parquet(
         logger.info(load_gz_msg)
         report_fn(load_gz_msg)
         conn.execute(
-            f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true)"
+            f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sample_size=-1, nullstr=['', 'NA', 'N/A', '.', 'NULL', 'null', 'None', 'Unknown', 'Missing', '-'])"
         )
     else:
         _py_enc, duckdb_encoding, duckdb_sep = _detect_csv_encoding_and_delimiter(
@@ -609,7 +670,7 @@ def _load_csv_or_parquet(
         escaped_sep = escape_sql_literal(duckdb_sep)
         escaped_enc = escape_sql_literal(duckdb_encoding)
         conn.execute(
-            f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sep='{escaped_sep}', encoding='{escaped_enc}')"
+            f"CREATE OR REPLACE TEMP VIEW temp_view AS SELECT * FROM read_csv('{escaped_path}', auto_detect=true, sample_size=-1, nullstr=['', 'NA', 'N/A', '.', 'NULL', 'null', 'None', 'Unknown', 'Missing', '-'], sep='{escaped_sep}', encoding='{escaped_enc}')"
         )
 
 
@@ -805,6 +866,7 @@ def _ingest_single_tabular_file(
         conn.execute("DROP VIEW temp_view")
         if is_clinical:
             conn.unregister("_clinical_df")
+        coerce_known_clinical_numeric_columns(conn, table_name)
 
         escaped_source = escape_sql_literal(current_source)
         conn.execute(f"COMMENT ON TABLE \"{escaped_table}\" IS '{escaped_source}'")

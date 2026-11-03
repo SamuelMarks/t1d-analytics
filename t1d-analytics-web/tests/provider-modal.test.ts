@@ -223,7 +223,7 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
 
     // Custom configured any-llm models and activeChat fallback resolution
     state.setConfiguredModels(
-      "groq:llama-3.3-70b-versatile, deepseek/deepseek-chat, custom-local-ollama, openai/gpt-4o",
+      "sql, groq:llama-3.3-70b-versatile, deepseek/deepseek-chat, custom-local-ollama, openai/gpt-4o",
     );
     const activeChat = state.getActiveChat();
     if (activeChat) {
@@ -233,6 +233,12 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
       ok: true,
       json: async () => ({
         models: [
+          { name: "sql", provider: "duckdb", configured: true },
+          {
+            name: "hf.co/google/gemma-4-E4B",
+            provider: "ollama",
+            configured: true,
+          },
           { name: "openai/gpt-4o", provider: "openai", configured: true },
         ],
       }),
@@ -243,6 +249,19 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
     expect(optionValues).toContain("groq/llama-3.3-70b-versatile");
     expect(optionValues).toContain("deepseek/deepseek-chat");
     expect(optionValues).toContain("custom-local-ollama");
+
+    // Multi-select custom selection save
+    const multiSelect = getTestElement<HTMLSelectElement>(
+      "provider-models-multiselect",
+    );
+    for (const opt of Array.from(multiSelect.options)) {
+      opt.selected =
+        opt.value === "sql" || opt.value === "groq/llama-3.3-70b-versatile";
+    }
+    await ui.providerModalController.saveSettings();
+    expect(state.getConfiguredModels()).toContain(
+      "groq/llama-3.3-70b-versatile",
+    );
     state.removeConfiguredModels();
 
     // Fallback when models list is empty and activeChat has a non-sql model

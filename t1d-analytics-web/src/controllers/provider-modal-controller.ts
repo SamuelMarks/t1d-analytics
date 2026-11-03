@@ -9,7 +9,12 @@ import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
 import { requireElementById, trapModalFocus } from "../modal-utils";
 import { type ChatState } from "../state";
-import { type ModelSelectorController } from "./model-selector-controller";
+import {
+  DEFAULT_CHOICE_OLLAMA_MODELS,
+  resolveModelProvider,
+  type ModelApiItem,
+  type ModelSelectorController,
+} from "./model-selector-controller";
 
 /**
  * Status metadata for a single LLM provider in `ProvidersStatusPayload`.
@@ -67,6 +72,8 @@ export class ProviderSettingsModalController {
   public readonly providerKeyAnthropic: HTMLInputElement;
   /** Password input for the Google Gemini API key. */
   public readonly providerKeyGoogle: HTMLInputElement;
+  /** Multi-select element for choosing enabled any-llm and SQL models. */
+  public readonly providerModelsMultiSelect: HTMLSelectElement;
   /** Checkbox input for user consent to store API keys in localStorage. */
   public readonly providerStoreConsent: HTMLInputElement;
   /** Button to save configured provider API keys. */
@@ -102,6 +109,9 @@ export class ProviderSettingsModalController {
     );
     this.providerKeyGoogle = requireElementById<HTMLInputElement>(
       "provider-key-google",
+    );
+    this.providerModelsMultiSelect = requireElementById<HTMLSelectElement>(
+      "provider-models-multiselect",
     );
     this.providerStoreConsent = requireElementById<HTMLInputElement>(
       "provider-store-consent",
@@ -162,9 +172,10 @@ export class ProviderSettingsModalController {
     }
 
     const selectedOpt = this.ui.modelSelect.selectedOptions?.[0];
-    const prov =
-      selectedOpt?.getAttribute("data-provider") ||
-      (val.includes("/") ? val.split("/")[0] : "ollama");
+    const prov = resolveModelProvider(
+      val,
+      selectedOpt?.getAttribute("data-provider") || undefined,
+    );
     const isConfigured =
       selectedOpt?.getAttribute("data-configured") === "true" ||
       Boolean(this.ui.state.getApiKey(prov));
@@ -201,6 +212,40 @@ export class ProviderSettingsModalController {
         "aria-label",
         this.providerStatusDot.title,
       );
+    }
+  }
+
+  /**
+   * Populates the multi-select model selector with `'sql'`, the 3 default choice models, and discovered `any-llm` models.
+   * @param {ModelApiItem[]} modelsList - Discovered and configured models list.
+   * @returns {void}
+   */
+  public populateMultiSelectModels(modelsList: ModelApiItem[]): void {
+    const configuredSet = new Set(this.ui.state.getConfiguredModels());
+    const sqlOpt = document.createElement("option");
+    sqlOpt.value = "sql";
+    sqlOpt.setAttribute("data-i18n", "app.literalSql");
+    sqlOpt.textContent = i18next.t("app.literalSql");
+    sqlOpt.selected = true;
+    this.providerModelsMultiSelect.replaceChildren(sqlOpt);
+
+    const seen = new Set<string>(["sql"]);
+    const allNames: string[] = [
+      ...DEFAULT_CHOICE_OLLAMA_MODELS,
+      ...modelsList.map((m) => m.name),
+    ];
+
+    for (const name of allNames) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      opt.selected =
+        configuredSet.has(name) ||
+        (configuredSet.size === 0 &&
+          DEFAULT_CHOICE_OLLAMA_MODELS.includes(name));
+      this.providerModelsMultiSelect.appendChild(opt);
     }
   }
 
@@ -304,7 +349,7 @@ export class ProviderSettingsModalController {
   }
 
   /**
-   * Saves provider API keys from the modal into localStorage.
+   * Saves provider API keys and multi-select model configuration from the modal into localStorage.
    * @returns {Promise<void>}
    */
   public async saveSettings(): Promise<void> {
@@ -322,6 +367,16 @@ export class ProviderSettingsModalController {
 
       if (go) this.ui.state.setApiKey("google", go);
       else this.ui.state.removeApiKey("google");
+
+      const selectedModels = Array.from(this.providerModelsMultiSelect.options)
+        .filter((opt) => opt.selected && opt.value !== "sql")
+        .map((opt) => opt.value);
+      const isDefaultSelection =
+        selectedModels.length === DEFAULT_CHOICE_OLLAMA_MODELS.length &&
+        selectedModels.every((m) => DEFAULT_CHOICE_OLLAMA_MODELS.includes(m));
+      if (selectedModels.length > 0 && !isDefaultSelection) {
+        this.ui.state.setConfiguredModels(selectedModels.join(","));
+      }
     }
 
     this.updateModalBadgesFromLocal();
@@ -339,6 +394,7 @@ export class ProviderSettingsModalController {
     for (const p of ["openai", "anthropic", "google"]) {
       this.ui.state.removeApiKey(p);
     }
+    this.ui.state.removeConfiguredModels();
     this.providerKeyOpenAI.value = "";
     this.providerKeyAnthropic.value = "";
     this.providerKeyGoogle.value = "";

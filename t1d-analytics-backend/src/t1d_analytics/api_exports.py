@@ -32,6 +32,7 @@ from t1d_analytics.errors import (
 from t1d_analytics.sql_utils import (
     SqlRawInputValue,
     SqlValue,
+    connect_duckdb_read_only_pooled,
     escape_sql_identifier,
     sanitize_spreadsheet_cell,
     sanitize_sql_value,
@@ -304,55 +305,67 @@ def fetch_paginated_table_data(
     if sort_order_clean not in ("asc", "desc"):
         raise InvalidSortOrderError(params={"order": order})
 
-    conn = None
     try:
-        conn = _open_validated_table_connection(target_db, table_name)
+        with connect_duckdb_read_only_pooled(
+            db_path=target_db,
+            connect_fn=duckdb.connect,
+            disable_external_access=True,
+        ) as conn:
+            tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+            if table_name not in tables:
+                raise TableNotFoundError(params={})
 
-        cols_info = conn.execute(f'DESCRIBE "{escaped_table}"').fetchall()
-        column_names = [c[0] for c in cols_info]
+            cols_info = conn.execute(f'DESCRIBE "{escaped_table}"').fetchall()
+            column_names = [c[0] for c in cols_info]
 
-        if sort_by is not None and sort_by != "" and sort_by not in column_names:
-            raise InvalidSortColumnError(params={"sort_by": sort_by})
+            if sort_by is not None and sort_by != "" and sort_by not in column_names:
+                raise InvalidSortColumnError(params={"sort_by": sort_by})
 
-        where_clause = ""
-        params: List[str] = []
-        if search is not None and search.strip():
-            search_pattern = f"%{search.strip()}%"
-            or_conditions = []
-            for col in column_names:
-                escaped_col = escape_sql_identifier(col)
-                or_conditions.append(f'CAST("{escaped_col}" AS VARCHAR) ILIKE ?')
-                params.append(search_pattern)
-            where_clause = f"WHERE ({' OR '.join(or_conditions)})"
+            where_clause = ""
+            params: List[str] = []
+            if search is not None and search.strip():
+                search_pattern = f"%{search.strip()}%"
+                or_conditions = []
+                for col in column_names:
+                    escaped_col = escape_sql_identifier(col)
+                    or_conditions.append(f'CAST("{escaped_col}" AS VARCHAR) ILIKE ?')
+                    params.append(search_pattern)
+                where_clause = f"WHERE ({' OR '.join(or_conditions)})"
 
-        limit = min(limit, 1000)
+            limit = min(limit, 1000)
 
-        count_query = f'SELECT COUNT(*) FROM "{escaped_table}" {where_clause}'.strip()
-        count_result = conn.execute(count_query, params).fetchone()
-        total_count = count_result[0] if count_result else 0
-        total_pages = max(1, math.ceil(total_count / limit)) if limit > 0 else 1
-        page = (offset // limit) + 1 if limit > 0 else 1
+            count_query = (
+                f'SELECT COUNT(*) FROM "{escaped_table}" {where_clause}'.strip()
+            )
+            count_result = conn.execute(count_query, params).fetchone()
+            total_count = count_result[0] if count_result else 0
+            total_pages = max(1, math.ceil(total_count / limit)) if limit > 0 else 1
+            page = (offset // limit) + 1 if limit > 0 else 1
 
-        if not column_names:
-            order_by_clause = ""
-        elif sort_by is not None and sort_by != "":
-            escaped_sort = escape_sql_identifier(sort_by)
-            order_by_clause = f'ORDER BY "{escaped_sort}" {sort_order_clean.upper()}'
-        else:
-            escaped_first = escape_sql_identifier(column_names[0])
-            order_by_clause = f'ORDER BY "{escaped_first}" ASC'
+            if not column_names:
+                order_by_clause = ""
+            elif sort_by is not None and sort_by != "":
+                escaped_sort = escape_sql_identifier(sort_by)
+                order_by_clause = (
+                    f'ORDER BY "{escaped_sort}" {sort_order_clean.upper()}'
+                )
+            else:
+                escaped_first = escape_sql_identifier(column_names[0])
+                order_by_clause = f'ORDER BY "{escaped_first}" ASC'
 
-        query = f'SELECT * FROM "{escaped_table}" {where_clause} {order_by_clause} LIMIT {limit} OFFSET {offset}'.strip()
-        result = conn.execute(query, params)
-        columns = [desc[0] for desc in result.description] if result.description else []
-        rows = result.fetchall()
-        output = [
-            {col: sanitize_sql_value(val) for col, val in zip(columns, row)}
-            for row in rows
-        ]
-        return TableDataResponse(
-            rows=output, total_count=total_count, page=page, total_pages=total_pages
-        )
+            query = f'SELECT * FROM "{escaped_table}" {where_clause} {order_by_clause} LIMIT {limit} OFFSET {offset}'.strip()
+            result = conn.execute(query, params)
+            columns = (
+                [desc[0] for desc in result.description] if result.description else []
+            )
+            rows = result.fetchall()
+            output = [
+                {col: sanitize_sql_value(val) for col, val in zip(columns, row)}
+                for row in rows
+            ]
+            return TableDataResponse(
+                rows=output, total_count=total_count, page=page, total_pages=total_pages
+            )
     except T1DError:
         raise
     except Exception as e:
@@ -361,9 +374,6 @@ def fetch_paginated_table_data(
             raise DatabaseNotFoundError(params={"error": str(e)}) from e
         logger.error(f"Error fetching table data: {e}")
         raise ExportError(params={"error": str(e)}) from e
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def fetch_table_profile(

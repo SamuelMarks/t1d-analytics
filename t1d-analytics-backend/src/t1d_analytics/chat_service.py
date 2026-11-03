@@ -29,6 +29,7 @@ from t1d_analytics.api_schemas import (
     ChatRequest,
     ChatResponse,
 )
+from t1d_analytics.diagnostics import detect_database_provenance
 from t1d_analytics.errors import (
     DatabaseError,
     DatabaseNotFoundError,
@@ -58,6 +59,7 @@ from t1d_analytics.sql_agent import (
 from t1d_analytics.sql_utils import (
     ALL_SQL_KEYWORDS,
     SqlValue,
+    connect_duckdb_read_only_pooled,
     escape_sql_identifier,
     strip_sql_comments_and_parens,
 )
@@ -88,6 +90,15 @@ def _next_stream_token_or_eof(iterator: Iterator[str]) -> str:
         return _STREAM_DONE_SENTINEL
 
 
+_VALID_SHOW_SECOND_TOKENS = {
+    "tables",
+    "databases",
+    "schemas",
+    "all",
+    "variables",
+}
+
+
 def is_likely_sql_statement(query: str) -> bool:
     """
     Determine whether a user input string begins with a SQL keyword rather than natural language.
@@ -98,7 +109,7 @@ def is_likely_sql_statement(query: str) -> bool:
 
     Returns:
     -------
-        bool: True if the input begins with a recognized SQL keyword (excluding natural language 'show me ...'), False otherwise.
+        bool: True if the input begins with a recognized SQL keyword (excluding natural language 'show ...' phrases), False otherwise.
 
     """
     unwrapped = strip_sql_comments_and_parens(query)
@@ -108,7 +119,32 @@ def is_likely_sql_statement(query: str) -> bool:
     first_word = tokens[0].lower().rstrip(";").strip()
     if first_word not in ALL_SQL_KEYWORDS:
         return False
-    return not (first_word == "show" and len(tokens) > 1 and tokens[1].lower() == "me")
+    if first_word == "show" and len(tokens) > 1:
+        second_word = tokens[1].lower().rstrip(";").strip()
+        if second_word not in _VALID_SHOW_SECOND_TOKENS:
+            return False
+        if second_word == "all" and (
+            len(tokens) < 3 or tokens[2].lower().rstrip(";").strip() != "tables"
+        ):
+            return False
+    return True
+
+
+_TABLE_1_FALLBACK_KEYWORDS = {
+    "table 1",
+    "table1",
+    "baseline",
+    "characteristics",
+    "stratified",
+    "arm",
+    "cohort",
+    "summary",
+    "demographics",
+    "outcomes",
+    "quartile",
+    "iqr",
+    "stddev",
+}
 
 
 def _score_table_for_query(
@@ -134,11 +170,67 @@ def _score_table_for_query(
     """
     tbl_lower = tbl_name.lower()
     score = 10 if tbl_lower in lower_q else 0
+    if tbl_lower in ("patients", "demographics", "tblaptsummary") and (
+        "table 1" in lower_q
+        or "baseline" in lower_q
+        or len(query_words.intersection(_TABLE_1_FALLBACK_KEYWORDS)) >= 2
+    ):
+        score += 6
     for w in query_words:
         if len(w) >= 3 and w in tbl_lower:
             score += 4
         score += sum(2 for c in cols if len(w) >= 3 and w == c.lower())
     return score
+
+
+def _build_fallback_table_1_sql(safe_tbl: str, cols: List[str]) -> str:
+    """
+    Build a deterministic Table 1 baseline summary DuckDB SQL query for `safe_tbl`.
+
+    Args:
+    ----
+        safe_tbl: Escaped DuckDB table identifier.
+        cols: Column names present in `safe_tbl`.
+
+    Returns:
+    -------
+        str: Valid DuckDB SELECT statement summarizing baseline cohort characteristics.
+
+    """
+    col_lookup = {c.lower(): c for c in cols}
+    group_col = (
+        col_lookup.get("txgroup")
+        or col_lookup.get("treatment_group")
+        or col_lookup.get("pt_pumpmanuf")
+    )
+    select_parts: List[str] = []
+    if group_col:
+        safe_grp = escape_sql_identifier(group_col)
+        select_parts.append(f'"{safe_grp}" AS treatment_arm')
+    select_parts.append("COUNT(*) AS n_participants")
+    for metric_key, alias_label in (
+        ("age", "mean_age_yr"),
+        ("ageasofranddt", "mean_age_yr"),
+        ("hba1c", "mean_hba1c_pct"),
+        ("tir", "mean_tir_pct"),
+        ("tbr", "mean_tbr_pct"),
+        ("tar", "mean_tar_pct"),
+        ("mean_glucose", "mean_glucose_mgdl"),
+    ):
+        actual_col = col_lookup.get(metric_key)
+        if actual_col and all(alias_label not in p for p in select_parts):
+            safe_col = escape_sql_identifier(actual_col)
+            select_parts.append(
+                f'ROUND(AVG(TRY_CAST("{safe_col}" AS DOUBLE)), 1) AS {alias_label}'
+            )
+    proj = ", ".join(select_parts)
+    if group_col:
+        safe_grp = escape_sql_identifier(group_col)
+        return (
+            f'SELECT {proj} FROM "{safe_tbl}" '
+            f'GROUP BY "{safe_grp}" ORDER BY "{safe_grp}";'
+        )
+    return f'SELECT {proj} FROM "{safe_tbl}";'
 
 
 def _select_best_fallback_table(
@@ -211,7 +303,11 @@ def synthesize_fallback_clinical_sql(
     target_table = _select_best_fallback_table(schema_map, lower_q)
 
     safe_tbl = escape_sql_identifier(target_table)
-    if re.search(r"\b(?:how\s+many|count|total\s+number)\b", lower_q):
+    if re.search(
+        r"\b(?:table\s*1|baseline\s+characteristics|cohort\s+summary)\b", lower_q
+    ):
+        sql = _build_fallback_table_1_sql(safe_tbl, schema_map.get(target_table, []))
+    elif re.search(r"\b(?:how\s+many|count|total\s+number)\b", lower_q):
         sql = f'SELECT COUNT(*) AS count FROM "{safe_tbl}";'
     else:
         sql = f'SELECT * FROM "{safe_tbl}" LIMIT {limit_val};'
@@ -255,13 +351,47 @@ def _is_recoverable_local_ollama_crash(provider: str, exc: BaseException) -> boo
     return any(marker in msg for marker in crash_markers)
 
 
-class SseTerminalPayload(TypedDict):
+class SseTerminalPayload(TypedDict, total=False):
     """Typed dictionary representing the terminal payload of a chat SSE stream."""
 
     content: str
     sqlQuery: Optional[str]
     sqlResult: Optional[List[Dict[str, SqlValue]]]
     error: Optional[Union[ErrorDetailDict, Dict[str, SqlValue]]]
+    is_synthetic_data: bool
+    is_rule_based_sql: bool
+    generation_mode: str
+    data_provenance: str
+
+
+def _resolve_db_provenance_flags(
+    db_path: str,
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
+) -> Tuple[str, bool]:
+    """
+    Determine `(data_provenance, is_synthetic_data)` for `db_path`.
+
+    Args:
+    ----
+        db_path: Path to the target DuckDB file.
+        connect_fn: DuckDB connection factory callable.
+
+    Returns:
+    -------
+        Tuple[str, bool]: `(data_provenance, is_synthetic_data)`.
+
+    """
+    try:
+        with connect_duckdb_read_only_pooled(
+            db_path=db_path,
+            connect_fn=connect_fn,
+            disable_external_access=True,
+        ) as conn:
+            all_tables = [str(r[0]) for r in conn.execute("SHOW TABLES").fetchall()]
+            provenance = detect_database_provenance(all_tables)
+    except Exception:
+        provenance = "synthetic_seed"
+    return provenance, (provenance != "jaeb_authentic")
 
 
 def _emit_sse_terminal_payload(
@@ -531,11 +661,12 @@ def _resolve_sql_mode_query(
     """
     if is_likely_sql_statement(message):
         return message
-    conn = connect_fn(db_path, read_only=True)
-    try:
+    with connect_duckdb_read_only_pooled(
+        db_path=db_path,
+        connect_fn=connect_fn,
+        disable_external_access=True,
+    ) as conn:
         schema = schema_fn(conn)
-    finally:
-        conn.close()
     _, synthesized_sql = synthesize_fallback_clinical_sql(schema, message)
     return synthesized_sql
 
@@ -573,13 +704,19 @@ def execute_chat_turn(
             f"Received chat request: model='{request.model}', message='{request.message}'"
         )
         db_path = db_validator(request.db_path)
-        if request.model in ("sql", ""):
+        provenance, is_synthetic = _resolve_db_provenance_flags(db_path)
+        is_raw_sql = is_likely_sql_statement(request.message)
+        if request.model.strip().lower() in ("sql", "") or is_raw_sql:
             sql_query = _resolve_sql_mode_query(db_path, request.message)
             results = execute_fn(db_path, sql_query)
             return ChatResponse(
                 content="backend.literalSql",
                 sqlResult=results,
                 sqlQuery=sql_query,
+                is_synthetic_data=is_synthetic,
+                is_rule_based_sql=(not is_raw_sql),
+                generation_mode="literal_sql" if is_raw_sql else "rule_based_fallback",
+                data_provenance=provenance,
             )
 
         full_response, sql_query = translate_fn(
@@ -589,6 +726,9 @@ def execute_chat_turn(
             history=request.history,
             api_key=request.api_key,
             provider=request.provider,
+        )
+        used_fallback = (
+            "Local LLM inference encountered a memory error" in full_response
         )
         nl_results: Optional[List[Dict[str, SqlValue]]] = None
         sql_error: Optional[ApiError] = None
@@ -603,6 +743,10 @@ def execute_chat_turn(
             sqlQuery=sql_query,
             sqlResult=nl_results,
             error=sql_error,
+            is_synthetic_data=is_synthetic,
+            is_rule_based_sql=used_fallback,
+            generation_mode="rule_based_fallback" if used_fallback else "llm",
+            data_provenance=provenance,
         )
     except (HTTPException, InvalidDatabasePathError):
         raise
@@ -653,6 +797,10 @@ def _generate_sql_mode_sse_frames(
     yield f"data: {exec_payload}{sse_sep}"
     yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
     sql_query = message
+    provenance, is_synthetic = _resolve_db_provenance_flags(
+        db_path, connect_fn=connect_fn
+    )
+    is_raw_sql = is_likely_sql_statement(message)
     try:
         sql_query = _resolve_sql_mode_query(
             db_path, message, connect_fn=connect_fn, schema_fn=schema_fn
@@ -663,6 +811,10 @@ def _generate_sql_mode_sse_frames(
             "sqlQuery": sql_query,
             "sqlResult": results,
             "error": None,
+            "is_synthetic_data": is_synthetic,
+            "is_rule_based_sql": (not is_raw_sql),
+            "generation_mode": "literal_sql" if is_raw_sql else "rule_based_fallback",
+            "data_provenance": provenance,
         }
         yield from _emit_sse_terminal_payload(res_dict, sse_sep)
     except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
@@ -672,6 +824,10 @@ def _generate_sql_mode_sse_frames(
             "sqlQuery": sql_query,
             "sqlResult": None,
             "error": err_dict,
+            "is_synthetic_data": is_synthetic,
+            "is_rule_based_sql": (not is_raw_sql),
+            "generation_mode": "literal_sql" if is_raw_sql else "rule_based_fallback",
+            "data_provenance": provenance,
         }
         yield from _emit_sse_terminal_payload(err_dict_payload, sse_sep)
 
@@ -683,6 +839,7 @@ def _finalize_nl_sse_frames(
     sse_sep: str,
     execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
     error_parser: Callable[[Exception], ApiError],
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
 ) -> Iterator[str]:
     """
     Emit `sql_generated`, optional `execution_progress`, and terminal SSE frames for an NL response.
@@ -695,12 +852,17 @@ def _finalize_nl_sse_frames(
         sse_sep: Double-newline SSE frame separator.
         execute_fn: Read-only SQL execution callable.
         error_parser: Exception to ApiError converter callable.
+        connect_fn: DuckDB connection factory callable.
 
     Yields:
     ------
         str: Formatted SSE event frames.
 
     """
+    provenance, is_synthetic = _resolve_db_provenance_flags(
+        db_path, connect_fn=connect_fn
+    )
+    used_fallback = "Local LLM inference encountered a memory error" in full_response
     sql_query = _extract_sql_from_response(full_response)
     sql_results: Optional[List[Dict[str, SqlValue]]] = None
     sql_err_dict: Optional[Dict[str, SqlValue]] = None
@@ -718,6 +880,10 @@ def _finalize_nl_sse_frames(
         "sqlQuery": sql_query,
         "sqlResult": sql_results,
         "error": sql_err_dict,
+        "is_synthetic_data": is_synthetic,
+        "is_rule_based_sql": used_fallback,
+        "generation_mode": "rule_based_fallback" if used_fallback else "llm",
+        "data_provenance": provenance,
     }
     yield from _emit_sse_terminal_payload(nl_res_dict, sse_sep)
 
@@ -744,7 +910,7 @@ def _read_schema_from_db(
     schema_fn: Callable[[duckdb.DuckDBPyConnection], str],
 ) -> str:
     """
-    Open a read-only DuckDB connection, extract the table schema text, and close the connection.
+    Open a read-only DuckDB connection, extract the table schema text, and release the connection.
 
     Args:
     ----
@@ -757,11 +923,12 @@ def _read_schema_from_db(
         str: Extracted schema DDL/summary string.
 
     """
-    conn = connect_fn(db_path, read_only=True)
-    try:
+    with connect_duckdb_read_only_pooled(
+        db_path=db_path,
+        connect_fn=connect_fn,
+        disable_external_access=True,
+    ) as conn:
         return schema_fn(conn)
-    finally:
-        conn.close()
 
 
 def _validate_sse_request_or_error(
@@ -873,7 +1040,9 @@ async def generate_sse_chat_events(
         yield err_frame
         return
 
-    if request.model in ("sql", ""):
+    if request.model.strip().lower() in ("sql", "") or is_likely_sql_statement(
+        request.message
+    ):
         for frame in _generate_sql_mode_sse_frames(
             db_path,
             request.message,
@@ -927,6 +1096,7 @@ async def generate_sse_chat_events(
             sse_sep,
             execute_fn=execute_fn,
             error_parser=error_parser,
+            connect_fn=connect_fn,
         ):
             yield frame
     except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:

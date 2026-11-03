@@ -267,10 +267,11 @@ from t1d_analytics.routers.training_routes import (
 from t1d_analytics.routers.training_routes import (
     training_router as training_router,
 )
-from t1d_analytics.seed import seed_database
+from t1d_analytics.seed import ensure_canonical_clinical_views, seed_database
 from t1d_analytics.session_store import SessionStore, open_sessions_db_conn
 from t1d_analytics.sql_utils import (
     SqlValue,
+    close_read_only_duckdb_pool,
     extract_sql_from_response,
 )
 from t1d_analytics.sql_utils import (
@@ -396,6 +397,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 sessions_db_path=sessions_db_path,
             )
             load_data_to_duckdb(data_dir, db_path)
+            ensure_canonical_clinical_views(db_path)
         except Exception as e:
             logger.warning(f"Startup auto-ingestion failed for {db_path}: {e}")
     run_system_diagnostics(db_path=db_path)
@@ -404,6 +406,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        close_read_only_duckdb_pool()
         close_all_rate_limiters()
 
 

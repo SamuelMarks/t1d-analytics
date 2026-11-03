@@ -466,6 +466,45 @@ body.light-mode .dropdown-item.danger {
   box-sizing: border-box;
 }
 
+.provenance-alert-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 1rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  border-bottom: 1px solid var(--border);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.provenance-alert-synthetic {
+  background-color: rgba(245, 158, 11, 0.14);
+  color: var(--text-light);
+  border-inline-start: 4px solid #f59e0b;
+}
+
+.provenance-alert-rule-sql {
+  background-color: rgba(59, 130, 246, 0.14);
+  color: var(--text-light);
+  border-inline-start: 4px solid #3b82f6;
+}
+
+.provenance-alert-content {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.provenance-alert-dismiss {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.45rem;
+}
+
 .header-left,
 .top-bar-left {
   display: flex;
@@ -557,7 +596,8 @@ input:focus-visible {
   max-width: 800px;
 }
 
-.chip {
+.chip,
+.table1-chip {
   background-color: var(--bg-dark);
   border: 1px solid var(--border);
   border-radius: var(--md-shape-corner-small);
@@ -570,7 +610,8 @@ input:focus-visible {
   text-align: start;
 }
 
-.chip:hover {
+.chip:hover,
+.table1-chip:hover {
   background-color: var(--dropdown-bg);
   border-color: var(--accent);
   transform: translateY(-1px);

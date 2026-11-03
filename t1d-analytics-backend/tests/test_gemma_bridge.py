@@ -769,6 +769,26 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
         enriched_err = prune_schema_with_gemma_rag("unrelated words xyz", ddl_text)
         assert "-- Relevant Schema Context:" in enriched_err
 
+        multi_schema = (
+            "Table: patients\nColumns:\n  - subject_id (INT)\n  - age (INT)\n"
+            "Table: cgm_readings\nColumns:\n  - subject_id (INT)\n  - glucose_value (DOUBLE)\n"
+            "Table: hba1c_labs\nColumns:\n  - subject_id (INT)\n  - hba1c (DOUBLE)\n"
+            "Table: dka_adverse_events\nColumns:\n  - subject_id (INT)\n  - EventType (VARCHAR)\n"
+            "Table: extra_tbl\nColumns:\n  - id (INT)\n"
+        )
+        t1_enriched = prune_schema_with_gemma_rag(
+            "Generate a Table 1 baseline summary", multi_schema, top_k_tables=2
+        )
+        assert "-- Table: patients" in t1_enriched
+        assert "-- Table: cgm_readings" in t1_enriched
+        assert "-- Table: hba1c_labs" in t1_enriched
+        assert "-- Table: dka_adverse_events" in t1_enriched
+
+        t1_kw_enriched = prune_schema_with_gemma_rag(
+            "stratified cohort characteristics", multi_schema, top_k_tables=2
+        )
+        assert "-- Table: patients" in t1_kw_enriched
+
         structured_models = [
             TableSchemaModel(
                 table_name="patients",
@@ -829,6 +849,17 @@ def test_validate_sql_tokens() -> None:
 
 def test_classify_sql_error_hint_and_execute_agentic_nl_to_sql() -> None:
     """Test _classify_sql_error_hint and execute_agentic_nl_to_sql self-correction loop."""
+    from t1d_analytics.sql_agent import classify_duckdb_error_hint
+
+    assert "TRY_CAST" in classify_duckdb_error_hint(
+        "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'."
+    )
+    assert "UNION ALL" in classify_duckdb_error_hint(
+        "Binder Error: Set operations can only apply to expressions with the same number of result columns"
+    )
+    assert "ROLLUP" in classify_duckdb_error_hint(
+        "Binder Error: column 'TxGroup' must appear in the GROUP BY clause"
+    )
     assert "column names" in _classify_sql_error_hint(
         "Binder Error: Referenced column 'bad_col' not found"
     )

@@ -12,6 +12,37 @@ import { type ChatState } from "../state";
 import { type ProviderSettingsModalController } from "./provider-modal-controller";
 
 /**
+ * Default choice Ollama / Hugging Face model identifiers.
+ */
+export const DEFAULT_CHOICE_OLLAMA_MODELS: readonly string[] = [
+  "hf.co/google/gemma-4-E4B",
+  "hf.co/microsoft/Phi-4-mini-flash-reasoning",
+  "hf.co/meta-llama/Llama-3.2-1B",
+];
+
+/**
+ * Resolves the provider identifier for a model name or API entry.
+ * @param {string} modelName - Model name string.
+ * @param {string} [explicitProvider] - Optional explicit provider string.
+ * @returns {string} Resolved provider identifier.
+ */
+export function resolveModelProvider(
+  modelName: string,
+  explicitProvider?: string,
+): string {
+  if (explicitProvider) {
+    return explicitProvider;
+  }
+  if (
+    modelName.startsWith("hf.co/") ||
+    DEFAULT_CHOICE_OLLAMA_MODELS.includes(modelName) ||
+    !modelName.includes("/")
+  ) {
+    return "ollama";
+  }
+  return modelName.split("/")[0];
+}
+/**
  * Model metadata entry returned by `/api/models`.
  */
 export interface ModelApiItem {
@@ -95,17 +126,18 @@ export class ModelSelectorController {
     customModels: string[],
   ): ModelApiItem[] {
     const modelsList: ModelApiItem[] = Array.isArray(apiModels)
-      ? [...apiModels]
+      ? apiModels.filter((m) => m.name !== "sql")
       : [];
 
     for (const customModel of customModels) {
+      if (customModel.trim().toLowerCase() === "sql") {
+        continue;
+      }
       const normalized = customModel.includes(":")
         ? customModel.replace(":", "/")
         : customModel;
       if (!modelsList.some((m) => m.name === normalized)) {
-        const prov = normalized.includes("/")
-          ? normalized.split("/")[0]
-          : "ollama";
+        const prov = resolveModelProvider(normalized);
         modelsList.push({
           name: normalized,
           provider: prov,
@@ -144,9 +176,7 @@ export class ModelSelectorController {
     groups.google.label = i18next.t("provider.groupGoogle", "Google");
 
     for (const model of modelsList) {
-      const prov =
-        model.provider ||
-        (model.name.includes("/") ? model.name.split("/")[0] : "ollama");
+      const prov = resolveModelProvider(model.name, model.provider);
       const hasKey = Boolean(this.ui.state.getApiKey(prov));
       const isConfigured = Boolean(model.configured || hasKey);
       const isReachable = model.reachable !== false;
@@ -201,8 +231,7 @@ export class ModelSelectorController {
     }
 
     const firstReady = modelsList.find((m) => {
-      const prov =
-        m.provider || (m.name.includes("/") ? m.name.split("/")[0] : "ollama");
+      const prov = resolveModelProvider(m.name, m.provider);
       const readyKey =
         (prov === "ollama" && m.configured !== false) ||
         Boolean(this.ui.state.getApiKey(prov));
@@ -235,9 +264,7 @@ export class ModelSelectorController {
       this.populateModelOptions(modelsList);
 
       const hasReachableOllama = modelsList.some((m) => {
-        const prov =
-          m.provider ||
-          (m.name.includes("/") ? m.name.split("/")[0] : "ollama");
+        const prov = resolveModelProvider(m.name, m.provider);
         return (
           prov === "ollama" &&
           m.available !== false &&
@@ -247,6 +274,7 @@ export class ModelSelectorController {
       });
       this.ui.state.setSystemStatus({ ollamaOnline: hasReachableOllama });
       this.resolveActiveChatModel(modelsList);
+      this.ui.providerModalController.populateMultiSelectModels(modelsList);
       this.ui.providerModalController.updateProviderBadgeStatus();
     } catch (error) {
       console.warn("Failed to fetch models from API:", error);

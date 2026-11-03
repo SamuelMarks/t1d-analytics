@@ -368,8 +368,21 @@ CLOUD_MODEL_CATALOG: Dict[str, List[str]] = {
     "google": ["google/gemini-1.5-pro", "google/gemini-1.5-flash"],
 }
 
+DEFAULT_CHOICE_OLLAMA_MODELS: Tuple[str, ...] = (
+    "hf.co/google/gemma-4-E4B",
+    "hf.co/microsoft/Phi-4-mini-flash-reasoning",
+    "hf.co/meta-llama/Llama-3.2-1B",
+)
+
+DEFAULT_CHOICE_HF_REPOS: Tuple[str, ...] = (
+    "google/gemma-4-E4B",
+    "microsoft/Phi-4-mini-flash-reasoning",
+    "meta-llama/Llama-3.2-1B",
+)
+
 ANY_LLM_PROVIDER_CATALOG: Dict[str, List[str]] = {
     **CLOUD_MODEL_CATALOG,
+    "ollama": list(DEFAULT_CHOICE_OLLAMA_MODELS),
     "gemini": ["gemini/gemini-1.5-pro", "gemini/gemini-1.5-flash"],
     "mistral": ["mistral/mistral-large-latest", "mistral/codestral-latest"],
     "groq": ["groq/llama-3.3-70b-versatile", "groq/llama-3.1-8b-instant"],
@@ -382,7 +395,12 @@ ANY_LLM_PROVIDER_CATALOG: Dict[str, List[str]] = {
     "cerebras": ["cerebras/llama3.1-70b"],
     "sambanova": ["sambanova/Meta-Llama-3.1-70B-Instruct"],
     "perplexity": ["perplexity/sonar-pro"],
-    "huggingface": ["huggingface/Qwen/Qwen2.5-Coder-32B-Instruct"],
+    "huggingface": [
+        "huggingface/google/gemma-4-E4B",
+        "huggingface/microsoft/Phi-4-mini-flash-reasoning",
+        "huggingface/meta-llama/Llama-3.2-1B",
+        "huggingface/Qwen/Qwen2.5-Coder-32B-Instruct",
+    ],
     "azure": ["azure/gpt-4o"],
     "azureopenai": ["azureopenai/gpt-4o"],
     "bedrock": ["bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0"],
@@ -454,7 +472,8 @@ def resolve_provider_and_model(
     Resolve the LLM provider identifier and model name from a composite model string.
 
     Supports both 'provider/model' and Mozilla any-llm 'provider:model' syntax when the
-    prefix matches a known any-llm provider.
+    prefix matches a known any-llm provider, as well as 'sql' and 'hf.co/<org>/<repo>'
+    Ollama Hugging Face model tags.
 
     Args:
     ----
@@ -466,17 +485,23 @@ def resolve_provider_and_model(
         Tuple[str, str]: A tuple of (resolved_provider, actual_model).
 
     """
+    cleaned = model_name.strip()
+    if cleaned.lower() == "sql" and not provider:
+        return ("sql", "sql")
     resolved_provider = provider or "ollama"
-    actual_model = model_name
+    actual_model = cleaned
     if not provider:
-        if (
-            ":" in model_name
-            and model_name.split(":", 1)[0].lower() in PROVIDER_ENV_KEYS
+        if cleaned.startswith("hf.co/") or cleaned in DEFAULT_CHOICE_HF_REPOS:
+            return ("ollama", cleaned)
+        if cleaned.startswith("ollama/") and (
+            cleaned[7:].startswith("hf.co/") or cleaned[7:] in DEFAULT_CHOICE_HF_REPOS
         ):
-            prefix, remainder = model_name.split(":", 1)
+            return ("ollama", cleaned[7:])
+        if ":" in cleaned and cleaned.split(":", 1)[0].lower() in PROVIDER_ENV_KEYS:
+            prefix, remainder = cleaned.split(":", 1)
             resolved_provider, actual_model = prefix.lower(), remainder
-        elif "/" in model_name:
-            resolved_provider, actual_model = model_name.split("/", 1)
+        elif "/" in cleaned:
+            resolved_provider, actual_model = cleaned.split("/", 1)
     return resolved_provider, actual_model
 
 
@@ -588,11 +613,16 @@ def parse_configured_models_string(raw_models: str) -> List[Tuple[str, str]]:
             continue
         prov, mod = resolve_provider_and_model(item)
         prov_clean = prov.lower().strip()
-        canonical = (
-            item
-            if prov_clean == "ollama" and "/" not in item
-            else f"{prov_clean}/{mod}"
-        )
+        if prov_clean == "sql":
+            canonical = "sql"
+        elif prov_clean == "ollama" and (
+            "/" not in item
+            or item.startswith("hf.co/")
+            or item in DEFAULT_CHOICE_HF_REPOS
+        ):
+            canonical = mod
+        else:
+            canonical = f"{prov_clean}/{mod}"
         if canonical not in seen:
             seen.add(canonical)
             results.append((prov_clean, canonical))
@@ -622,7 +652,7 @@ def _discover_additional_provider_models(
     for prov, prov_models in ANY_LLM_PROVIDER_CATALOG.items():
         if (
             prov in active_catalog
-            or prov == "gemini"
+            or prov in ("gemini", "ollama")
             or not is_provider_configured(prov)
         ):
             continue
@@ -1138,6 +1168,13 @@ Context & Rules for T1D Analytics:
    - CRITICAL: You must ONLY use the exact table names and column names provided in the schema above.
    - Do NOT invent, guess, or hallucinate table names (e.g., do not use "Visit1" or "demographics" if they are not in the schema).
    - If a requested concept (like "demographics") is not a table, find the relevant columns within the existing tables (e.g., `visits` or `patients`).
+5. Academic "Table 1" (Baseline Participant Characteristics & Stratified Outcomes) Rules:
+   - Trigger Phrases: When asked for `"Table 1"`, `"baseline characteristics"`, `"cohort summary table"`, `"CONSORT baseline table"`, or `"stratified demographic and glycemic table"`, produce a publication-ready DuckDB summary query.
+   - Parametric Continuous Metrics (Mean ± SD): Use `ROUND(AVG(col), 1) || ' ± ' || ROUND(STDDEV_SAMP(col), 1)`.
+   - Non-Parametric Skewed Metrics (Median (IQR)): Use `ROUND(MEDIAN(col), 2) || ' (' || ROUND(QUANTILE_CONT(col, 0.25), 2) || '-' || ROUND(QUANTILE_CONT(col, 0.75), 2) || ')'`.
+   - Categorical Proportions (n (%)): Use `SUM(CASE WHEN cond THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN cond THEN 1.0 ELSE 0.0 END), 1) || '%)'`.
+   - Stratified Arms + Overall Rollup: Use `GROUP BY ROLLUP(TxGroup)` and `COALESCE(TxGroup, 'Overall Cohort') AS "Cohort Arm"` to include both treatment arms and the overall cohort.
+   - Transposed Publication Table 1: When asked for a transposed NEJM/Lancet-style Table 1 where rows are clinical characteristics and columns are study arms (`"Characteristic"`, `"Closed-Loop Arm"`, `"Control Arm"`, `"Overall Cohort"`, `"Arm Difference"`), use a `UNION ALL` of characteristic rows with explicit `CAST(... AS VARCHAR)` alignment and `ORDER BY sort_ord`.
 
 {formatting_instruction}
 
@@ -1339,7 +1376,7 @@ def probe_providers_status(
     )
 
     for prov in ANY_LLM_PROVIDER_CATALOG:
-        if prov in ("openai", "anthropic", "google", "gemini"):
+        if prov in ("openai", "anthropic", "google", "gemini", "ollama"):
             continue
         if is_provider_configured(prov):
             env_name = PROVIDER_ENV_KEYS.get(prov, f"{prov.upper()}_API_KEY")

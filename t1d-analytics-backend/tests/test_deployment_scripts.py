@@ -731,3 +731,16 @@ def test_libscript_config_and_docs_consistency() -> None:
         assert parsed == {"SAMPLE_KEY": "sample_val"}
     finally:
         sample_env.unlink(missing_ok=True)
+
+    import json
+
+    libscript_cfg = json.loads(
+        (REPO_ROOT / "libscript.json").read_text(encoding="utf-8")
+    )
+    before_start_hooks = libscript_cfg["hooks"]["before_start"]
+    assert len(before_start_hooks) >= 1
+    pull_cmd = before_start_hooks[0]["command"]
+    assert "ollama pull" in pull_cmd
+    assert "hf.co/google/gemma-4-E4B" in pull_cmd
+    assert "hf.co/microsoft/Phi-4-mini-flash-reasoning" in pull_cmd
+    assert "hf.co/meta-llama/Llama-3.2-1B" in pull_cmd

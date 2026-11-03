@@ -325,3 +325,40 @@ def test_cli_profile_integration(
     profile_out = capsys.readouterr().out
     assert "clinical_data" in profile_out
     assert "reading" in profile_out
+
+
+def test_seeded_table_1_views_and_joins_integration(temp_workspace: Path) -> None:
+    """Verify seeded base tables and compatibility views execute multi-table Table 1 joins with zero orphans."""
+    from t1d_analytics.seed import seed_database
+
+    data_dir = temp_workspace / "seed_t1_data"
+    db_path = temp_workspace / "seed_t1.duckdb"
+    sess_path = temp_workspace / "sessions.duckdb"
+
+    counts = seed_database(
+        data_dir=str(data_dir),
+        db_path=str(db_path),
+        sessions_db_path=str(sess_path),
+        overwrite_csvs=True,
+    )
+    assert counts["patients"] == 100
+    assert counts["cgm_readings"] == 200
+    assert counts["hba1c_labs"] == 150
+    assert counts["dka_adverse_events"] == 25
+
+    conn = duckdb.connect(str(db_path), read_only=True)
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT p.subject_id) AS n_pts,
+            COUNT(DISTINCT s.PtID) AS n_subj,
+            COUNT(DISTINCT d.patient_id) AS n_demo,
+            COUNT(DISTINCT t.PtID) AS n_summary
+        FROM patients p
+        INNER JOIN subjects s ON p.subject_id = s.PtID
+        INNER JOIN demographics d ON p.subject_id = d.subject_id
+        INNER JOIN tblaptsummary t ON p.subject_id = t.PtID
+        """
+    ).fetchone()
+    conn.close()
+    assert row == (100, 100, 100, 100)

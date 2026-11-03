@@ -50,7 +50,69 @@ EXPECTED_T1D_TABLES = {
     "pedap",
     "loop",
     "flair",
+    "tblaptsummary",
+    "subjects",
+    "hptroster",
+    "acpepptroster",
+    "cgmanalysis",
+    "devicecgm",
 }
+
+AUTHENTIC_JAEB_TABLES = {
+    "acpepptroster",
+    "bdemolifediabhxmgmt",
+    "cgmanalysis",
+    "devicecgm",
+    "dexcomclaritycgm",
+    "hptroster",
+    "loopdevicecgm4",
+    "ptroster_a",
+    "tblalabhba1c",
+    "fptroster",
+    "gptroster",
+    "bptroster",
+}
+
+SYNTHETIC_SEED_BASE_TABLES = {
+    "patients",
+    "cgm_readings",
+    "hba1c_labs",
+    "dka_adverse_events",
+    "tiny",
+}
+
+
+def detect_database_provenance(
+    all_tables: List[str],
+    base_tables: Optional[set[str]] = None,
+) -> str:
+    """
+    Classify whether a DuckDB table list represents authentic Jaeb trial datasets or synthetic seed data.
+
+    Args:
+    ----
+        all_tables: All table and view names discovered in the database.
+        base_tables: Optional set of non-view base table names.
+
+    Returns:
+    -------
+        str: `'jaeb_authentic'`, `'synthetic_seed'`, or `'custom'`.
+
+    """
+    user_tables = {t.lower() for t in all_tables if not t.lower().startswith("_t1d_")}
+    if not user_tables:
+        return "custom"
+    if user_tables.intersection(AUTHENTIC_JAEB_TABLES) or len(user_tables) > 20:
+        return "jaeb_authentic"
+    if base_tables is not None:
+        lower_base = {
+            t.lower() for t in base_tables if not t.lower().startswith("_t1d_")
+        }
+        if "tblaptsummary" in lower_base and "patients" not in lower_base:
+            return "jaeb_authentic"
+    if user_tables.intersection(SYNTHETIC_SEED_BASE_TABLES):
+        return "synthetic_seed"
+    return "custom"
 
 
 class HealthStatus(str, Enum):
@@ -122,6 +184,8 @@ class DatabaseStatus:
     integrity_ok: bool = True
     disk_free_bytes: int = 0
     status: HealthStatus = HealthStatus.UNHEALTHY
+    data_provenance: str = "synthetic_seed"
+    is_synthetic_faked_data: bool = True
 
     @property
     def details(self) -> DatabaseDetailsDict:
@@ -136,6 +200,8 @@ class DatabaseStatus:
             "writable": self.writable,
             "integrity_ok": self.integrity_ok,
             "disk_free_bytes": self.disk_free_bytes,
+            "data_provenance": self.data_provenance,
+            "is_synthetic_faked_data": self.is_synthetic_faked_data,
         }
 
     def to_dict(self) -> DiagnosticDict:
@@ -156,6 +222,8 @@ class DatabaseStatus:
             "writable": self.writable,
             "integrity_ok": self.integrity_ok,
             "disk_free_bytes": self.disk_free_bytes,
+            "data_provenance": self.data_provenance,
+            "is_synthetic_faked_data": self.is_synthetic_faked_data,
             "details": self.details,
         }
 
@@ -351,15 +419,23 @@ def check_database_health(
     # 3. Attempt DuckDB connection, run integrity check, and count rows
     integrity_ok = True
     total_rows = 0
+    provenance = "synthetic_seed"
     try:
         conn = duckdb.connect(target_path_str, read_only=True)
         try:
+            base_table_names: Optional[set[str]] = None
             try:
-                conn.execute("SELECT * FROM duckdb_tables() LIMIT 1")
+                bt_rows = conn.execute(
+                    "SELECT table_name FROM duckdb_tables()"
+                ).fetchall()
+                base_table_names = {str(r[0]) for r in bt_rows}
             except Exception:
                 integrity_ok = False
             raw_tables = conn.execute("SHOW TABLES").fetchall()
             all_tables = [row[0] for row in raw_tables]
+            provenance = detect_database_provenance(
+                all_tables, base_tables=base_table_names
+            )
             compat_views = {
                 "tblaptsummary",
                 "adverseevents",
@@ -378,7 +454,12 @@ def check_database_health(
                 if primary_tables
                 else [t for t in all_tables if not t.startswith("_t1d_")]
             )
-            for tbl_name in tables:
+            if provenance == "jaeb_authentic" and len(tables) > 25:
+                # Avoid scanning 50M+ rows across 544 tables on every /api/status poll
+                sample_tables = tables[:10]
+            else:
+                sample_tables = tables
+            for tbl_name in sample_tables:
                 safe_tbl = tbl_name.replace('"', '""')
                 cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
                 total_rows += int(cnt_res[0]) if cnt_res else 0
@@ -478,6 +559,8 @@ def check_database_health(
             integrity_ok=integrity_ok,
             disk_free_bytes=disk_free,
             status=db_health_status,
+            data_provenance=provenance,
+            is_synthetic_faked_data=(provenance != "jaeb_authentic"),
         )
 
     msg = _(
@@ -501,6 +584,8 @@ def check_database_health(
         integrity_ok=integrity_ok,
         disk_free_bytes=disk_free,
         status=db_health_status,
+        data_provenance=provenance,
+        is_synthetic_faked_data=(provenance != "jaeb_authentic"),
     )
 
 

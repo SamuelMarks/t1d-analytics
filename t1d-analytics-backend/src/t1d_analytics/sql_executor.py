@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 import duckdb
 
@@ -14,6 +14,7 @@ from t1d_analytics.errors import (
 from t1d_analytics.sql_utils import (
     SqlValue,
     coerce_numeric_aggregates_in_sql,
+    connect_duckdb_read_only_pooled,
     sanitize_sql_value,
 )
 
@@ -28,7 +29,7 @@ def execute_duckdb_query(
     connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
 ) -> List[Dict[str, SqlValue]]:
     """
-    Execute a read-only SQL query against DuckDB with timeout protection and numeric aggregate coercion.
+    Execute a read-only SQL query against connection-pooled DuckDB with timeout protection and numeric aggregate coercion.
 
     Args:
     ----
@@ -50,7 +51,7 @@ def execute_duckdb_query(
     """
     nl = chr(10)
     logger.info(f"Executing SQL query against database at {db_path}:{nl}{query}")
-    conn = None
+    conn: Optional[duckdb.DuckDBPyConnection] = None
     is_closed = False
     lock = threading.Lock()
 
@@ -62,10 +63,14 @@ def execute_duckdb_query(
 
     try:
         try:
-            conn = connect_fn(db_path, read_only=True)
+            ctx = connect_duckdb_read_only_pooled(
+                db_path=db_path,
+                connect_fn=connect_fn,
+                disable_external_access=True,
+            )
+            conn = ctx.__enter__()
         except duckdb.IOException as io_err:
             raise DatabaseNotFoundError(params={"error": str(io_err)}) from io_err
-        conn.execute("SET enable_external_access = false")
         coerced_query = coerce_numeric_aggregates_in_sql(query)
         timer = threading.Timer(timeout_seconds, safe_interrupt)
         timer.daemon = True
@@ -100,4 +105,4 @@ def execute_duckdb_query(
         with lock:
             is_closed = True
             if conn is not None:
-                conn.close()
+                ctx.__exit__(None, None, None)

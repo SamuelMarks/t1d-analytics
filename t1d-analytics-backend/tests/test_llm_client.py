@@ -265,10 +265,15 @@ def test_build_clinical_sql_prompt() -> None:
         "Table: p", "How many?", require_markdown_fence=True
     )
     assert "markdown code block" in p_md
+    assert 'Academic "Table 1"' in p_md
+    assert "STDDEV_SAMP" in p_md
+    assert "QUANTILE_CONT" in p_md
+    assert "GROUP BY ROLLUP(TxGroup)" in p_md
     p_raw = build_clinical_sql_prompt(
         "Table: p", "How many?", require_markdown_fence=False
     )
     assert "Return ONLY the raw SQL query" in p_raw
+    assert "Transposed Publication Table 1" in p_raw
 
 
 def test_complete_llm_prompt_and_stream_llm_factory() -> None:
@@ -400,3 +405,31 @@ def test_llm_client_protocol_stubs() -> None:
         llm_factory=lambda provider, api_key=None: transport,
     )
     assert sql_out == "SELECT 'patients' AS q;"
+
+    from t1d_analytics.llm_client import (
+        parse_configured_models_string,
+        resolve_provider_and_model,
+    )
+
+    assert resolve_provider_and_model("sql") == ("sql", "sql")
+    assert resolve_provider_and_model("hf.co/google/gemma-4-E4B") == (
+        "ollama",
+        "hf.co/google/gemma-4-E4B",
+    )
+    assert resolve_provider_and_model("ollama/hf.co/google/gemma-4-E4B") == (
+        "ollama",
+        "hf.co/google/gemma-4-E4B",
+    )
+    assert resolve_provider_and_model("microsoft/Phi-4-mini-flash-reasoning") == (
+        "ollama",
+        "microsoft/Phi-4-mini-flash-reasoning",
+    )
+    parsed_cfg = parse_configured_models_string(
+        "sql, hf.co/google/gemma-4-E4B, meta-llama/Llama-3.2-1B, openai/gpt-4o"
+    )
+    assert parsed_cfg == [
+        ("sql", "sql"),
+        ("ollama", "hf.co/google/gemma-4-E4B"),
+        ("ollama", "meta-llama/Llama-3.2-1B"),
+        ("openai", "openai/gpt-4o"),
+    ]

@@ -70,6 +70,10 @@ export interface SystemStatusDbPayload {
   integrity_ok?: boolean;
   /** Free disk space in bytes. */
   disk_free_bytes?: number;
+  /** Database provenance ('jaeb_authentic', 'synthetic_seed', 'custom'). */
+  data_provenance?: string;
+  /** Whether the database is using synthetic/faked seed data instead of authentic Jaeb datasets. */
+  is_synthetic_faked_data?: boolean;
 }
 
 /**
@@ -135,6 +139,14 @@ export class SystemStatusController {
   public readonly bannerInstructionsDrawer: HTMLElement;
   /** Button to dismiss the system status alert banner. */
   public readonly bannerDismissBtn: HTMLButtonElement;
+  /** Alert row below navbar warning when synthetic/faked non-Jaeb data is active. */
+  public readonly jaebProvenanceAlert: HTMLElement;
+  /** Dismiss ✖ button for the synthetic data alert row. */
+  public readonly jaebProvenanceAlertDismissBtn: HTMLButtonElement;
+  /** Alert row below navbar warning when deterministic rule-based SQL generation is active instead of an LLM. */
+  public readonly ruleBasedSqlAlert: HTMLElement;
+  /** Dismiss ✖ button for the rule-based SQL alert row. */
+  public readonly ruleBasedSqlAlertDismissBtn: HTMLButtonElement;
   /** Interval timer ID for periodic system status polling, or null when inactive. */
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -163,6 +175,18 @@ export class SystemStatusController {
     );
     this.bannerDismissBtn =
       requireElementById<HTMLButtonElement>("banner-dismiss-btn");
+    this.jaebProvenanceAlert = requireElementById<HTMLElement>(
+      "jaeb-provenance-alert",
+    );
+    this.jaebProvenanceAlertDismissBtn = requireElementById<HTMLButtonElement>(
+      "jaeb-provenance-alert-dismiss",
+    );
+    this.ruleBasedSqlAlert = requireElementById<HTMLElement>(
+      "rule-based-sql-alert",
+    );
+    this.ruleBasedSqlAlertDismissBtn = requireElementById<HTMLButtonElement>(
+      "rule-based-sql-alert-dismiss",
+    );
 
     this.bindEvents();
   }
@@ -190,9 +214,65 @@ export class SystemStatusController {
       this.hideBanner();
     });
 
+    this.jaebProvenanceAlertDismissBtn.addEventListener("click", () => {
+      this.hideSyntheticDataAlert();
+    });
+
+    this.jaebProvenanceAlert.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        this.hideSyntheticDataAlert();
+      }
+    });
+
+    this.ruleBasedSqlAlertDismissBtn.addEventListener("click", () => {
+      this.hideRuleBasedSqlAlert();
+    });
+
+    this.ruleBasedSqlAlert.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        this.hideRuleBasedSqlAlert();
+      }
+    });
+
     this.systemStatusChip.addEventListener("click", () => {
       void this.check(true);
     });
+  }
+
+  /**
+   * Shows the visual alert row below the navbar indicating synthetic/faked non-Jaeb data is active.
+   * @returns {void}
+   */
+  public showSyntheticDataAlert(): void {
+    this.jaebProvenanceAlert.classList.remove("hidden");
+    this.jaebProvenanceAlert.removeAttribute("aria-hidden");
+  }
+
+  /**
+   * Hides the visual alert row below the navbar for synthetic/faked non-Jaeb data.
+   * @returns {void}
+   */
+  public hideSyntheticDataAlert(): void {
+    this.jaebProvenanceAlert.classList.add("hidden");
+    this.jaebProvenanceAlert.setAttribute("aria-hidden", "true");
+  }
+
+  /**
+   * Shows the visual alert row below the navbar indicating deterministic rule-based SQL generation is active instead of an LLM.
+   * @returns {void}
+   */
+  public showRuleBasedSqlAlert(): void {
+    this.ruleBasedSqlAlert.classList.remove("hidden");
+    this.ruleBasedSqlAlert.removeAttribute("aria-hidden");
+  }
+
+  /**
+   * Hides the visual alert row below the navbar for deterministic rule-based SQL generation.
+   * @returns {void}
+   */
+  public hideRuleBasedSqlAlert(): void {
+    this.ruleBasedSqlAlert.classList.add("hidden");
+    this.ruleBasedSqlAlert.setAttribute("aria-hidden", "true");
   }
 
   /**
@@ -300,6 +380,21 @@ export class SystemStatusController {
    * @returns {void}
    */
   private applyStatusBannerAndChip(health: SystemStatusApiResponse): void {
+    if (
+      health.database?.is_synthetic_faked_data === false ||
+      health.database?.data_provenance === "jaeb_authentic"
+    ) {
+      this.hideSyntheticDataAlert();
+    } else if (health.database?.is_synthetic_faked_data === true) {
+      this.showSyntheticDataAlert();
+    }
+
+    if (!health.ollama?.accessible || this.ui.modelSelect.value === "sql") {
+      this.showRuleBasedSqlAlert();
+    } else {
+      this.hideRuleBasedSqlAlert();
+    }
+
     if (health.database?.status_code === "missing_file") {
       this.showBanner(
         "warning",

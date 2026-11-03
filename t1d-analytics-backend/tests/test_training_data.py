@@ -742,3 +742,43 @@ def test_generate_pairs_checkpointing_and_custom_template(
     conn.close()
     with TrainingDataGenerator(duckdb.connect(":memory:"), "ollama/gemma4") as ctx_gen:
         assert ctx_gen.model == "gemma4"
+
+
+def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
+    """Test evaluating all 7 complexity tiers of the Academic Table 1 benchmark suite against seeded DuckDB."""
+    from t1d_analytics.seed import seed_database
+    from t1d_analytics.training_data import (
+        evaluate_text_to_sql,
+        get_table_1_benchmark_suite,
+    )
+
+    data_dir = tmp_path / "t1_bench_data"
+    db_path = tmp_path / "t1_bench.duckdb"
+    sess_path = tmp_path / "t1_sess.duckdb"
+    seed_database(
+        data_dir=str(data_dir),
+        db_path=str(db_path),
+        sessions_db_path=str(sess_path),
+        overwrite_csvs=True,
+    )
+
+    suite = get_table_1_benchmark_suite()
+    assert len(suite) == 7
+    gold_lookup = {item["question"]: item["gold_sql"] for item in suite}
+
+    def _oracle_translate(
+        db_p: str, question: str, model_name: str = "gemma4"
+    ) -> tuple[str, str]:
+        """Return gold SQL for each Table 1 benchmark question."""
+        return "oracle", gold_lookup[question]
+
+    report = evaluate_text_to_sql(
+        str(db_path),
+        suite,
+        model="gemma4",
+        translate_fn=_oracle_translate,
+    )
+    assert report["total_samples"] == 7
+    assert report["exact_match_rate"] == 100.0
+    assert report["execution_accuracy"] == 100.0
+    assert report["syntax_failure_rate"] == 0.0

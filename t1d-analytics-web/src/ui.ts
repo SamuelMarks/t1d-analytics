@@ -422,6 +422,16 @@ export class ChatUI
         onTokenScroll: () => this.scrollToBottom(),
       });
       loadingDiv.remove();
+      if (outcome.data.is_synthetic_data === true) {
+        this.systemStatusController.showSyntheticDataAlert();
+      } else if (outcome.data.is_synthetic_data === false) {
+        this.systemStatusController.hideSyntheticDataAlert();
+      }
+      if (outcome.data.is_rule_based_sql === true) {
+        this.systemStatusController.showRuleBasedSqlAlert();
+      } else if (outcome.data.is_rule_based_sql === false && model !== "sql") {
+        this.systemStatusController.hideRuleBasedSqlAlert();
+      }
       this.messageRenderer.finalizeAssistantResponse(
         outcome.data,
         model,

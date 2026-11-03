@@ -27,6 +27,14 @@ export interface SseFinalChatData {
   sqlQuery?: string;
   /** Structured API error detail when execution or translation fails. */
   error?: ApiErrorInput;
+  /** Whether the queried DuckDB database uses synthetic seed data rather than authentic Jaeb trial data. */
+  is_synthetic_data?: boolean;
+  /** Whether the SQL was generated via deterministic rule-based templates instead of an LLM. */
+  is_rule_based_sql?: boolean;
+  /** SQL generation mode ('llm', 'rule_based_fallback', 'literal_sql'). */
+  generation_mode?: string;
+  /** Database provenance classification ('jaeb_authentic', 'synthetic_seed', 'custom'). */
+  data_provenance?: string;
 }
 
 /**

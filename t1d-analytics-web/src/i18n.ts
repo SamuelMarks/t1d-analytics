@@ -81,6 +81,17 @@ export const enTranslations: TranslationResourceMap = {
       pumpManufacturersComment: "-- Patient Pump Manufacturers",
       hba1cDemographicsComment:
         "-- Joining Subject Summaries with HbA1c Lab Results",
+      table1SectionTitle: "Academic Table 1 Baseline & Stratified Examples:",
+      table1Overall: "[Table 1 · Low] Overall Cohort Summary",
+      table1ByArm: "[Table 1 · Low-Med] Closed-Loop vs Control",
+      table1ByAge: "[Table 1 · Med] Age-Stratified & ADA Goals",
+      table1ByPump: "[Table 1 · Med] Pump Manufacturer Cohort",
+      table1LongitudinalLab:
+        "[Table 1 · Med-High] Longitudinal Lab & C-Peptide",
+      table1MultiDomainRollup:
+        "[Table 1 · High] Multi-Domain Sensor & Safety Rollup",
+      table1TransposedNejm:
+        "[Table 1 · Very High] Transposed NEJM/Lancet Table 1",
     },
     copyQuery: "Copy Query",
     refreshQuery: "Refresh Query",
@@ -184,6 +195,7 @@ export const enTranslations: TranslationResourceMap = {
     groupOpenAI: "OpenAI",
     groupAnthropic: "Anthropic",
     groupGoogle: "Google",
+    multiSelectLabel: "Enabled Models (any-llm & SQL Multi-Select):",
   },
   table: {
     searchPlaceholder: "Search table rows...",
@@ -270,6 +282,14 @@ export const enTranslations: TranslationResourceMap = {
     error: "Error",
     emptyDbPrompt:
       "Database has no tables loaded. Use 't1d-analytics load' to import clinical data.",
+    syntheticDataAlertTitle: "Synthetic Seed Data Active:",
+    syntheticDataAlertDesc:
+      "Not using proper Jaeb (JCHR) clinical trial datasets — currently faking/seeding synthetic data. Select /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb for authentic Jaeb data.",
+    ruleBasedSqlAlertTitle: "Deterministic Rule-Based SQL Active:",
+    ruleBasedSqlAlertDesc:
+      "Not using an LLM — queries are using deterministic rule-based SQL generation instead of neural LLM inference.",
+    dismissSyntheticAlert: "Dismiss synthetic data alert",
+    dismissRuleSqlAlert: "Dismiss rule-based SQL alert",
   },
   cgm: {
     title: "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
@@ -377,6 +397,15 @@ export const jaTranslations: TranslationResourceMap = {
       adverseEventsComment: "-- 有害事象の頻度",
       pumpManufacturersComment: "-- 患者のポンプメーカー",
       hba1cDemographicsComment: "-- 被験者サマリーとHbA1c検査結果の結合",
+      table1SectionTitle:
+        "学術論文「Table 1」ベースラインおよび層別解析サンプル:",
+      table1Overall: "[Table 1 · 低] 全体コホート要約",
+      table1ByArm: "[Table 1 · 低-中] クローズドループ対コントロール群",
+      table1ByAge: "[Table 1 · 中] 年齢層別・ADA目標達成率",
+      table1ByPump: "[Table 1 · 中] ポンプメーカー別コホート",
+      table1LongitudinalLab: "[Table 1 · 中-高] 縦断的HbA1c・Cペプチド推移",
+      table1MultiDomainRollup: "[Table 1 · 高] CGM・有害事象統合ロールアップ",
+      table1TransposedNejm: "[Table 1 · 最高] NEJM/Lancet形式 転置Table 1",
     },
     copyQuery: "クエリをコピー",
     refreshQuery: "クエリを更新",
@@ -480,6 +509,7 @@ export const jaTranslations: TranslationResourceMap = {
     groupOpenAI: "OpenAI",
     groupAnthropic: "Anthropic",
     groupGoogle: "Google",
+    multiSelectLabel: "有効なモデル (any-llm & SQL 複数選択):",
   },
   table: {
     searchPlaceholder: "テーブル行を検索...",
@@ -566,6 +596,14 @@ export const jaTranslations: TranslationResourceMap = {
     error: "エラー",
     emptyDbPrompt:
       "データベースにテーブルが読み込まれていません。't1d-analytics load' を使用してデータをインポートしてください。",
+    syntheticDataAlertTitle: "合成シードデータ使用中:",
+    syntheticDataAlertDesc:
+      "正式なJaeb（JCHR）臨床試験データセットではなく、合成シードデータを使用しています。実際のJaebデータには /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb を選択してください。",
+    ruleBasedSqlAlertTitle: "決定論的ルールベースSQL生成:",
+    ruleBasedSqlAlertDesc:
+      "LLMを使用していません — ニューラルLLM推論ではなく決定論的なルールベースSQL生成を使用しています。",
+    dismissSyntheticAlert: "合成データ警告を閉じる",
+    dismissRuleSqlAlert: "ルールベースSQL警告を閉じる",
   },
   cgm: {
     title: "📊 CGM分析（外来血糖プロファイル＆TIR）",
@@ -677,6 +715,16 @@ export const arTranslations: TranslationResourceMap = {
       pumpManufacturersComment: "-- الشركات المصنعة لمضخات المرضى",
       hba1cDemographicsComment:
         "-- ربط ملخصات المشاركين بنتائج مختبر السكر التراكمي HbA1c",
+      table1SectionTitle:
+        "أمثلة الجدول الأكاديمي 1 (Table 1) للخصائص الأساسية:",
+      table1Overall: "[Table 1 · منخفض] ملخص المجموعة الكلية",
+      table1ByArm: "[Table 1 · منخفض-متوسط] الحلقة المغلقة مقابل الضابطة",
+      table1ByAge: "[Table 1 · متوسط] التقسيم العمري وأهداف ADA",
+      table1ByPump: "[Table 1 · متوسط] مجموعة مصنعي المضخات",
+      table1LongitudinalLab:
+        "[Table 1 · متوسط-عالٍ] المختبر الطولي و C-Peptide",
+      table1MultiDomainRollup: "[Table 1 · عالٍ] دمج مستشعر CGM والسلامة",
+      table1TransposedNejm: "[Table 1 · عالٍ جداً] جدول NEJM/Lancet المبدل",
     },
     copyQuery: "نسخ الاستعلام",
     refreshQuery: "تحديث الاستعلام",
@@ -780,6 +828,7 @@ export const arTranslations: TranslationResourceMap = {
     groupOpenAI: "OpenAI",
     groupAnthropic: "Anthropic",
     groupGoogle: "Google",
+    multiSelectLabel: "النماذج الممكّنة (تحديد متعدد لـ any-llm و SQL):",
   },
   table: {
     searchPlaceholder: "البحث في صفوف الجدول...",
@@ -866,6 +915,14 @@ export const arTranslations: TranslationResourceMap = {
     error: "خطأ",
     emptyDbPrompt:
       "لا توجد جداول محملة في قاعدة البيانات. استخدم 't1d-analytics load' لاستيراد البيانات.",
+    syntheticDataAlertTitle: "بيانات اصطناعية نشطة:",
+    syntheticDataAlertDesc:
+      "لا يتم استخدام مجموعات بيانات Jaeb (JCHR) الحقيقية — يتم حالياً استخدام بيانات اصطناعية تجريبية. اختر /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb للبيانات الحقيقية.",
+    ruleBasedSqlAlertTitle: "توليد SQL القياسي القائم على القواعد نشط:",
+    ruleBasedSqlAlertDesc:
+      "لا يتم استخدام نموذج لغوي كبير (LLM) — يتم إنشاء الاستعلامات عبر قواعد SQL حتمية بدلاً من الاستدلال العصبي.",
+    dismissSyntheticAlert: "إغلاق تنبيه البيانات الاصطناعية",
+    dismissRuleSqlAlert: "إغلاق تنبيه SQL القائم على القواعد",
   },
   cgm: {
     title: "📊 تحليلات CGM (مخطط الجلوكوز المتنقل وTIR)",
@@ -976,6 +1033,15 @@ export const heTranslations: TranslationResourceMap = {
       adverseEventsComment: "-- תדירות תופעות לוואי",
       pumpManufacturersComment: "-- יצרני משאבות של מטופלים",
       hba1cDemographicsComment: "-- איחוד סיכומי נבדקים עם תוצאות מעבדה HbA1c",
+      table1SectionTitle: "דוגמאות טבלה אקדמית 1 (Table 1) למאפייני בסיס:",
+      table1Overall: "[Table 1 · נמוך] סיכום קוהורט כולל",
+      table1ByArm: "[Table 1 · נמוך-בינוני] לולאה סגורה מול ביקורת",
+      table1ByAge: "[Table 1 · בינוני] פילוח גיל ויעדי ADA",
+      table1ByPump: "[Table 1 · בינוני] קוהורט יצרני משאבות",
+      table1LongitudinalLab:
+        "[Table 1 · בינוני-גבוה] מעבדה לאורך זמן ו-C-Peptide",
+      table1MultiDomainRollup: "[Table 1 · גבוה] איחוד חיישן CGM ובטיחות",
+      table1TransposedNejm: "[Table 1 · גבוה מאוד] טבלת NEJM/Lancet משוחלפת",
     },
     copyQuery: "העתק שאילתה",
     refreshQuery: "רענן שאילתה",
@@ -1079,6 +1145,7 @@ export const heTranslations: TranslationResourceMap = {
     groupOpenAI: "OpenAI",
     groupAnthropic: "Anthropic",
     groupGoogle: "Google",
+    multiSelectLabel: "מודלים מופעלים (בחירה מרובה של any-llm ו-SQL):",
   },
   table: {
     searchPlaceholder: "חפש בשורות הטבלה...",
@@ -1165,6 +1232,14 @@ export const heTranslations: TranslationResourceMap = {
     error: "שגיאה",
     emptyDbPrompt:
       "אין טבלאות במסד הנתונים. השתמש ב-'t1d-analytics load' לייבוא נתונים.",
+    syntheticDataAlertTitle: "נתוני דמה סינתטיים פעילים:",
+    syntheticDataAlertDesc:
+      "לא נעשה שימוש במאגרי Jaeb (JCHR) מקוריים — המערכת משתמשת בנתוני דמה סינתטיים. בחר /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb לנתוני Jaeb מקוריים.",
+    ruleBasedSqlAlertTitle: "יצירת SQL דטרמיניסטית מבוססת-חוקים פעילה:",
+    ruleBasedSqlAlertDesc:
+      "לא נעשה שימוש ב-LLM — השאילתות מופקות באמצעות מחולל SQL דטרמיניסטי מבוסס-חוקים במקום מודל שפה.",
+    dismissSyntheticAlert: "סגור התראת נתונים סינתטיים",
+    dismissRuleSqlAlert: "סגור התראת SQL מבוסס-חוקים",
   },
   cgm: {
     title: "📊 ניתוח CGM (פרופיל גלוקוז אמבולטורי ו-TIR)",

@@ -104,7 +104,9 @@ test.describe("SQL Detection, Result Rendering, Exports & Sanitization", () => {
     });
 
     await page.goto("/");
-    await page.selectOption("#model-select", "sql");
+    await expect(page.locator(".empty-state .table1-chip")).toHaveCount(7);
+    await page.locator(".empty-state .table1-chip").first().click();
+    await expect(page.locator("#model-select")).toHaveValue("sql");
 
     // 1. Empty SQL result
     await page.fill("#chat-input", "SELECT * FROM empty_cohort;");

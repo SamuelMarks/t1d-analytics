@@ -76,6 +76,198 @@ class TextToSqlEvalReportDict(TypedDict):
     csv_report: str
 
 
+class Table1BenchmarkSpecDict(TypedDict):
+    """Specification for an Academic Table 1 Text-to-SQL benchmark question and gold SQL."""
+
+    id: str
+    complexity: str
+    question: str
+    gold_sql: str
+
+
+TABLE_1_BENCHMARK_SUITE: Tuple[Table1BenchmarkSpecDict, ...] = (
+    {
+        "id": "table1-overall",
+        "complexity": "Low",
+        "question": (
+            "Generate a Table 1 summary of overall participant count, mean age, "
+            "percent female, mean HbA1c, and mean Time in Range from the patients table."
+        ),
+        "gold_sql": (
+            "SELECT COUNT(*) AS n_participants, ROUND(AVG(age), 1) AS mean_age_yr, "
+            "ROUND(STDDEV_SAMP(age), 1) AS sd_age_yr, "
+            "SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) AS female_n, "
+            "ROUND(100.0 * AVG(CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END), 1) AS female_pct, "
+            "ROUND(AVG(hba1c), 2) AS mean_hba1c_pct, ROUND(AVG(tir), 1) AS mean_tir_pct, "
+            "ROUND(AVG(tbr), 2) AS mean_tbr_pct, ROUND(AVG(tar), 1) AS mean_tar_pct, "
+            "ROUND(AVG(mean_glucose), 1) AS mean_cgm_mgdl FROM patients;"
+        ),
+    },
+    {
+        "id": "table1-by-arm",
+        "complexity": "Low-Medium",
+        "question": (
+            "Create a Table 1 comparing Closed-Loop vs Control treatment arms in patients "
+            "with N, Age (Mean ± SD), Female n (%), Baseline HbA1c (Mean ± SD), TIR, TBR, TAR, and total DKA events."
+        ),
+        "gold_sql": (
+            "SELECT TxGroup AS treatment_arm, COUNT(*) AS n, "
+            "ROUND(AVG(age), 1) || ' ± ' || ROUND(STDDEV_SAMP(age), 1) AS age_mean_sd, "
+            "SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END), 1) || '%)' AS female_n_pct, "
+            "ROUND(AVG(hba1c), 2) || ' ± ' || ROUND(STDDEV_SAMP(hba1c), 2) AS hba1c_mean_sd, "
+            "ROUND(AVG(tir), 1) || ' ± ' || ROUND(STDDEV_SAMP(tir), 1) AS tir_mean_sd, "
+            "ROUND(AVG(tbr), 2) || ' ± ' || ROUND(STDDEV_SAMP(tbr), 2) AS tbr_mean_sd, "
+            "ROUND(AVG(tar), 1) || ' ± ' || ROUND(STDDEV_SAMP(tar), 1) AS tar_mean_sd, "
+            "SUM(numhospdka) AS total_dka_events FROM patients GROUP BY TxGroup ORDER BY TxGroup;"
+        ),
+    },
+    {
+        "id": "table1-by-age",
+        "complexity": "Medium",
+        "question": (
+            "Build an age-stratified Table 1 across Pediatric (<18 yr), Adult (18-49 yr), "
+            "and Older Adult (>=50 yr) cohorts showing sample size, % Closed-Loop, mean and median HbA1c, "
+            "mean TIR, and % achieving ADA targets (TIR >= 70% and HbA1c < 7.0%)."
+        ),
+        "gold_sql": (
+            "SELECT CASE WHEN age < 18 THEN '1. Pediatric (<18 yr)' "
+            "WHEN age < 50 THEN '2. Adult (18-49 yr)' ELSE '3. Older Adult (>=50 yr)' END AS age_stratum, "
+            "COUNT(*) AS n, ROUND(AVG(age), 1) AS mean_age, "
+            "ROUND(100.0 * AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN 1.0 ELSE 0.0 END), 1) AS closed_loop_pct, "
+            "ROUND(AVG(hba1c), 2) AS mean_hba1c, ROUND(MEDIAN(hba1c), 2) AS median_hba1c, "
+            "ROUND(AVG(tir), 1) AS mean_tir, "
+            "ROUND(100.0 * AVG(CASE WHEN tir >= 70.0 AND hba1c < 7.0 THEN 1.0 ELSE 0.0 END), 1) AS ada_goal_achieved_pct "
+            "FROM patients GROUP BY 1 ORDER BY 1;"
+        ),
+    },
+    {
+        "id": "table1-by-pump",
+        "complexity": "Medium",
+        "question": (
+            "Produce a device-stratified Table 1 joining subjects and patients by pump manufacturer "
+            "(Insulet, Medtronic, Tandem) with N, Age (Mean ± SD), % Female, mean HbA1c, mean TIR, mean CGM glucose, and DKA count."
+        ),
+        "gold_sql": (
+            "SELECT s.Pt_PumpManuf AS pump_manufacturer, COUNT(*) AS n, "
+            "ROUND(AVG(p.age), 1) || ' ± ' || ROUND(STDDEV_SAMP(p.age), 1) AS age_mean_sd, "
+            "ROUND(100.0 * AVG(CASE WHEN p.gender = 'F' THEN 1.0 ELSE 0.0 END), 1) AS female_pct, "
+            "ROUND(AVG(p.hba1c), 2) AS mean_hba1c, ROUND(AVG(p.tir), 1) AS mean_tir, "
+            "ROUND(AVG(p.mean_glucose), 1) AS mean_glucose_mgdl, SUM(p.numhospdka) AS dka_events "
+            "FROM subjects s JOIN patients p ON s.PtID = p.subject_id GROUP BY s.Pt_PumpManuf ORDER BY s.Pt_PumpManuf;"
+        ),
+    },
+    {
+        "id": "table1-longitudinal-lab",
+        "complexity": "Medium-High",
+        "question": (
+            "Generate a longitudinal laboratory Table 1 joining patients and hba1c_labs by treatment arm "
+            "showing randomized N, lab completers N, baseline vs endpoint HbA1c, HbA1c change (delta), and baseline vs endpoint C-Peptide."
+        ),
+        "gold_sql": (
+            "WITH lab_bounds AS (SELECT subject_id, FIRST(hba1c ORDER BY VisitDate ASC) AS baseline_hba1c, "
+            "LAST(hba1c ORDER BY VisitDate ASC) AS endpoint_hba1c, "
+            "FIRST(C_Peptide ORDER BY VisitDate ASC) AS baseline_c_peptide, "
+            "LAST(C_Peptide ORDER BY VisitDate ASC) AS endpoint_c_peptide "
+            "FROM hba1c_labs GROUP BY subject_id) "
+            "SELECT p.TxGroup AS treatment_arm, COUNT(p.subject_id) AS randomized_n, "
+            "COUNT(l.subject_id) AS lab_completers_n, ROUND(AVG(l.baseline_hba1c), 2) AS baseline_a1c, "
+            "ROUND(AVG(l.endpoint_hba1c), 2) AS endpoint_a1c, "
+            "ROUND(AVG(l.endpoint_hba1c - l.baseline_hba1c), 2) AS delta_a1c, "
+            "ROUND(AVG(l.baseline_c_peptide), 3) AS baseline_c_pep, "
+            "ROUND(AVG(l.endpoint_c_peptide), 3) AS endpoint_c_pep "
+            "FROM patients p LEFT JOIN lab_bounds l ON p.subject_id = l.subject_id GROUP BY p.TxGroup ORDER BY p.TxGroup;"
+        ),
+    },
+    {
+        "id": "table1-multi-domain-rollup",
+        "complexity": "High",
+        "question": (
+            "Construct a multi-domain Table 1 with an Overall Cohort rollup joining patients, "
+            "raw cgm_readings, and dka_adverse_events by treatment arm, reporting N, Age, HbA1c, "
+            "raw sensor CGM Mean ± SD, sensor CV%, TIR%, DKA events, severe hypoglycemia events, and hospitalizations."
+        ),
+        "gold_sql": (
+            "WITH cgm_agg AS (SELECT subject_id, AVG(glucose_value) AS sensor_mean_mgdl, "
+            "STDDEV_SAMP(glucose_value) AS sensor_sd_mgdl, "
+            "100.0 * STDDEV_SAMP(glucose_value) / NULLIF(AVG(glucose_value), 0) AS sensor_cv_pct "
+            "FROM cgm_readings GROUP BY subject_id), "
+            "ae_agg AS (SELECT subject_id, SUM(CASE WHEN EventType = 'DKA' THEN 1 ELSE 0 END) AS dka_ae, "
+            "SUM(CASE WHEN EventType = 'Severe Hypoglycemia' THEN 1 ELSE 0 END) AS sev_hypo_ae, "
+            "SUM(CASE WHEN Hospitalized THEN 1 ELSE 0 END) AS hosp_ae FROM dka_adverse_events GROUP BY subject_id) "
+            "SELECT COALESCE(p.TxGroup, 'Overall Cohort') AS cohort_column, COUNT(*) AS n_subjects, "
+            "ROUND(AVG(p.age), 1) || ' ± ' || ROUND(STDDEV_SAMP(p.age), 1) AS age_yr_mean_sd, "
+            "ROUND(AVG(p.hba1c), 2) || ' ± ' || ROUND(STDDEV_SAMP(p.hba1c), 2) AS hba1c_pct_mean_sd, "
+            "ROUND(AVG(c.sensor_mean_mgdl), 1) || ' ± ' || ROUND(AVG(c.sensor_sd_mgdl), 1) AS cgm_mgdl_mean_sd, "
+            "ROUND(AVG(c.sensor_cv_pct), 1) AS cgm_cv_pct, ROUND(AVG(p.tir), 1) AS tir_70_180_pct, "
+            "COALESCE(SUM(a.dka_ae), 0) AS dka_events, COALESCE(SUM(a.sev_hypo_ae), 0) AS sev_hypo_events, "
+            "COALESCE(SUM(a.hosp_ae), 0) AS hospitalizations "
+            "FROM patients p LEFT JOIN cgm_agg c ON p.subject_id = c.subject_id "
+            "LEFT JOIN ae_agg a ON p.subject_id = a.subject_id "
+            "GROUP BY ROLLUP(p.TxGroup) ORDER BY CASE WHEN p.TxGroup IS NULL THEN 1 ELSE 0 END, p.TxGroup;"
+        ),
+    },
+    {
+        "id": "table1-transposed-nejm",
+        "complexity": "Very High",
+        "question": (
+            "Generate a transposed NEJM/Lancet-style Table 1 where each row is a clinical characteristic "
+            "(Sample Size N, Age Mean ± SD, Female Sex n (%), Baseline HbA1c Mean ± SD, Time in Range Mean ± SD, "
+            "Time Below Range Median (IQR)) and columns are Closed-Loop Arm, Control Arm, Overall Cohort, and Arm Difference."
+        ),
+        "gold_sql": (
+            "WITH base AS (SELECT p.*, s.Pt_PumpManuf FROM patients p LEFT JOIN subjects s ON p.subject_id = s.PtID) "
+            "SELECT 1 AS sort_ord, 'Sample Size (N)' AS characteristic, "
+            "CAST(SUM(CASE WHEN TxGroup = 'Closed-Loop' THEN 1 ELSE 0 END) AS VARCHAR) AS closed_loop_arm, "
+            "CAST(SUM(CASE WHEN TxGroup = 'Control' THEN 1 ELSE 0 END) AS VARCHAR) AS control_arm, "
+            "CAST(COUNT(*) AS VARCHAR) AS overall_cohort, '—' AS arm_difference FROM base "
+            "UNION ALL SELECT 2, 'Age (years), Mean ± SD', "
+            "ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN age END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Closed-Loop' THEN age END), 1), "
+            "ROUND(AVG(CASE WHEN TxGroup = 'Control' THEN age END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Control' THEN age END), 1), "
+            "ROUND(AVG(age), 1) || ' ± ' || ROUND(STDDEV_SAMP(age), 1), "
+            "CAST(ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN age END) - AVG(CASE WHEN TxGroup = 'Control' THEN age END), 2) AS VARCHAR) FROM base "
+            "UNION ALL SELECT 3, 'Female Sex, n (%)', "
+            "SUM(CASE WHEN TxGroup = 'Closed-Loop' AND gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END END), 1) || '%)', "
+            "SUM(CASE WHEN TxGroup = 'Control' AND gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN TxGroup = 'Control' THEN CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END END), 1) || '%)', "
+            "SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END), 1) || '%)', '—' FROM base "
+            "UNION ALL SELECT 4, 'Baseline HbA1c (%), Mean ± SD', "
+            "ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN hba1c END), 2) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Closed-Loop' THEN hba1c END), 2), "
+            "ROUND(AVG(CASE WHEN TxGroup = 'Control' THEN hba1c END), 2) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Control' THEN hba1c END), 2), "
+            "ROUND(AVG(hba1c), 2) || ' ± ' || ROUND(STDDEV_SAMP(hba1c), 2), "
+            "CAST(ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN hba1c END) - AVG(CASE WHEN TxGroup = 'Control' THEN hba1c END), 2) AS VARCHAR) FROM base "
+            "UNION ALL SELECT 5, 'Time in Range 70-180 mg/dL (%), Mean ± SD', "
+            "ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN tir END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Closed-Loop' THEN tir END), 1), "
+            "ROUND(AVG(CASE WHEN TxGroup = 'Control' THEN tir END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Control' THEN tir END), 1), "
+            "ROUND(AVG(tir), 1) || ' ± ' || ROUND(STDDEV_SAMP(tir), 1), "
+            "CAST(ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN tir END) - AVG(CASE WHEN TxGroup = 'Control' THEN tir END), 2) AS VARCHAR) FROM base "
+            "UNION ALL SELECT 6, 'Time Below Range <70 mg/dL (%), Median (IQR)', "
+            "ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Closed-Loop' THEN tbr END, 0.5), 2) || ' (' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Closed-Loop' THEN tbr END, 0.25), 2) || '-' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Closed-Loop' THEN tbr END, 0.75), 2) || ')', "
+            "ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Control' THEN tbr END, 0.5), 2) || ' (' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Control' THEN tbr END, 0.25), 2) || '-' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Control' THEN tbr END, 0.75), 2) || ')', "
+            "ROUND(QUANTILE_CONT(tbr, 0.5), 2) || ' (' || ROUND(QUANTILE_CONT(tbr, 0.25), 2) || '-' || ROUND(QUANTILE_CONT(tbr, 0.75), 2) || ')', '—' FROM base ORDER BY sort_ord;"
+        ),
+    },
+)
+
+
+def get_table_1_benchmark_suite() -> List[Dict[str, str]]:
+    """
+    Return the 7-tier Academic Table 1 Text-to-SQL benchmark dataset for `evaluate_text_to_sql`.
+
+    Returns
+    -------
+        List[Dict[str, str]]: List of benchmark dicts with `id`, `complexity`, `question`, and `gold_sql`.
+
+    """
+    return [
+        {
+            "id": item["id"],
+            "complexity": item["complexity"],
+            "question": item["question"],
+            "gold_sql": item["gold_sql"],
+        }
+        for item in TABLE_1_BENCHMARK_SUITE
+    ]
+
+
 def _make_hashable(val: HashableInput) -> HashableResult:
     """
     Recursively convert unhashable types into immutable hashable equivalents.

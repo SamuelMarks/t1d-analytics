@@ -553,3 +553,54 @@ def test_get_system_health_providers_dict(tmp_path: Path) -> None:
     providers_dict = d["providers"]
     assert isinstance(providers_dict, dict)
     assert "openai" in providers_dict
+
+
+def test_detect_database_provenance_and_jaeb_views(tmp_path: Path) -> None:
+    """Test detect_database_provenance and ensure_canonical_clinical_views across jaeb_authentic, synthetic_seed, and custom DBs."""
+    from t1d_analytics.diagnostics import (
+        check_database_health,
+        detect_database_provenance,
+    )
+    from t1d_analytics.seed import ensure_canonical_clinical_views
+
+    assert detect_database_provenance([]) == "custom"
+    assert detect_database_provenance(["custom_only"]) == "custom"
+    assert detect_database_provenance(["patients", "cgm_readings"]) == "synthetic_seed"
+    assert (
+        detect_database_provenance(["acpepptroster", "tblaptsummary"])
+        == "jaeb_authentic"
+    )
+    assert (
+        detect_database_provenance(["tblaptsummary"], base_tables={"tblaptsummary"})
+        == "jaeb_authentic"
+    )
+    assert (
+        detect_database_provenance(
+            ["tblaptsummary", "patients"], base_tables={"tblaptsummary", "patients"}
+        )
+        == "synthetic_seed"
+    )
+
+    # Test check_database_health on an authentic Jaeb DB with > 25 tables
+    jaeb_db = tmp_path / "jaeb_large.duckdb"
+    conn = duckdb.connect(str(jaeb_db))
+    conn.execute(
+        "CREATE TABLE tblaptsummary (RecID BIGINT, ptid BIGINT, gender VARCHAR, AgeAsOfRandDt BIGINT, InsulinModality VARCHAR)"
+    )
+    conn.execute("INSERT INTO tblaptsummary VALUES (1, 101, 'F', 28, 'Pump')")
+    for idx in range(28):
+        conn.execute(f"CREATE TABLE study_tbl_{idx} (id INT)")
+    conn.close()
+
+    ensure_canonical_clinical_views(str(jaeb_db))
+    status_jaeb = check_database_health(str(jaeb_db))
+    assert status_jaeb.data_provenance == "jaeb_authentic"
+    assert status_jaeb.is_synthetic_faked_data is False
+    assert status_jaeb.to_dict()["data_provenance"] == "jaeb_authentic"
+    assert status_jaeb.to_dict()["is_synthetic_faked_data"] is False
+
+    empty_views_db = tmp_path / "empty_views.duckdb"
+    conn_ev = duckdb.connect(str(empty_views_db))
+    conn_ev.execute("CREATE TABLE unrelated_only (id INT)")
+    conn_ev.close()
+    ensure_canonical_clinical_views(str(empty_views_db))

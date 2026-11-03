@@ -1582,6 +1582,8 @@ def test_load_data_to_duckdb_legacy_latin1_encoding(tmp_path: Path) -> None:
 
 def test_load_data_to_duckdb_coerces_varchar_numeric_concepts(tmp_path: Path) -> None:
     """Test load_data_to_duckdb coerces VARCHAR clinical numeric concept columns (like NumSevHypo and age with NA) to DOUBLE."""
+    from t1d_analytics.ingestion import coerce_known_clinical_numeric_columns
+
     data_dir = tmp_path / "jaeb_data"
     data_dir.mkdir()
     csv_file = data_dir / "tblAPTSummary.csv"
@@ -1594,12 +1596,19 @@ def test_load_data_to_duckdb_coerces_varchar_numeric_concepts(tmp_path: Path) ->
     db_file = tmp_path / "jaeb.duckdb"
     conn_init = duckdb.connect(str(db_file))
     conn_init.execute("CREATE VIEW tblaptsummary AS SELECT 1 AS dummy")
+    conn_init.execute(
+        "CREATE TABLE manual_tbl (PtID INT, NumSevHypo VARCHAR, Gender VARCHAR)"
+    )
+    conn_init.execute("INSERT INTO manual_tbl VALUES (1, '4', 'M'), (2, '', 'F')")
+    coerce_known_clinical_numeric_columns(conn_init, "manual_tbl")
     conn_init.close()
     load_data_to_duckdb(str(data_dir), str(db_file))
 
     conn = duckdb.connect(str(db_file), read_only=True)
     res = conn.execute("SELECT SUM(NumSevHypo), AVG(age) FROM tblaptsummary").fetchone()
+    res_manual = conn.execute("SELECT SUM(NumSevHypo) FROM manual_tbl").fetchone()
     conn.close()
     assert res is not None
     assert res[0] == 2.0
     assert res[1] == 22.5
+    assert res_manual == (4.0,)

@@ -278,12 +278,26 @@
         "condition": "unix"
       }
     ],
+    "before_start": [
+      {
+        "name": "pull-default-choice-ollama-models",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; if command -v ollama >/dev/null 2>&1; then if ! ollama list >/dev/null 2>&1; then (nohup ollama serve >/dev/null 2>&1 & sleep 2); fi; for _m in hf.co/google/gemma-4-E4B hf.co/microsoft/Phi-4-mini-flash-reasoning hf.co/meta-llama/Llama-3.2-1B; do ollama pull \"$_m\" || true; done; fi",
+        "cmd_windows": "where ollama >nul 2>&1 && (ollama pull hf.co/google/gemma-4-E4B & ollama pull hf.co/microsoft/Phi-4-mini-flash-reasoning & ollama pull hf.co/meta-llama/Llama-3.2-1B)",
+        "ignore_errors": true
+      }
+    ],
     "pre_start": [
       {
         "name": "normalize-t1d-data-ownership",
         "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo chown -R \"${REMOTE_USER:-ubuntu}:${REMOTE_GROUP:-ubuntu}\" \"${DATA_DISK_MOUNT:-/mnt/data}\" \"${TMP_DATA_DIR:-/tmp/data}\" data 2>/dev/null || true",
         "cmd_windows": "rem Data ownership managed by Windows ACLs",
         "condition": "unix"
+      },
+      {
+        "name": "ensure-default-choice-ollama-models",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; if command -v ollama >/dev/null 2>&1; then if ! ollama list >/dev/null 2>&1; then (nohup ollama serve >/dev/null 2>&1 & sleep 2); fi; for _m in hf.co/google/gemma-4-E4B hf.co/microsoft/Phi-4-mini-flash-reasoning hf.co/meta-llama/Llama-3.2-1B; do ollama pull \"$_m\" || true; done; fi",
+        "cmd_windows": "where ollama >nul 2>&1 && (ollama pull hf.co/google/gemma-4-E4B & ollama pull hf.co/microsoft/Phi-4-mini-flash-reasoning & ollama pull hf.co/meta-llama/Llama-3.2-1B)",
+        "ignore_errors": true
       }
     ],
     "health": [
@@ -484,6 +498,13 @@
     },
     "hooks": {
       "db_migrate": [],
+      "before_start": [
+        {
+          "name": "pull-default-choice-ollama-models",
+          "command": "if command -v ollama >/dev/null 2>&1; then for _m in hf.co/google/gemma-4-E4B hf.co/microsoft/Phi-4-mini-flash-reasoning hf.co/meta-llama/Llama-3.2-1B; do ollama pull \"$_m\" || true; done; fi",
+          "ignore_errors": true
+        }
+      ],
       "pre_start": [],
       "health": []
     },

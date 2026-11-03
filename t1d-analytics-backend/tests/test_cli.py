@@ -1667,13 +1667,15 @@ def test_seed_subcommand_and_doctor_thresholds(
     )
     c_tv.execute("INSERT INTO patients VALUES (1, 'F', 25, 0, 7.1, 70.0)")
     c_tv.execute("CREATE TABLE tblaptsummary (PtID INT)")
-    c_tv.execute("CREATE TABLE subjects (PtID INT)")
-    c_tv.execute("INSERT INTO subjects VALUES (999)")
+    c_tv.execute("CREATE TABLE subjects (PtID INT, NumSevHypo VARCHAR, Gender VARCHAR)")
+    c_tv.execute("INSERT INTO subjects VALUES (999, '3', 'F')")
     c_tv.close()
     ensure_canonical_clinical_views(str(tbl_vs_view_db))
     c_tv2 = duckdb.connect(str(tbl_vs_view_db), read_only=True)
     assert c_tv2.execute("SELECT PtID FROM tblaptsummary").fetchone() == (1,)
-    assert c_tv2.execute("SELECT PtID FROM subjects").fetchone() == (999,)
+    assert c_tv2.execute(
+        "SELECT PtID, SUM(NumSevHypo) FROM subjects GROUP BY PtID"
+    ).fetchone() == (999, 3.0)
     c_tv2.close()
 
     # Test load_data_to_duckdb drops existing compatibility view when real CSV for that stem arrives

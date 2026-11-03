@@ -12,6 +12,7 @@ from typing_extensions import TypedDict
 from t1d_analytics.api_schemas import TableSchemaModel
 from t1d_analytics.sql_utils import (
     SqlValue,
+    coerce_numeric_aggregates_in_sql,
     extract_sql_from_response,
     is_read_only_sql_query,
     is_sql_query,
@@ -133,6 +134,56 @@ def _extract_schema_map_from_text(
     return schema_map if schema_map else _extract_ddl_schema_map(schema_text)
 
 
+_TABLE_1_RAG_KEYWORDS = {
+    "table 1",
+    "table1",
+    "baseline",
+    "characteristics",
+    "stratified",
+    "arm",
+    "cohort",
+    "summary",
+    "demographics",
+    "outcomes",
+    "quartile",
+    "iqr",
+    "stddev",
+}
+
+_CORE_CLINICAL_TABLES = {
+    "patients",
+    "demographics",
+    "subjects",
+    "tblaptsummary",
+    "cgm_readings",
+    "cgm_data",
+    "hba1c_labs",
+    "hba1c",
+    "dka_adverse_events",
+    "adverseevents",
+}
+
+
+def _is_table_1_broad_query(nl_query: str) -> bool:
+    """
+    Determine whether `nl_query` requests a broad Academic Table 1 or baseline cohort summary.
+
+    Args:
+    ----
+        nl_query: Natural language clinical question.
+
+    Returns:
+    -------
+        bool: True if the query contains Table 1 or baseline summary keywords.
+
+    """
+    lower_q = nl_query.lower()
+    if "table 1" in lower_q or "table1" in lower_q or "baseline" in lower_q:
+        return True
+    query_words = set(re.findall(r"\b\w+\b", lower_q))
+    return len(query_words.intersection(_TABLE_1_RAG_KEYWORDS)) >= 2
+
+
 def prune_schema_with_gemma_rag(
     nl_query: str,
     full_schema_text: Union[str, Sequence[TableSchemaModel]],
@@ -170,21 +221,32 @@ def prune_schema_with_gemma_rag(
     if not schema_map:
         return rendered_schema
 
+    effective_top_k = (
+        max(top_k_tables, len(schema_map))
+        if _is_table_1_broad_query(nl_query)
+        else top_k_tables
+    )
+
     if repo_resolver is not None:
         repo_resolver()
     try:
         rag_mod = importlib.import_module("gemma_4_sql.sdk.rag")
         retrieve_fn = rag_mod.retrieve_relevant_schema
-        rag_header = str(retrieve_fn(nl_query, schema_map, top_k_tables=top_k_tables))
+        rag_header = str(
+            retrieve_fn(nl_query, schema_map, top_k_tables=effective_top_k)
+        )
         if rag_header.strip():
             return f"{rag_header}{nl}{nl}{rendered_schema}"
     except Exception as e:
         logger.debug("Falling back to built-in BM25 schema ranking: %s", e)
 
     prompt_words = {w.lower() for w in re.findall(r"\b\w+\b", nl_query)}
+    is_broad_t1 = _is_table_1_broad_query(nl_query)
     scores: Dict[str, int] = {}
     for table, cols in schema_map.items():
         score = 5 if table.lower() in prompt_words else 0
+        if is_broad_t1 and table.lower() in _CORE_CLINICAL_TABLES:
+            score += 3
         for col in cols:
             if col.lower() in prompt_words:
                 score += 1
@@ -193,12 +255,12 @@ def prune_schema_with_gemma_rag(
     ranked = [
         t
         for t, s in sorted(scores.items(), key=lambda item: item[1], reverse=True)[
-            :top_k_tables
+            :effective_top_k
         ]
         if s > 0
     ]
     if not ranked:
-        ranked = list(schema_map.keys())[:top_k_tables]
+        ranked = list(schema_map.keys())[:effective_top_k]
 
     lines = ["-- Relevant Schema Context:"]
     for t in ranked:
@@ -296,6 +358,35 @@ def _classify_sql_error_hint(error_msg: str) -> str:
 
     """
     if re.search(
+        r"(?:sum\(varchar\)|avg\(varchar\)|stddev_samp\(varchar\)|quantile_cont\(varchar|no function matches the given name and argument types)",
+        error_msg,
+        re.IGNORECASE,
+    ):
+        return (
+            " [Hint: Numeric aggregation failed because the target column is stored as VARCHAR "
+            "(often due to 'NA' strings in clinical CSVs). Wrap the column in "
+            "TRY_CAST(column_name AS DOUBLE) inside SUM(), AVG(), STDDEV_SAMP(), QUANTILE_CONT(), or MEDIAN(), "
+            "e.g. SUM(TRY_CAST(NumSevHypo AS DOUBLE))]"
+        )
+    if re.search(
+        r"(?:set operations can only apply to expressions with the same|type mismatch.*union|cannot mix values of type)",
+        error_msg,
+        re.IGNORECASE,
+    ):
+        return (
+            " [Hint: Transposed Table 1 UNION ALL branches have mismatched column types or counts. "
+            "Explicitly wrap formatted value columns in CAST(... AS VARCHAR) across every UNION ALL branch]"
+        )
+    if re.search(
+        r"(?:must appear in the group by clause|rollup|grouping sets)",
+        error_msg,
+        re.IGNORECASE,
+    ):
+        return (
+            " [Hint: When using GROUP BY ROLLUP(col), reference the raw column inside COALESCE(col, 'Overall Cohort') "
+            "and ensure all non-aggregated SELECT columns appear in GROUP BY]"
+        )
+    if re.search(
         r"(?:no such column|column .* does not exist|Referenced column .* not found)",
         error_msg,
         re.IGNORECASE,
@@ -308,6 +399,10 @@ def _classify_sql_error_hint(error_msg: str) -> str:
     ):
         return " [Hint: check available table names in the schema]"
     return ""
+
+
+classify_sql_error = _classify_sql_error_hint
+classify_duckdb_error_hint = _classify_sql_error_hint
 
 
 def execute_agentic_nl_to_sql(
@@ -346,7 +441,8 @@ def execute_agentic_nl_to_sql(
     while attempts < total_budget:
         attempts += 1
         raw_output = generate_fn(current_prompt)
-        candidate_sql = extract_sql_from_response(raw_output) or raw_output.strip()
+        extracted_sql = extract_sql_from_response(raw_output) or raw_output.strip()
+        candidate_sql = coerce_numeric_aggregates_in_sql(extracted_sql)
         final_sql = candidate_sql
         try:
             rows = execute_fn(db_path, candidate_sql)
@@ -376,3 +472,6 @@ def execute_agentic_nl_to_sql(
         "rows": [],
         "error": last_error,
     }
+
+
+execute_sql_with_self_correction = execute_agentic_nl_to_sql

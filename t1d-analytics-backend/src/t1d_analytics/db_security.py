@@ -9,6 +9,22 @@ from t1d_analytics.api_schemas import DatabaseItem, DatabaseListResponse
 from t1d_analytics.errors import InvalidDatabasePathError
 
 ALLOWED_DB_EXTENSIONS = (".duckdb", ".db")
+DEFAULT_JAEB_EXTERNAL_ROOT = Path("/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb")
+
+
+def get_jaeb_external_root() -> Path:
+    """
+    Resolve the external Jaeb clinical dataset directory from `T1D_JAEB_DIR` or `DEFAULT_JAEB_EXTERNAL_ROOT`.
+
+    Returns
+    -------
+        Path: Candidate path to the external Jaeb dataset root directory.
+
+    """
+    env_jaeb = os.environ.get("T1D_JAEB_DIR")
+    if env_jaeb and env_jaeb.strip():
+        return Path(env_jaeb.strip())
+    return DEFAULT_JAEB_EXTERNAL_ROOT
 
 
 def get_allowed_db_roots() -> List[Path]:
@@ -36,6 +52,9 @@ def get_allowed_db_roots() -> List[Path]:
     env_db = os.environ.get("T1D_DB_PATH")
     if env_db:
         allowed_dirs.append(Path(env_db).resolve().parent)
+    jaeb_root = get_jaeb_external_root()
+    if jaeb_root.exists():
+        allowed_dirs.append(jaeb_root.resolve())
     return allowed_dirs
 
 
@@ -189,7 +208,8 @@ def discover_workspace_databases() -> DatabaseListResponse:
         p_def = Path(default_db)
         if p_def.exists():
             all_files.append(p_def)
-    for s_dir in (Path(), Path("./data")):
+    search_dirs: List[Path] = [Path(), Path("./data"), get_jaeb_external_root()]
+    for s_dir in search_dirs:
         if s_dir.exists():
             all_files.extend(
                 p

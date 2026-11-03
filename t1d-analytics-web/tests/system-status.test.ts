@@ -90,6 +90,59 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
     expect(ui.systemStatusController.statusChipText.textContent).toBe(
       "Degraded Service",
     );
+
+    // Test synthetic data alert and rule-based SQL alert show/hide, ✖ click, and Escape key
+    ui.systemStatusController.showSyntheticDataAlert();
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(false);
+    ui.systemStatusController.jaebProvenanceAlert.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(false);
+    ui.systemStatusController.jaebProvenanceAlert.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(true);
+    ui.systemStatusController.showSyntheticDataAlert();
+    ui.systemStatusController.jaebProvenanceAlertDismissBtn.click();
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(true);
+
+    ui.systemStatusController.showRuleBasedSqlAlert();
+    expect(
+      ui.systemStatusController.ruleBasedSqlAlert.classList.contains("hidden"),
+    ).toBe(false);
+    ui.systemStatusController.ruleBasedSqlAlert.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(
+      ui.systemStatusController.ruleBasedSqlAlert.classList.contains("hidden"),
+    ).toBe(false);
+    ui.systemStatusController.ruleBasedSqlAlert.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(
+      ui.systemStatusController.ruleBasedSqlAlert.classList.contains("hidden"),
+    ).toBe(true);
+    ui.systemStatusController.showRuleBasedSqlAlert();
+    ui.systemStatusController.ruleBasedSqlAlertDismissBtn.click();
+    expect(
+      ui.systemStatusController.ruleBasedSqlAlert.classList.contains("hidden"),
+    ).toBe(true);
   });
 
   it("checks system status across missing_file, empty_db, missing_initial_data, offline ollama, healthy, and HTTP/network errors", async () => {
@@ -180,13 +233,48 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
       ok: true,
       json: async () => ({
         status: "healthy",
-        database: { status_code: "custom_code", table_count: 3 },
+        database: {
+          status_code: "custom_code",
+          table_count: 3,
+          is_synthetic_faked_data: true,
+          data_provenance: "synthetic_seed",
+        },
         ollama: { accessible: true },
       }),
     });
     await ui.systemStatusController.check(false, "custom.duckdb");
     expect(
       ui.systemStatusController.systemStatusBanner.classList.contains("hidden"),
+    ).toBe(true);
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(false);
+
+    // 5b. authentic Jaeb database with LLM selected hides both alerts
+    ui.modelSelect.value = "gemma4";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "healthy",
+        database: {
+          status_code: "healthy",
+          table_count: 544,
+          is_synthetic_faked_data: false,
+          data_provenance: "jaeb_authentic",
+        },
+        ollama: { accessible: true },
+      }),
+    });
+    await ui.systemStatusController.check(false, "jaeb.duckdb");
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(true);
+    expect(
+      ui.systemStatusController.ruleBasedSqlAlert.classList.contains("hidden"),
     ).toBe(true);
 
     // 6. HTTP 500 error -> offline banner

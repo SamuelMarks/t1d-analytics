@@ -32,6 +32,18 @@ from t1d_analytics.models import TrainingJobConfig
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_CHOICE_HF_MODELS: Dict[str, str] = {
+    "google/gemma-4-E4B": "https://huggingface.co/google/gemma-4-E4B",
+    "microsoft/Phi-4-mini-flash-reasoning": "https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning",
+    "meta-llama/Llama-3.2-1B": "https://huggingface.co/meta-llama/Llama-3.2-1B",
+}
+
+DEFAULT_CHOICE_OLLAMA_MODELS: Tuple[str, ...] = (
+    "hf.co/google/gemma-4-E4B",
+    "hf.co/microsoft/Phi-4-mini-flash-reasoning",
+    "hf.co/meta-llama/Llama-3.2-1B",
+)
+
 
 class DeviceProtocol(Protocol):
     """Protocol representing a PyTorch compute device."""

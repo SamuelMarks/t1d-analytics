@@ -678,7 +678,7 @@ describe("ChatState", () => {
     expect(state.getConfiguredModels()).toEqual([]);
   });
 
-  it("decodes legacy HTML entities in persisted chat messages on load", () => {
+  it("decodes legacy HTML entities and strips superseded sum(VARCHAR) binder errors in persisted chat messages on load", () => {
     const encodedMsg =
       "Error details: SQL execution error: &#39;sum(VARCHAR)&#39; -&gt; DECIMAL (arg, &#x2F;) &quot;test&quot; &lt;tag&gt; &amp; &#x27; &#34; &#x2f; &#47; &apos;";
     expect(decodeLegacyHtmlEntities(encodedMsg)).toBe(
@@ -698,11 +698,45 @@ describe("ChatState", () => {
           title: "Chat without messages array",
           model: "sql",
         },
+        {
+          id: "c3",
+          title: "Chat with superseded sum(VARCHAR) errors",
+          model: "sql",
+          messages: [
+            {
+              role: "assistant",
+              content: "Binder Error: 'sum(VARCHAR)' orphan without user",
+              isError: true,
+            },
+            {
+              role: "user",
+              content: "SELECT SUM(NumSevHypo) FROM tblaptsummary",
+            },
+            {
+              role: "assistant",
+              content:
+                "Error details: SQL execution error: Binder Error: No function matches the given name and argument types 'avg(VARCHAR)'.",
+              isError: true,
+            },
+            {
+              role: "user",
+              content: "SELECT SUM(NumSevHypo) FROM tblaptsummary",
+            },
+            {
+              role: "assistant",
+              content: "Executed SQL query.",
+              sqlResult: [{ total_severe_hypo_events: 12 }],
+            },
+          ],
+        },
       ],
     });
     const parsed = parsePersistedChatState(payload);
     expect(parsed.chats?.[0].messages[0].content).toContain("'sum(VARCHAR)'");
     expect(parsed.chats?.[0].messages[0].content).toContain("-> DECIMAL");
     expect(parsed.chats?.[0].messages[0].content).toContain("(arg, /)");
+    expect(parsed.chats?.[2].messages).toHaveLength(2);
+    expect(parsed.chats?.[2].messages[0].role).toBe("user");
+    expect(parsed.chats?.[2].messages[1].content).toBe("Executed SQL query.");
   });
 });

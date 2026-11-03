@@ -1299,6 +1299,33 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
     _, sql_first = synthesize_fallback_clinical_sql(schema_first, "unrelated question")
     assert sql_first == 'SELECT * FROM "custom_alpha" LIMIT 10;'
 
+    # 4b. Table 1 fallback SQL synthesis with and without grouping column
+    schema_t1 = (
+        "Table: patients\n"
+        "Columns: subject_id (BIGINT), age (BIGINT), TxGroup (VARCHAR), hba1c (DOUBLE), tir (DOUBLE)\n"
+    )
+    _, sql_t1_grouped = synthesize_fallback_clinical_sql(
+        schema_t1, "Generate a Table 1 baseline characteristics summary"
+    )
+    assert 'GROUP BY "TxGroup"' in sql_t1_grouped
+    assert "mean_age_yr" in sql_t1_grouped
+    assert "mean_hba1c_pct" in sql_t1_grouped
+
+    _, sql_t1_ungrouped = synthesize_fallback_clinical_sql(
+        schema_first, "Create a cohort summary table"
+    )
+    assert sql_t1_ungrouped == 'SELECT COUNT(*) AS n_participants FROM "custom_alpha";'
+
+    # 4c. _resolve_db_provenance_flags error fallback when duckdb connection fails
+    from t1d_analytics.chat_service import _resolve_db_provenance_flags
+
+    prov_err, is_synth_err = _resolve_db_provenance_flags(
+        "nonexistent.duckdb",
+        connect_fn=MagicMock(side_effect=RuntimeError("cannot open")),
+    )
+    assert prov_err == "synthetic_seed"
+    assert is_synth_err is True
+
     # 5. translate_nl_to_sql fallback on Ollama OOM crash
     with patch(
         "t1d_analytics.chat_service.complete_llm_prompt",
@@ -1337,6 +1364,8 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
     assert is_likely_sql_statement("   ") is False
     assert is_likely_sql_statement("SELECT * FROM users") is True
     assert is_likely_sql_statement("SHOW TABLES") is True
+    assert is_likely_sql_statement("SHOW ALL TABLES") is True
+    assert is_likely_sql_statement("Show all users") is False
     assert is_likely_sql_statement("Show me the first 5 users") is False
     assert is_likely_sql_statement("How many users?") is False
 

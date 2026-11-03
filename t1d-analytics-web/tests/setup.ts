@@ -166,6 +166,12 @@ export function mountChatUiTestDom(): void {
           <input type="password" id="provider-key-openai" />
           <input type="password" id="provider-key-anthropic" />
           <input type="password" id="provider-key-google" />
+          <select id="provider-models-multiselect" multiple>
+            <option value="sql" selected>Literal SQL</option>
+            <option value="hf.co/google/gemma-4-E4B" selected>hf.co/google/gemma-4-E4B</option>
+            <option value="hf.co/microsoft/Phi-4-mini-flash-reasoning" selected>hf.co/microsoft/Phi-4-mini-flash-reasoning</option>
+            <option value="hf.co/meta-llama/Llama-3.2-1B" selected>hf.co/meta-llama/Llama-3.2-1B</option>
+          </select>
           <input type="checkbox" id="provider-store-consent" checked />
           <span id="provider-badge-openai"></span>
           <span id="provider-badge-anthropic"></span>
@@ -181,6 +187,16 @@ export function mountChatUiTestDom(): void {
           <button id="banner-instructions-btn">Instructions</button>
           <div id="banner-instructions-drawer" class="banner-drawer hidden"></div>
           <button id="banner-dismiss-btn">✕</button>
+        </div>
+        <div id="jaeb-provenance-alert" class="provenance-alert-bar provenance-alert-synthetic hidden" aria-hidden="true" tabindex="-1">
+          <strong id="jaeb-provenance-alert-title">Synthetic Seed Data Active:</strong>
+          <span id="jaeb-provenance-alert-desc">Not using proper Jaeb (JCHR) clinical trial datasets.</span>
+          <button id="jaeb-provenance-alert-dismiss" type="button">✖</button>
+        </div>
+        <div id="rule-based-sql-alert" class="provenance-alert-bar provenance-alert-rule-sql hidden" aria-hidden="true" tabindex="-1">
+          <strong id="rule-based-sql-alert-title">Deterministic Rule-Based SQL Active:</strong>
+          <span id="rule-based-sql-alert-desc">Not using an LLM.</span>
+          <button id="rule-based-sql-alert-dismiss" type="button">✖</button>
         </div>
         <div id="messages-container"></div>
         <form id="chat-form">

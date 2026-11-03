@@ -147,6 +147,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
         content: "Generated SQL for: Hello world",
         sqlResult: null,
         error: null,
+        is_synthetic_data: true,
+        is_rule_based_sql: true,
       }),
     });
 
@@ -166,6 +168,41 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(state.getActiveChat()?.messages[1]?.content).toContain(
       "Generated SQL for: Hello world",
     );
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(false);
+    expect(
+      ui.systemStatusController.ruleBasedSqlAlert.classList.contains("hidden"),
+    ).toBe(false);
+
+    // Second turn with authentic Jaeb data and active LLM hides both alert bars
+    ui.modelSelect.value = "gemma4";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: "Generated SQL from LLM on Jaeb DB",
+        sqlResult: null,
+        error: null,
+        is_synthetic_data: false,
+        is_rule_based_sql: false,
+      }),
+    });
+    input.value = "Second question";
+    document
+      .getElementById("chat-form")
+      ?.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(
+      ui.systemStatusController.jaebProvenanceAlert.classList.contains(
+        "hidden",
+      ),
+    ).toBe(true);
+    expect(
+      ui.systemStatusController.ruleBasedSqlAlert.classList.contains("hidden"),
+    ).toBe(true);
     expect(document.getElementById("a11y-announcer")?.textContent).toContain(
       "received",
     );
@@ -533,6 +570,15 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     await flushPromises();
     expect(state.getActiveChat()?.messages.length).toBe(0);
     expect(input.value).toBeTruthy();
+
+    const table1Chips = queryAllTestElements<HTMLButtonElement>(".table1-chip");
+    expect(table1Chips.length).toBe(7);
+    for (const t1Chip of table1Chips) {
+      t1Chip.click();
+      expect(ui.modelSelect.value).toBe("sql");
+      expect(state.getActiveChat()?.model).toBe("sql");
+      expect(input.value).toContain("SELECT");
+    }
 
     const select = getTestElement<HTMLSelectElement>("model-select");
     select.innerHTML = `<option value="gemma4">Gemma</option><option value="sql">SQL</option>`;

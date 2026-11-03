@@ -25,6 +25,7 @@ from t1d_analytics.llm_client import (
 from t1d_analytics.sql_utils import (
     SqlValue,
     coerce_numeric_aggregates_in_sql,
+    connect_duckdb_read_only_pooled,
     escape_sql_identifier,
     extract_sql_from_response,
     extract_table_columns_map,
@@ -220,8 +221,11 @@ def run_query_repl(
         )
 
     print(_("Connecting to DuckDB at {}...", db_path))
-    conn = duckdb.connect(db_path, read_only=True)
-    try:
+    with connect_duckdb_read_only_pooled(
+        db_path=db_path,
+        connect_fn=duckdb.connect,
+        disable_external_access=True,
+    ) as conn:
         print("\n" + "=" * 50)
         print(_("Welcome to T1D Analytics Interface!"))
         print(_("You can enter:"))
@@ -249,10 +253,9 @@ def run_query_repl(
                 print(_("Exiting."))
                 break
 
-            if is_sql_query(user_input, conn=conn):
+            if model.strip().lower() == "sql" or is_sql_query(user_input, conn=conn):
                 try:
                     result = conn.sql(coerce_numeric_aggregates_in_sql(user_input))
-                    # Show results nicely
                     if result:
                         result.show()
                 except Exception as e:
@@ -261,8 +264,6 @@ def run_query_repl(
                 handle_natural_language(
                     conn, user_input, model=model, provider=provider
                 )
-    finally:
-        conn.close()
 
 
 def profile_table(db_path: str, table_name: str) -> TableProfileResult:
@@ -290,8 +291,11 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
     if not Path(db_path).exists():
         raise FileNotFoundError(f"Database file not found: {db_path}")
 
-    conn = duckdb.connect(db_path, read_only=True)
-    try:
+    with connect_duckdb_read_only_pooled(
+        db_path=db_path,
+        connect_fn=duckdb.connect,
+        disable_external_access=True,
+    ) as conn:
         tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
         if table_name not in tables:
             raise TableNotFoundError(
@@ -410,5 +414,3 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
             "column_count": len(column_profiles),
             "columns": column_profiles,
         }
-    finally:
-        conn.close()

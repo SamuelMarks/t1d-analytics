@@ -84,8 +84,12 @@ def _run_sessions_crud_assertions() -> None:
 def test_sessions_malformed_json_and_default_conn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Test sessions endpoints with corrupted messages_json and default db_path."""
+    """Test sessions endpoints with corrupted messages_json, legacy sum(VARCHAR) sanitization, and default db_path."""
+    import json
+
     from t1d_analytics.api import _get_sessions_db_conn
+    from t1d_analytics.seed import seed_sessions_database
+    from t1d_analytics.session_store import sanitize_legacy_error_sessions
 
     monkeypatch.delenv("T1D_SESSIONS_DB_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -93,7 +97,57 @@ def test_sessions_malformed_json_and_default_conn(
     conn.execute(
         "INSERT INTO chat_sessions VALUES ('bad-json-id', 'Bad JSON', now(), now(), 'not-json{')"
     )
+    legacy_msgs = [
+        {
+            "role": "assistant",
+            "content": "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'.",
+        },
+        {"role": "user", "content": "SELECT SUM(NumSevHypo) FROM tblaptsummary"},
+        {
+            "role": "assistant",
+            "content": "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'.",
+        },
+        {"role": "user", "content": "SELECT SUM(NumSevHypo) FROM tblaptsummary"},
+        {"role": "assistant", "content": "Executed SQL query."},
+        {
+            "role": "assistant",
+            "content": "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'.",
+        },
+        {
+            "role": "assistant",
+            "content": "Some non-binder error message",
+        },
+        {"role": "user", "content": "SELECT AVG(AgeAsOfRandDt) FROM tblaptsummary"},
+        {
+            "role": "assistant",
+            "content": "Binder Error: No function matches the given name and argument types 'avg(VARCHAR)'.",
+        },
+    ]
+    conn.execute(
+        "INSERT INTO chat_sessions VALUES ('legacy-err-id', 'Legacy Errors', now(), now(), ?)",
+        [json.dumps(legacy_msgs)],
+    )
+    conn.execute(
+        "INSERT INTO chat_sessions VALUES ('session-default-welcome', 'Welcome', now(), now(), ?)",
+        [
+            json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "content": "Error details: Binder Error",
+                        "isError": True,
+                    }
+                ]
+            )
+        ],
+    )
+    sanitized_cnt = sanitize_legacy_error_sessions(conn)
+    assert sanitized_cnt == 2
+    # Calling a second time has 0 changes
+    assert sanitize_legacy_error_sessions(conn) == 0
     conn.close()
+
+    assert seed_sessions_database(str(tmp_path / "data" / "sessions.duckdb")) == 0
 
     resp_list = client.get("/api/sessions")
     assert resp_list.status_code == 200
@@ -101,6 +155,10 @@ def test_sessions_malformed_json_and_default_conn(
         s for s in resp_list.json()["sessions"] if s["session_id"] == "bad-json-id"
     )
     assert item["messages"] == []
+    legacy_item = next(
+        s for s in resp_list.json()["sessions"] if s["session_id"] == "legacy-err-id"
+    )
+    assert len(legacy_item["messages"]) == 5
 
     resp_get = client.get("/api/sessions/bad-json-id")
     assert resp_get.status_code == 200

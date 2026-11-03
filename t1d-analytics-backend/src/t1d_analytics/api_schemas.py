@@ -66,6 +66,10 @@ class ChatResponse(BaseModel):
     sqlResult: Optional[List[Dict[str, SqlValue]]] = None
     sqlQuery: Optional[str] = None
     error: Optional[ApiError] = None
+    is_synthetic_data: bool = True
+    is_rule_based_sql: bool = False
+    generation_mode: str = "llm"
+    data_provenance: str = "synthetic_seed"
 
 
 class SessionModel(BaseModel):

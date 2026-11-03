@@ -302,8 +302,21 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
     """Verify TinyCausalLM, tokenizer adapters, and LocalCpuRunner satisfy hf_models runtime protocols."""
     from t1d_analytics.dataset_loader import prepare_torch_dataset
     from t1d_analytics.hf_models import (
+        DEFAULT_CHOICE_HF_MODELS,
+        DEFAULT_CHOICE_OLLAMA_MODELS,
         PretrainedSavableProtocol,
         TrainableModelProtocol,
+    )
+
+    assert DEFAULT_CHOICE_HF_MODELS == {
+        "google/gemma-4-E4B": "https://huggingface.co/google/gemma-4-E4B",
+        "microsoft/Phi-4-mini-flash-reasoning": "https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning",
+        "meta-llama/Llama-3.2-1B": "https://huggingface.co/meta-llama/Llama-3.2-1B",
+    }
+    assert DEFAULT_CHOICE_OLLAMA_MODELS == (
+        "hf.co/google/gemma-4-E4B",
+        "hf.co/microsoft/Phi-4-mini-flash-reasoning",
+        "hf.co/meta-llama/Llama-3.2-1B",
     )
 
     class _CharWordTokenizer:

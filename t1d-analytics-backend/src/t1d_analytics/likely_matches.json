@@ -7,7 +7,12 @@
     "Participant_ID",
     "pt_id",
     "patientid",
-    "patient_id"
+    "patient_id",
+    "DeidentID",
+    "PtId",
+    "record_id",
+    "ptid",
+    "subjectid"
   ],
   "age": [
     "Age",
@@ -15,16 +20,130 @@
     "AgeVisit",
     "AgeYears",
     "age_baseline",
-    "baseline_age"
+    "baseline_age",
+    "AgeAsOfRandDt",
+    "AgeAsOfEnrollDt",
+    "AgeAtEnrollment",
+    "AgeAsOfConsent",
+    "AgeAtConsent",
+    "ageatenroll",
+    "age"
   ],
-  "gender": ["Gender", "Sex", "pt_sex", "pt_gender"],
+  "gender": ["Gender", "Sex", "pt_sex", "pt_gender", "Pt_Gender", "gender"],
+  "race_ethnicity": [
+    "Race",
+    "Ethnicity",
+    "RaceEth",
+    "Pt_Race",
+    "Pt_Ethnicity",
+    "race_ethnicity",
+    "RaceProtF",
+    "race",
+    "ethnic"
+  ],
+  "t1d_duration_years": [
+    "Duration",
+    "DiagDuration",
+    "YrsDiag",
+    "T1DDuration",
+    "Pt_Duration",
+    "t1d_duration_years",
+    "DavDiabetes",
+    "DurationValue",
+    "T1DDiagDtDaysFromConsent",
+    "agediabetesdeveloped"
+  ],
+  "bmi": [
+    "BMI",
+    "BMIBaseline",
+    "BodyMassIndex",
+    "bmi_kg_m2",
+    "bmi"
+  ],
+  "weight": [
+    "PtWeight",
+    "Weight",
+    "WeightKg",
+    "weight"
+  ],
+  "height": [
+    "Height",
+    "HeightCm",
+    "PtHeight",
+    "height_inches",
+    "height"
+  ],
+  "total_daily_insulin": [
+    "TDD",
+    "TotalDailyDose",
+    "UnitsPerKg",
+    "BasalBolusTotal",
+    "total_daily_insulin",
+    "PtUnitsInsTotal",
+    "UnitsInsTotal",
+    "PtUnitsInsBasal",
+    "Pt_UnitsInsBasal",
+    "unitsinstotal"
+  ],
+  "insulin_delivery_modality": [
+    "InsModality",
+    "PumpOrMDI",
+    "DeliveryMethod",
+    "CSII_MDI",
+    "insulin_delivery_modality",
+    "InsulinModality",
+    "InsulinDelivMethod",
+    "Pt_InsulinRecMethod",
+    "Pt_InitTrt",
+    "PumpUse",
+    "pumpuse"
+  ],
+  "cgm_active_wear_pct": [
+    "PctWear",
+    "ActiveWear",
+    "SensorWearPct",
+    "ValidCGMDays",
+    "cgm_active_wear_pct",
+    "CGMUsed",
+    "PtCGMUsed",
+    "Pt_CGMUse",
+    "cgm_use"
+  ],
+  "TxGroup": [
+    "TxGroup",
+    "TrtGroup",
+    "trtGroup",
+    "trtgroup",
+    "treatment_group",
+    "txgroup",
+    "treatment",
+    "BCaseControlStatus"
+  ],
   "hba1c": [
     "HbA1c",
     "A1C",
     "A1cVal",
     "glycated_hb",
     "hemoglobin_a1c",
-    "baseline_a1c"
+    "baseline_a1c",
+    "EligHbA1c",
+    "HbA1CTest",
+    "HbA1cCollected",
+    "HbA1cTest",
+    "Hba1cValue",
+    "hba1c_level",
+    "LabA1cResult",
+    "HbA1cTestRes",
+    "QCA1cResult"
+  ],
+  "a1cdate": [
+    "HbA1CTestDt",
+    "HbA1cDt",
+    "HbA1cTestDt",
+    "Hba1cTestDt",
+    "LabHbA1cDt",
+    "DrawDt",
+    "a1cdate"
   ],
   "tir": [
     "TIR",
@@ -40,7 +159,8 @@
     "PercentUnder70",
     "cgm_tbr",
     "pct_time_under_70",
-    "time_below_range"
+    "time_below_range",
+    "CGMTimeBelow70"
   ],
   "tar": [
     "TAR",
@@ -55,17 +175,27 @@
     "MeanGlucose",
     "avg_glucose",
     "cgm_mean",
-    "mean_cgm_val"
+    "mean_cgm_val",
+    "HGMGlucMean"
   ],
   "glucose_value": [
     "HistoricGlucose",
     "SensorGlucose",
     "cgm_val",
     "cgm",
+    "CGM",
+    "CGMValue",
+    "CGMVal",
     "glucose",
+    "Glucose",
+    "GlucoseValue",
+    "GlucValue",
+    "GlucLevel",
+    "BG",
     "glucosevalue",
     "glucose_level",
-    "value"
+    "value",
+    "Value"
   ],
   "timestamp": [
     "cgm_datetime",
@@ -74,18 +204,61 @@
     "reading_time",
     "time",
     "date_time",
-    "devicetimestamp"
+    "devicetimestamp",
+    "DataDtTm",
+    "datadttm",
+    "DeviceDtTm",
+    "LocalDtTm",
+    "DeviceTime",
+    "DeviceTm",
+    "devicetm"
+  ],
+  "visit": [
+    "CTRVisit",
+    "SurveyVisit",
+    "Visit",
+    "VisitNum",
+    "VisitNumber",
+    "visit"
+  ],
+  "edulevel": [
+    "EduLevel",
+    "Pt_EduLevel",
+    "edulevel"
+  ],
+  "annualinc": [
+    "AnnualInc",
+    "Pt_AnnualInc",
+    "annualinc"
+  ],
+  "maritalstatus": [
+    "MaritalStatus",
+    "Pt_MaritalStatus",
+    "maritalstatus"
+  ],
+  "employstatus": [
+    "EmployStatus",
+    "Pt_EmployStatus",
+    "employstatus"
   ],
   "numhospdka": [
     "Pt_NumHospDKA",
     "NumHospDKA",
     "num_hosp_dka",
-    "hosp_dka_count"
+    "hosp_dka_count",
+    "Pt_HospDKASinceDiag",
+    "DKASinceLastVis",
+    "numhospdka"
   ],
   "numsevhypo": [
     "NumSevHypo",
     "Pt_NumSevHypo",
     "num_sev_hypo",
-    "sev_hypo_count"
+    "sev_hypo_count",
+    "Pt_SevHypoEver",
+    "SHSinceLastVis",
+    "SevHypo",
+    "SevereHypo",
+    "sevhypo"
   ]
 }

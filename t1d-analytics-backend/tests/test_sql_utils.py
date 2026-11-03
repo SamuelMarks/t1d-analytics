@@ -30,10 +30,23 @@ def test_normalize_sql_and_strip_comments() -> None:
     """Test normalize_sql, coerce_numeric_aggregates_in_sql, and strip_sql_comments_and_parens."""
     assert normalize_sql("  SELECT   *  FROM  patients ; ") == "select * from patients"
     coerced = coerce_numeric_aggregates_in_sql(
-        "SELECT SUM(NumSevHypo), AVG(DISTINCT t.AgeAsOfRandDt) FROM tblaptsummary t"
+        "SELECT SUM(NumSevHypo), AVG(DISTINCT t.AgeAsOfRandDt), "
+        "STDDEV_SAMP(hba1c), MEDIAN(tir), QUANTILE_CONT(tbr, 0.25), "
+        "SUM(COALESCE(NumSevHypo, 0)), AVG(DISTINCT IFNULL(t.AgeAsOfRandDt, 0)), "
+        "SUM((NumSevHypo)), CAST(NumSevHypo AS INT), CAST(t.AgeAsOfRandDt AS DOUBLE) "
+        "FROM tblaptsummary t"
     )
     assert "SUM(TRY_CAST(NumSevHypo AS DOUBLE))" in coerced
     assert "AVG(DISTINCT TRY_CAST(t.AgeAsOfRandDt AS DOUBLE))" in coerced
+    assert "STDDEV_SAMP(TRY_CAST(hba1c AS DOUBLE))" in coerced
+    assert "MEDIAN(TRY_CAST(tir AS DOUBLE))" in coerced
+    assert "QUANTILE_CONT(TRY_CAST(tbr AS DOUBLE), 0.25)" in coerced
+    assert "SUM(COALESCE(TRY_CAST(NumSevHypo AS DOUBLE), 0))" in coerced
+    assert "AVG(DISTINCT IFNULL(TRY_CAST(t.AgeAsOfRandDt AS DOUBLE), 0))" in coerced
+    assert "TRY_CAST(NumSevHypo AS INT)" in coerced
+    assert "TRY_CAST(t.AgeAsOfRandDt AS DOUBLE)" in coerced
+    # Verify idempotency
+    assert coerce_numeric_aggregates_in_sql(coerced) == coerced
     assert (
         strip_sql_comments_and_parens("""-- comment
 (/* block */ (SELECT 1))""")
@@ -318,3 +331,73 @@ def test_execute_duckdb_batch_write_with_retry(tmp_path: Path) -> None:
         with pytest.raises(duckdb.IOException, match="Unrecoverable"):
             with connect_duckdb_with_retry(db_file, read_only=True, max_attempts=2):
                 pass
+
+
+def test_read_only_duckdb_pool(tmp_path: Path) -> None:
+    """Test ReadOnlyDuckDBPool connection reuse, mtime invalidation, capacity overflow, and custom connect_fn."""
+    from t1d_analytics.sql_utils import (
+        ReadOnlyDuckDBPool,
+        close_read_only_duckdb_pool,
+        connect_duckdb_read_only_pooled,
+    )
+
+    db_file = tmp_path / "pooled.duckdb"
+    wconn = duckdb.connect(str(db_file))
+    wconn.execute("CREATE TABLE t (x INT)")
+    wconn.execute("INSERT INTO t VALUES (10)")
+    wconn.close()
+
+    pool = ReadOnlyDuckDBPool(max_pool_size_per_db=1)
+    c1 = pool.acquire(db_file, disable_external_access=False)
+    c2 = pool.acquire(db_file, disable_external_access=True)
+    pool.release(db_file, c1)
+    # Pool max is 1, so releasing c2 closes it
+    pool.release(db_file, c2)
+
+    # Re-acquiring pops c1 from bucket
+    c1_reused = pool.acquire(db_file)
+    assert c1_reused is c1
+    pool.release(db_file, c1_reused)
+
+    # Simulate mtime signature change on disk -> acquire evicts stale pooled connection
+    pool._mtimes[str(db_file.resolve())] = (0, 0)
+    with connect_duckdb_read_only_pooled(db_file, pool=pool) as conn_fresh:
+        rows = conn_fresh.execute("SELECT x FROM t ORDER BY x").fetchall()
+        assert rows == [(10,)]
+
+    # Exception inside context manager discards connection
+    with pytest.raises(RuntimeError, match="boom"):
+        with connect_duckdb_read_only_pooled(db_file, pool=pool) as _conn_err:
+            raise RuntimeError("boom")
+
+    # Custom connect_fn with disable_external_access=False and True
+    custom_called = 0
+
+    def _custom_connect(path: str, read_only: bool = True) -> duckdb.DuckDBPyConnection:
+        """Open DuckDB connection via custom wrapper."""
+        nonlocal custom_called
+        custom_called += 1
+        return duckdb.connect(path, read_only=read_only)
+
+    with connect_duckdb_read_only_pooled(
+        db_file, connect_fn=_custom_connect, disable_external_access=False, pool=pool
+    ) as conn_custom:
+        assert conn_custom.execute("SELECT COUNT(*) FROM t").fetchone() == (1,)
+    with connect_duckdb_read_only_pooled(
+        db_file, connect_fn=_custom_connect, disable_external_access=True, pool=pool
+    ) as conn_custom2:
+        assert conn_custom2.execute("SELECT COUNT(*) FROM t").fetchone() == (1,)
+    assert custom_called == 2
+
+    # close_path evicts idle connections for db_file so write connection can open
+    c_pooled = pool.acquire(db_file)
+    pool.release(db_file, c_pooled)
+    pool.close_path(db_file)
+
+    # Release when file has been deleted from disk
+    c_last = pool.acquire(db_file)
+    db_file.unlink()
+    pool.release(db_file, c_last)
+
+    pool.close_all()
+    close_read_only_duckdb_pool()

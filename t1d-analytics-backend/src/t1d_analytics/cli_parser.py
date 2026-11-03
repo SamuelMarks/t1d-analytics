@@ -280,13 +280,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     query_parser.add_argument(
         "--model",
         default="gemma4",
-        help="The model name (or 'provider/model' e.g. openai/gpt-4o) for query translation.",
+        help="The model name (e.g. 'sql', 'hf.co/google/gemma-4-E4B', 'openai/gpt-4o') for query execution/translation.",
     )
     query_parser.add_argument(
         "--provider",
         default="ollama",
-        choices=["ollama", "openai", "anthropic", "google"],
-        help="The LLM provider to use for query translation (default: 'ollama').",
+        choices=["sql", "ollama", "huggingface", "openai", "anthropic", "google"],
+        help="The LLM/SQL provider to use for query translation (default: 'ollama').",
     )
 
     generate_parser = subparsers.add_parser(

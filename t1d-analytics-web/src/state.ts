@@ -70,6 +70,35 @@ export function decodeLegacyHtmlEntities(text: string): string {
 }
 
 /**
+ * Filters out legacy `sum(VARCHAR)` / `avg(VARCHAR)` Binder Error retry turns that were
+ * immediately superseded by a subsequent turn in the same session transcript.
+ * @param {Message[]} messages - Ordered list of chat messages in a session.
+ * @returns {Message[]} Sanitized message list with superseded `sum(VARCHAR)` binder errors removed.
+ */
+export function sanitizeLegacySessionMessages(messages: Message[]): Message[] {
+  for (const msg of messages) {
+    msg.content = decodeLegacyHtmlEntities(msg.content);
+  }
+  const cleaned: Message[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const lower = msg.content.toLowerCase();
+    const isLegacySumVarcharError =
+      msg.role === "assistant" &&
+      lower.includes("binder error") &&
+      (lower.includes("sum(varchar)") || lower.includes("avg(varchar)"));
+    if (isLegacySumVarcharError && i + 1 < messages.length) {
+      if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === "user") {
+        cleaned.pop();
+      }
+      continue;
+    }
+    cleaned.push(msg);
+  }
+  return cleaned;
+}
+
+/**
  * Parses a serialized ChatState JSON string into a typed PersistedChatStatePayload.
  * @param {string} rawJson - Serialized JSON string from localStorage.
  * @returns {PersistedChatStatePayload} Parsed state payload object.
@@ -81,9 +110,7 @@ export function parsePersistedChatState(
   if (Array.isArray(parsed.chats)) {
     for (const chat of parsed.chats) {
       if (Array.isArray(chat.messages)) {
-        for (const msg of chat.messages) {
-          msg.content = decodeLegacyHtmlEntities(msg.content);
-        }
+        chat.messages = sanitizeLegacySessionMessages(chat.messages);
       }
     }
   }
@@ -408,18 +435,19 @@ export class ChatState {
         }
         const local = this.chats.find((c) => c.id === s.session_id);
         const remoteTime = s.updated_at ? new Date(s.updated_at).getTime() : 0;
+        const remoteMessages = sanitizeLegacySessionMessages(s.messages || []);
         if (!local) {
           this.chats.push({
             id: s.session_id,
             title: s.title,
-            messages: s.messages || [],
+            messages: remoteMessages,
             model: "gemma4",
             isTemporary: false,
             updatedAt: remoteTime,
           });
         } else {
-          if ((s.messages?.length || 0) > local.messages.length) {
-            local.messages = s.messages;
+          if (remoteMessages.length > local.messages.length) {
+            local.messages = remoteMessages;
             local.updatedAt = remoteTime;
           }
           if (s.title && s.title !== local.title && !local.titleModified) {

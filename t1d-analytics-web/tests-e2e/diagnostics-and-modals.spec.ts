@@ -52,8 +52,10 @@ test.describe("System Diagnostics, Schema Explorer & Table Preview Modal", () =>
             connected: true,
             table_count: 4,
             has_initial_data: true,
+            is_synthetic_faked_data: true,
+            data_provenance: "synthetic_seed",
           },
-          ollama: { accessible: true },
+          ollama: { accessible: false },
         },
       });
     });
@@ -114,13 +116,15 @@ test.describe("System Diagnostics, Schema Explorer & Table Preview Modal", () =>
     );
     await expect(page.locator("#chat-input")).toBeDisabled();
 
-    // 4. Transition to healthy and click Retry -> banner hides and input enables
+    // 4. Transition to healthy DB with synthetic data and offline ollama -> provenance and rule-based SQL alerts appear and can be dismissed with ✖
     statusPhase = "healthy";
     await page.click("#banner-retry-btn");
-    await expect(banner).toHaveClass(/hidden/);
-    await expect(page.locator("#system-status-chip")).toHaveClass(
-      /status-healthy/,
-    );
+    await expect(page.locator("#jaeb-provenance-alert")).toBeVisible();
+    await expect(page.locator("#rule-based-sql-alert")).toBeVisible();
+    await page.click("#jaeb-provenance-alert-dismiss");
+    await expect(page.locator("#jaeb-provenance-alert")).toHaveClass(/hidden/);
+    await page.click("#rule-based-sql-alert-dismiss");
+    await expect(page.locator("#rule-based-sql-alert")).toHaveClass(/hidden/);
     await expect(page.locator("#chat-input")).toBeEnabled();
     await expect(page.locator(".schema-table")).toHaveCount(1);
   });

@@ -228,3 +228,57 @@ def test_prepare_torch_dataset_tokenizer_name_and_failure(tmp_path: Path) -> Non
     ):
         with pytest.raises(ValueError):
             prepare_torch_dataset(ds, tokenizer_name="google/gemma-4-2b")
+
+
+def test_table_1_clinical_variable_mappings_and_numeric_coercion(
+    tmp_path: Path,
+) -> None:
+    """Verify Table 1 clinical variable mappings in likely_matches.json and numeric column coercion."""
+    from t1d_analytics.ingestion import (
+        _CLINICAL_NUMERIC_COLUMNS,
+        get_clinical_variable_mappings,
+        load_data_to_duckdb,
+    )
+    from t1d_analytics.seed import _BASE_TABLE_NUMERIC_COLUMNS
+
+    mappings = get_clinical_variable_mappings()
+    for required_concept in (
+        "race_ethnicity",
+        "t1d_duration_years",
+        "bmi",
+        "total_daily_insulin",
+        "insulin_delivery_modality",
+        "cgm_active_wear_pct",
+    ):
+        assert required_concept in mappings
+        assert len(mappings[required_concept]) >= 4
+
+    for numeric_col in (
+        "bmi",
+        "t1d_duration_years",
+        "total_daily_insulin",
+        "cgm_active_wear_pct",
+    ):
+        assert numeric_col in _CLINICAL_NUMERIC_COLUMNS
+        assert numeric_col in _BASE_TABLE_NUMERIC_COLUMNS
+
+    csv_file = tmp_path / "trial_table1.csv"
+    csv_file.write_text(
+        "PtID,Race,Duration,BMI,TDD,InsModality,PctWear\n"
+        "1,White,12.5,24.1,42.0,Pump,96.5\n",
+        encoding="utf-8",
+    )
+    db_file = tmp_path / "table1_mapped.duckdb"
+    load_data_to_duckdb(str(tmp_path), str(db_file))
+
+    conn = duckdb.connect(str(db_file), read_only=True)
+    desc = {
+        str(r[0]): str(r[1]) for r in conn.execute("DESCRIBE trial_table1").fetchall()
+    }
+    conn.close()
+    assert "race_ethnicity" in desc
+    assert "t1d_duration_years" in desc
+    assert "bmi" in desc
+    assert "total_daily_insulin" in desc
+    assert "insulin_delivery_modality" in desc
+    assert "cgm_active_wear_pct" in desc

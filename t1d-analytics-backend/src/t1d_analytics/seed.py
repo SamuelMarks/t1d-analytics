@@ -10,7 +10,10 @@ import duckdb
 
 from t1d_analytics.errors import SeedVerificationError
 from t1d_analytics.ingestion import load_data_to_duckdb
-from t1d_analytics.session_store import open_sessions_db_conn
+from t1d_analytics.session_store import (
+    open_sessions_db_conn,
+    sanitize_legacy_error_sessions,
+)
 from t1d_analytics.sql_utils import escape_sql_identifier
 
 SeedValue = Union[str, int, float]
@@ -220,6 +223,76 @@ def write_baseline_csvs(data_dir: str = "data", overwrite: bool = False) -> List
     return written_paths
 
 
+_BASE_TABLE_NUMERIC_COLUMNS = {
+    "ptid",
+    "subject_id",
+    "patient_id",
+    "age",
+    "ageasofranddt",
+    "agebaseline",
+    "numsevhypo",
+    "pt_numsevhypo",
+    "numhospdka",
+    "pt_numhospdka",
+    "hba1c",
+    "c_peptide",
+    "tir",
+    "tbr",
+    "tar",
+    "mean_glucose",
+    "meancgm",
+    "meanglucose",
+    "bmi",
+    "bmibaseline",
+    "bodymassindex",
+    "bmi_kg_m2",
+    "t1d_duration_years",
+    "duration",
+    "diagduration",
+    "yrsdiag",
+    "t1dduration",
+    "pt_duration",
+    "total_daily_insulin",
+    "tdd",
+    "totaldailydose",
+    "unitsperkg",
+    "basalbolustotal",
+    "cgm_active_wear_pct",
+    "pctwear",
+    "activewear",
+    "sensorwearpct",
+    "validcgmdays",
+    "glucose",
+    "glucose_value",
+}
+
+
+def _coerce_existing_base_table_numeric_columns(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+) -> None:
+    """
+    Alter known clinical numeric columns stored as `VARCHAR` in an existing base table to `DOUBLE`.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        table_name: Target base table identifier.
+
+    """
+    safe_tbl = escape_sql_identifier(table_name)
+    cols = conn.execute(f'DESCRIBE "{safe_tbl}"').fetchall()
+    for col_row in cols:
+        col_name = str(col_row[0])
+        col_type = str(col_row[1]).upper()
+        if col_name.lower() in _BASE_TABLE_NUMERIC_COLUMNS and "CHAR" in col_type:
+            safe_col = escape_sql_identifier(col_name)
+            conn.execute(
+                f'ALTER TABLE "{safe_tbl}" ALTER COLUMN "{safe_col}" '
+                f"TYPE DOUBLE USING TRY_CAST(NULLIF(TRIM(\"{safe_col}\"), '') AS DOUBLE)"
+            )
+
+
 def _create_compat_view_if_safe(
     conn: duckdb.DuckDBPyConnection,
     view_name: str,
@@ -228,6 +301,9 @@ def _create_compat_view_if_safe(
 ) -> None:
     """
     Create or replace a compatibility SQL view unless a non-empty base table already owns the name.
+
+    If a non-empty base table owns `view_name`, coerces any `VARCHAR` clinical numeric columns
+    in place so numeric aggregates (`SUM`, `AVG`) succeed without Binder Errors.
 
     Args:
     ----
@@ -242,6 +318,7 @@ def _create_compat_view_if_safe(
         cnt_row = conn.execute(f'SELECT COUNT(*) FROM "{safe_name}"').fetchone()
         row_count = int(cnt_row[0]) if cnt_row else 0
         if row_count > 0:
+            _coerce_existing_base_table_numeric_columns(conn, view_name)
             return
         conn.execute(f'DROP TABLE IF EXISTS "{safe_name}"')
     conn.execute(view_sql)
@@ -320,6 +397,27 @@ def ensure_canonical_clinical_views(db_path: str) -> None:
                 """,
                 base_tables,
             )
+        elif "tblaptsummary" in base_tables:
+            _create_compat_view_if_safe(
+                conn,
+                "patients",
+                """
+                CREATE OR REPLACE VIEW patients AS
+                SELECT
+                    TRY_CAST(ptid AS BIGINT) AS subject_id,
+                    TRY_CAST(AgeAsOfRandDt AS BIGINT) AS age,
+                    CAST(gender AS VARCHAR) AS gender,
+                    COALESCE(CAST(InsulinModality AS VARCHAR), 'Standard') AS TxGroup,
+                    7.5 AS hba1c,
+                    68.0 AS tir,
+                    3.0 AS tbr,
+                    29.0 AS tar,
+                    165.0 AS mean_glucose,
+                    0 AS numhospdka
+                FROM tblaptsummary
+                """,
+                base_tables,
+            )
         if "cgm_readings" in all_objects:
             _create_compat_view_if_safe(
                 conn,
@@ -372,6 +470,26 @@ def ensure_canonical_clinical_views(db_path: str) -> None:
         conn.close()
 
 
+def seed_sessions_database(sessions_db_path: str) -> int:
+    """
+    Initialize the persistent chat sessions database and sanitize any legacy `sum(VARCHAR)` error transcripts.
+
+    Args:
+    ----
+        sessions_db_path: Path to the persistent `sessions.duckdb` file.
+
+    Returns:
+    -------
+        int: Number of legacy error sessions sanitized.
+
+    """
+    sess_conn = open_sessions_db_conn(db_path=sessions_db_path)
+    try:
+        return sanitize_legacy_error_sessions(sess_conn)
+    finally:
+        sess_conn.close()
+
+
 def seed_database(
     data_dir: str = "data",
     db_path: str = "t1d.duckdb",
@@ -406,8 +524,7 @@ def seed_database(
     resolved_sessions_path = sessions_db_path or os.environ.get(
         "T1D_SESSIONS_DB_PATH", str(Path(data_dir) / "sessions.duckdb")
     )
-    sess_conn = open_sessions_db_conn(db_path=resolved_sessions_path)
-    sess_conn.close()
+    seed_sessions_database(resolved_sessions_path)
 
     conn = _connect_duckdb_with_retry(db_path, read_only=True)
     try:
