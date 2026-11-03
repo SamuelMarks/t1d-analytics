@@ -3,51 +3,61 @@ repos:
     hooks:
       - id: auto-format
         name: Auto Format
-        entry: bash -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi && npx --prefix t1d-analytics-web prettier --write t1d-analytics-web"
+        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi && npx --prefix t1d-analytics-web prettier --write t1d-analytics-web"
         language: system
         pass_filenames: false
       - id: backend-lint
         name: Backend Lint
-        entry: bash -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
+        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
         language: system
         pass_filenames: false
       - id: backend-format
         name: Backend Format
-        entry: bash -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
+        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
         language: system
         pass_filenames: false
       - id: backend-mypy
         name: Backend Mypy
-        entry: bash -c "if [ -x .venv/bin/mypy ]; then .venv/bin/mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; else mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; fi"
+        entry: /bin/sh -c "if [ -x .venv/bin/mypy ]; then .venv/bin/mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; else mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; fi"
         language: system
         pass_filenames: false
       - id: backend-test
         name: Backend Tests
-        entry: bash -c "if [ -x .venv/bin/pytest ]; then .venv/bin/pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; else pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; fi"
+        entry: /bin/sh -c "if [ -x .venv/bin/pytest ]; then .venv/bin/pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; else pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; fi"
         language: system
         pass_filenames: false
       - id: frontend-lint
         name: Frontend Lint
-        entry: bash -c "cd t1d-analytics-web && ([ -d node_modules ] || npm install --no-audit --no-fund --silent) && npm run lint"
+        entry: /bin/sh -c "cd t1d-analytics-web && ([ -d node_modules ] || npm install --no-audit --no-fund --silent) && npm run lint"
         language: system
         pass_filenames: false
       - id: frontend-format
         name: Frontend Format
-        entry: bash -c "cd t1d-analytics-web && npm run format"
+        entry: /bin/sh -c "cd t1d-analytics-web && npm run format"
         language: system
         pass_filenames: false
       - id: frontend-test
         name: Frontend Tests
-        entry: bash -c "cd t1d-analytics-web && npm run test:coverage && npm run docs"
+        entry: /bin/sh -c "cd t1d-analytics-web && npm run test:coverage && npm run docs"
         language: system
         pass_filenames: false
       - id: e2e-test
         name: E2E Tests
-        entry: bash -c "if [ -x .venv/bin/python ]; then .venv/bin/python scripts/run_tests.py; elif command -v python3 >/dev/null 2>&1; then python3 scripts/run_tests.py; else python scripts/run_tests.py; fi"
+        entry: /bin/sh -c "if [ -x .venv/bin/python ]; then .venv/bin/python scripts/run_tests.py; elif command -v python3 >/dev/null 2>&1; then python3 scripts/run_tests.py; else python scripts/run_tests.py; fi"
         language: system
         pass_filenames: false
       - id: update-coverage-badges
         name: Update Coverage Badges
-        entry: bash -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; else interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; fi"
+        entry: /bin/sh -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; else interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; fi"
+        language: system
+        pass_filenames: false
+      - id: libscript-audit-standards
+        name: LibScript Audit Standards
+        entry: /bin/sh -c "if [ -f ../../libscript/devtools/audit/audit_standards.sh ]; then /bin/sh ../../libscript/devtools/audit/audit_standards.sh libscript.json make.sh make.bat test.sh test.cmd; else /bin/sh ../../../libscript/devtools/audit/audit_standards.sh libscript.json make.sh make.bat test.sh test.cmd; fi"
+        language: system
+        pass_filenames: false
+      - id: libscript-doc-coverage
+        name: LibScript Doc Coverage
+        entry: /bin/sh -c "if [ -f ../../libscript/devtools/audit/doc_coverage.sh ]; then /bin/sh ../../libscript/devtools/audit/doc_coverage.sh --repo-root . --strict; else /bin/sh ../../../libscript/devtools/audit/doc_coverage.sh --repo-root . --strict; fi"
         language: system
         pass_filenames: false

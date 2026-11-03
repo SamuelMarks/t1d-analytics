@@ -402,6 +402,35 @@ def test_export_parquet_endpoint(
         verify_conn.close()
     assert parquet_rows == [(1, "Alice"), (2, "Bob")]
 
+    # Verify Parquet export succeeds after pooled sandboxed queries and while a concurrent
+    # read-only connection has SET enable_external_access = false active on the database instance
+    profile_resp = client.get(f"/api/table/users/profile?db_path={mock_db}")
+    assert profile_resp.status_code == 200
+    resp_after_pool = client.get(
+        f"/api/export/parquet?table_name=users&db_path={mock_db}"
+    )
+    assert resp_after_pool.status_code == 200
+
+    active_sandbox_conn = duckdb.connect(mock_db, read_only=True)
+    try:
+        active_sandbox_conn.execute("SET enable_external_access = false")
+        resp_concurrent_sandbox = client.get(
+            f"/api/export/parquet?table_name=users&db_path={mock_db}"
+        )
+        assert resp_concurrent_sandbox.status_code == 200
+        sandbox_pq_file = tmp_path / "verify_sandbox_users.parquet"
+        sandbox_pq_file.write_bytes(resp_concurrent_sandbox.content)
+        verify_sandbox_conn = duckdb.connect(":memory:")
+        try:
+            sandbox_rows = verify_sandbox_conn.execute(
+                f"SELECT id, name FROM read_parquet('{sandbox_pq_file}') ORDER BY id"
+            ).fetchall()
+        finally:
+            verify_sandbox_conn.close()
+        assert sandbox_rows == [(1, "Alice"), (2, "Bob")]
+    finally:
+        active_sandbox_conn.close()
+
     resp_no_db = client.get("/api/export/parquet?table_name=users&db_path=no_db.duckdb")
     assert resp_no_db.status_code == 404
 

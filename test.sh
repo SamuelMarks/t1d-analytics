@@ -1,15 +1,12 @@
 #!/bin/sh
 # # test.sh
-#
 # ## Overview
 # End-to-end cloud deployment, health verification, and test execution harness
 # for T1D Analytics using LibScript.
-#
 # ## Usage
 # ./test.sh [--unit-mock|--mock-cloud|--dry-run] [--live-cloud] [--local|-l] [--run-remote-tests|-t] [args]
 
 set -feu
-
 if [ "${SCRIPT_NAME-}" ]; then
     THIS_FILE="${SCRIPT_NAME}"
 elif [ "${BASH_SOURCE-}" ]; then

@@ -50,7 +50,10 @@ from t1d_analytics.llm_client import (
     create_any_llm_transport,
     extract_stream_delta,
     get_effective_api_key,
+    probe_ollama_tags_and_version,
+    resolve_installed_ollama_model_tag,
     resolve_provider_and_model,
+    sort_ollama_models,
 )
 from t1d_analytics.sql_agent import (
     _extract_schema_map_from_text,
@@ -324,7 +327,7 @@ def synthesize_fallback_clinical_sql(
 
 def _is_recoverable_local_ollama_crash(provider: str, exc: BaseException) -> bool:
     """
-    Return True if `exc` is a local Ollama server crash or OOM allocation failure.
+    Return True if `exc` is a local Ollama server crash, timeout, missing model tag, or OOM allocation failure.
 
     Args:
     ----
@@ -333,7 +336,7 @@ def _is_recoverable_local_ollama_crash(provider: str, exc: BaseException) -> boo
 
     Returns:
     -------
-        bool: True when `provider == 'ollama'` and `exc` indicates a server crash/OOM/disconnect.
+        bool: True when `provider == 'ollama'` and `exc` indicates a server crash/OOM/disconnect/timeout.
 
     """
     if provider.lower() != "ollama":
@@ -347,8 +350,62 @@ def _is_recoverable_local_ollama_crash(provider: str, exc: BaseException) -> boo
         "segmentation fault",
         "server disconnected without sending a response",
         "cannot use the `sync` api in an `async` context",
+        "timed out",
+        "timeout",
+        "not found, try pulling it first",
+        "model_not_pulled",
     )
     return any(marker in msg for marker in crash_markers)
+
+
+def _probe_installed_ollama_names() -> List[str]:
+    """
+    Query the local Ollama `/api/tags` endpoint and return installed model names.
+
+    Returns
+    -------
+        List[str]: Installed Ollama model names.
+
+    """
+    infos, _ = probe_ollama_tags_and_version(timeout=1.5, include_version=False)
+    return [info.name for info in infos]
+
+
+def _resolve_and_select_local_ollama_model(
+    actual_model: str,
+    probe_fn: Callable[[], List[str]] = _probe_installed_ollama_names,
+) -> Tuple[str, Optional[str]]:
+    """
+    Normalize a requested local Ollama model against installed `/api/tags` models and return a lightweight fallback tag.
+
+    Args:
+    ----
+        actual_model: Requested Ollama model name (without `ollama/` prefix).
+        probe_fn: Callable returning the list of installed Ollama model names.
+
+    Returns:
+    -------
+        Tuple[str, Optional[str]]: `(normalized_primary_model, fallback_lightweight_model)`.
+
+    """
+    try:
+        installed = probe_fn()
+    except Exception:
+        installed = []
+    if not installed:
+        return actual_model, None
+
+    ranked = sort_ollama_models(installed)
+    matched = resolve_installed_ollama_model_tag(actual_model, ranked)
+    primary = matched if matched is not None else ranked[0]
+    fallback: Optional[str] = None
+    for cand in ranked:
+        if cand != primary and not any(
+            h in cand.lower() for h in ("26b", "27b", "70b")
+        ):
+            fallback = cand
+            break
+    return primary, fallback
 
 
 class SseTerminalPayload(TypedDict, total=False):
@@ -419,6 +476,7 @@ def build_sql_prompt_with_history(
     schema: str,
     nl_query: str,
     history: Optional[List[ChatMessageModel]] = None,
+    compact_schema: bool = False,
 ) -> str:
     """
     Construct the clinical Text-to-SQL system prompt for an LLM with conversation history and RAG pruning.
@@ -428,6 +486,7 @@ def build_sql_prompt_with_history(
         schema: The database schema text.
         nl_query: The clinician or user query.
         history: Optional list of prior conversation messages for multi-turn context.
+        compact_schema: Whether to compact sample rows and table blocks for local CPU Ollama models.
 
     Returns:
     -------
@@ -454,6 +513,7 @@ def build_sql_prompt_with_history(
         nl_query=nl_query,
         history_context=history_context,
         require_markdown_fence=True,
+        compact_schema=compact_schema,
     )
 
 
@@ -485,6 +545,11 @@ def stream_llm_completion_tokens(
 
     """
     resolved_provider, actual_model = resolve_provider_and_model(model_name, provider)
+    fallback_model: Optional[str] = None
+    if resolved_provider.lower() == "ollama" and llm_factory is None:
+        actual_model, fallback_model = _resolve_and_select_local_ollama_model(
+            actual_model
+        )
     effective_api_key = get_effective_api_key(resolved_provider, api_key)
 
     if resolved_provider.lower() in PROVIDER_ENV_KEYS and not effective_api_key:
@@ -517,15 +582,30 @@ def stream_llm_completion_tokens(
             return
     except Exception as e:
         logger.warning(
-            f"Native streaming failed for provider '{resolved_provider}': {e}. Falling back to non-streaming completion."
+            f"Native streaming failed for provider '{resolved_provider}' model '{actual_model}' ({type(e).__name__}: {e}). Falling back to non-streaming completion."
         )
 
-    response = llm.completion(
-        model=actual_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = llm.completion(
+            model=actual_model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as primary_exc:
+        if fallback_model is not None:
+            logger.warning(
+                f"Local Ollama model '{actual_model}' failed ({type(primary_exc).__name__}: {primary_exc}); retrying with lightweight model '{fallback_model}'."
+            )
+            response = llm.completion(
+                model=fallback_model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        else:
+            raise
     full_text = extract_stream_delta(response, resolved_provider) or str(response)
     yield full_text
+
+
+_stream_llm_with_ollama_fallback = stream_llm_completion_tokens
 
 
 def translate_nl_to_sql(
@@ -608,30 +688,53 @@ def translate_nl_to_sql(
         logger.error(f"Failed to read schema: {e}")
         raise SchemaReadError(params={"error": str(e)}) from e
 
-    prompt = build_sql_prompt_with_history(schema, nl_query, history=history)
+    is_local_ollama = resolved_provider.lower() == "ollama"
+    fallback_model: Optional[str] = None
+    if is_local_ollama and llm_factory is None:
+        actual_model, fallback_model = _resolve_and_select_local_ollama_model(
+            actual_model
+        )
+    prompt = build_sql_prompt_with_history(
+        schema, nl_query, history=history, compact_schema=is_local_ollama
+    )
     nl = chr(10)
 
     try:
         logger.info(f"Sending prompt to LLM ({resolved_provider}/{actual_model})...")
-        full_response = complete_llm_prompt(
-            prompt=prompt,
-            model_name=actual_model,
-            api_key=effective_api_key,
-            provider=resolved_provider,
-            llm_factory=llm_factory,
-        )
+        try:
+            full_response = complete_llm_prompt(
+                prompt=prompt,
+                model_name=actual_model,
+                api_key=effective_api_key,
+                provider=resolved_provider,
+                llm_factory=llm_factory,
+            )
+        except Exception as primary_exc:
+            if is_local_ollama and fallback_model is not None:
+                logger.warning(
+                    f"Local Ollama model '{actual_model}' failed ({type(primary_exc).__name__}: {primary_exc}); retrying once with lightweight model '{fallback_model}'."
+                )
+                full_response = complete_llm_prompt(
+                    prompt=prompt,
+                    model_name=fallback_model,
+                    api_key=effective_api_key,
+                    provider=resolved_provider,
+                    llm_factory=llm_factory,
+                )
+            else:
+                raise
         logger.info(f"LLM response:{nl}{full_response}")
         sql_query = _extract_sql_from_response(full_response)
         return full_response, sql_query
     except Exception as e:
         if _is_recoverable_local_ollama_crash(resolved_provider, e):
             logger.warning(
-                f"Local Ollama model '{actual_model}' crashed ({e}); synthesizing schema-aware clinical SQL fallback."
+                f"Local Ollama model '{actual_model}' failed with {type(e).__name__} ({e}); synthesizing schema-aware clinical SQL fallback."
             )
             return synthesize_fallback_clinical_sql(
                 schema, nl_query, include_diagnostic_note=True
             )
-        logger.error(f"LLM translation error: {e}")
+        logger.error(f"LLM translation error ({type(e).__name__}): {e}")
         raise LlmTranslationError(params={"error": str(e)}) from e
 
 
@@ -729,6 +832,7 @@ def execute_chat_turn(
         )
         used_fallback = (
             "Local LLM inference encountered a memory error" in full_response
+            or "Local LLM inference was unavailable" in full_response
         )
         nl_results: Optional[List[Dict[str, SqlValue]]] = None
         sql_error: Optional[ApiError] = None
@@ -862,7 +966,10 @@ def _finalize_nl_sse_frames(
     provenance, is_synthetic = _resolve_db_provenance_flags(
         db_path, connect_fn=connect_fn
     )
-    used_fallback = "Local LLM inference encountered a memory error" in full_response
+    used_fallback = (
+        "Local LLM inference encountered a memory error" in full_response
+        or "Local LLM inference was unavailable" in full_response
+    )
     sql_query = _extract_sql_from_response(full_response)
     sql_results: Optional[List[Dict[str, SqlValue]]] = None
     sql_err_dict: Optional[Dict[str, SqlValue]] = None
@@ -967,6 +1074,7 @@ def _recover_ollama_stream_fallback_token(
     schema: str,
     message: str,
     sse_sep: str,
+    model_name: str = "ollama",
 ) -> Tuple[str, str]:
     """
     Recover from a local Ollama crash by synthesizing fallback SQL, or re-raise `stream_exc`.
@@ -978,6 +1086,7 @@ def _recover_ollama_stream_fallback_token(
         schema: Extracted database schema string.
         message: User natural-language query.
         sse_sep: Double-newline SSE frame separator.
+        model_name: Requested model identifier for diagnostic logging.
 
     Returns:
     -------
@@ -991,13 +1100,16 @@ def _recover_ollama_stream_fallback_token(
     if not _is_recoverable_local_ollama_crash(resolved_prov, stream_exc):
         raise stream_exc
     logger.warning(
-        f"Local Ollama streaming crashed ({stream_exc}); using schema-aware clinical SQL fallback."
+        f"Local Ollama streaming for model '{model_name}' failed with {type(stream_exc).__name__} ({stream_exc}); using schema-aware clinical SQL fallback."
     )
     fb_resp, _ = synthesize_fallback_clinical_sql(
         schema, message, include_diagnostic_note=True
     )
     tok_payload = json.dumps({"event": "token", "token": fb_resp})
     return fb_resp, f"data: {tok_payload}{sse_sep}"
+
+
+_recover_or_reraise_local_ollama_failure = _recover_ollama_stream_fallback_token
 
 
 async def generate_sse_chat_events(
@@ -1057,10 +1169,13 @@ async def generate_sse_chat_events(
 
     try:
         schema = _read_schema_from_db(db_path, connect_fn, schema_fn)
-        prompt = build_sql_prompt_with_history(
-            schema, request.message, history=request.history
-        )
         resolved_prov, _ = resolve_provider_and_model(request.model, request.provider)
+        prompt = build_sql_prompt_with_history(
+            schema,
+            request.message,
+            history=request.history,
+            compact_schema=(resolved_prov.lower() == "ollama"),
+        )
         full_parts: List[str] = []
         try:
             token_iter = iter(
@@ -1083,7 +1198,12 @@ async def generate_sse_chat_events(
                 yield f"data: {tok_payload}{sse_sep}"
         except Exception as stream_exc:
             fb_resp, tok_frame = _recover_ollama_stream_fallback_token(
-                resolved_prov, stream_exc, schema, request.message, sse_sep
+                resolved_prov,
+                stream_exc,
+                schema,
+                request.message,
+                sse_sep,
+                model_name=request.model,
             )
             full_parts.append(fb_resp)
             yield tok_frame

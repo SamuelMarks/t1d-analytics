@@ -425,7 +425,7 @@ def test_llm_client_protocol_stubs() -> None:
         "microsoft/Phi-4-mini-flash-reasoning",
     )
     parsed_cfg = parse_configured_models_string(
-        "sql, hf.co/google/gemma-4-E4B, meta-llama/Llama-3.2-1B, openai/gpt-4o"
+        "sql, /mnt/data/ollama_models, C:\\ollama, ./models, hf.co/google/gemma-4-E4B, meta-llama/Llama-3.2-1B, openai/gpt-4o"
     )
     assert parsed_cfg == [
         ("sql", "sql"),
@@ -433,3 +433,142 @@ def test_llm_client_protocol_stubs() -> None:
         ("ollama", "meta-llama/Llama-3.2-1B"),
         ("openai", "openai/gpt-4o"),
     ]
+
+
+def test_ollama_model_sorting_path_filtering_and_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test sort_ollama_models, is_filesystem_path_token, read_configured_ollama_model_list, resolve_installed_ollama_model_tag, and compact_schema_for_prompt."""
+    from t1d_analytics.llm_client import (
+        compact_schema_for_prompt,
+        fetch_available_models,
+        is_filesystem_path_token,
+        read_configured_ollama_model_list,
+        resolve_installed_ollama_model_tag,
+        sort_ollama_models,
+    )
+
+    ranked = sort_ollama_models(
+        [
+            "gemma2:27b",
+            "gemma4:26b",
+            "custom-mid:7b",
+            "gemma4:latest",
+            "ollama/gemma:2b",
+            "llama3.2:1b",
+        ]
+    )
+    assert ranked[0] == "ollama/gemma:2b"
+    assert ranked[1] == "llama3.2:1b"
+    assert ranked[2] == "gemma4:latest"
+    assert ranked[3] == "custom-mid:7b"
+    assert set(ranked[-2:]) == {"gemma2:27b", "gemma4:26b"}
+
+    assert is_filesystem_path_token("") is True
+    assert is_filesystem_path_token("/mnt/data/ollama_models") is True
+    assert is_filesystem_path_token("\\server\\share") is True
+    assert is_filesystem_path_token("./relative/path") is True
+    assert is_filesystem_path_token("C:\\Users\\ollama") is True
+    assert is_filesystem_path_token("D:") is True
+    assert is_filesystem_path_token("a/b/c") is True
+    assert is_filesystem_path_token("hf.co/google/gemma-4-E4B") is False
+    assert is_filesystem_path_token("gemma:2b") is False
+
+    monkeypatch.delenv("OLLAMA_MODEL_LIST", raising=False)
+    monkeypatch.delenv("OLLAMA_MODELS", raising=False)
+    assert read_configured_ollama_model_list() == []
+
+    monkeypatch.setenv("OLLAMA_MODELS", "/mnt/data/ollama_models")
+    assert read_configured_ollama_model_list() == []
+
+    monkeypatch.setenv("OLLAMA_MODELS", "/mnt/data/ollama_models, gemma:2b, phi4-mini")
+    assert read_configured_ollama_model_list() == ["gemma:2b", "phi4-mini"]
+
+    monkeypatch.setenv("OLLAMA_MODEL_LIST", "gemma:2b,llama3.2:1b")
+    assert read_configured_ollama_model_list() == ["gemma:2b", "llama3.2:1b"]
+
+    installed = ["gemma4:latest", "phi4-mini:latest", "llama3.2:1b"]
+    assert (
+        resolve_installed_ollama_model_tag("ollama/gemma4", installed)
+        == "gemma4:latest"
+    )
+    assert (
+        resolve_installed_ollama_model_tag("gemma4:latest", installed)
+        == "gemma4:latest"
+    )
+    assert (
+        resolve_installed_ollama_model_tag("hf.co/google/gemma-4-E4B", installed)
+        == "gemma4:latest"
+    )
+    assert (
+        resolve_installed_ollama_model_tag(
+            "hf.co/microsoft/Phi-4-mini-flash-reasoning", installed
+        )
+        == "phi4-mini:latest"
+    )
+    assert resolve_installed_ollama_model_tag("nonexistent:7b", installed) is None
+
+    assert compact_schema_for_prompt("   ") == "   "
+    long_sample = "Sample row: (" + ("x" * 200) + ")"
+    raw_schema = "-- Relevant Schema Context:\n-- Table: t1\n\n\n\n" + "\n\n".join(
+        f"Table: t{i}\nColumns: id (INT)\n{long_sample}" for i in range(1, 11)
+    )
+    compacted = compact_schema_for_prompt(raw_schema, max_tables=2, max_sample_chars=40)
+    assert "Table: t1" in compacted
+    assert "Table: t2" in compacted
+    assert "Table: t3" not in compacted
+    assert "..." in compacted
+
+    prompt_compact = build_clinical_sql_prompt(
+        raw_schema, "Count rows", compact_schema=True
+    )
+    assert "Table: t8" in prompt_compact
+    assert "Table: t9" not in prompt_compact
+
+    # Test fetch_available_models with configured Ollama models (both matched and unpulled)
+    class _OnlineTagsResp:
+        """Protocol-compliant URL response returning gemma4:latest."""
+
+        status = 200
+
+        def read(self) -> bytes:
+            """Return JSON tags."""
+            return b'{"models": [{"name": "gemma4:latest", "size": 100}]}'
+
+        def __enter__(self) -> "_OnlineTagsResp":
+            """Enter context."""
+            return self
+
+        def __exit__(
+            self,
+            exc_type: Optional[type],
+            exc_val: Optional[BaseException],
+            exc_tb: Optional[object],
+        ) -> Optional[bool]:
+            """Exit context."""
+            return None
+
+    monkeypatch.setenv("OLLAMA_MODEL_LIST", "hf.co/google/gemma-4-E4B,unpulled:7b")
+    res_online = fetch_available_models(
+        include_cloud=True,
+        urlopen_fn=lambda req, timeout=5: _OnlineTagsResp(),
+    )
+    by_name = {m.name: m for m in res_online.models}
+    assert by_name["gemma4:latest"].available is True
+    assert by_name["unpulled:7b"].available is False
+    assert by_name["unpulled:7b"].reachable is False
+    assert by_name["unpulled:7b"].error_code == "MODEL_NOT_PULLED"
+
+    def _fail_urlopen(req: object, timeout: float = 5.0) -> _OnlineTagsResp:
+        """Raise URLError to simulate offline Ollama."""
+        raise urllib.error.URLError("offline")
+
+    res_offline = fetch_available_models(
+        include_cloud=True,
+        urlopen_fn=_fail_urlopen,
+    )
+    by_name_off = {m.name: m for m in res_offline.models}
+    assert by_name_off["unpulled:7b"].available is False
+    assert by_name_off["unpulled:7b"].error_code == "PROVIDER_OFFLINE"
+    monkeypatch.delenv("OLLAMA_MODEL_LIST", raising=False)
+    monkeypatch.delenv("OLLAMA_MODELS", raising=False)

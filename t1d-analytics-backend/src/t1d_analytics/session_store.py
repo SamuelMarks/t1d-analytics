@@ -26,6 +26,7 @@ from t1d_analytics.api_schemas import (
     SessionModel,
 )
 from t1d_analytics.errors import SessionNotFoundError
+from t1d_analytics.sql_utils import global_read_only_duckdb_pool
 
 
 def _is_legacy_sum_varchar_error_message(msg: ChatMessageModel) -> bool:
@@ -165,6 +166,7 @@ def open_sessions_db_conn(
             sessions_dir.mkdir(parents=True, exist_ok=True)
             db_path = str((sessions_dir / "sessions.duckdb").resolve())
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    global_read_only_duckdb_pool.close_path(db_path)
     max_retries = 5
     conn: Optional[duckdb.DuckDBPyConnection] = None
     for attempt in range(max_retries - 1):

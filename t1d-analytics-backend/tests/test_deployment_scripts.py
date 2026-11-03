@@ -751,6 +751,15 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert len(before_start_hooks) >= 1
     pull_cmd = before_start_hooks[0]["command"]
     assert "ollama pull" in pull_cmd
-    assert "hf.co/google/gemma-4-E4B" in pull_cmd
-    assert "hf.co/microsoft/Phi-4-mini-flash-reasoning" in pull_cmd
-    assert "hf.co/meta-llama/Llama-3.2-1B" in pull_cmd
+    assert "http://127.0.0.1:11434/api/tags" in pull_cmd
+    assert "ollama list" in pull_cmd
+    assert "gemma2:27b" in pull_cmd
+    assert "gemma:2b" in pull_cmd
+    assert "llama3.2:1b" in pull_cmd
+    assert "phi4-mini" in pull_cmd
+    assert "gemma4:latest" in pull_cmd
+    assert (
+        libscript_cfg["vars"]["OLLAMA_MODEL_LIST"]
+        == "gemma:2b,llama3.2:1b,phi4-mini,gemma4:latest"
+    )
+    assert libscript_cfg["vars"]["DEFAULT_OLLAMA_MODEL"] == "gemma:2b"

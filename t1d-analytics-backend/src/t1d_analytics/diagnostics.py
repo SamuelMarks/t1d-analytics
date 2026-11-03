@@ -19,6 +19,7 @@ from t1d_analytics.llm_client import (
     PROVIDER_ENV_KEYS,
     normalize_ollama_host,
     probe_ollama_tags_and_version,
+    sort_ollama_models,
 )
 from t1d_analytics.sql_utils import SqlValue
 
@@ -625,8 +626,12 @@ def check_ollama_health(
             timeout=timeout,
             urlopen_fn=urllib.request.urlopen,
         )
-        models = [m.name for m in model_infos]
-        has_recommended = any(recommended_model in m for m in models)
+        models = sort_ollama_models([m.name for m in model_infos])
+        has_recommended = any(
+            recommended_model in m
+            or m in ("gemma:2b", "llama3.2:1b", "phi4-mini", "gemma4:latest")
+            for m in models
+        )
 
         if not has_recommended:
             msg = _(
@@ -664,6 +669,9 @@ def check_ollama_health(
             message=msg,
             remediation=remediation,
         )
+
+
+check_ollama_service = check_ollama_health
 
 
 def check_provider_health(

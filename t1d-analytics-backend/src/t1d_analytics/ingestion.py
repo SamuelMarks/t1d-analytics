@@ -19,7 +19,11 @@ if TYPE_CHECKING:
 
 from t1d_analytics.errors import DatabaseError
 from t1d_analytics.i18n import get_translator
-from t1d_analytics.sql_utils import escape_sql_identifier, escape_sql_literal
+from t1d_analytics.sql_utils import (
+    escape_sql_identifier,
+    escape_sql_literal,
+    global_read_only_duckdb_pool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1095,6 +1099,7 @@ def load_data_to_duckdb(
         return
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    global_read_only_duckdb_pool.close_path(db_path)
     conn_msg = _("Connecting to DuckDB at {}...", db_path)
     logger.info(conn_msg)
     report_fn(conn_msg)

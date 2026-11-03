@@ -287,6 +287,8 @@ export class ChatState {
 
   /** Currently selected DuckDB database path. */
   public currentDb: string = "t1d.duckdb";
+  /** Default selected LLM model identifier. */
+  public selectedModel: string = "ollama/gemma:2b";
   /** List of discovered workspace DuckDB databases. */
   public availableDbs: AvailableDatabaseItem[] = [];
   /** Whether server-side chat session synchronization is enabled. */
@@ -612,11 +614,21 @@ export class ChatState {
    * @returns {void}
    */
   setActiveChatModel(model: string): void {
+    this.selectedModel = model;
     const chat = this.getActiveChat();
     if (chat) {
       chat.model = model;
       this.saveToLocalStorage();
     }
+  }
+
+  /**
+   * Sets the global and active chat selected model.
+   * @param {string} model The model identifier.
+   * @returns {void}
+   */
+  setSelectedModel(model: string): void {
+    this.setActiveChatModel(model);
   }
 
   /**

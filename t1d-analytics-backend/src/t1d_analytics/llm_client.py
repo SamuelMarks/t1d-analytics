@@ -369,9 +369,10 @@ CLOUD_MODEL_CATALOG: Dict[str, List[str]] = {
 }
 
 DEFAULT_CHOICE_OLLAMA_MODELS: Tuple[str, ...] = (
-    "hf.co/google/gemma-4-E4B",
-    "hf.co/microsoft/Phi-4-mini-flash-reasoning",
-    "hf.co/meta-llama/Llama-3.2-1B",
+    "gemma:2b",
+    "llama3.2:1b",
+    "phi4-mini",
+    "gemma4:latest",
 )
 
 DEFAULT_CHOICE_HF_REPOS: Tuple[str, ...] = (
@@ -379,6 +380,180 @@ DEFAULT_CHOICE_HF_REPOS: Tuple[str, ...] = (
     "microsoft/Phi-4-mini-flash-reasoning",
     "meta-llama/Llama-3.2-1B",
 )
+
+LEGACY_OLLAMA_MODEL_ALIASES: Dict[str, str] = {
+    "hf.co/google/gemma-4-e4b": "gemma4:latest",
+    "google/gemma-4-e4b": "gemma4:latest",
+    "gemma-4-e4b": "gemma4:latest",
+    "gemma4": "gemma4:latest",
+    "hf.co/microsoft/phi-4-mini-flash-reasoning": "phi4-mini",
+    "microsoft/phi-4-mini-flash-reasoning": "phi4-mini",
+    "phi-4-mini-flash-reasoning": "phi4-mini",
+    "hf.co/meta-llama/llama-3.2-1b": "llama3.2:1b",
+    "meta-llama/llama-3.2-1b": "llama3.2:1b",
+    "llama-3.2-1b": "llama3.2:1b",
+}
+
+_FAST_SMALL_OLLAMA_ORDER: Tuple[str, ...] = (
+    "gemma:2b",
+    "llama3.2:1b",
+    "phi4-mini",
+    "phi4-mini:latest",
+    "gemma-4-e4b",
+    "gemma4:latest",
+    "gemma4",
+    "gemma:latest",
+    "gemma",
+)
+
+_HEAVY_OLLAMA_SUBSTRINGS: Tuple[str, ...] = (
+    "26b",
+    "27b",
+    "32b",
+    "70b",
+)
+
+
+def _ollama_model_sort_key(model_name: str) -> Tuple[int, int, str]:
+    """
+    Compute a deterministic ranking key for an Ollama model name.
+
+    Ranks lightweight CPU-friendly models first (`tier 0`) and heavy 26B/27B/70B
+    models last (`tier 2`).
+
+    Args:
+    ----
+        model_name: Ollama model name or `ollama/<tag>` identifier.
+
+    Returns:
+    -------
+        Tuple[int, int, str]: `(tier, priority_index, lower_name)` sort key.
+
+    """
+    cleaned = model_name.strip().lower()
+    if cleaned.startswith("ollama/"):
+        cleaned = cleaned[7:]
+    if any(heavy in cleaned for heavy in _HEAVY_OLLAMA_SUBSTRINGS):
+        return (2, 999, cleaned)
+    for idx, preferred in enumerate(_FAST_SMALL_OLLAMA_ORDER):
+        if cleaned == preferred or cleaned.startswith(f"{preferred}:"):
+            return (0, idx, cleaned)
+    return (1, 500, cleaned)
+
+
+def sort_ollama_models(models: Sequence[str]) -> List[str]:
+    """
+    Deterministically sort Ollama model names so fast/small models appear first and 26B/27B/70B models appear last.
+
+    Args:
+    ----
+        models: Sequence of Ollama model identifier strings.
+
+    Returns:
+    -------
+        List[str]: Ranked list of model names.
+
+    """
+    return sorted(models, key=_ollama_model_sort_key)
+
+
+def is_filesystem_path_token(token: str) -> bool:
+    r"""
+    Check whether a raw environment variable token looks like a filesystem directory path rather than a model ID.
+
+    Prevents `OLLAMA_MODELS=/mnt/data/ollama_models` or `C:\ollama_models` from being misparsed as a model name.
+
+    Args:
+    ----
+        token: Candidate model token string.
+
+    Returns:
+    -------
+        bool: True if the token is a filesystem path, False otherwise.
+
+    """
+    stripped = token.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("/", "\\", ".")):
+        return True
+    if (
+        len(stripped) >= 2
+        and stripped[0].isalpha()
+        and stripped[1] == ":"
+        and (len(stripped) == 2 or stripped[2] in ("\\", "/"))
+    ):
+        return True
+    return "\\" in stripped or (
+        stripped.count("/") >= 2
+        and not stripped.startswith(
+            ("hf.co/", "huggingface/", "together/", "fireworks/", "openrouter/")
+        )
+    )
+
+
+def read_configured_ollama_model_list() -> List[str]:
+    """
+    Read configured Ollama model names from `OLLAMA_MODEL_LIST` (or non-path `OLLAMA_MODELS`).
+
+    Ignores any token in `OLLAMA_MODELS` that looks like a filesystem path (such as `/mnt/data/ollama_models`).
+
+    Returns
+    -------
+        List[str]: Sanitized list of configured Ollama model names.
+
+    """
+    raw = os.environ.get("OLLAMA_MODEL_LIST", "").strip()
+    if not raw:
+        raw = os.environ.get("OLLAMA_MODELS", "").strip()
+    if not raw:
+        return []
+    models: List[str] = []
+    for part in raw.split(","):
+        tok = part.strip()
+        if tok and not is_filesystem_path_token(tok):
+            models.append(tok)
+    return models
+
+
+def resolve_installed_ollama_model_tag(
+    requested_model: str,
+    installed_models: Sequence[str],
+) -> Optional[str]:
+    """
+    Match a requested Ollama model identifier (or legacy HF alias) against installed `/api/tags` model names.
+
+    Args:
+    ----
+        requested_model: Model identifier (e.g., `'gemma4'`, `'ollama/gemma4'`, `'hf.co/google/gemma-4-E4B'`).
+        installed_models: Sequence of model names reported by Ollama `/api/tags`.
+
+    Returns:
+    -------
+        Optional[str]: Exact installed model tag if present in `installed_models`, else None.
+
+    """
+    cleaned = requested_model.strip()
+    if cleaned.lower().startswith("ollama/"):
+        cleaned = cleaned[7:]
+    lower_req = cleaned.lower()
+    alias_target = LEGACY_OLLAMA_MODEL_ALIASES.get(lower_req)
+
+    installed_by_lower = {
+        m.strip().lower(): m.strip() for m in installed_models if m.strip()
+    }
+    base_req = lower_req[:-7] if lower_req.endswith(":latest") else lower_req
+    candidates = [lower_req, f"{base_req}:latest", base_req]
+    if alias_target:
+        alias_low = alias_target.lower()
+        base_alias = alias_low[:-7] if alias_low.endswith(":latest") else alias_low
+        candidates.extend([alias_low, f"{base_alias}:latest", base_alias])
+
+    for cand in candidates:
+        if cand in installed_by_lower:
+            return installed_by_lower[cand]
+    return None
+
 
 ANY_LLM_PROVIDER_CATALOG: Dict[str, List[str]] = {
     **CLOUD_MODEL_CATALOG,
@@ -609,7 +784,7 @@ def parse_configured_models_string(raw_models: str) -> List[Tuple[str, str]]:
     seen: set[str] = set()
     for token in raw_models.split(","):
         item = token.strip()
-        if not item:
+        if not item or is_filesystem_path_token(item):
             continue
         prov, mod = resolve_provider_and_model(item)
         prov_clean = prov.lower().strip()
@@ -723,6 +898,7 @@ def discover_configured_any_llm_models(
         filter(
             None,
             [
+                ",".join(read_configured_ollama_model_list()),
                 os.environ.get("T1D_ANY_LLM_MODELS", ""),
                 os.environ.get("ANY_LLM_CONFIGURED_MODELS", ""),
                 extra_configured_models or "",
@@ -1105,11 +1281,58 @@ def complete_llm_prompt(
     return extract_stream_delta(response, resolved_provider).strip()
 
 
+def compact_schema_for_prompt(
+    schema: str,
+    max_tables: int = 8,
+    max_sample_chars: int = 120,
+) -> str:
+    """
+    Compact a verbose database schema string for fast CPU prompt evaluation on small local Ollama models.
+
+    Truncates long `Sample row:` lines to `max_sample_chars` and limits the number of full table
+    blocks to `max_tables` while preserving the `-- Relevant Schema Context:` header.
+
+    Args:
+    ----
+        schema: Raw or RAG-enriched database schema string.
+        max_tables: Maximum number of detailed `Table:` blocks to include.
+        max_sample_chars: Maximum character length per `Sample row:` line.
+
+    Returns:
+    -------
+        str: Compacted schema string.
+
+    """
+    if not schema.strip():
+        return schema
+    nl = chr(10)
+    blocks = schema.split(f"{nl}{nl}")
+    out_blocks: List[str] = []
+    table_count = 0
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Table:"):
+            if table_count >= max_tables:
+                continue
+            table_count += 1
+        lines: List[str] = []
+        for line in stripped.splitlines():
+            if line.strip().startswith("Sample row:") and len(line) > max_sample_chars:
+                lines.append(line[:max_sample_chars] + "...")
+            else:
+                lines.append(line)
+        out_blocks.append(nl.join(lines))
+    return f"{nl}{nl}".join(out_blocks)
+
+
 def build_clinical_sql_prompt(
     schema: str,
     nl_query: str,
     history_context: str = "",
     require_markdown_fence: bool = True,
+    compact_schema: bool = False,
 ) -> str:
     """
     Construct the clinical Text-to-SQL system prompt for an LLM.
@@ -1120,12 +1343,14 @@ def build_clinical_sql_prompt(
         nl_query: The clinician or user query.
         history_context: Optional formatted prior conversation history block.
         require_markdown_fence: Whether to instruct the LLM to wrap SQL in markdown fences.
+        compact_schema: Whether to compact sample rows and table count for fast local CPU inference.
 
     Returns:
     -------
         str: Formatted system and user prompt.
 
     """
+    effective_schema = compact_schema_for_prompt(schema) if compact_schema else schema
     formatting_instruction = (
         """Write a SQL query that answers the user's request.
 You may provide an explanation of your thought process before or after the query.
@@ -1140,7 +1365,7 @@ The query should be a valid DuckDB SQL SELECT statement."""
 
     return f"""You are a DuckDB SQL expert. Given the following database schema for Type 1 Diabetes (T1D) clinical trial datasets:
 
-{schema}
+{effective_schema}
 
 Context & Rules for T1D Analytics:
 1. Terminology & Aliases:
@@ -1179,6 +1404,9 @@ Context & Rules for T1D Analytics:
 {formatting_instruction}
 
 {history_context}User request: {nl_query}"""
+
+
+build_system_prompt = build_clinical_sql_prompt
 
 
 def probe_ollama_tags_and_version(
@@ -1227,7 +1455,7 @@ def probe_ollama_tags_and_version(
         except Exception:
             version = None
 
-    models: List[ModelInfo] = [
+    raw_models: List[ModelInfo] = [
         ModelInfo(
             name=str(model.get("name")),
             size=model.get("size"),
@@ -1241,6 +1469,9 @@ def probe_ollama_tags_and_version(
         for model in data.get("models", [])
         if model.get("name")
     ]
+    by_name = {m.name: m for m in raw_models}
+    sorted_names = sort_ollama_models(list(by_name.keys()))
+    models = [by_name[name] for name in sorted_names]
     return models, version
 
 
@@ -1416,12 +1647,16 @@ def fetch_available_models(
 
     """
     models: List[ModelInfo] = []
+    ollama_online = False
+    installed_ollama_names: List[str] = []
     try:
         ollama_models, _ = probe_ollama_tags_and_version(
             timeout=5,
             urlopen_fn=urlopen_fn,
             include_version=False,
         )
+        ollama_online = True
+        installed_ollama_names = [m.name for m in ollama_models]
         models.extend(ollama_models)
     except Exception as e:
         logger.error(f"Error fetching models from local Ollama instance: {e}")
@@ -1431,16 +1666,35 @@ def fetch_available_models(
             extra_configured_models=configured_models,
             cloud_catalog=cloud_catalog,
         ):
-            models.append(
-                ModelInfo(
-                    name=m,
-                    provider=prov,
-                    configured=conf,
-                    requires_key=prov != "ollama",
-                    available=conf,
-                    reachable=conf,
-                    error_code=None if conf else "MISSING_API_KEY",
+            if prov == "ollama":
+                matched_tag = resolve_installed_ollama_model_tag(
+                    m, installed_ollama_names
                 )
-            )
+                if matched_tag is None:
+                    models.append(
+                        ModelInfo(
+                            name=m,
+                            provider="ollama",
+                            configured=True,
+                            requires_key=False,
+                            available=False,
+                            reachable=False,
+                            error_code="MODEL_NOT_PULLED"
+                            if ollama_online
+                            else "PROVIDER_OFFLINE",
+                        )
+                    )
+            else:
+                models.append(
+                    ModelInfo(
+                        name=m,
+                        provider=prov,
+                        configured=conf,
+                        requires_key=True,
+                        available=conf,
+                        reachable=conf,
+                        error_code=None if conf else "MISSING_API_KEY",
+                    )
+                )
 
     return ModelsResponse(models=models)

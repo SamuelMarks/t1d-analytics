@@ -326,6 +326,38 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
       json: async () => ({ models: [{ name: "gemma4", configured: true }] }),
     });
     await ui.modelSelectorController.loadModels();
+
+    // :latest tag normalization and small-model fallback preference over 26b/27b models
+    const normChat = state.createChat();
+    normChat.model = "ollama/gemma4";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        models: [
+          { name: "gemma2:27b", provider: "ollama", configured: true },
+          { name: "gemma4:latest", provider: "ollama", configured: true },
+        ],
+      }),
+    });
+    await ui.modelSelectorController.loadModels();
+    expect(modelSelect.value).toBe("gemma4:latest");
+    expect(normChat.model).toBe("gemma4:latest");
+    expect(state.selectedModel).toBe("gemma4:latest");
+
+    normChat.model = "unmatched-custom-model";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        models: [
+          { name: "gemma2:27b", provider: "ollama", configured: true },
+          { name: "gemma4:26b", provider: "ollama", configured: true },
+          { name: "ollama/gemma:2b", provider: "ollama", configured: true },
+        ],
+      }),
+    });
+    await ui.modelSelectorController.loadModels();
+    expect(modelSelect.value).toBe("ollama/gemma:2b");
+    expect(normChat.model).toBe("ollama/gemma:2b");
   });
 
   it("handles provider modal Escape key dismissal, focus restoration, and dispose", async () => {

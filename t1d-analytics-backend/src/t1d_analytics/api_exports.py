@@ -34,11 +34,53 @@ from t1d_analytics.sql_utils import (
     SqlValue,
     connect_duckdb_read_only_pooled,
     escape_sql_identifier,
+    global_read_only_duckdb_pool,
     sanitize_spreadsheet_cell,
     sanitize_sql_value,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_table_to_parquet_file(
+    conn: duckdb.DuckDBPyConnection,
+    escaped_table: str,
+    target_path: Union[str, Path],
+    use_zstd_compression: bool = False,
+) -> None:
+    """
+    Write a DuckDB table to a Parquet file on disk, falling back to an in-memory DuckDB instance if external access is disabled.
+
+    When a concurrent or pooled read-only connection on the same DuckDB database file has executed
+    ``SET enable_external_access = false``, DuckDB locks external filesystem writes across the entire
+    ``DatabaseInstance``. In that case, this helper materializes the table DataFrame from the read-only
+    connection and writes the Parquet file through an isolated ``:memory:`` DuckDB connection.
+
+    Args:
+    ----
+        conn: Open DuckDB connection to the source database.
+        escaped_table: Double-quote-escaped table identifier.
+        target_path: Destination filesystem path for the Parquet file.
+        use_zstd_compression: Whether to include ``COMPRESSION ZSTD`` in the ``COPY`` options.
+
+    """
+    escaped_out = str(target_path).replace("'", "''")
+    format_opts = (
+        "FORMAT PARQUET, COMPRESSION ZSTD" if use_zstd_compression else "FORMAT PARQUET"
+    )
+    copy_sql = f"COPY \"{escaped_table}\" TO '{escaped_out}' ({format_opts})"
+    try:
+        conn.execute(copy_sql)
+    except duckdb.PermissionException:
+        df = conn.execute(f'SELECT * FROM "{escaped_table}"').df()
+        mem_conn = duckdb.connect(":memory:")
+        try:
+            mem_conn.register("_t1d_parquet_export_df", df)
+            mem_conn.execute(
+                f"COPY \"_t1d_parquet_export_df\" TO '{escaped_out}' ({format_opts})"
+            )
+        finally:
+            mem_conn.close()
 
 
 def iter_sanitized_table_batches(
@@ -136,6 +178,9 @@ def export_table(
     target_path = Path(output_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if fmt == "parquet":
+        global_read_only_duckdb_pool.close_path(db_path)
+
     conn = duckdb.connect(db_path, read_only=True)
     try:
         tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
@@ -147,8 +192,12 @@ def export_table(
         escaped_tbl = table_name.replace('"', '""')
 
         if fmt == "parquet":
-            escaped_out = str(target_path.resolve()).replace("'", "''")
-            conn.execute(f"COPY \"{escaped_tbl}\" TO '{escaped_out}' (FORMAT PARQUET)")
+            _copy_table_to_parquet_file(
+                conn=conn,
+                escaped_table=escaped_tbl,
+                target_path=target_path.resolve(),
+                use_zstd_compression=False,
+            )
         elif fmt == "csv":
             result = conn.execute(f'SELECT * FROM "{escaped_tbl}"')
             columns = (
@@ -536,13 +585,16 @@ def stream_parquet_export(
     conn = None
     temp_parquet_file = None
     try:
+        global_read_only_duckdb_pool.close_path(target_db)
         conn = _open_validated_table_connection(target_db, table_name)
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
             temp_parquet_file = tmp.name
 
-        escaped_out_path = temp_parquet_file.replace("'", "''")
-        conn.execute(
-            f"COPY \"{escaped_table}\" TO '{escaped_out_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        _copy_table_to_parquet_file(
+            conn=conn,
+            escaped_table=escaped_table,
+            target_path=temp_parquet_file,
+            use_zstd_compression=True,
         )
 
         def _iter_parquet_chunks(

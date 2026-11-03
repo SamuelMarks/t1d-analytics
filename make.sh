@@ -1,27 +1,22 @@
 #!/bin/sh
 # # make.sh
-#
 # ## Overview
 # POSIX /bin/sh build, database provisioning, dependency installation, stack orchestration,
 # and test runner for T1D Analytics (delegating to Makefile targets).
-#
 # ## Usage
 # ./make.sh [target]
 
 set -feu
-
 if [ "${SCRIPT_NAME-}" ]; then
   THIS_FILE="${SCRIPT_NAME}"
 elif [ "${BASH_SOURCE-}" ]; then
   THIS_FILE="${BASH_SOURCE}"
 elif [ "${ZSH_VERSION-}" ]; then
-  # libscript-allow-eval
   # shellcheck disable=SC2296
   THIS_FILE="${(%):-%x}"
 else
   THIS_FILE="${0}"
 fi
-
 case "${STACK+x}" in
   *':'"${THIS_FILE}"':'*)
     printf '[STOP]     processing "%s"\n' "${THIS_FILE}" >&2

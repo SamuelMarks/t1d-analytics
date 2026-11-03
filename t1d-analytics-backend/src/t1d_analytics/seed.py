@@ -14,7 +14,10 @@ from t1d_analytics.session_store import (
     open_sessions_db_conn,
     sanitize_legacy_error_sessions,
 )
-from t1d_analytics.sql_utils import escape_sql_identifier
+from t1d_analytics.sql_utils import (
+    escape_sql_identifier,
+    global_read_only_duckdb_pool,
+)
 
 SeedValue = Union[str, int, float]
 
@@ -54,6 +57,8 @@ def _connect_duckdb_with_retry(
         duckdb.DuckDBPyConnection: Active DuckDB connection.
 
     """
+    if not read_only:
+        global_read_only_duckdb_pool.close_path(db_path)
     max_retries = 5
     for attempt in range(max_retries - 1):
         try:

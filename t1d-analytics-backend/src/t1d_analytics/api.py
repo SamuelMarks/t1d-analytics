@@ -171,7 +171,13 @@ from t1d_analytics.llm_client import (
     is_provider_configured as is_provider_configured,
 )
 from t1d_analytics.llm_client import (
+    read_configured_ollama_model_list as read_configured_ollama_model_list,
+)
+from t1d_analytics.llm_client import (
     resolve_provider_and_model as resolve_provider_and_model,
+)
+from t1d_analytics.llm_client import (
+    sort_ollama_models as sort_ollama_models,
 )
 from t1d_analytics.rate_limiter import close_all_rate_limiters
 from t1d_analytics.routers.chat_routes import (

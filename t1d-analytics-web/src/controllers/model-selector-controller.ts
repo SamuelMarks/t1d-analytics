@@ -15,10 +15,72 @@ import { type ProviderSettingsModalController } from "./provider-modal-controlle
  * Default choice Ollama / Hugging Face model identifiers.
  */
 export const DEFAULT_CHOICE_OLLAMA_MODELS: readonly string[] = [
+  "gemma:2b",
+  "llama3.2:1b",
+  "phi4-mini",
+  "gemma4:latest",
   "hf.co/google/gemma-4-E4B",
   "hf.co/microsoft/Phi-4-mini-flash-reasoning",
   "hf.co/meta-llama/Llama-3.2-1B",
 ];
+
+/**
+ * Preferred lightweight local Ollama model identifiers ranked ahead of heavy 26B/27B models.
+ */
+const PREFERRED_FAST_LOCAL_MODELS: readonly string[] = [
+  "gemma:2b",
+  "llama3.2:1b",
+  "phi4-mini",
+  "gemma4:latest",
+  "gemma-4-e4b",
+  "gemma:latest",
+];
+
+/**
+ * Strips an optional `ollama/` prefix from a model identifier for normalized tag comparison.
+ * @param {string} modelId - Raw model identifier.
+ * @returns {string} Model tag without `ollama/` prefix.
+ */
+function stripOllamaPrefix(modelId: string): string {
+  return modelId.toLowerCase().startsWith("ollama/")
+    ? modelId.slice(7)
+    : modelId;
+}
+
+/**
+ * Checks whether an option/API model identifier matches a requested model identifier, normalizing `:latest` suffixes.
+ * @param {string} candidateId - Candidate model ID from `/api/models` or `<option>`.
+ * @param {string} currentModel - Current model ID stored on the chat or state.
+ * @returns {boolean} True if the identifiers match directly or via `:latest` normalization.
+ */
+export function matchesModelTagWithLatest(
+  candidateId: string,
+  currentModel: string,
+): boolean {
+  const c = stripOllamaPrefix(candidateId.trim()).toLowerCase();
+  const t = stripOllamaPrefix(currentModel.trim()).toLowerCase();
+  return c === t || c === `${t}:latest` || `${c}:latest` === t;
+}
+
+/**
+ * Computes a priority rank for a candidate fallback model so small/fast local models are preferred and `:26b`/`:27b` models are ranked last.
+ * @param {string} modelName - Candidate model name.
+ * @returns {number} Numeric rank (lower is preferred).
+ */
+export function getModelFallbackRank(modelName: string): number {
+  const cleaned = stripOllamaPrefix(modelName.trim()).toLowerCase();
+  if (
+    cleaned.includes("26b") ||
+    cleaned.includes("27b") ||
+    cleaned.includes("70b")
+  ) {
+    return 200;
+  }
+  const idx = PREFERRED_FAST_LOCAL_MODELS.findIndex(
+    (pref) => cleaned === pref || cleaned.startsWith(`${pref}:`),
+  );
+  return idx >= 0 ? idx : 50;
+}
 
 /**
  * Resolves the provider identifier for a model name or API entry.
@@ -216,34 +278,43 @@ export class ModelSelectorController {
     const activeChat = this.ui.state.getActiveChat();
     if (!activeChat) return;
 
-    const exists = Array.from(this.modelSelect.options).some(
-      (opt) => opt.value === activeChat.model,
+    const currentModel = activeChat.model;
+    const matchedOpt = Array.from(this.modelSelect.options).find((opt) =>
+      matchesModelTagWithLatest(opt.value, currentModel),
     );
-    if (exists) {
-      this.modelSelect.value = activeChat.model;
+    if (matchedOpt) {
+      this.modelSelect.value = matchedOpt.value;
+      if (matchedOpt.value !== currentModel) {
+        this.ui.state.setSelectedModel(matchedOpt.value);
+      }
       return;
     }
 
     if (modelsList.length === 0) {
       this.modelSelect.value = "sql";
-      this.ui.state.setActiveChatModel("sql");
+      this.ui.state.setSelectedModel("sql");
       return;
     }
 
-    const firstReady = modelsList.find((m) => {
-      const prov = resolveModelProvider(m.name, m.provider);
-      const readyKey =
-        (prov === "ollama" && m.configured !== false) ||
-        Boolean(this.ui.state.getApiKey(prov));
-      return m.available !== false && m.reachable !== false && readyKey;
-    });
+    const readyCandidates = modelsList
+      .filter((m) => {
+        const prov = resolveModelProvider(m.name, m.provider);
+        const readyKey =
+          (prov === "ollama" && m.configured !== false) ||
+          Boolean(this.ui.state.getApiKey(prov));
+        return m.available !== false && m.reachable !== false && readyKey;
+      })
+      .sort(
+        (a, b) => getModelFallbackRank(a.name) - getModelFallbackRank(b.name),
+      );
+    const firstReady = readyCandidates[0];
     const fallbackModel = firstReady
       ? firstReady.name
       : activeChat.messages.length === 0
         ? "sql"
         : modelsList[0].name;
     this.modelSelect.value = fallbackModel;
-    this.ui.state.setActiveChatModel(fallbackModel);
+    this.ui.state.setSelectedModel(fallbackModel);
   }
 
   /**

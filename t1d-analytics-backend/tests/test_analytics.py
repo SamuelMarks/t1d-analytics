@@ -1567,6 +1567,24 @@ def test_export_table_parquet_and_csv(tmp_path: Path) -> None:
     assert rows_pq[0] == (1, "Alice", 5.5)
     conn_pq.close()
 
+    # Parquet export while an active read-only connection has disabled external access
+    sandbox_conn = duckdb.connect(str(db_file), read_only=True)
+    try:
+        sandbox_conn.execute("SET enable_external_access = false")
+        pq_sandbox_out = tmp_path / "cohort_sandbox.parquet"
+        export_table(str(db_file), "cohort", pq_sandbox_out, "parquet")
+        assert pq_sandbox_out.exists()
+        conn_pq2 = duckdb.connect(":memory:")
+        try:
+            rows_pq2 = conn_pq2.execute(
+                f"SELECT * FROM read_parquet('{pq_sandbox_out}')"
+            ).fetchall()
+        finally:
+            conn_pq2.close()
+        assert rows_pq2 == [(1, "Alice", 5.5)]
+    finally:
+        sandbox_conn.close()
+
     # CSV export with formula injection sanitization
     conn_csv = duckdb.connect(str(db_file))
     conn_csv.execute(

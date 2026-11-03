@@ -1339,6 +1339,100 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         assert fb_sql == 'SELECT * FROM "users" LIMIT 5;'
         assert fb_sql in fb_full
 
+    # 5b. _resolve_and_select_local_ollama_model and retry-once with lightweight fallback model
+    from t1d_analytics.api_schemas import ModelInfo
+    from t1d_analytics.chat_service import (
+        _probe_installed_ollama_names,
+        _resolve_and_select_local_ollama_model,
+        stream_llm_completion_tokens,
+    )
+
+    with patch(
+        "t1d_analytics.chat_service.probe_ollama_tags_and_version",
+        return_value=([ModelInfo(name="gemma:2b")], "0.5.0"),
+    ):
+        assert _probe_installed_ollama_names() == ["gemma:2b"]
+
+    p_empty, fb_empty = _resolve_and_select_local_ollama_model(
+        "gemma4",
+        probe_fn=MagicMock(side_effect=RuntimeError("offline")),
+    )
+    assert p_empty == "gemma4"
+    assert fb_empty is None
+
+    p_resolved, fb_resolved = _resolve_and_select_local_ollama_model(
+        "gemma2:27b",
+        probe_fn=lambda: ["gemma2:27b", "gemma:2b", "gemma4:latest"],
+    )
+    assert p_resolved == "gemma2:27b"
+    assert fb_resolved == "gemma:2b"
+
+    p_unmatched, fb_unmatched = _resolve_and_select_local_ollama_model(
+        "missing:model",
+        probe_fn=lambda: ["gemma2:27b", "gemma:2b"],
+    )
+    assert p_unmatched == "gemma:2b"
+    assert fb_unmatched is None
+
+    with (
+        patch(
+            "t1d_analytics.chat_service._resolve_and_select_local_ollama_model",
+            return_value=("gemma2:27b", "gemma:2b"),
+        ),
+        patch(
+            "t1d_analytics.chat_service.complete_llm_prompt",
+            side_effect=[
+                RuntimeError("Request timed out on gemma2:27b"),
+                "```sql\nSELECT COUNT(*) FROM users;\n```",
+            ],
+        ) as mock_comp_retry,
+    ):
+        retry_full, retry_sql = translate_nl_to_sql(
+            mock_db, "Count users", model_name="ollama/gemma2:27b"
+        )
+        assert retry_sql == "SELECT COUNT(*) FROM users;"
+        assert "SELECT COUNT(*)" in retry_full
+        assert mock_comp_retry.call_count == 2
+
+    mock_retry_transport = MagicMock()
+    mock_retry_transport.completion.side_effect = [
+        RuntimeError("stream failed"),
+        RuntimeError("non-stream primary failed"),
+        "SELECT 42;",
+    ]
+    with (
+        patch(
+            "t1d_analytics.chat_service._resolve_and_select_local_ollama_model",
+            return_value=("gemma2:27b", "gemma:2b"),
+        ),
+        patch(
+            "t1d_analytics.chat_service.create_any_llm_transport",
+            return_value=mock_retry_transport,
+        ),
+    ):
+        retry_tokens = list(
+            stream_llm_completion_tokens("Count users", "ollama/gemma2:27b")
+        )
+        assert retry_tokens == ["SELECT 42;"]
+
+    mock_fail_transport = MagicMock()
+    mock_fail_transport.completion.side_effect = [
+        RuntimeError("stream failed"),
+        RuntimeError("non-stream failed without fallback"),
+    ]
+    with (
+        patch(
+            "t1d_analytics.chat_service._resolve_and_select_local_ollama_model",
+            return_value=("gemma:2b", None),
+        ),
+        patch(
+            "t1d_analytics.chat_service.create_any_llm_transport",
+            return_value=mock_fail_transport,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="non-stream failed without fallback"):
+            list(stream_llm_completion_tokens("Count users", "ollama/gemma:2b"))
+
     # 6. /api/chat/stream recovers when stream_fn raises a local Ollama OOM / sync-in-async crash
     with patch(
         "t1d_analytics.api.stream_llm_tokens",
