@@ -53,6 +53,7 @@ goto :find_root
 if "%DOCS_DIR%"=="" set DOCS_DIR=docs
 if "%DATA_DIR%"=="" set DATA_DIR=data
 if "%T1D_DB_PATH%"=="" set T1D_DB_PATH=%DATA_DIR%/t1d.duckdb
+if "%T1D_DB_SEARCH_DIR%"=="" set T1D_DB_SEARCH_DIR=/Volumes/TOSHIBA_EXT/stanford/t1d;/mnt/data/t1d
 if "%COMPOSE_FILE%"=="" set COMPOSE_FILE=docker-compose.yml
 if "%DOCKER_COMPOSE%"=="" set DOCKER_COMPOSE=docker-compose
 if "%LIBSCRIPT_ROOT_DIR%"=="" set "LIBSCRIPT_ROOT_DIR=%USERPROFILE%\repos\libscript"

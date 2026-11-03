@@ -122,11 +122,55 @@ def test_main_exception(mock_fetch: MagicMock, capsys: CaptureFixture[str]) -> N
 
 @patch("t1d_analytics.ingestion.extract_zips")
 def test_extract_subcommand(mock_extract: MagicMock) -> None:
-    """Test successful CLI execution for extract."""
+    """Test successful CLI execution for extract with default and custom flags."""
     with patch("sys.argv", ["t1d-analytics", "extract", "--data-dir", "./test_data"]):
         main()
 
     mock_extract.assert_called_once_with("./test_data")
+
+    mock_extract.reset_mock()
+    with patch(
+        "sys.argv",
+        [
+            "t1d-analytics",
+            "extract",
+            "--data-dir",
+            "./test_data",
+            "--max-decompressed-gb",
+            "500",
+            "--overwrite",
+            "--tabular-only",
+        ],
+    ):
+        main()
+
+    mock_extract.assert_called_once_with(
+        "./test_data",
+        max_decompressed_bytes=500 * 1024 * 1024 * 1024,
+        overwrite=True,
+        tabular_only=True,
+    )
+
+    mock_extract.reset_mock()
+    with patch(
+        "sys.argv",
+        [
+            "t1d-analytics",
+            "extract",
+            "--data-dir",
+            "./test_data",
+            "--max-decompressed-gb",
+            "0",
+        ],
+    ):
+        main()
+
+    mock_extract.assert_called_once_with(
+        "./test_data",
+        max_decompressed_bytes=0,
+        overwrite=False,
+        tabular_only=False,
+    )
 
 
 @patch("t1d_analytics.ingestion.load_data_to_duckdb")

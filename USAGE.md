@@ -116,11 +116,12 @@ This will output `pretrain_data`, `sft_data`, and `dpo_data` tables (plus strati
 
 The web interface communicates with the database through a FastAPI application.
 
-Start the backend server using `uvicorn`, and specify your database path using the `T1D_DB_PATH` environment variable:
+Start the backend server using `uvicorn`, and specify your database path using the `T1D_DB_PATH` environment variable (or set `T1D_DB_SEARCH_DIR` to search `/Volumes/TOSHIBA_EXT/stanford/t1d` locally and `/mnt/data/t1d` on the remote server):
 
 ```bash
 # Ensure you are in the root directory of the project
 T1D_DB_PATH=/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb \
+T1D_DB_SEARCH_DIR=/Volumes/TOSHIBA_EXT/stanford/t1d:/mnt/data/t1d \
 uvicorn t1d_analytics.api:app --app-dir t1d-analytics-backend/src --reload --host 0.0.0.0 --port 8000
 ```
 

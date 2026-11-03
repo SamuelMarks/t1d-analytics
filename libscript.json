@@ -134,8 +134,13 @@
       "engine": "duckdb",
       "name": "t1d_analytics",
       "path": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+      "search_dir_env": "T1D_DB_SEARCH_DIR",
       "fallback_paths": [
+        "/mnt/data/t1d/jaeb/t1d.duckdb",
+        "/mnt/data/t1d/t1d.duckdb",
         "/mnt/data/t1d_analytics.duckdb",
+        "/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb",
+        "/Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb",
         "data/t1d_analytics.duckdb"
       ],
       "url_env": "T1D_DB_URL",
@@ -332,6 +337,8 @@
       ],
       "env": {
         "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+        "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
+        "T1D_JAEB_DIR": "${T1D_JAEB_DIR:-/mnt/data/t1d/jaeb}",
         "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics-test/data}",
         "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}",
         "T1D_POSTGRES_URL": "${T1D_POSTGRES_URL:-postgresql://postgres:postgres@127.0.0.1:5432/t1d_analytics_db}",
@@ -421,6 +428,15 @@
         "engine": "duckdb",
         "name": "t1d_analytics",
         "path": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+        "search_dir_env": "T1D_DB_SEARCH_DIR",
+        "fallback_paths": [
+          "/mnt/data/t1d/jaeb/t1d.duckdb",
+          "/mnt/data/t1d/t1d.duckdb",
+          "/mnt/data/t1d_analytics.duckdb",
+          "/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb",
+          "/Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb",
+          "data/t1d_analytics.duckdb"
+        ],
         "url_env": "T1D_DB_URL",
         "min_tables": 4,
         "required_tables": [
@@ -452,6 +468,8 @@
         ],
         "env": {
           "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+          "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
+          "T1D_JAEB_DIR": "${T1D_JAEB_DIR:-/mnt/data/t1d/jaeb}",
           "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics-test/data}",
           "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}",
           "T1D_POSTGRES_URL": "${T1D_POSTGRES_URL:-postgresql://postgres:postgres@127.0.0.1:5432/t1d_analytics_db}",

@@ -142,6 +142,7 @@ You can override the default paths and binaries either via environment variables
 | `DOCS_DIR`           | `docs`                            | Output directory for generated Sphinx and TypeDoc documentation |
 | `DATA_DIR`           | `data`                            | Directory containing clinical trial datasets to ingest          |
 | `T1D_DB_PATH`        | `$(DATA_DIR)/t1d.duckdb`          | Path to the target DuckDB database file                         |
+| `T1D_DB_SEARCH_DIR`  | `/Volumes/TOSHIBA_EXT/stanford/t1d:/mnt/data/t1d` | Search directories for discovering T1D DuckDB databases |
 | `COMPOSE_FILE`       | `docker-compose.yml`              | Docker Compose manifest file                                    |
 | `DOCKER_COMPOSE`     | `docker-compose`                  | Docker Compose binary or command                                |
 | `LIBSCRIPT_ROOT_DIR` | `~/repos/libscript`               | Path to local LibScript installation (used by `install_base`)   |

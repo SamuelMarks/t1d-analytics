@@ -86,6 +86,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Skipping unsafe entry {} in {} (symlink detected).": "{}内の安全でないエントリ{}をスキップしています（シンボリックリンクが検出されました）。",
         "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "{} 内の安全でないエントリ {} をスキップしました（シンボリックリンクまたはハードリンクを検出）。",
         "Skipping entry {} in {} (decompressed size quota exceeded).": "{} 内のエントリ {} をスキップしました（展開サイズの上限を超過）。",
+        "Skipping unsafe entry {} in {} (suspicious compression ratio).": "{} 内の安全でないエントリ {} をスキップしました（不審な圧縮率）。",
     },
     "ar": {
         "An error occurred: {}": "حدث خطأ: {}",
@@ -166,6 +167,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Skipping unsafe entry {} in {} (symlink detected).": "تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي).",
         "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "تم تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي أو صلب).",
         "Skipping entry {} in {} (decompressed size quota exceeded).": "تم تخطي الإدخال {} في {} (تم تجاوز حصة الحجم بعد فك الضغط).",
+        "Skipping unsafe entry {} in {} (suspicious compression ratio).": "تم تخطي الإدخال غير الآمن {} في {} (نسبة ضغط مشبوهة).",
     },
     "he": {
         "An error occurred: {}": "אירעה שגיאה: {}",
@@ -246,6 +248,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Skipping unsafe entry {} in {} (symlink detected).": "מדלג על רשומה לא בטוחה {} ב-{} (זוהה קישור סימבולי).",
         "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "דילוג על רשומה לא בטוחה {} ב-{} (זוהה קישור סמלי או קשיח).",
         "Skipping entry {} in {} (decompressed size quota exceeded).": "דילוג על רשומה {} ב-{} (חריגה ממכסת גודל הפריסה).",
+        "Skipping unsafe entry {} in {} (suspicious compression ratio).": "דילוג על רשומה לא בטוחה {} ב-{} (יחס דחיסה חשוד).",
     },
 }
 

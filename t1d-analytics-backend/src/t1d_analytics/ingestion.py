@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import re
 import tarfile
 import zipfile
@@ -22,7 +23,24 @@ from t1d_analytics.sql_utils import escape_sql_identifier, escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_DECOMPRESSED_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB quota
+DEFAULT_MAX_DECOMPRESSED_BYTES = 200 * 1024 * 1024 * 1024  # 200 GiB quota
+MAX_MEMBER_COMPRESSION_RATIO = 1000  # Zip-bomb ratio threshold for >100 MiB members
+MIN_RATIO_CHECK_BYTES = 100 * 1024 * 1024  # 100 MiB threshold for ratio check
+
+_TABULAR_AND_ARCHIVE_SUFFIXES = (
+    ".csv",
+    ".txt",
+    ".parquet",
+    ".csv.gz",
+    ".sas7bdat",
+    ".xpt",
+    ".sav",
+    ".zip",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tar",
+)
 
 
 class IngestionManifestRecord(TypedDict):
@@ -59,6 +77,83 @@ def compute_file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
+def resolve_effective_decompressed_quota(
+    max_decompressed_bytes: Optional[int] = None,
+) -> int:
+    """
+    Resolve the effective maximum decompressed byte quota from explicit arguments or environment variables.
+
+    Supports `T1D_MAX_DECOMPRESSED_BYTES` and `T1D_MAX_DECOMPRESSED_GB` when `max_decompressed_bytes`
+    is None or equals `DEFAULT_MAX_DECOMPRESSED_BYTES`. A value `<= 0` indicates an unlimited quota.
+
+    Args:
+    ----
+        max_decompressed_bytes: Explicit maximum decompressed bytes (or None to use default/env).
+
+    Returns:
+    -------
+        int: Effective quota in bytes (`<= 0` means unlimited).
+
+    """
+    if (
+        max_decompressed_bytes is not None
+        and max_decompressed_bytes != DEFAULT_MAX_DECOMPRESSED_BYTES
+    ):
+        return max_decompressed_bytes
+
+    env_bytes = os.environ.get("T1D_MAX_DECOMPRESSED_BYTES", "").strip()
+    if env_bytes:
+        try:
+            return int(env_bytes)
+        except ValueError:
+            pass
+
+    env_gb = os.environ.get("T1D_MAX_DECOMPRESSED_GB", "").strip()
+    if env_gb:
+        try:
+            gb_val = float(env_gb)
+            return int(gb_val * 1024 * 1024 * 1024) if gb_val > 0 else 0
+        except ValueError:
+            pass
+
+    return (
+        DEFAULT_MAX_DECOMPRESSED_BYTES
+        if max_decompressed_bytes is None
+        else max_decompressed_bytes
+    )
+
+
+def _should_skip_archive_member_name(
+    member_name: str,
+    tabular_only: bool = False,
+) -> bool:
+    """
+    Determine whether an archive member should be skipped as OS metadata or non-tabular documentation.
+
+    Args:
+    ----
+        member_name: Internal relative path of the archive entry.
+        tabular_only: If True, skip entries that are neither tabular data files nor nested archives.
+
+    Returns:
+    -------
+        bool: True if the member should be skipped without warning.
+
+    """
+    norm_parts = Path(member_name.replace("\\", "/")).parts
+    if not norm_parts:
+        return True
+    for part in norm_parts:
+        if part == "__MACOSX" or part.startswith("._"):
+            return True
+    leaf_lower = norm_parts[-1].lower()
+    if leaf_lower in ("thumbs.db", ".ds_store"):
+        return True
+    if tabular_only:
+        return not leaf_lower.endswith(_TABULAR_AND_ARCHIVE_SUFFIXES)
+    return False
+
+
 def _extract_tar_archive(
     path: Path,
     extract_dir: Path,
@@ -66,9 +161,11 @@ def _extract_tar_archive(
     total_extracted_bytes: int,
     max_decompressed_bytes: int,
     report_fn: Callable[[str], None],
+    overwrite: bool = False,
+    tabular_only: bool = False,
 ) -> int:
     """
-    Safely extract a tar archive into `extract_dir` with symlink, path-traversal, and size-quota checks.
+    Safely extract a tar archive into `extract_dir` with symlink, path-traversal, idempotency, and size-quota checks.
 
     Args:
     ----
@@ -76,8 +173,10 @@ def _extract_tar_archive(
         extract_dir: Target extraction directory.
         resolved_extract_dir: Resolved target extraction directory.
         total_extracted_bytes: Running cumulative extracted byte count.
-        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes.
+        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes (`<= 0` for unlimited).
         report_fn: Progress/warning reporter callback.
+        overwrite: Whether to overwrite already-extracted member files that match expected size.
+        tabular_only: Whether to skip non-tabular documentation files.
 
     Returns:
     -------
@@ -85,6 +184,7 @@ def _extract_tar_archive(
 
     """
     _ = get_translator()
+    announced = False
     try:
         with tarfile.open(path, "r:*") as tar_ref:
             for tar_member in tar_ref.getmembers():
@@ -94,7 +194,7 @@ def _extract_tar_archive(
                         tar_member.name,
                         path.name,
                     )
-                    logger.warning(warn_sym)
+                    logger.debug(warn_sym)
                     report_fn(warn_sym)
                     continue
                 tar_target = (resolved_extract_dir / tar_member.name).resolve()
@@ -108,26 +208,44 @@ def _extract_tar_archive(
                         tar_member.name,
                         path.name,
                     )
-                    logger.warning(warn_trav)
+                    logger.debug(warn_trav)
                     report_fn(warn_trav)
                     continue
+                if tar_member.isdir() or _should_skip_archive_member_name(
+                    tar_member.name, tabular_only=tabular_only
+                ):
+                    continue
+                expected_size = max(0, tar_member.size)
                 if (
-                    total_extracted_bytes + max(0, tar_member.size)
-                    > max_decompressed_bytes
+                    not overwrite
+                    and tar_target.exists()
+                    and tar_target.is_file()
+                    and tar_target.stat().st_size == expected_size
+                ):
+                    continue
+                if (
+                    max_decompressed_bytes > 0
+                    and total_extracted_bytes + expected_size > max_decompressed_bytes
                 ):
                     warn_quota = _(
                         "Skipping entry {} in {} (decompressed size quota exceeded).",
                         tar_member.name,
                         path.name,
                     )
-                    logger.warning(warn_quota)
+                    logger.debug(warn_quota)
                     report_fn(warn_quota)
                     continue
-                total_extracted_bytes += max(0, tar_member.size)
+                if not announced:
+                    ext_msg = _("Extracting {}...", path.name)
+                    logger.info(ext_msg)
+                    report_fn(ext_msg)
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    announced = True
+                total_extracted_bytes += expected_size
                 tar_ref.extract(tar_member, extract_dir)
     except (tarfile.TarError, EOFError, OSError):
         err_tar = _("Failed to extract {} (Bad Archive File).", path.name)
-        logger.error(err_tar)
+        logger.debug(err_tar)
         report_fn(err_tar)
     return total_extracted_bytes
 
@@ -139,9 +257,11 @@ def _extract_zip_archive(
     total_extracted_bytes: int,
     max_decompressed_bytes: int,
     report_fn: Callable[[str], None],
+    overwrite: bool = False,
+    tabular_only: bool = False,
 ) -> int:
     """
-    Safely extract a zip archive into `extract_dir` with symlink, path-traversal, and size-quota checks.
+    Safely extract a zip archive into `extract_dir` with symlink, path-traversal, idempotency, and size-quota checks.
 
     Args:
     ----
@@ -149,8 +269,10 @@ def _extract_zip_archive(
         extract_dir: Target extraction directory.
         resolved_extract_dir: Resolved target extraction directory.
         total_extracted_bytes: Running cumulative extracted byte count.
-        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes.
+        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes (`<= 0` for unlimited).
         report_fn: Progress/warning reporter callback.
+        overwrite: Whether to overwrite already-extracted member files that match expected size.
+        tabular_only: Whether to skip non-tabular documentation files.
 
     Returns:
     -------
@@ -158,6 +280,7 @@ def _extract_zip_archive(
 
     """
     _ = get_translator()
+    announced = False
     try:
         with zipfile.ZipFile(path, "r") as zip_ref:
             for zip_info in zip_ref.infolist():
@@ -167,7 +290,7 @@ def _extract_zip_archive(
                         zip_info.filename,
                         path.name,
                     )
-                    logger.warning(warn_zsym)
+                    logger.debug(warn_zsym)
                     report_fn(warn_zsym)
                     continue
                 zip_target = (resolved_extract_dir / zip_info.filename).resolve()
@@ -181,26 +304,57 @@ def _extract_zip_archive(
                         zip_info.filename,
                         path.name,
                     )
-                    logger.warning(warn_ztrav)
+                    logger.debug(warn_ztrav)
                     report_fn(warn_ztrav)
                     continue
+                if zip_info.is_dir() or _should_skip_archive_member_name(
+                    zip_info.filename, tabular_only=tabular_only
+                ):
+                    continue
+                expected_size = max(0, zip_info.file_size)
+                compressed_size = max(1, zip_info.compress_size)
                 if (
-                    total_extracted_bytes + max(0, zip_info.file_size)
-                    > max_decompressed_bytes
+                    expected_size >= MIN_RATIO_CHECK_BYTES
+                    and (expected_size / compressed_size) > MAX_MEMBER_COMPRESSION_RATIO
+                ):
+                    warn_bomb = _(
+                        "Skipping unsafe entry {} in {} (suspicious compression ratio).",
+                        zip_info.filename,
+                        path.name,
+                    )
+                    logger.debug(warn_bomb)
+                    report_fn(warn_bomb)
+                    continue
+                if (
+                    not overwrite
+                    and zip_target.exists()
+                    and zip_target.is_file()
+                    and zip_target.stat().st_size == expected_size
+                ):
+                    continue
+                if (
+                    max_decompressed_bytes > 0
+                    and total_extracted_bytes + expected_size > max_decompressed_bytes
                 ):
                     warn_zquota = _(
                         "Skipping entry {} in {} (decompressed size quota exceeded).",
                         zip_info.filename,
                         path.name,
                     )
-                    logger.warning(warn_zquota)
+                    logger.debug(warn_zquota)
                     report_fn(warn_zquota)
                     continue
-                total_extracted_bytes += max(0, zip_info.file_size)
+                if not announced:
+                    ext_msg = _("Extracting {}...", path.name)
+                    logger.info(ext_msg)
+                    report_fn(ext_msg)
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    announced = True
+                total_extracted_bytes += expected_size
                 zip_ref.extract(zip_info, extract_dir)
     except zipfile.BadZipFile:
         err_zip = _("Failed to extract {} (Bad Zip File).", path.name)
-        logger.error(err_zip)
+        logger.debug(err_zip)
         report_fn(err_zip)
     return total_extracted_bytes
 
@@ -210,27 +364,33 @@ def extract_zips(
     max_depth: int = 3,
     report_fn: Callable[[str], None] = print,
     max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
+    overwrite: bool = False,
+    tabular_only: bool = False,
 ) -> None:
     """
     Extract zip and tar archives found in the data directory safely without path traversal or zip bombs.
 
-    Recursively decompresses nested archives up to max_depth.
+    Recursively decompresses nested archives up to max_depth with per-entry size-verified idempotency.
 
     Args:
     ----
         data_dir_str: Directory path containing archive files to extract.
         max_depth: Maximum recursion depth for decompressing nested archives.
         report_fn: Progress reporter callback (defaults to `print`).
-        max_decompressed_bytes: Maximum cumulative decompressed size in bytes allowed across archives.
+        max_decompressed_bytes: Maximum cumulative decompressed size in bytes allowed across archives (`<= 0` for unlimited).
+        overwrite: Whether to force re-extraction of existing member files even if sizes match.
+        tabular_only: Whether to only extract tabular data files and nested archives (skipping PDFs/docs).
 
     """
     _ = get_translator()
     data_dir = Path(data_dir_str)
     if not data_dir.exists():
         msg = _("Data directory {} does not exist.", data_dir)
-        logger.warning(msg)
+        logger.debug(msg)
         report_fn(msg)
         return
+
+    effective_quota = resolve_effective_decompressed_quota(max_decompressed_bytes)
 
     check_msg = _("Checking for zip files to extract...")
     logger.info(check_msg)
@@ -238,13 +398,26 @@ def extract_zips(
     processed_archives: set[Path] = set()
     found_any = False
     total_extracted_bytes = 0
-    archive_patterns = ("*.zip", "*.tar.gz", "*.tgz", "*.tar.bz2", "*.tar")
+    archive_patterns = (
+        "*.zip",
+        "*.ZIP",
+        "*.tar.gz",
+        "*.TAR.GZ",
+        "*.tgz",
+        "*.TGZ",
+        "*.tar.bz2",
+        "*.TAR.BZ2",
+        "*.tar",
+        "*.TAR",
+    )
 
-    for depth in range(max_depth):
+    for _depth in range(max_depth):
         candidate_archives: list[Path] = []
         for pat in archive_patterns:
             candidate_archives.extend(data_dir.rglob(pat))
-        candidate_archives = list(dict.fromkeys(candidate_archives))
+        candidate_archives = [
+            p for p in dict.fromkeys(candidate_archives) if not p.name.startswith("._")
+        ]
 
         unprocessed = [
             p for p in candidate_archives if p.resolve() not in processed_archives
@@ -264,13 +437,6 @@ def extract_zips(
             else:
                 extract_dir = path.with_suffix("")
 
-            if depth == 0 and extract_dir.exists():
-                continue
-
-            ext_msg = _("Extracting {}...", path.name)
-            logger.info(ext_msg)
-            report_fn(ext_msg)
-            extract_dir.mkdir(parents=True, exist_ok=True)
             resolved_extract_dir = extract_dir.resolve()
 
             if p_name.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar")):
@@ -279,8 +445,10 @@ def extract_zips(
                     extract_dir,
                     resolved_extract_dir,
                     total_extracted_bytes,
-                    max_decompressed_bytes,
+                    effective_quota,
                     report_fn,
+                    overwrite=overwrite,
+                    tabular_only=tabular_only,
                 )
             else:
                 total_extracted_bytes = _extract_zip_archive(
@@ -288,8 +456,10 @@ def extract_zips(
                     extract_dir,
                     resolved_extract_dir,
                     total_extracted_bytes,
-                    max_decompressed_bytes,
+                    effective_quota,
                     report_fn,
+                    overwrite=overwrite,
+                    tabular_only=tabular_only,
                 )
 
     if not found_any:

@@ -46,6 +46,7 @@ USER t1d
 EXPOSE 8000
 
 ENV T1D_DB_PATH=/app/data/t1d.duckdb
+ENV T1D_DB_SEARCH_DIR=/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d:/app/data
 ENV PYTHONUNBUFFERED=1
 
 CMD ["uvicorn", "t1d_analytics.api:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -11,6 +11,7 @@ services:
       - "8000:8000"
     environment:
       - T1D_DB_PATH=/app/data/t1d.duckdb
+      - T1D_DB_SEARCH_DIR=/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d:/app/data
       - OLLAMA_HOST=http://ollama:11434
       - DEBUG=1
     volumes:

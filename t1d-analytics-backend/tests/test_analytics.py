@@ -438,22 +438,115 @@ def test_load_data_to_duckdb_existing_table(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_extract_zips_already_extracted(tmp_path: Path) -> None:
-    """Test extract_zips when the directory already exists."""
+def test_extract_zips_already_extracted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Test extract_zips per-entry size-verified idempotency, partial recovery, overwrite, tabular_only, and quota env vars."""
+    import tarfile
     import zipfile
 
-    from t1d_analytics.ingestion import extract_zips
+    from t1d_analytics.ingestion import (
+        DEFAULT_MAX_DECOMPRESSED_BYTES,
+        _should_skip_archive_member_name,
+        extract_zips,
+        resolve_effective_decompressed_quota,
+    )
 
+    assert DEFAULT_MAX_DECOMPRESSED_BYTES == 200 * 1024 * 1024 * 1024
+    assert resolve_effective_decompressed_quota(12345) == 12345
+    assert resolve_effective_decompressed_quota(None) == DEFAULT_MAX_DECOMPRESSED_BYTES
+    with patch.dict(os.environ, {"T1D_MAX_DECOMPRESSED_BYTES": "5000"}):
+        assert resolve_effective_decompressed_quota() == 5000
+    with patch.dict(
+        os.environ,
+        {"T1D_MAX_DECOMPRESSED_BYTES": "invalid", "T1D_MAX_DECOMPRESSED_GB": "2"},
+    ):
+        assert resolve_effective_decompressed_quota() == 2 * 1024 * 1024 * 1024
+    with patch.dict(
+        os.environ,
+        {"T1D_MAX_DECOMPRESSED_BYTES": "", "T1D_MAX_DECOMPRESSED_GB": "0"},
+    ):
+        assert resolve_effective_decompressed_quota() == 0
+    with patch.dict(
+        os.environ,
+        {"T1D_MAX_DECOMPRESSED_BYTES": "", "T1D_MAX_DECOMPRESSED_GB": "bad_gb"},
+    ):
+        assert resolve_effective_decompressed_quota() == DEFAULT_MAX_DECOMPRESSED_BYTES
+
+    assert _should_skip_archive_member_name("")
+    assert _should_skip_archive_member_name("__MACOSX/file.txt")
+    assert _should_skip_archive_member_name("sub/._file.txt")
+    assert _should_skip_archive_member_name("CRFs/Thumbs.db")
+    assert _should_skip_archive_member_name("CRFs/protocol.pdf", tabular_only=True)
+    assert not _should_skip_archive_member_name("Data/cgm.txt", tabular_only=True)
+
+    # 1. Partial directory recovery: if extract_dir exists but is empty (from a prior interrupted run),
+    # extract_zips recovers and extracts the missing member.
     zip_path = tmp_path / "data.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("sub/", "")
+        zf.writestr("__MACOSX/._test.txt", "mac")
+        zf.writestr("Protocol.pdf", "pdf_bytes")
         zf.writestr("test.txt", "content")
 
     extract_dir = tmp_path / "data"
     extract_dir.mkdir()
 
+    capsys.readouterr()
+    extract_zips(str(tmp_path), tabular_only=True)
+    assert (extract_dir / "test.txt").exists()
+    assert not (extract_dir / "Protocol.pdf").exists()
+
+    # 2. Second run when test.txt already exists with matching size: idempotently skipped without re-extracting
+    capsys.readouterr()
+    extract_zips(str(tmp_path), tabular_only=True)
+    second_out = capsys.readouterr().out
+    assert "Extracting data.zip..." not in second_out
+
+    # 3. With overwrite=True and tabular_only=False, re-extracts and includes Protocol.pdf
+    extract_zips(str(tmp_path), overwrite=True, tabular_only=False)
+    assert (extract_dir / "Protocol.pdf").exists()
+
+    # 4. Tar archive idempotency and directory/metadata skipping
+    tar_path = tmp_path / "tar_idem.tar"
+    with tarfile.open(tar_path, "w") as tf:
+        dir_info = tarfile.TarInfo(name="subdir")
+        dir_info.type = tarfile.DIRTYPE
+        tf.addfile(dir_info)
+        mac_info = tarfile.TarInfo(name="__MACOSX/._ignore.txt")
+        mac_info.size = 3
+        tf.addfile(mac_info, io.BytesIO(b"mac"))
+        file_info = tarfile.TarInfo(name="subdir/table.csv")
+        file_info.size = 7
+        tf.addfile(file_info, io.BytesIO(b"a,b\n1,2"))
+        file_info2 = tarfile.TarInfo(name="subdir/table2.csv")
+        file_info2.size = 7
+        tf.addfile(file_info2, io.BytesIO(b"c,d\n3,4"))
+
     extract_zips(str(tmp_path))
-    # It should skip extraction, so "test.txt" won't be inside extract_dir
-    assert not (extract_dir / "test.txt").exists()
+    assert (tmp_path / "tar_idem" / "subdir" / "table.csv").exists()
+    capsys.readouterr()
+    extract_zips(str(tmp_path))
+    assert "Extracting tar_idem.tar..." not in capsys.readouterr().out
+
+    # 5. Zip-bomb compression ratio check on oversized suspicious entry
+    bomb_dir = tmp_path / "bomb_check"
+    bomb_dir.mkdir()
+    bomb_zip = bomb_dir / "bomb.zip"
+    with zipfile.ZipFile(bomb_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("normal.csv", "id\n1\n")
+    with (
+        patch("t1d_analytics.ingestion.MIN_RATIO_CHECK_BYTES", 10),
+        patch("t1d_analytics.ingestion.MAX_MEMBER_COMPRESSION_RATIO", 1),
+    ):
+        big_zeros = b"0" * 5000
+        with zipfile.ZipFile(bomb_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("zero_bomb.txt", big_zeros)
+        capsys.readouterr()
+        extract_zips(str(bomb_dir))
+        bomb_out = capsys.readouterr().out
+        assert "suspicious compression ratio" in bomb_out
+        assert not (bomb_dir / "bomb" / "zero_bomb.txt").exists()
 
 
 def test_load_data_no_matches_file(tmp_path: Path, mocker: MagicMock) -> None:

@@ -294,8 +294,36 @@ def test_validate_db_path_traversal(
     assert get_allowed_db_roots() == [tmp_path.resolve()]
     monkeypatch.delenv("T1D_ALLOWED_DB_DIR", raising=False)
 
-    # T1D_JAEB_DIR adds existing external Jaeb root and ignores non-existent root
-    from t1d_analytics.db_security import get_jaeb_external_root
+    # T1D_JAEB_DIR and T1D_DB_SEARCH_DIR add existing external roots and ignore non-existent roots
+    from t1d_analytics import db_security
+    from t1d_analytics.db_security import (
+        _split_search_dir_spec,
+        get_configured_db_search_dirs,
+        get_jaeb_external_root,
+        get_t1d_db_search_dirs,
+    )
+
+    assert _split_search_dir_spec("   ") == []
+    assert _split_search_dir_spec(
+        "/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d"
+    ) == [
+        Path("/mnt/data/t1d"),
+        Path("/Volumes/TOSHIBA_EXT/stanford/t1d"),
+    ]
+    assert _split_search_dir_spec(
+        "/mnt/data/t1d;/Volumes/TOSHIBA_EXT/stanford/t1d"
+    ) == [
+        Path("/mnt/data/t1d"),
+        Path("/Volumes/TOSHIBA_EXT/stanford/t1d"),
+    ]
+    assert _split_search_dir_spec(
+        "/mnt/data/t1d,/Volumes/TOSHIBA_EXT/stanford/t1d"
+    ) == [
+        Path("/mnt/data/t1d"),
+        Path("/Volumes/TOSHIBA_EXT/stanford/t1d"),
+    ]
+    assert _split_search_dir_spec("C:\\t1d") == [Path("C:\\t1d")]
+    assert get_jaeb_external_root() == db_security.DEFAULT_JAEB_EXTERNAL_ROOT
 
     jaeb_dir = tmp_path / "jaeb_ext"
     jaeb_dir.mkdir()
@@ -306,6 +334,33 @@ def test_validate_db_path_traversal(
     monkeypatch.setenv("T1D_JAEB_DIR", str(tmp_path / "missing_jaeb_ext"))
     assert (tmp_path / "missing_jaeb_ext").resolve() not in get_allowed_db_roots()
     monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
+
+    # T1D_DB_SEARCH_DIR with multiple colon-separated paths (remote + local host) and duplicates
+    remote_sim = tmp_path / "mnt_data_t1d"
+    local_sim = tmp_path / "toshiba_t1d"
+    local_sim.mkdir()
+    monkeypatch.setenv(
+        "T1D_DB_SEARCH_DIR",
+        f"{remote_sim}:{local_sim}:{local_sim}:/Volumes/TOSHIBA_EXT/stanford/t1d",
+    )
+    monkeypatch.setenv("T1D_DB_PATH", str(local_sim / "test.duckdb"))
+    assert get_jaeb_external_root() == local_sim
+    assert local_sim.resolve() in get_allowed_db_roots()
+    monkeypatch.delenv("T1D_DB_PATH", raising=False)
+    cfg_dirs = get_configured_db_search_dirs()
+    assert remote_sim in cfg_dirs
+    assert (remote_sim / "jaeb") in cfg_dirs
+    assert local_sim in cfg_dirs
+    assert local_sim in get_t1d_db_search_dirs()
+
+    monkeypatch.setenv("T1D_DB_SEARCH_DIR", str(remote_sim))
+    assert get_jaeb_external_root() == remote_sim
+    monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
+
+    # Platform fallback when REMOTE_T1D_DB_SEARCH_ROOT exists and DEFAULT_JAEB_EXTERNAL_ROOT does not
+    monkeypatch.setattr(db_security, "REMOTE_T1D_DB_SEARCH_ROOT", local_sim)
+    monkeypatch.setattr(db_security, "DEFAULT_JAEB_EXTERNAL_ROOT", remote_sim / "jaeb")
+    assert get_jaeb_external_root() == local_sim
 
 
 def test_validate_db_path_env_var(
@@ -341,6 +396,23 @@ def test_validate_db_path_env_var(
     with patch("duckdb.connect", side_effect=RuntimeError("mock")):
         hlth = check_database_health(db_path=None)
         assert hlth.configured_path == "data/t1d.duckdb"
+
+    # When data/t1d.duckdb does not exist, resolve_default_db_path falls back to T1D_DB_SEARCH_DIR
+    (data_sub / "t1d.duckdb").unlink()
+    search_root = tmp_path / "ext_search"
+    jaeb_sub = search_root / "jaeb"
+    jaeb_sub.mkdir(parents=True)
+    ext_t1d_db = jaeb_sub / "t1d.duckdb"
+    ext_t1d_db.write_text("dummy_jaeb")
+    monkeypatch.setenv("T1D_DB_SEARCH_DIR", str(search_root))
+    assert validate_db_path("t1d.duckdb") == str(ext_t1d_db.resolve())
+
+    # If t1d.duckdb is absent in search_root, falls back to first *.duckdb in search_root
+    ext_t1d_db.unlink()
+    alt_ext_db = jaeb_sub / "cohort_jaeb.duckdb"
+    alt_ext_db.write_text("dummy_alt")
+    assert validate_db_path("t1d.duckdb") == str(alt_ext_db.resolve())
+    monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
 
 
 def test_get_providers_status_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:

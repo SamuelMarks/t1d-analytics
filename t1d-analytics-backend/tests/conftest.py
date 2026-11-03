@@ -36,6 +36,10 @@ def _mock_any_llm(
     mock_module.AnyLLM = MagicMock()
     monkeypatch.setitem(sys.modules, "any_llm", mock_module)
     monkeypatch.delenv("T1D_DB_PATH", raising=False)
+    monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
+    monkeypatch.delenv("T1D_DB_SEARCH_PATH", raising=False)
+    monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
+    monkeypatch.delenv("T1D_DB_DIR", raising=False)
     monkeypatch.delenv("T1D_SESSIONS_DB", raising=False)
     default_sess_dir = tmp_path_factory.getbasetemp() / "default_sessions"
     default_sess_dir.mkdir(parents=True, exist_ok=True)

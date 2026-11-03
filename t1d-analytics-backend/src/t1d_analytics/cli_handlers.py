@@ -174,7 +174,24 @@ def handle_extract(opts: CliOptionsModel) -> None:
         opts: Validated CLI options model.
 
     """
-    ingestion.extract_zips(opts.data_dir)
+    if (
+        opts.max_decompressed_gb == 200.0
+        and not opts.overwrite
+        and not opts.tabular_only
+    ):
+        ingestion.extract_zips(opts.data_dir)
+    else:
+        max_bytes = (
+            int(opts.max_decompressed_gb * 1024 * 1024 * 1024)
+            if opts.max_decompressed_gb > 0
+            else 0
+        )
+        ingestion.extract_zips(
+            opts.data_dir,
+            max_decompressed_bytes=max_bytes,
+            overwrite=opts.overwrite,
+            tabular_only=opts.tabular_only,
+        )
 
 
 def handle_load(opts: CliOptionsModel) -> None:

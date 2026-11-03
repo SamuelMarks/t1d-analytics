@@ -595,6 +595,9 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert "REMOTE_USER" in dotenv_vars
     assert "DATA_DISK_MOUNT" in dotenv_vars
     assert "T1D_DB_PATH" in dotenv_vars
+    assert "T1D_DB_SEARCH_DIR" in dotenv_vars
+    assert "/mnt/data/t1d" in dotenv_vars["T1D_DB_SEARCH_DIR"]
+    assert "/Volumes/TOSHIBA_EXT/stanford/t1d" in dotenv_vars["T1D_DB_SEARCH_DIR"]
 
     secrets_tpl_path = REPO_ROOT / ".env.secrets.tpl"
     assert secrets_tpl_path.is_file()
@@ -640,6 +643,13 @@ def test_libscript_config_and_docs_consistency() -> None:
     )
     assert config["ingress"]["routes"]["/"]["spa"] is True
     assert config["services"]["t1d-api"]["port"] in (8000, 8001)
+    assert "T1D_DB_SEARCH_DIR" in config["services"]["t1d-api"]["env"]
+    assert "/mnt/data/t1d" in config["services"]["t1d-api"]["env"]["T1D_DB_SEARCH_DIR"]
+    assert (
+        "/Volumes/TOSHIBA_EXT/stanford/t1d"
+        in config["services"]["t1d-api"]["env"]["T1D_DB_SEARCH_DIR"]
+    )
+    assert "T1D_DB_SEARCH_DIR" in config["infrastructure"]["services"]["t1d-api"]["env"]
     assert ".env" in config["services"]["t1d-api"]["env_files"]
     assert ".env.secrets" in config["services"]["t1d-api"]["env_files"]
     assert ".env.libscript" in config["services"]["t1d-api"]["env_files"]

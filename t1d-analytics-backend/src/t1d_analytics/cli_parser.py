@@ -43,6 +43,8 @@ class CliNamespace(argparse.Namespace):
     json: bool = False
     sessions_db: Optional[str] = None
     overwrite: bool = False
+    max_decompressed_gb: float = 200.0
+    tabular_only: bool = False
     table: str = "sft_data"
     format: str = "jsonl"
     output_file: str = ""
@@ -108,6 +110,8 @@ class CliOptionsModel(BaseModel):
     )
     sessions_db: Optional[str] = None
     overwrite: bool = False
+    max_decompressed_gb: float = 200.0
+    tabular_only: bool = False
     table: str = "sft_data"
     format: str = "jsonl"
     output_file: str = ""
@@ -227,6 +231,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default="./data",
         help="The directory containing downloaded zip files.",
+    )
+    extract_parser.add_argument(
+        "--max-decompressed-gb",
+        type=float,
+        default=200.0,
+        help="Maximum cumulative decompressed size in GiB across archives (0 for unlimited, default: 200.0).",
+    )
+    extract_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Force re-extraction of archives even if target files already exist.",
+    )
+    extract_parser.add_argument(
+        "--tabular-only",
+        action="store_true",
+        help="Only extract tabular clinical data files and nested archives, skipping PDFs and docs.",
     )
 
     load_parser = subparsers.add_parser(

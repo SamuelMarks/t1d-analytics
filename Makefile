@@ -11,6 +11,8 @@
 DOCS_DIR ?= docs
 DATA_DIR ?= data
 T1D_DB_PATH ?= $(DATA_DIR)/t1d.duckdb
+T1D_DB_SEARCH_DIR ?= /Volumes/TOSHIBA_EXT/stanford/t1d:/mnt/data/t1d
+export T1D_DB_SEARCH_DIR
 COMPOSE_FILE ?= docker-compose.yml
 DOCKER_COMPOSE ?= docker-compose
 LIBSCRIPT_ROOT_DIR ?= $(HOME)/repos/libscript
