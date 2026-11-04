@@ -4,12 +4,9 @@ import csv
 import hashlib
 import json
 import logging
-import os
 import re
-import tarfile
-import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import duckdb
 from typing_extensions import TypedDict
@@ -17,6 +14,26 @@ from typing_extensions import TypedDict
 if TYPE_CHECKING:
     import pandas as pd
 
+from t1d_analytics.archive_extractor import (
+    _ARCHIVE_GLOB_PATTERNS,
+    _TABULAR_AND_ARCHIVE_SUFFIXES,
+    DEFAULT_MAX_DECOMPRESSED_BYTES,
+    MAX_MEMBER_COMPRESSION_RATIO,
+    MIN_RATIO_CHECK_BYTES,
+    _discover_unprocessed_archives,
+    _extract_single_archive_file,
+    _extract_single_zip,
+    _extract_tar_archive,
+    _extract_zip_archive,
+    _is_already_extracted,
+    _is_safe_member_target,
+    _resolve_archive_extract_dir,
+    _should_skip_archive_member_name,
+    resolve_effective_decompressed_quota,
+)
+from t1d_analytics.archive_extractor import (
+    extract_zips as _archive_extract_zips,
+)
 from t1d_analytics.errors import DatabaseError
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.sql_utils import (
@@ -26,25 +43,6 @@ from t1d_analytics.sql_utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MAX_DECOMPRESSED_BYTES = 200 * 1024 * 1024 * 1024  # 200 GiB quota
-MAX_MEMBER_COMPRESSION_RATIO = 1000  # Zip-bomb ratio threshold for >100 MiB members
-MIN_RATIO_CHECK_BYTES = 100 * 1024 * 1024  # 100 MiB threshold for ratio check
-
-_TABULAR_AND_ARCHIVE_SUFFIXES = (
-    ".csv",
-    ".txt",
-    ".parquet",
-    ".csv.gz",
-    ".sas7bdat",
-    ".xpt",
-    ".sav",
-    ".zip",
-    ".tar.gz",
-    ".tgz",
-    ".tar.bz2",
-    ".tar",
-)
 
 
 class IngestionManifestRecord(TypedDict):
@@ -56,6 +54,39 @@ class IngestionManifestRecord(TypedDict):
     row_count: int
     loaded_at: str
     file_size: int
+
+
+def extract_zips(
+    data_dir_str: str,
+    max_depth: int = 3,
+    report_fn: Callable[[str], None] = print,
+    max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
+    overwrite: bool = False,
+    tabular_only: bool = False,
+) -> None:
+    """
+    Extract zip and tar archives found in the data directory safely without path traversal or zip bombs.
+
+    Args:
+    ----
+        data_dir_str: Directory path containing archive files to extract.
+        max_depth: Maximum recursion depth for decompressing nested archives.
+        report_fn: Progress reporter callback (defaults to `print`).
+        max_decompressed_bytes: Maximum cumulative decompressed size in bytes allowed across archives.
+        overwrite: Whether to force re-extraction of existing member files even if sizes match.
+        tabular_only: Whether to only extract tabular data files and nested archives.
+
+    """
+    _archive_extract_zips(
+        data_dir_str=data_dir_str,
+        max_depth=max_depth,
+        report_fn=report_fn,
+        max_decompressed_bytes=max_decompressed_bytes,
+        overwrite=overwrite,
+        tabular_only=tabular_only,
+        min_ratio_check_bytes=MIN_RATIO_CHECK_BYTES,
+        max_member_compression_ratio=MAX_MEMBER_COMPRESSION_RATIO,
+    )
 
 
 def compute_file_hash(path: Path) -> str:
@@ -81,401 +112,6 @@ def compute_file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def resolve_effective_decompressed_quota(
-    max_decompressed_bytes: Optional[int] = None,
-) -> int:
-    """
-    Resolve the effective maximum decompressed byte quota from explicit arguments or environment variables.
-
-    Supports `T1D_MAX_DECOMPRESSED_BYTES` and `T1D_MAX_DECOMPRESSED_GB` when `max_decompressed_bytes`
-    is None or equals `DEFAULT_MAX_DECOMPRESSED_BYTES`. A value `<= 0` indicates an unlimited quota.
-
-    Args:
-    ----
-        max_decompressed_bytes: Explicit maximum decompressed bytes (or None to use default/env).
-
-    Returns:
-    -------
-        int: Effective quota in bytes (`<= 0` means unlimited).
-
-    """
-    if (
-        max_decompressed_bytes is not None
-        and max_decompressed_bytes != DEFAULT_MAX_DECOMPRESSED_BYTES
-    ):
-        return max_decompressed_bytes
-
-    env_bytes = os.environ.get("T1D_MAX_DECOMPRESSED_BYTES", "").strip()
-    if env_bytes:
-        try:
-            return int(env_bytes)
-        except ValueError:
-            pass
-
-    env_gb = os.environ.get("T1D_MAX_DECOMPRESSED_GB", "").strip()
-    if env_gb:
-        try:
-            gb_val = float(env_gb)
-            return int(gb_val * 1024 * 1024 * 1024) if gb_val > 0 else 0
-        except ValueError:
-            pass
-
-    return (
-        DEFAULT_MAX_DECOMPRESSED_BYTES
-        if max_decompressed_bytes is None
-        else max_decompressed_bytes
-    )
-
-
-def _should_skip_archive_member_name(
-    member_name: str,
-    tabular_only: bool = False,
-) -> bool:
-    """
-    Determine whether an archive member should be skipped as OS metadata or non-tabular documentation.
-
-    Args:
-    ----
-        member_name: Internal relative path of the archive entry.
-        tabular_only: If True, skip entries that are neither tabular data files nor nested archives.
-
-    Returns:
-    -------
-        bool: True if the member should be skipped without warning.
-
-    """
-    norm_parts = Path(member_name.replace("\\", "/")).parts
-    if not norm_parts:
-        return True
-    for part in norm_parts:
-        if part == "__MACOSX" or part.startswith("._"):
-            return True
-    leaf_lower = norm_parts[-1].lower()
-    if leaf_lower in ("thumbs.db", ".ds_store"):
-        return True
-    if tabular_only:
-        return not leaf_lower.endswith(_TABULAR_AND_ARCHIVE_SUFFIXES)
-    return False
-
-
-def _extract_tar_archive(
-    path: Path,
-    extract_dir: Path,
-    resolved_extract_dir: Path,
-    total_extracted_bytes: int,
-    max_decompressed_bytes: int,
-    report_fn: Callable[[str], None],
-    overwrite: bool = False,
-    tabular_only: bool = False,
-) -> int:
-    """
-    Safely extract a tar archive into `extract_dir` with symlink, path-traversal, idempotency, and size-quota checks.
-
-    Args:
-    ----
-        path: Source tar archive path.
-        extract_dir: Target extraction directory.
-        resolved_extract_dir: Resolved target extraction directory.
-        total_extracted_bytes: Running cumulative extracted byte count.
-        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes (`<= 0` for unlimited).
-        report_fn: Progress/warning reporter callback.
-        overwrite: Whether to overwrite already-extracted member files that match expected size.
-        tabular_only: Whether to skip non-tabular documentation files.
-
-    Returns:
-    -------
-        int: Updated cumulative extracted byte count.
-
-    """
-    _ = get_translator()
-    announced = False
-    try:
-        with tarfile.open(path, "r:*") as tar_ref:
-            for tar_member in tar_ref.getmembers():
-                if tar_member.issym() or tar_member.islnk():
-                    warn_sym = _(
-                        "Skipping unsafe entry {} in {} (symlink or hardlink detected).",
-                        tar_member.name,
-                        path.name,
-                    )
-                    logger.debug(warn_sym)
-                    report_fn(warn_sym)
-                    continue
-                tar_target = (resolved_extract_dir / tar_member.name).resolve()
-                is_safe_tar = (
-                    tar_target == resolved_extract_dir
-                    or tar_target.is_relative_to(resolved_extract_dir)
-                )
-                if not is_safe_tar:
-                    warn_trav = _(
-                        "Skipping unsafe entry {} in {} (path traversal detected).",
-                        tar_member.name,
-                        path.name,
-                    )
-                    logger.debug(warn_trav)
-                    report_fn(warn_trav)
-                    continue
-                if tar_member.isdir() or _should_skip_archive_member_name(
-                    tar_member.name, tabular_only=tabular_only
-                ):
-                    continue
-                expected_size = max(0, tar_member.size)
-                if (
-                    not overwrite
-                    and tar_target.exists()
-                    and tar_target.is_file()
-                    and tar_target.stat().st_size == expected_size
-                ):
-                    continue
-                if (
-                    max_decompressed_bytes > 0
-                    and total_extracted_bytes + expected_size > max_decompressed_bytes
-                ):
-                    warn_quota = _(
-                        "Skipping entry {} in {} (decompressed size quota exceeded).",
-                        tar_member.name,
-                        path.name,
-                    )
-                    logger.debug(warn_quota)
-                    report_fn(warn_quota)
-                    continue
-                if not announced:
-                    ext_msg = _("Extracting {}...", path.name)
-                    logger.info(ext_msg)
-                    report_fn(ext_msg)
-                    extract_dir.mkdir(parents=True, exist_ok=True)
-                    announced = True
-                total_extracted_bytes += expected_size
-                tar_ref.extract(tar_member, extract_dir)
-    except (tarfile.TarError, EOFError, OSError):
-        err_tar = _("Failed to extract {} (Bad Archive File).", path.name)
-        logger.debug(err_tar)
-        report_fn(err_tar)
-    return total_extracted_bytes
-
-
-def _extract_zip_archive(
-    path: Path,
-    extract_dir: Path,
-    resolved_extract_dir: Path,
-    total_extracted_bytes: int,
-    max_decompressed_bytes: int,
-    report_fn: Callable[[str], None],
-    overwrite: bool = False,
-    tabular_only: bool = False,
-) -> int:
-    """
-    Safely extract a zip archive into `extract_dir` with symlink, path-traversal, idempotency, and size-quota checks.
-
-    Args:
-    ----
-        path: Source zip archive path.
-        extract_dir: Target extraction directory.
-        resolved_extract_dir: Resolved target extraction directory.
-        total_extracted_bytes: Running cumulative extracted byte count.
-        max_decompressed_bytes: Maximum cumulative decompressed size quota in bytes (`<= 0` for unlimited).
-        report_fn: Progress/warning reporter callback.
-        overwrite: Whether to overwrite already-extracted member files that match expected size.
-        tabular_only: Whether to skip non-tabular documentation files.
-
-    Returns:
-    -------
-        int: Updated cumulative extracted byte count.
-
-    """
-    _ = get_translator()
-    announced = False
-    try:
-        with zipfile.ZipFile(path, "r") as zip_ref:
-            for zip_info in zip_ref.infolist():
-                if (zip_info.external_attr >> 16) & 0o170000 == 0o120000:
-                    warn_zsym = _(
-                        "Skipping unsafe entry {} in {} (symlink detected).",
-                        zip_info.filename,
-                        path.name,
-                    )
-                    logger.debug(warn_zsym)
-                    report_fn(warn_zsym)
-                    continue
-                zip_target = (resolved_extract_dir / zip_info.filename).resolve()
-                is_safe_zip = (
-                    zip_target == resolved_extract_dir
-                    or zip_target.is_relative_to(resolved_extract_dir)
-                )
-                if not is_safe_zip:
-                    warn_ztrav = _(
-                        "Skipping unsafe entry {} in {} (path traversal detected).",
-                        zip_info.filename,
-                        path.name,
-                    )
-                    logger.debug(warn_ztrav)
-                    report_fn(warn_ztrav)
-                    continue
-                if zip_info.is_dir() or _should_skip_archive_member_name(
-                    zip_info.filename, tabular_only=tabular_only
-                ):
-                    continue
-                expected_size = max(0, zip_info.file_size)
-                compressed_size = max(1, zip_info.compress_size)
-                if (
-                    expected_size >= MIN_RATIO_CHECK_BYTES
-                    and (expected_size / compressed_size) > MAX_MEMBER_COMPRESSION_RATIO
-                ):
-                    warn_bomb = _(
-                        "Skipping unsafe entry {} in {} (suspicious compression ratio).",
-                        zip_info.filename,
-                        path.name,
-                    )
-                    logger.debug(warn_bomb)
-                    report_fn(warn_bomb)
-                    continue
-                if (
-                    not overwrite
-                    and zip_target.exists()
-                    and zip_target.is_file()
-                    and zip_target.stat().st_size == expected_size
-                ):
-                    continue
-                if (
-                    max_decompressed_bytes > 0
-                    and total_extracted_bytes + expected_size > max_decompressed_bytes
-                ):
-                    warn_zquota = _(
-                        "Skipping entry {} in {} (decompressed size quota exceeded).",
-                        zip_info.filename,
-                        path.name,
-                    )
-                    logger.debug(warn_zquota)
-                    report_fn(warn_zquota)
-                    continue
-                if not announced:
-                    ext_msg = _("Extracting {}...", path.name)
-                    logger.info(ext_msg)
-                    report_fn(ext_msg)
-                    extract_dir.mkdir(parents=True, exist_ok=True)
-                    announced = True
-                total_extracted_bytes += expected_size
-                zip_ref.extract(zip_info, extract_dir)
-    except zipfile.BadZipFile:
-        err_zip = _("Failed to extract {} (Bad Zip File).", path.name)
-        logger.debug(err_zip)
-        report_fn(err_zip)
-    return total_extracted_bytes
-
-
-def extract_zips(
-    data_dir_str: str,
-    max_depth: int = 3,
-    report_fn: Callable[[str], None] = print,
-    max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
-    overwrite: bool = False,
-    tabular_only: bool = False,
-) -> None:
-    """
-    Extract zip and tar archives found in the data directory safely without path traversal or zip bombs.
-
-    Recursively decompresses nested archives up to max_depth with per-entry size-verified idempotency.
-
-    Args:
-    ----
-        data_dir_str: Directory path containing archive files to extract.
-        max_depth: Maximum recursion depth for decompressing nested archives.
-        report_fn: Progress reporter callback (defaults to `print`).
-        max_decompressed_bytes: Maximum cumulative decompressed size in bytes allowed across archives (`<= 0` for unlimited).
-        overwrite: Whether to force re-extraction of existing member files even if sizes match.
-        tabular_only: Whether to only extract tabular data files and nested archives (skipping PDFs/docs).
-
-    """
-    _ = get_translator()
-    data_dir = Path(data_dir_str)
-    if not data_dir.exists():
-        msg = _("Data directory {} does not exist.", data_dir)
-        logger.debug(msg)
-        report_fn(msg)
-        return
-
-    effective_quota = resolve_effective_decompressed_quota(max_decompressed_bytes)
-
-    check_msg = _("Checking for zip files to extract...")
-    logger.info(check_msg)
-    report_fn(check_msg)
-    processed_archives: set[Path] = set()
-    found_any = False
-    total_extracted_bytes = 0
-    archive_patterns = (
-        "*.zip",
-        "*.ZIP",
-        "*.tar.gz",
-        "*.TAR.GZ",
-        "*.tgz",
-        "*.TGZ",
-        "*.tar.bz2",
-        "*.TAR.BZ2",
-        "*.tar",
-        "*.TAR",
-    )
-
-    for _depth in range(max_depth):
-        candidate_archives: list[Path] = []
-        for pat in archive_patterns:
-            candidate_archives.extend(data_dir.rglob(pat))
-        candidate_archives = [
-            p for p in dict.fromkeys(candidate_archives) if not p.name.startswith("._")
-        ]
-
-        unprocessed = [
-            p for p in candidate_archives if p.resolve() not in processed_archives
-        ]
-        if not unprocessed:
-            break
-
-        for path in unprocessed:
-            found_any = True
-            processed_archives.add(path.resolve())
-
-            p_name = path.name.lower()
-            if p_name.endswith((".tar.gz", ".tar.bz2")):
-                extract_dir = path.parent / path.name[:-7]
-            elif p_name.endswith(".tgz"):
-                extract_dir = path.parent / path.name[:-4]
-            else:
-                extract_dir = path.with_suffix("")
-
-            resolved_extract_dir = extract_dir.resolve()
-
-            if p_name.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar")):
-                total_extracted_bytes = _extract_tar_archive(
-                    path,
-                    extract_dir,
-                    resolved_extract_dir,
-                    total_extracted_bytes,
-                    effective_quota,
-                    report_fn,
-                    overwrite=overwrite,
-                    tabular_only=tabular_only,
-                )
-            else:
-                total_extracted_bytes = _extract_zip_archive(
-                    path,
-                    extract_dir,
-                    resolved_extract_dir,
-                    total_extracted_bytes,
-                    effective_quota,
-                    report_fn,
-                    overwrite=overwrite,
-                    tabular_only=tabular_only,
-                )
-
-    if not found_any:
-        no_zips_msg = _("No zip files found to extract.")
-        logger.info(no_zips_msg)
-        report_fn(no_zips_msg)
-    else:
-        done_msg = _("Extraction complete.")
-        logger.info(done_msg)
-        report_fn(done_msg)
-
-
 def _read_clinical_dataframe(data_file: Path) -> "pd.DataFrame":
     """
     Read SAS (.sas7bdat, .xpt) or SPSS (.sav) data file into a pandas DataFrame.
@@ -490,6 +126,10 @@ def _read_clinical_dataframe(data_file: Path) -> "pd.DataFrame":
     -------
         pd.DataFrame: Parsed DataFrame with converted column data.
 
+    Raises:
+    ------
+        DatabaseError: If the file format is unsupported or reading fails.
+
     """
     import pandas as pd
 
@@ -503,7 +143,7 @@ def _read_clinical_dataframe(data_file: Path) -> "pd.DataFrame":
                 df, _ = pyreadstat.read_sas7bdat(str(data_file))
             else:
                 df, _ = pyreadstat.read_xport(str(data_file))
-        except (ImportError, Exception):
+        except (ImportError, OSError, RuntimeError, ValueError):
             fmt = "sas7bdat" if suffix == ".sas7bdat" else "xport"
             df = pd.read_sas(str(data_file), format=fmt)
     elif suffix == ".sav":
@@ -511,7 +151,7 @@ def _read_clinical_dataframe(data_file: Path) -> "pd.DataFrame":
             import pyreadstat
 
             df, _ = pyreadstat.read_sav(str(data_file))
-        except (ImportError, Exception):
+        except (ImportError, OSError, RuntimeError, ValueError):
             df = pd.read_spss(str(data_file))
     else:
         raise DatabaseError(f"Unsupported clinical file format: {suffix}")
@@ -519,12 +159,10 @@ def _read_clinical_dataframe(data_file: Path) -> "pd.DataFrame":
     if df is None:
         raise DatabaseError(f"Could not read clinical file {data_file}")
 
-    # Ensure column names are standard strings
     df.columns = [
         col.decode("utf-8", errors="ignore") if isinstance(col, bytes) else str(col)
         for col in df.columns
     ]
-    # Decode byte string elements if any
     for col in df.columns:
         if pd.api.types.is_object_dtype(df[col].dtype):
             df[col] = df[col].apply(
@@ -643,6 +281,7 @@ def coerce_known_clinical_numeric_columns(
         table_name: Target DuckDB table identifier.
 
     """
+    dq = chr(34)
     safe_tbl = escape_sql_identifier(table_name)
     cols = conn.execute(f'DESCRIBE "{safe_tbl}"').fetchall()
     for col_row in cols:
@@ -652,7 +291,7 @@ def coerce_known_clinical_numeric_columns(
             safe_col = escape_sql_identifier(col_name)
             conn.execute(
                 f'ALTER TABLE "{safe_tbl}" ALTER COLUMN "{safe_col}" '
-                f"TYPE DOUBLE USING TRY_CAST(NULLIF(TRIM(\"{safe_col}\"), '') AS DOUBLE)"
+                f"TYPE DOUBLE USING TRY_CAST(NULLIF(TRIM({dq}{safe_col}{dq}), '') AS DOUBLE)"
             )
 
 
@@ -698,7 +337,7 @@ def get_clinical_variable_mappings() -> Dict[str, List[str]]:
     matches_file = Path(__file__).parent / "likely_matches.json"
     if matches_file.exists():
         try:
-            with open(matches_file, "r") as f:
+            with open(matches_file) as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     return {
@@ -706,7 +345,7 @@ def get_clinical_variable_mappings() -> Dict[str, List[str]]:
                         for k, v in data.items()
                         if isinstance(v, list)
                     }
-        except Exception:
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
             pass
     return {}
 
@@ -757,7 +396,7 @@ def _detect_csv_encoding_and_delimiter(csv_path: Path) -> Tuple[str, str, str]:
         duckdb_encoding = "utf-8"
     else:
         try:
-            with open(csv_path, "r", encoding="utf-8") as f_chk:
+            with open(csv_path, encoding="utf-8") as f_chk:
                 f_chk.read(8192)
             py_encoding = "utf-8"
             duckdb_encoding = "utf-8"
@@ -768,13 +407,13 @@ def _detect_csv_encoding_and_delimiter(csv_path: Path) -> Tuple[str, str, str]:
     sep = ","
     tab_char = chr(9)
     try:
-        with open(csv_path, "r", encoding=py_encoding, errors="ignore") as f:
+        with open(csv_path, encoding=py_encoding, errors="ignore") as f:
             sample = "".join([f.readline() for _ in range(5)])
         if sample.strip():
             dialect = csv.Sniffer().sniff(sample, delimiters=f",{tab_char}|;")
             sep = dialect.delimiter
-    except Exception:
-        with open(csv_path, "r", encoding=py_encoding, errors="ignore") as f:
+    except (csv.Error, OSError, ValueError):
+        with open(csv_path, encoding=py_encoding, errors="ignore") as f:
             first_line = f.readline()
         if "|" in first_line:
             sep = "|"
@@ -921,16 +560,120 @@ def _build_column_select_expressions(
 
         seen_std_names.add(std_name.lower())
 
+        dq = chr(34)
         escaped_orig = escape_sql_identifier(orig_col)
         escaped_std = escape_sql_identifier(std_name)
         col_expr = f'"{escaped_orig}"'
         if std_name.lower() in _NUMERIC_CLINICAL_CONCEPTS and "CHAR" in col_type:
-            col_expr = f"TRY_CAST(NULLIF(TRIM(\"{escaped_orig}\"), '') AS DOUBLE)"
+            col_expr = f"TRY_CAST(NULLIF(TRIM({dq}{escaped_orig}{dq}), '') AS DOUBLE)"
         if std_name != orig_col or col_expr != f'"{escaped_orig}"':
             select_exprs.append(f'{col_expr} AS "{escaped_std}"')
         else:
             select_exprs.append(f'"{escaped_orig}"')
     return select_exprs
+
+
+def _resolve_unique_table_name_or_skip(
+    conn: duckdb.DuckDBPyConnection,
+    base_tbl: str,
+    current_source: str,
+    current_hash: str,
+    existing_tables: Sequence[str],
+    loaded_tables: Sequence[str],
+) -> Tuple[str, bool]:
+    """
+    Resolve a non-colliding `table_name` or detect if `current_source` was already loaded.
+
+    Args:
+    ----
+        conn: Active DuckDB connection.
+        base_tbl: Candidate table stem.
+        current_source: Resolved source file path string.
+        current_hash: SHA-256 digest of the source file.
+        existing_tables: Table names existing before this ingestion run.
+        loaded_tables: Table names loaded so far in this ingestion run.
+
+    Returns:
+    -------
+        Tuple[str, bool]: `(resolved_table_name, is_already_loaded)`.
+
+    """
+    manifest_row = conn.execute(
+        "SELECT table_name FROM _t1d_ingestion_manifest WHERE source_file = ? AND file_hash = ?",
+        [current_source, current_hash],
+    ).fetchone()
+    table_name = base_tbl
+    counter = 1
+    while table_name in existing_tables or table_name in loaded_tables:
+        row = conn.execute(
+            "SELECT comment FROM duckdb_tables() WHERE table_name = ?",
+            [table_name],
+        ).fetchone()
+        existing_comment = row[0] if row else None
+        if existing_comment == current_source or (
+            manifest_row and manifest_row[0] == table_name
+        ):
+            return table_name, True
+        counter += 1
+        table_name = f"{base_tbl}_{counter}"
+    return table_name, False
+
+
+def _materialize_temp_view_into_table(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+    current_source: str,
+    current_hash: str,
+    file_size: int,
+    reverse_map: Dict[str, str],
+    is_clinical: bool,
+) -> None:
+    """
+    Materialize `temp_view` into `table_name`, coerce numeric columns, and record manifest metadata.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        table_name: Target DuckDB table name.
+        current_source: Resolved source file path string.
+        current_hash: SHA-256 hash of the source file.
+        file_size: File size in bytes.
+        reverse_map: Clinical column mapping dictionary.
+        is_clinical: Whether `_clinical_df` was registered for SAS/SPSS ingestion.
+
+    """
+    cols = conn.execute("DESCRIBE temp_view").fetchall()
+    select_exprs = _build_column_select_expressions(cols, reverse_map)
+
+    nl = chr(10)
+    select_sql = f",{nl}                ".join(select_exprs)
+    escaped_table = escape_sql_identifier(table_name)
+
+    query = (
+        f'CREATE TABLE "{escaped_table}" AS SELECT {nl}'
+        f"                {select_sql} {nl}"
+        f"            FROM temp_view"
+    )
+    conn.execute(query)
+    conn.execute("DROP VIEW temp_view")
+    if is_clinical:
+        conn.unregister("_clinical_df")
+    coerce_known_clinical_numeric_columns(conn, table_name)
+
+    dq = chr(34)
+    escaped_source = escape_sql_literal(current_source)
+    conn.execute(f"COMMENT ON TABLE {dq}{escaped_table}{dq} IS '{escaped_source}'")
+
+    row_count_res = conn.execute(f'SELECT COUNT(*) FROM "{escaped_table}"').fetchone()
+    row_count = row_count_res[0] if row_count_res else 0
+    conn.execute(
+        "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR table_name = ?",
+        [current_source, table_name],
+    )
+    conn.execute(
+        "INSERT INTO _t1d_ingestion_manifest VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+        [current_source, table_name, current_hash, row_count, file_size],
+    )
 
 
 def _ingest_single_tabular_file(
@@ -964,34 +707,20 @@ def _ingest_single_tabular_file(
     """
     _ = get_translator()
     current_source = str(data_file.resolve())
-    table_name = _resolve_target_table_stem(
+    base_tbl = _resolve_target_table_stem(
         data_file, data_dir, prefix_subdirs, stem_counts
     )
-    counter = 1
-    base_tbl = table_name
-    is_already_loaded = False
 
     try:
         current_hash = compute_file_hash(data_file)
-        manifest_row = conn.execute(
-            "SELECT table_name FROM _t1d_ingestion_manifest WHERE source_file = ? AND file_hash = ?",
-            [current_source, current_hash],
-        ).fetchone()
-
-        while table_name in existing_tables or table_name in loaded_tables:
-            row = conn.execute(
-                "SELECT comment FROM duckdb_tables() WHERE table_name = ?",
-                [table_name],
-            ).fetchone()
-            existing_comment = row[0] if row else None
-            if existing_comment == current_source or (
-                manifest_row and manifest_row[0] == table_name
-            ):
-                is_already_loaded = True
-                break
-            counter += 1
-            table_name = f"{base_tbl}_{counter}"
-
+        table_name, is_already_loaded = _resolve_unique_table_name_or_skip(
+            conn=conn,
+            base_tbl=base_tbl,
+            current_source=current_source,
+            current_hash=current_hash,
+            existing_tables=existing_tables,
+            loaded_tables=loaded_tables,
+        )
         if is_already_loaded:
             skip_msg = _("Table {} already exists, skipping...", table_name)
             logger.info(skip_msg)
@@ -1024,46 +753,72 @@ def _ingest_single_tabular_file(
                 table_name=table_name,
                 report_fn=report_fn,
             )
-        cols = conn.execute("DESCRIBE temp_view").fetchall()
-        select_exprs = _build_column_select_expressions(cols, reverse_map)
 
-        nl = chr(10)
-        select_sql = f",{nl}                ".join(select_exprs)
-        escaped_table = escape_sql_identifier(table_name)
-
-        query = (
-            f'CREATE TABLE "{escaped_table}" AS SELECT {nl}'
-            f"                {select_sql} {nl}"
-            f"            FROM temp_view"
+        _materialize_temp_view_into_table(
+            conn=conn,
+            table_name=table_name,
+            current_source=current_source,
+            current_hash=current_hash,
+            file_size=data_file.stat().st_size,
+            reverse_map=reverse_map,
+            is_clinical=is_clinical,
         )
-        conn.execute(query)
-        conn.execute("DROP VIEW temp_view")
-        if is_clinical:
-            conn.unregister("_clinical_df")
-        coerce_known_clinical_numeric_columns(conn, table_name)
-
-        escaped_source = escape_sql_literal(current_source)
-        conn.execute(f"COMMENT ON TABLE \"{escaped_table}\" IS '{escaped_source}'")
-
-        row_count_res = conn.execute(
-            f'SELECT COUNT(*) FROM "{escaped_table}"'
-        ).fetchone()
-        row_count = row_count_res[0] if row_count_res else 0
-        file_size = data_file.stat().st_size
-        conn.execute(
-            "DELETE FROM _t1d_ingestion_manifest WHERE source_file = ? OR table_name = ?",
-            [current_source, table_name],
-        )
-        conn.execute(
-            "INSERT INTO _t1d_ingestion_manifest VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
-            [current_source, table_name, current_hash, row_count, file_size],
-        )
-
         loaded_tables.append(table_name)
-    except Exception as e:
+    except (
+        DatabaseError,
+        duckdb.Error,
+        OSError,
+        UnicodeError,
+        ValueError,
+        RuntimeError,
+    ) as e:
         err_load = _("Failed to load {}: {}", data_file.name, e)
         logger.error(err_load)
         report_fn(err_load)
+
+
+_ingest_single_file = _ingest_single_tabular_file
+
+
+def _discover_tabular_files(
+    data_dir: Path,
+    include_sas: bool,
+    include_spss: bool,
+) -> Tuple[List[Path], dict[str, int]]:
+    """
+    Scan `data_dir` for supported tabular files and compute stem collision counts.
+
+    Args:
+    ----
+        data_dir: Root directory containing tabular datasets.
+        include_sas: Whether to include SAS files.
+        include_spss: Whether to include SPSS files.
+
+    Returns:
+    -------
+        Tuple[List[Path], dict[str, int]]: `(discovered_files, stem_frequency_map)`.
+
+    """
+    patterns = get_supported_tabular_globs(
+        include_sas=include_sas,
+        include_spss=include_spss,
+    )
+    raw_files: list[Path] = []
+    for pat in patterns:
+        raw_files.extend(data_dir.rglob(pat))
+    data_files = [
+        f
+        for f in dict.fromkeys(raw_files)
+        if not f.name.startswith("._")
+        and "Glossary" not in f.name
+        and "Protocol" not in f.name
+    ]
+    stem_counts: dict[str, int] = {}
+    for df in data_files:
+        s_name = Path(df.stem).stem if df.name.endswith(".csv.gz") else df.stem
+        raw_stem = re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
+        stem_counts[raw_stem] = stem_counts.get(raw_stem, 0) + 1
+    return data_files, stem_counts
 
 
 def load_data_to_duckdb(
@@ -1110,22 +865,11 @@ def load_data_to_duckdb(
         scan_msg = _("Scanning for tabular files (CSV, TXT, Parquet, GZ)...")
         logger.info(scan_msg)
         report_fn(scan_msg)
-        patterns = get_supported_tabular_globs(
+        data_files, stem_counts = _discover_tabular_files(
+            data_dir=data_dir,
             include_sas=include_sas,
             include_spss=include_spss,
         )
-
-        raw_files: list[Path] = []
-        for pat in patterns:
-            raw_files.extend(data_dir.rglob(pat))
-        data_files = [
-            f
-            for f in dict.fromkeys(raw_files)
-            if not f.name.startswith("._")
-            and "Glossary" not in f.name
-            and "Protocol" not in f.name
-        ]
-
         if not data_files:
             no_files_msg = _("No tabular files found.")
             logger.info(no_files_msg)
@@ -1137,14 +881,6 @@ def load_data_to_duckdb(
             for std_name, orig_names in get_clinical_variable_mappings().items()
             for orig in orig_names
         }
-
-        stem_counts: dict[str, int] = {}
-        for df in data_files:
-            s_name = Path(df.stem).stem if df.name.endswith(".csv.gz") else df.stem
-            raw_stem = (
-                re.sub(r"[^a-zA-Z0-9_]", "_", s_name).lower().strip("_") or "dataset"
-            )
-            stem_counts[raw_stem] = stem_counts.get(raw_stem, 0) + 1
 
         existing_views = {
             v[0]
@@ -1178,3 +914,43 @@ def load_data_to_duckdb(
             report_fn(pop_msg)
     finally:
         conn.close()
+
+
+__all__ = [
+    "DEFAULT_MAX_DECOMPRESSED_BYTES",
+    "MAX_MEMBER_COMPRESSION_RATIO",
+    "MIN_RATIO_CHECK_BYTES",
+    "_ARCHIVE_GLOB_PATTERNS",
+    "_CLINICAL_NUMERIC_COLUMNS",
+    "_NUMERIC_CLINICAL_CONCEPTS",
+    "_TABULAR_AND_ARCHIVE_SUFFIXES",
+    "IngestionManifestRecord",
+    "_build_column_select_expressions",
+    "_detect_csv_encoding_and_delimiter",
+    "_discover_tabular_files",
+    "_discover_unprocessed_archives",
+    "_ensure_manifest_table",
+    "_extract_single_archive_file",
+    "_extract_single_zip",
+    "_extract_tar_archive",
+    "_extract_zip_archive",
+    "_ingest_single_file",
+    "_ingest_single_tabular_file",
+    "_is_already_extracted",
+    "_is_safe_member_target",
+    "_load_csv_or_parquet",
+    "_materialize_temp_view_into_table",
+    "_read_clinical_dataframe",
+    "_resolve_archive_extract_dir",
+    "_resolve_target_table_stem",
+    "_resolve_unique_table_name_or_skip",
+    "_should_skip_archive_member_name",
+    "coerce_known_clinical_numeric_columns",
+    "compute_file_hash",
+    "extract_zips",
+    "get_clinical_variable_mappings",
+    "get_ingestion_manifest",
+    "get_supported_tabular_globs",
+    "load_data_to_duckdb",
+    "resolve_effective_decompressed_quota",
+]

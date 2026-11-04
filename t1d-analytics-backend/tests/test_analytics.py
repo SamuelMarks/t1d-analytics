@@ -191,7 +191,7 @@ def test_handle_natural_language_error(
     """Test natural language error handling."""
     conn = duckdb.connect(":memory:")
     mock_llm = MagicMock()
-    mock_llm.completion.side_effect = Exception("API error")
+    mock_llm.completion.side_effect = RuntimeError("API error")
     mock_create.return_value = mock_llm
 
     handle_natural_language(conn, "get all users")
@@ -736,9 +736,11 @@ def test_load_data_to_duckdb_fallback_delimiters(
     tab_file = data_dir / "tab_fb.csv"
     tab_file.write_text("colA\tcolB\n1\t2\n")
 
-    # Mock csv.Sniffer to raise Exception
+    # Mock csv.Sniffer to raise csv.Error
+    import csv
+
     mock_sniffer = mocker.patch("csv.Sniffer")
-    mock_sniffer.return_value.sniff.side_effect = Exception("Sniff failed")
+    mock_sniffer.return_value.sniff.side_effect = csv.Error("Sniff failed")
 
     load_data_to_duckdb(str(data_dir), db_path)
 
@@ -1018,8 +1020,10 @@ def test_is_sql_query_ddl_and_dml() -> None:
 
 
 def test_is_sql_query_without_extract_statements() -> None:
-    """Test is_sql_query fallback when extract_statements is absent on connection."""
-    from t1d_analytics.sql_utils import is_sql_query
+    """Test is_sql_query fallback when extract_statements is absent or raises on connection."""
+    from typing import Sequence
+
+    from t1d_analytics.sql_utils import SqlSyntaxValidatorProtocol, is_sql_query
 
     mock_conn = MagicMock(spec=["execute", "close"])
     mock_conn.execute.return_value = None
@@ -1027,13 +1031,24 @@ def test_is_sql_query_without_extract_statements() -> None:
     assert is_sql_query("SELECT 42", conn=mock_conn)
     assert is_sql_query("EXPLAIN SELECT 42", conn=mock_conn)
 
-    # ParserException simulation
-    mock_conn.execute.side_effect = duckdb.ParserException("syntax error")
-    assert not is_sql_query("INVALID SYNTAX", conn=mock_conn)
+    class _ParserErrorValidator(SqlSyntaxValidatorProtocol):
+        """Protocol fake raising ParserException."""
 
-    # General Exception simulation (e.g. CatalogException) returns True
-    mock_conn.execute.side_effect = Exception("Catalog error")
-    assert is_sql_query("SELECT * FROM missing_table", conn=mock_conn)
+        def extract_statements(self, query: str) -> Sequence[duckdb.Statement]:
+            """Raise ParserException."""
+            _ = query
+            raise duckdb.ParserException("syntax error")
+
+    class _CatalogErrorValidator(SqlSyntaxValidatorProtocol):
+        """Protocol fake raising CatalogException."""
+
+        def extract_statements(self, query: str) -> Sequence[duckdb.Statement]:
+            """Raise CatalogException."""
+            _ = query
+            raise duckdb.CatalogException("Catalog error")
+
+    assert not is_sql_query("SELECT 42", conn=_ParserErrorValidator())
+    assert is_sql_query("SELECT * FROM missing_table", conn=_CatalogErrorValidator())
 
 
 def test_extract_tar_and_nested_archives(
@@ -1233,7 +1248,7 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
     assert res_df["col_bytes"].iloc[0] == "val_bytes"
 
     # 2. SAS pyreadstat failure falling back to pd.read_sas
-    mocker.patch("pyreadstat.read_sas7bdat", side_effect=Exception("Read failure"))
+    mocker.patch("pyreadstat.read_sas7bdat", side_effect=OSError("Read failure"))
     mock_pandas_sas = mocker.patch(
         "pandas.read_sas", return_value=pd.DataFrame({"a": [1]})
     )
@@ -1244,7 +1259,7 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
     # 3. SPSS pyreadstat failure falling back to pd.read_spss
     sav_file = tmp_path / "test.sav"
     sav_file.write_text("data")
-    mocker.patch("pyreadstat.read_sav", side_effect=Exception("Read failure"))
+    mocker.patch("pyreadstat.read_sav", side_effect=OSError("Read failure"))
     mock_pandas_spss = mocker.patch(
         "pandas.read_spss", return_value=pd.DataFrame({"b": [2]})
     )

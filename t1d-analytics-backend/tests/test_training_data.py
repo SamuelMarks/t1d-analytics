@@ -94,7 +94,7 @@ def test_generate_pairs_success(
     mock_urlopen.return_value.__enter__.return_value = mock_response
 
     generator = TrainingDataGenerator(mock_db, "gemma4")
-    pairs = generator._generate_pairs("dummy_schema", 1)
+    pairs = generator.generate_pairs("dummy_schema", 1)
 
     assert len(pairs) == 1
     prompt, chosen, rejected = pairs[0]
@@ -128,7 +128,9 @@ def test_generate_pairs_http_error(
     mock_urlopen: MagicMock, mock_db: duckdb.DuckDBPyConnection
 ) -> None:
     """Test generating pairs when the HTTP request fails."""
-    mock_urlopen.side_effect = Exception("HTTP Error")
+    import urllib.error
+
+    mock_urlopen.side_effect = urllib.error.URLError("HTTP Error")
 
     generator = TrainingDataGenerator(mock_db, "gemma4")
     pairs = generator._generate_pairs("dummy_schema", 1)
@@ -289,7 +291,7 @@ def test_validate_provider_readiness_errors(
 
     # 4. Non-ollama provider failure when any-llm create fails
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    with patch("any_llm.AnyLLM.create", side_effect=Exception("API failure")):
+    with patch("any_llm.AnyLLM.create", side_effect=RuntimeError("API failure")):
         gen = TrainingDataGenerator(mock_db, "openai/gpt-4o")
         with pytest.raises(RuntimeError, match="Failed to initialize any-llm"):
             gen._generate_pairs("schema", 1)
@@ -549,7 +551,7 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
 
 
 def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> None:
-    """Test generic Exception blocks in training_data.py."""
+    """Test error handling in _parse_llm_json_array, _is_valid_sql, and evaluate_text_to_sql with malformed inputs and DB errors."""
     import duckdb
 
     from t1d_analytics.training_data import (
@@ -558,28 +560,27 @@ def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> 
         evaluate_text_to_sql,
     )
 
-    # 1. _parse_llm_json_array exceptions
-    with patch("json.loads", side_effect=Exception("Generic Mock JSON Error")):
-        assert _parse_llm_json_array('["a"]') is None
-        assert _parse_llm_json_array('text before ["a"]') is None
+    _ = mocker
+    # 1. _parse_llm_json_array with nested non-SqlValue objects triggering ValidationError
+    assert _parse_llm_json_array('[{"nested": "dict"}]') is None
+    assert _parse_llm_json_array('preamble [{"nested": "dict"}] suffix') is None
 
-    # 2. _is_valid_sql exceptions
+    # 2. _is_valid_sql with duckdb.Error and RuntimeError
     db_file = tmp_path / "test.duckdb"
     conn = duckdb.connect(str(db_file))
     gen = TrainingDataGenerator(conn, "gemma4")
     with patch(
         "duckdb.DuckDBPyConnection.execute",
-        side_effect=Exception("Generic Mock DuckDB Error"),
+        side_effect=duckdb.Error("Mock DuckDB Error"),
     ):
         assert gen._is_valid_sql("SELECT 1") is False
     conn.close()
 
-    # 3. evaluate_text_to_sql exceptions
+    # 3. evaluate_text_to_sql when query execution raises duckdb.Error
     test_cases = [{"prompt": "q", "gold_sql": "SELECT 1"}]
-    # Mock conn.execute to throw Exception for both gold and pred
     with patch(
         "duckdb.DuckDBPyConnection.execute",
-        side_effect=Exception("Generic Execute Error"),
+        side_effect=duckdb.Error("Execute Error"),
     ):
         res = evaluate_text_to_sql(
             str(db_file),
@@ -587,7 +588,7 @@ def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> 
             translate_fn=lambda db_p, q, model_name="gemma4": ("", "SELECT 2"),
         )
         assert res["execution_accuracy"] == 0.0
-        assert res["syntax_failure_rate"] > 0
+        assert res["syntax_failure_rate"] == 100.0
 
 
 def test_make_hashable() -> None:
@@ -782,3 +783,33 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
     assert report["exact_match_rate"] == 100.0
     assert report["execution_accuracy"] == 100.0
     assert report["syntax_failure_rate"] == 0.0
+
+    # Verify parity with frontend t1d-analytics-web/src/table1-queries.ts
+    import re
+
+    import duckdb
+
+    frontend_t1_file = (
+        Path(__file__).resolve().parents[2]
+        / "t1d-analytics-web"
+        / "src"
+        / "table1-queries.ts"
+    )
+    assert frontend_t1_file.exists()
+    ts_content = frontend_t1_file.read_text(encoding="utf-8")
+    ts_ids = re.findall(r'id:\s*"([^"]+)"', ts_content)
+    ts_complexities = re.findall(r'complexity:\s*"([^"]+)"', ts_content)
+    ts_questions = re.findall(r'question:\s*\n?\s*"([^"]+)"', ts_content)
+    ts_sqls = re.findall(r"sql:\s*`([^`]+)`", ts_content)
+    assert ts_ids == [item["id"] for item in suite]
+    assert ts_complexities == [item["complexity"] for item in suite]
+    assert ts_questions == [item["question"] for item in suite]
+    conn_parity = duckdb.connect(str(db_path), read_only=True)
+    try:
+        for ts_sql, item in zip(ts_sqls, suite):
+            assert (
+                conn_parity.execute(ts_sql).fetchall()
+                == conn_parity.execute(item["gold_sql"]).fetchall()
+            )
+    finally:
+        conn_parity.close()

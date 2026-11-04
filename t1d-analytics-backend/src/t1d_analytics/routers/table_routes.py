@@ -3,10 +3,12 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Request
+import duckdb
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from t1d_analytics.analytics import TableProfileResult
+from t1d_analytics.api_dependencies import AppServices, get_app_services
 from t1d_analytics.api_exports import (
     fetch_paginated_table_data,
     fetch_table_profile,
@@ -42,6 +44,7 @@ def get_table_data(
     order: Optional[str] = "asc",
     search: Optional[str] = None,
     db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> TableDataResponse:
     """
     Return paginated rows from a specific table with optional sorting and searching.
@@ -55,14 +58,14 @@ def get_table_data(
         order: Sort order, either 'asc' or 'desc' (default: 'asc').
         search: Optional string to filter across columns.
         db_path: Optional path to the DuckDB database.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         TableDataResponse: The data with pagination metadata.
 
     """
-    import t1d_analytics.api as api_mod
-
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return fetch_paginated_table_data(
         table_name=table_name,
         limit=limit,
@@ -71,13 +74,15 @@ def get_table_data(
         order=order,
         search=search,
         db_path=db_path,
-        db_validator=api_mod.validate_db_path,
+        db_validator=active_svc.validate_db_path,
     )
 
 
 @tables_router.get("/api/table/{table_name}/profile")
 def get_table_profile(
-    table_name: str, db_path: Optional[str] = None
+    table_name: str,
+    db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> TableProfileResult:
     """
     Profile a table to return data quality, completeness, and column statistics.
@@ -86,24 +91,28 @@ def get_table_profile(
     ----
         table_name: The table name to profile.
         db_path: Optional path to the database file.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         TableProfileResult: Profiling summary dictionary.
 
     """
-    import t1d_analytics.api as api_mod
-
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return fetch_table_profile(
         table_name=table_name,
         db_path=db_path,
-        db_validator=api_mod.validate_db_path,
-        profile_fn=api_mod.profile_table,
+        db_validator=active_svc.validate_db_path,
+        profile_fn=active_svc.profile_table,
     )
 
 
 @tables_router.get("/api/export/excel")
-def export_excel(table_name: str, db_path: Optional[str] = None) -> StreamingResponse:
+def export_excel(
+    table_name: str,
+    db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
+) -> StreamingResponse:
     """
     Export table data formatted as a native OpenXML Excel (.xlsx) workbook.
 
@@ -111,18 +120,18 @@ def export_excel(table_name: str, db_path: Optional[str] = None) -> StreamingRes
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed XLSX file with spreadsheetml MIME type.
 
     """
-    import t1d_analytics.api as api_mod
-
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_excel_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=api_mod.validate_db_path,
+        db_validator=active_svc.validate_db_path,
     )
 
 
@@ -130,6 +139,7 @@ def export_excel(table_name: str, db_path: Optional[str] = None) -> StreamingRes
 def export_parquet(
     table_name: str,
     db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data in columnar Apache Parquet format.
@@ -138,18 +148,18 @@ def export_parquet(
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed Parquet file.
 
     """
-    import t1d_analytics.api as api_mod
-
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_parquet_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=api_mod.validate_db_path,
+        db_validator=active_svc.validate_db_path,
     )
 
 
@@ -157,6 +167,7 @@ def export_parquet(
 def export_csv(
     table_name: str,
     db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a streaming CSV file with spreadsheet formula defense.
@@ -165,18 +176,18 @@ def export_csv(
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed CSV file with text/csv MIME type.
 
     """
-    import t1d_analytics.api as api_mod
-
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_csv_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=api_mod.validate_db_path,
+        db_validator=active_svc.validate_db_path,
     )
 
 
@@ -184,6 +195,7 @@ def export_csv(
 def export_json(
     table_name: str,
     db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a streaming JSON array of row objects.
@@ -192,22 +204,26 @@ def export_json(
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed JSON file with application/json MIME type.
 
     """
-    import t1d_analytics.api as api_mod
-
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_json_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=api_mod.validate_db_path,
+        db_validator=active_svc.validate_db_path,
     )
 
 
-def _build_schema_response(target_db: str, lang: str = "en") -> SchemaResponse:
+def _build_schema_response(
+    target_db: str,
+    lang: str = "en",
+    services: Optional[AppServices] = None,
+) -> SchemaResponse:
     """
     Inspect a DuckDB database and build a SchemaResponse with table columns and health status.
 
@@ -215,20 +231,20 @@ def _build_schema_response(target_db: str, lang: str = "en") -> SchemaResponse:
     ----
         target_db: Validated path to the DuckDB database file.
         lang: Localization language code for database health messages.
+        services: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         SchemaResponse: Structured table and column metadata with database health dictionary.
 
     """
-    import t1d_analytics.api as api_mod
-
+    svc = services or get_app_services()
     db_health = check_database_health(target_db, lang=lang)
 
     try:
         with connect_duckdb_read_only_pooled(
             db_path=target_db,
-            connect_fn=api_mod.duckdb.connect,
+            connect_fn=svc.duckdb_connect,
             disable_external_access=True,
         ) as conn:
             cols_map = extract_table_columns_map(
@@ -245,13 +261,17 @@ def _build_schema_response(target_db: str, lang: str = "en") -> SchemaResponse:
         ]
 
         return SchemaResponse(tables=schema_data, database=db_health.to_dict())
-    except Exception as e:
+    except (duckdb.Error, OSError, RuntimeError, ValueError) as e:
         logger.error(f"Error fetching schema: {e}")
         return SchemaResponse(tables=[], database=db_health.to_dict())
 
 
 @tables_router.get("/api/schema", response_model=SchemaResponse)
-def get_schema(request: Request, db_path: Optional[str] = None) -> SchemaResponse:
+def get_schema(
+    request: Request,
+    db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
+) -> SchemaResponse:
     """
     Return structured schema for the frontend Schema Explorer.
 
@@ -259,29 +279,34 @@ def get_schema(request: Request, db_path: Optional[str] = None) -> SchemaRespons
     ----
         request: FastAPI request.
         db_path: Optional target DuckDB database path.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         SchemaResponse: The structured schema response including database diagnostics.
 
     """
-    import t1d_analytics.api as api_mod
-
-    target_db = api_mod.validate_db_path(db_path)
-    lang = api_mod.get_request_locale(request)
-    return _build_schema_response(target_db=target_db, lang=lang)
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
+    target_db = active_svc.validate_db_path(db_path)
+    lang = active_svc.get_request_locale(request)
+    return _build_schema_response(target_db=target_db, lang=lang, services=active_svc)
 
 
 @tables_router.get("/api/databases", response_model=DatabaseListResponse)
-def list_databases() -> DatabaseListResponse:
+def list_databases(
+    svc: Optional[AppServices] = Depends(get_app_services),
+) -> DatabaseListResponse:
     """
     Discover and list available DuckDB database files in the workspace.
 
-    Returns
+    Args:
+    ----
+        svc: Optional injected AppServices dependency bundle.
+
+    Returns:
     -------
         DatabaseListResponse: Found databases and current default.
 
     """
-    import t1d_analytics.api as api_mod
-
-    return api_mod.discover_workspace_databases()
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
+    return active_svc.discover_workspace_databases()

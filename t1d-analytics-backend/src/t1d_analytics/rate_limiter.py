@@ -100,6 +100,26 @@ class BaseRateLimiter(ABC):
 class MemoryRateLimiter(BaseRateLimiter):
     """In-memory sliding-window rate limiter using thread synchronization."""
 
+    def __init__(
+        self,
+        store: Optional[Dict[str, List[float]]] = None,
+        lock: Optional[threading.Lock] = None,
+    ) -> None:
+        """
+        Initialize an in-memory rate limiter with an encapsulated timestamp dictionary and lock.
+
+        Args:
+        ----
+            store: Optional backing dictionary mapping client IPs to request timestamps.
+            lock: Optional threading.Lock for synchronizing concurrent access.
+
+        """
+        super().__init__()
+        self._store: Dict[str, List[float]] = (
+            store if store is not None else RATE_LIMIT_STORE
+        )
+        self._lock: threading.Lock = lock if lock is not None else RATE_LIMIT_LOCK
+
     def is_allowed(
         self, client_ip: str, limit: int = 120, window_seconds: float = 60.0
     ) -> bool:
@@ -118,22 +138,22 @@ class MemoryRateLimiter(BaseRateLimiter):
 
         """
         now = time.time()
-        with RATE_LIMIT_LOCK:
+        with self._lock:
             expired_ips = [
                 ip
-                for ip, ts_list in RATE_LIMIT_STORE.items()
+                for ip, ts_list in self._store.items()
                 if not ts_list or (now - ts_list[-1] >= window_seconds)
             ]
             for ip in expired_ips:
-                RATE_LIMIT_STORE.pop(ip, None)
+                self._store.pop(ip, None)
 
-            timestamps = RATE_LIMIT_STORE.get(client_ip, [])
+            timestamps = self._store.get(client_ip, [])
             valid_timestamps = [t for t in timestamps if now - t < window_seconds]
             if len(valid_timestamps) >= limit:
-                RATE_LIMIT_STORE[client_ip] = valid_timestamps
+                self._store[client_ip] = valid_timestamps
                 return False
             valid_timestamps.append(now)
-            RATE_LIMIT_STORE[client_ip] = valid_timestamps
+            self._store[client_ip] = valid_timestamps
             return True
 
     def get_retry_after(self, client_ip: str, window_seconds: float = 60.0) -> int:
@@ -151,19 +171,19 @@ class MemoryRateLimiter(BaseRateLimiter):
 
         """
         now = time.time()
-        with RATE_LIMIT_LOCK:
-            timestamps = RATE_LIMIT_STORE.get(client_ip, [])
+        with self._lock:
+            timestamps = self._store.get(client_ip, [])
             valid = [t for t in timestamps if now - t < window_seconds]
             if not valid:
-                RATE_LIMIT_STORE.pop(client_ip, None)
+                self._store.pop(client_ip, None)
                 return 1
             oldest = min(valid)
             return max(1, math.ceil(window_seconds - (now - oldest)))
 
     def reset(self) -> None:
         """Clear all stored timestamps."""
-        with RATE_LIMIT_LOCK:
-            RATE_LIMIT_STORE.clear()
+        with self._lock:
+            self._store.clear()
 
 
 class DuckDbRateLimiter(BaseRateLimiter):

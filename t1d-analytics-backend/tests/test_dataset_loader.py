@@ -102,10 +102,6 @@ not a json
     empty_file.write_text(chr(10) * 2)
     with pytest.raises(ValueError, match="no valid training pairs"):
         prepare_torch_dataset(empty_file, tokenizer_name="mock")
-
-    with patch("json.loads", side_effect=Exception("Mock generic exception")):
-        with pytest.raises(ValueError, match="Failed to read JSONL dataset"):
-            prepare_torch_dataset(jsonl_file, tokenizer_name="mock")
     with pytest.raises(ValueError, match="contains no valid training pairs"):
         prepare_torch_dataset(empty_file)
 

@@ -29,10 +29,10 @@ def test_get_schema_success(mock_db: str) -> None:
     assert data["tables"][0]["columns"][1]["type"] == "VARCHAR"
 
 
-@patch("t1d_analytics.api.duckdb.connect")
+@patch("t1d_analytics.api_dependencies.duckdb.connect")
 def test_get_schema_error(mock_connect: MagicMock) -> None:
     """Test schema endpoint handles errors gracefully."""
-    mock_connect.side_effect = Exception("DB connection failed")
+    mock_connect.side_effect = duckdb.Error("DB connection failed")
 
     response = client.get("/api/schema")
     assert response.status_code == 200
@@ -108,7 +108,7 @@ def test_get_table_data_exception(
 ) -> None:
     """Test server error handling when DB operations fail."""
     monkeypatch.setenv("T1D_DB_PATH", mock_db)
-    with patch("duckdb.connect", side_effect=Exception("DB Failure")):
+    with patch("duckdb.connect", side_effect=duckdb.Error("DB Failure")):
         response = client.get("/api/table/users")
         assert response.status_code == 500
         assert response.json()["detail"]["error_code"] == "backend.serverError"
@@ -148,7 +148,7 @@ def test_get_table_data_missing_db_and_db_error(
     resp_no_db = client.get("/api/table/users?db_path=nonexistent.duckdb")
     assert resp_no_db.status_code == 404
 
-    mocker.patch("duckdb.connect", side_effect=Exception("Cannot open file"))
+    mocker.patch("duckdb.connect", side_effect=duckdb.IOException("Cannot open file"))
     resp_open_err = client.get(f"/api/table/users?db_path={mock_db}")
     assert resp_open_err.status_code == 404
 
@@ -304,15 +304,15 @@ def test_get_table_profile_endpoint(mock_db: str, mocker: MagicMock) -> None:
     assert resp_no_tbl.status_code == 404
 
     mocker.patch(
-        "t1d_analytics.api.profile_table",
+        "t1d_analytics.api_dependencies.profile_table",
         side_effect=FileNotFoundError("not found"),
     )
     resp_fnf = client.get(f"/api/table/users/profile?db_path={mock_db}")
     assert resp_fnf.status_code == 404
 
     mocker.patch(
-        "t1d_analytics.api.profile_table",
-        side_effect=Exception("Database crash"),
+        "t1d_analytics.api_dependencies.profile_table",
+        side_effect=RuntimeError("Database crash"),
     )
     resp_err = client.get(f"/api/table/users/profile?db_path={mock_db}")
     assert resp_err.status_code == 500
@@ -367,14 +367,14 @@ def test_export_excel_endpoint(mock_db: str, mocker: MagicMock) -> None:
     resp_no_tbl = client.get(f"/api/export/excel?table_name=missing&db_path={mock_db}")
     assert resp_no_tbl.status_code == 404
 
-    mocker.patch("duckdb.connect", side_effect=Exception("IO Failure"))
+    mocker.patch("duckdb.connect", side_effect=OSError("IO Failure"))
     resp_500 = client.get(f"/api/export/excel?table_name=users&db_path={mock_db}")
     assert resp_500.status_code == 500
 
     mock_conn_exc = mocker.MagicMock()
     mock_conn_exc.execute.side_effect = [
         mocker.MagicMock(fetchall=lambda: [("users",)]),
-        Exception("Execution failure"),
+        duckdb.Error("Execution failure"),
     ]
     mocker.patch("duckdb.connect", return_value=mock_conn_exc)
     resp_500b = client.get(f"/api/export/excel?table_name=users&db_path={mock_db}")
@@ -444,14 +444,14 @@ def test_export_parquet_endpoint(
     )
     assert resp_no_tbl.status_code == 404
 
-    mocker.patch("duckdb.connect", side_effect=Exception("Parquet export failure"))
+    mocker.patch("duckdb.connect", side_effect=OSError("Parquet export failure"))
     resp_500 = client.get(f"/api/export/parquet?table_name=users&db_path={mock_db}")
     assert resp_500.status_code == 500
 
     mock_conn_p = mocker.MagicMock()
     mock_conn_p.execute.side_effect = [
         mocker.MagicMock(fetchall=lambda: [("users",)]),
-        Exception("Disk error during COPY"),
+        OSError("Disk error during COPY"),
     ]
     mocker.patch("duckdb.connect", return_value=mock_conn_p)
     resp_500b = client.get(f"/api/export/parquet?table_name=users&db_path={mock_db}")
@@ -499,12 +499,12 @@ def test_export_csv_endpoint(mock_db: str, mocker: MagicMock) -> None:
     resp_no_tbl = client.get(f"/api/export/csv?table_name=missing&db_path={mock_db}")
     assert resp_no_tbl.status_code == 404
 
-    mocker.patch("duckdb.connect", side_effect=Exception("CSV export failure"))
+    mocker.patch("duckdb.connect", side_effect=OSError("CSV export failure"))
     resp_500 = client.get(f"/api/export/csv?table_name=users&db_path={mock_db}")
     assert resp_500.status_code == 500
 
     mock_conn_open = mocker.MagicMock()
-    mock_conn_open.execute.side_effect = Exception("Show tables error")
+    mock_conn_open.execute.side_effect = duckdb.Error("Show tables error")
     mocker.patch("duckdb.connect", return_value=mock_conn_open)
     resp_500b = client.get(f"/api/export/csv?table_name=users&db_path={mock_db}")
     assert resp_500b.status_code == 500
@@ -513,7 +513,7 @@ def test_export_csv_endpoint(mock_db: str, mocker: MagicMock) -> None:
     mock_conn = mocker.MagicMock()
     mock_res = mocker.MagicMock()
     mock_res.description = [("id",)]
-    mock_res.fetchmany.side_effect = Exception("Read failure")
+    mock_res.fetchmany.side_effect = duckdb.Error("Read failure")
     mock_conn.execute.side_effect = [
         mocker.MagicMock(fetchall=lambda: [("users",)]),
         mock_res,
@@ -554,12 +554,12 @@ def test_export_json_endpoint(mock_db: str, mocker: MagicMock) -> None:
     resp_no_tbl = client.get(f"/api/export/json?table_name=missing&db_path={mock_db}")
     assert resp_no_tbl.status_code == 404
 
-    mocker.patch("duckdb.connect", side_effect=Exception("JSON export failure"))
+    mocker.patch("duckdb.connect", side_effect=OSError("JSON export failure"))
     resp_500 = client.get(f"/api/export/json?table_name=users&db_path={mock_db}")
     assert resp_500.status_code == 500
 
     mock_conn_open = mocker.MagicMock()
-    mock_conn_open.execute.side_effect = Exception("JSON show tables error")
+    mock_conn_open.execute.side_effect = duckdb.Error("JSON show tables error")
     mocker.patch("duckdb.connect", return_value=mock_conn_open)
     resp_500b = client.get(f"/api/export/json?table_name=users&db_path={mock_db}")
     assert resp_500b.status_code == 500
@@ -568,7 +568,7 @@ def test_export_json_endpoint(mock_db: str, mocker: MagicMock) -> None:
     mock_conn = mocker.MagicMock()
     mock_res = mocker.MagicMock()
     mock_res.description = [("id",)]
-    mock_res.fetchmany.side_effect = Exception("JSON read failure")
+    mock_res.fetchmany.side_effect = duckdb.Error("JSON read failure")
     mock_conn.execute.side_effect = [
         mocker.MagicMock(fetchall=lambda: [("users",)]),
         mock_res,

@@ -4,7 +4,6 @@ import datetime
 import decimal
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import duckdb
 import pytest
@@ -93,7 +92,11 @@ def test_is_read_only_sql_query() -> None:
 
 
 def test_is_sql_query_branches() -> None:
-    """Test all branches of is_sql_query including comments, parens, show NL, and mocks."""
+    """Test all branches of is_sql_query including comments, parens, show NL, real connections, and protocol fakes."""
+    from typing import Sequence
+
+    from t1d_analytics.sql_utils import SqlSyntaxValidatorProtocol
+
     assert is_sql_query("") is False
     assert is_sql_query("()") is False
     assert is_sql_query("What is the average glucose?") is False
@@ -102,17 +105,23 @@ def test_is_sql_query_branches() -> None:
     assert is_sql_query("SELECT 1") is True
     assert is_sql_query("SELECT FROM WHERE INVALID") is False
 
-    # Mock connection without extract_statements
-    mock_conn = MagicMock()
-    del mock_conn.extract_statements
-    assert is_sql_query("CREATE TABLE x (id INT)", conn=mock_conn) is True
-    assert is_sql_query("SELECT 1", conn=mock_conn) is True
+    real_conn = duckdb.connect(":memory:")
+    try:
+        assert is_sql_query("CREATE TABLE x (id INT)", conn=real_conn) is True
+        assert is_sql_query("SELECT 1", conn=real_conn) is True
+        assert is_sql_query("SELECT FROM WHERE INVALID", conn=real_conn) is False
+    finally:
+        real_conn.close()
 
-    mock_conn.execute.side_effect = duckdb.ParserException("syntax error")
-    assert is_sql_query("SELECT 1", conn=mock_conn) is False
+    class _RuntimeErrorValidator(SqlSyntaxValidatorProtocol):
+        """Protocol fake raising RuntimeError during statement extraction."""
 
-    mock_conn.execute.side_effect = RuntimeError("other db error")
-    assert is_sql_query("SELECT 1", conn=mock_conn) is True
+        def extract_statements(self, query: str) -> Sequence[duckdb.Statement]:
+            """Raise RuntimeError to verify non-ParserException fallback."""
+            _ = query
+            raise RuntimeError("other db error")
+
+    assert is_sql_query("SELECT 1", conn=_RuntimeErrorValidator()) is True
 
 
 def test_extract_sql_from_response_branches() -> None:
@@ -399,5 +408,54 @@ def test_read_only_duckdb_pool(tmp_path: Path) -> None:
     db_file.unlink()
     pool.release(db_file, c_last)
 
+    # close_all closes any remaining idle connections in the pool
+    db_file_2 = tmp_path / "pooled2.duckdb"
+    wconn2 = duckdb.connect(str(db_file_2))
+    wconn2.execute("CREATE TABLE t2 (x INT)")
+    wconn2.close()
+    c_for_close_all = pool.acquire(db_file_2)
+    pool.release(db_file_2, c_for_close_all)
     pool.close_all()
     close_read_only_duckdb_pool()
+
+
+def test_coerce_numeric_aggregates_masks_literals_and_comments() -> None:
+    """Test coerce_numeric_aggregates_in_sql preserves string literals and comments untouched."""
+    from t1d_analytics.sql_agent import parse_schema_text_to_models
+    from t1d_analytics.sql_utils import (
+        coerce_numeric_aggregates_in_sql,
+        parse_schema_text_to_column_pairs,
+        parse_schema_text_to_map,
+    )
+
+    q = (
+        "SELECT 'SUM(NumSevHypo)' AS label, $$AVG(HbA1c)$$ AS dlabel, "
+        "SUM(NumSevHypo) AS total -- comment with AVG(x)\n"
+        "FROM tblaptsummary /* CAST(x AS DOUBLE) */"
+    )
+    rewritten = coerce_numeric_aggregates_in_sql(q)
+    assert "'SUM(NumSevHypo)' AS label" in rewritten
+    assert "$$AVG(HbA1c)$$ AS dlabel" in rewritten
+    assert "-- comment with AVG(x)" in rewritten
+    assert "/* CAST(x AS DOUBLE) */" in rewritten
+    assert "SUM(TRY_CAST(NumSevHypo AS DOUBLE)) AS total" in rewritten
+
+    schema_text = (
+        "-- Table: inline_tbl | Columns: a (INTEGER), b\n"
+        "Table: multi_tbl\n"
+        "Columns: c (DOUBLE)\n"
+        "- d (VARCHAR)\n"
+        "Table:\n"
+        "Table: |\n"
+    )
+    pairs = parse_schema_text_to_column_pairs(schema_text)
+    assert pairs["inline_tbl"] == [("a", "INTEGER"), ("b", "VARCHAR")]
+    assert pairs["multi_tbl"] == [("c", "DOUBLE"), ("d", "VARCHAR")]
+
+    models = parse_schema_text_to_models(schema_text)
+    assert [m.table_name for m in models] == ["inline_tbl", "multi_tbl"]
+    assert models[0].column_names() == ["a", "b"]
+
+    ddl_text = 'CREATE TABLE "patients" (id INT, PRIMARY KEY (id), flag)'
+    ddl_map = parse_schema_text_to_map(ddl_text)
+    assert ddl_map == {"patients": ["id", "flag"]}

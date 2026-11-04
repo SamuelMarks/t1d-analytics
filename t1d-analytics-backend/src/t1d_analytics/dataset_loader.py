@@ -4,7 +4,9 @@ import importlib
 import json
 import logging
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Iterator, List, Mapping, Optional, Sequence, Tuple
+
+import duckdb
 
 from t1d_analytics.errors import (
     DatabaseNotFoundError,
@@ -16,8 +18,119 @@ from t1d_analytics.hf_models import (
     TokenizerProtocol,
     TransformersModuleProtocol,
 )
+from t1d_analytics.sql_utils import SqlValue
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_prompt_target_pair(
+    record: Mapping[str, SqlValue],
+) -> Tuple[str, str]:
+    """
+    Extract `(prompt, completion)` strings from a parsed JSONL/JSON dictionary record.
+
+    Args:
+    ----
+        record: Parsed JSON dictionary record.
+
+    Returns:
+    -------
+        Tuple[str, str]: `(prompt_str, completion_str)`.
+
+    """
+    p = str(record.get("prompt") or record.get("question") or "")
+    c = str(
+        record.get("completion") or record.get("sql") or record.get("response") or ""
+    )
+    return (p, c)
+
+
+def _load_pairs_from_json_or_jsonl(dataset_path: Path) -> List[Tuple[str, str]]:
+    """
+    Read `(prompt, target)` text pairs from a `.jsonl` or `.json` dataset file.
+
+    Args:
+    ----
+        dataset_path: Path to the `.jsonl` or `.json` file.
+
+    Returns:
+    -------
+        List[Tuple[str, str]]: Extracted prompt and target pairs.
+
+    Raises:
+    ------
+        InsufficientDataError: If reading the file fails.
+
+    """
+    raw_pairs: List[Tuple[str, str]] = []
+    try:
+        with open(dataset_path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                    if isinstance(record, dict):
+                        raw_pairs.append(_extract_prompt_target_pair(record))
+                except json.JSONDecodeError:
+                    logger.warning(f"Skipping malformed JSON line in {dataset_path}")
+    except (OSError, UnicodeError, RuntimeError, ValueError) as e:
+        raise InsufficientDataError(
+            f"Failed to read JSONL dataset at '{dataset_path}': {e}"
+        ) from e
+    return raw_pairs
+
+
+def _load_pairs_from_duckdb_or_parquet(dataset_path: Path) -> List[Tuple[str, str]]:
+    """
+    Read `(prompt, target)` text pairs from a `.parquet` dataset file using DuckDB.
+
+    Args:
+    ----
+        dataset_path: Path to the `.parquet` file.
+
+    Returns:
+    -------
+        List[Tuple[str, str]]: Extracted prompt and target pairs.
+
+    Raises:
+    ------
+        InsufficientDataError: If the Parquet file has no columns or cannot be read.
+
+    """
+    raw_pairs: List[Tuple[str, str]] = []
+    escaped = str(dataset_path.resolve()).replace("'", "''")
+    conn = duckdb.connect()
+    try:
+        rel = conn.execute(f"SELECT * FROM read_parquet('{escaped}')")
+        cols = [c[0] for c in rel.description] if rel.description else []
+        if not cols:
+            raise InsufficientDataError("Parquet file contains no schema columns.")
+        rows = rel.fetchall()
+        for r in rows:
+            p = str(r[0]) if len(r) > 0 and r[0] is not None else ""
+            c = (
+                str(r[1])
+                if len(r) > 1 and r[1] is not None
+                else (
+                    " ".join(str(x) for x in r if x is not None) if len(r) <= 1 else ""
+                )
+            )
+            raw_pairs.append((p, c))
+    except (
+        InsufficientDataError,
+        duckdb.Error,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as e:
+        raise InsufficientDataError(
+            f"Failed to read Parquet dataset at '{dataset_path}': {e}"
+        ) from e
+    finally:
+        conn.close()
+    return raw_pairs
 
 
 def _load_raw_pairs_from_file(dataset_path: Path) -> List[Tuple[str, str]]:
@@ -37,66 +150,12 @@ def _load_raw_pairs_from_file(dataset_path: Path) -> List[Tuple[str, str]]:
         InsufficientDataError: If the file cannot be read or contains no valid pairs.
 
     """
-    raw_pairs: List[Tuple[str, str]] = []
     suffix = dataset_path.suffix.lower()
-
-    if suffix in (".jsonl", ".json"):
-        try:
-            with open(dataset_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        record = json.loads(stripped)
-                        if isinstance(record, dict):
-                            p = str(
-                                record.get("prompt") or record.get("question") or ""
-                            )
-                            c = str(
-                                record.get("completion")
-                                or record.get("sql")
-                                or record.get("response")
-                                or ""
-                            )
-                            raw_pairs.append((p, c))
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"Skipping malformed JSON line in {dataset_path}"
-                        )
-        except Exception as e:
-            raise InsufficientDataError(
-                f"Failed to read JSONL dataset at '{dataset_path}': {e}"
-            ) from e
-    else:
-        import duckdb
-
-        escaped = str(dataset_path.resolve()).replace("'", "''")
-        conn = duckdb.connect()
-        try:
-            rel = conn.execute(f"SELECT * FROM read_parquet('{escaped}')")
-            cols = [c[0] for c in rel.description] if rel.description else []
-            if not cols:
-                raise InsufficientDataError("Parquet file contains no schema columns.")
-            rows = rel.fetchall()
-            for r in rows:
-                p = str(r[0]) if len(r) > 0 and r[0] is not None else ""
-                c = (
-                    str(r[1])
-                    if len(r) > 1 and r[1] is not None
-                    else (
-                        " ".join(str(x) for x in r if x is not None)
-                        if len(r) <= 1
-                        else ""
-                    )
-                )
-                raw_pairs.append((p, c))
-        except Exception as e:
-            raise InsufficientDataError(
-                f"Failed to read Parquet dataset at '{dataset_path}': {e}"
-            ) from e
-        finally:
-            conn.close()
+    raw_pairs = (
+        _load_pairs_from_json_or_jsonl(dataset_path)
+        if suffix in (".jsonl", ".json")
+        else _load_pairs_from_duckdb_or_parquet(dataset_path)
+    )
 
     if not raw_pairs:
         raise InsufficientDataError(
@@ -135,7 +194,7 @@ def _resolve_tokenizer(
         tf_mod: TransformersModuleProtocol = importlib.import_module("transformers")
         auto_tok_cls = tf_mod.AutoTokenizer
         return auto_tok_cls.from_pretrained(model_id)
-    except Exception as e:
+    except (ImportError, OSError, RuntimeError, ValueError, TypeError) as e:
         raise InsufficientDataError(
             f"Failed to load Hugging Face tokenizer '{model_id}'. "
             f"Ensure 'transformers' is installed and model '{model_id}' is accessible: {e}"
@@ -165,10 +224,10 @@ def _tokenize_pair_with_masking(
     """
     import torch
 
-    formatted_prompt = f"""<start_of_turn>user
-{prompt}<end_of_turn>
-<start_of_turn>model
-"""
+    nl = chr(10)
+    formatted_prompt = (
+        f"<start_of_turn>user{nl}{prompt}<end_of_turn>{nl}<start_of_turn>model{nl}"
+    )
     formatted_target = f"{target}<end_of_turn>"
 
     p_ids = list(active_tok.encode(formatted_prompt, add_special_tokens=False))
@@ -196,8 +255,8 @@ def _tokenize_pair_with_masking(
     return (input_ids, target_ids)
 
 
-class TokenizedPairDataset(Sequence[Tuple[TensorLike, TensorLike]]):
-    """Sequence dataset wrapping pre-tokenized `(input_ids, labels)` tensor pairs."""
+class TokenizedPairDataset:
+    """Sequence-like dataset wrapping pre-tokenized `(input_ids, labels)` tensor pairs."""
 
     def __init__(self, pairs: Sequence[Tuple[TensorLike, TensorLike]]) -> None:
         """
@@ -221,15 +280,13 @@ class TokenizedPairDataset(Sequence[Tuple[TensorLike, TensorLike]]):
         """
         return len(self._pairs)
 
-    def __getitem__(  # type: ignore[override]
-        self, index: int
-    ) -> Tuple[TensorLike, TensorLike]:
+    def __getitem__(self, index: int) -> Tuple[TensorLike, TensorLike]:
         """
         Return the `(input_ids, labels)` tuple at the given index.
 
         Args:
         ----
-            index: Zero-based sample index.
+            index: Zero-based sample integer index.
 
         Returns:
         -------

@@ -1,10 +1,12 @@
 """Module for generating synthetic Text-to-SQL training data using an LLM."""
 
+import collections
 import csv
 import io
 import json
 import logging
 import re
+import urllib.error
 import urllib.request
 from pathlib import Path
 from types import TracebackType
@@ -13,17 +15,19 @@ from typing import (
     Dict,
     Hashable,
     List,
+    Mapping,
     Optional,
+    Sequence,
     Set,
     Tuple,
     Union,
 )
 
 import duckdb
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
-from t1d_analytics.errors import LlmProviderError
+from t1d_analytics.errors import LlmProviderError, T1DError
 from t1d_analytics.llm_client import (
     PROVIDER_ENV_KEYS,
     create_any_llm_transport,
@@ -33,6 +37,7 @@ from t1d_analytics.llm_client import (
 from t1d_analytics.llm_client import (
     validate_provider_readiness as validate_provider_readiness,
 )
+from t1d_analytics.sql_fallback_synthesizer import TranslationResult
 from t1d_analytics.sql_utils import (
     SqlValue,
     extract_table_schemas,
@@ -310,29 +315,26 @@ def _parse_llm_json_array(content_str: str) -> Optional[list[SqlValue]]:
         Optional[list[SqlValue]]: Parsed list of values if successful, otherwise None.
 
     """
+    nl = chr(10)
     cleaned = content_str.strip()
     if cleaned.startswith("```"):
         lines = [
             line for line in cleaned.splitlines() if not line.strip().startswith("```")
         ]
-        cleaned = "\n".join(lines).strip()
+        cleaned = nl.join(lines).strip()
     try:
         data = json.loads(cleaned)
         if isinstance(data, list):
             return _SQL_VALUE_LIST_ADAPTER.validate_python(data)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as e:
         logger.debug(f"Failed to decode exact JSON list: {e}")
-    except Exception as e:
-        logger.debug(f"Unexpected error decoding exact JSON list: {e}")
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if match:
         try:
             extracted = list(json.loads(match.group(0)))
             return _SQL_VALUE_LIST_ADAPTER.validate_python(extracted)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as e:
             logger.debug(f"Failed to decode extracted JSON list: {e}")
-        except Exception as e:
-            logger.debug(f"Unexpected error decoding extracted JSON list: {e}")
     return None
 
 
@@ -436,8 +438,9 @@ class TrainingDataGenerator:
         """
         if custom_prompt_template:
             return custom_prompt_template.format(schema=schema)
+        nl = chr(10)
         return (
-            f"Given the following database schema:\n{schema}\n"
+            f"Given the following database schema:{nl}{schema}{nl}"
             "Generate a natural language question, a correct SQL query to answer it, "
             "and an incorrect SQL query with a subtle mistake. "
             "Output as a JSON array with exactly three strings: "
@@ -461,11 +464,8 @@ class TrainingDataGenerator:
         try:
             self.conn.execute(f"EXPLAIN {sql_query}")
             return True
-        except duckdb.Error as e:
+        except (duckdb.Error, RuntimeError, ValueError) as e:
             logger.debug(f"SQL validation failed: {e}")
-            return False
-        except Exception as e:
-            logger.debug(f"Unexpected error in SQL validation: {e}")
             return False
 
     def generate_pairs(
@@ -532,7 +532,13 @@ class TrainingDataGenerator:
                             pairs.append(
                                 (item["prompt"], item["chosen"], item["rejected"])
                             )
-            except Exception as e:
+            except (
+                OSError,
+                json.JSONDecodeError,
+                KeyError,
+                ValueError,
+                TypeError,
+            ) as e:
                 logger.warning(f"Could not load checkpoint from {checkpoint_path}: {e}")
         return pairs
 
@@ -559,7 +565,7 @@ class TrainingDataGenerator:
                     indent=2,
                 )
             )
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             logger.warning(f"Could not write checkpoint: {e}")
 
     def _generate_pairs(
@@ -602,7 +608,7 @@ class TrainingDataGenerator:
         llm_transport = None
         try:
             llm_transport = create_any_llm_transport(self.provider)
-        except Exception as e:
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError) as e:
             logger.debug(f"Failed to create AnyLLM transport: {e}")
             use_any_llm = False
 
@@ -632,7 +638,7 @@ class TrainingDataGenerator:
                     )
                     content_str = extract_stream_delta(resp, self.provider).strip()
                     parsed = _parse_llm_json_array(content_str)
-                except Exception as e:
+                except (T1DError, OSError, RuntimeError, ValueError, TypeError) as e:
                     logger.warning(f"any-llm generation attempt {attempts} failed: {e}")
 
             if parsed is None and self.provider == "ollama":
@@ -645,7 +651,13 @@ class TrainingDataGenerator:
                         urlopen_fn=urllib.request.urlopen,
                     )
                     parsed = _parse_llm_json_array(generated_text)
-                except Exception as e:
+                except (
+                    urllib.error.URLError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    TypeError,
+                ) as e:
                     logger.warning(
                         f"Generation attempt {attempts} failed: {e}. Retrying..."
                     )
@@ -728,7 +740,8 @@ class TrainingDataGenerator:
         if not pairs:
             return
 
-        pretrain_rows = [(f"Question: {p}\nSQL: {c}",) for p, c, _ in pairs]
+        nl = chr(10)
+        pretrain_rows = [(f"Question: {p}{nl}SQL: {c}",) for p, c, _ in pairs]
         sft_rows = [(p, c) for p, c, _ in pairs]
         dpo_rows = [(p, c, r) for p, c, r in pairs]
 
@@ -740,7 +753,7 @@ class TrainingDataGenerator:
             self.conn.executemany(f'INSERT INTO "{sft_tbl}" VALUES (?, ?)', sft_rows)
             self.conn.executemany(f'INSERT INTO "{dpo_tbl}" VALUES (?, ?, ?)', dpo_rows)
             self.conn.execute("COMMIT")
-        except Exception:
+        except (duckdb.Error, RuntimeError, ValueError, TypeError):
             self.conn.execute("ROLLBACK")
             raise
 
@@ -798,106 +811,127 @@ def _execute_eval_sql(
         return None, False
     try:
         return conn.execute(sql_query).fetchall(), False
-    except duckdb.Error as e:
+    except (duckdb.Error, RuntimeError, ValueError, TypeError) as e:
         logger.debug(f"Execution error for SQL '{sql_query}': {e}")
         return None, True
-    except Exception as e:
-        logger.debug(f"Unexpected error for SQL '{sql_query}': {e}")
-        return None, True
 
 
-def evaluate_text_to_sql(
-    db_path: str,
-    test_data: list[dict[str, str]],
-    model: str = "gemma4",
-    translate_fn: Optional[Callable[..., tuple[str, str]]] = None,
-) -> TextToSqlEvalReportDict:
+def _compare_sql_result_sets(
+    gold_rows: Sequence[Tuple[SqlValue, ...]],
+    pred_rows: Sequence[Tuple[SqlValue, ...]],
+    has_order_by: bool,
+) -> bool:
     """
-    Evaluate Text-to-SQL generation accuracy against a holdout test set.
-
-    Computes Exact Match (EM), Execution Accuracy (EX), and Syntax Failure Rates.
+    Compare gold and predicted SQL result sets using ordered or multiset equality.
 
     Args:
     ----
-        db_path: Path to DuckDB instance.
-        test_data: List of test cases with 'prompt'/'question' and 'gold_sql'/'chosen'.
-        model: Model identifier.
-        translate_fn: Optional injectable NL-to-SQL translation callable.
+        gold_rows: Gold query result rows.
+        pred_rows: Predicted query result rows.
+        has_order_by: Whether either query specifies an `ORDER BY` clause.
 
     Returns:
     -------
-        TextToSqlEvalReportDict: Evaluation summary metrics and generated markdown/CSV reports.
+        bool: True if result sets are equivalent.
 
     """
-    from t1d_analytics.chat_service import generate_sql_from_nl
+    if has_order_by:
+        return list(pred_rows) == list(gold_rows)
+    hashable_pred = [_make_hashable(r) for r in pred_rows]
+    hashable_gold = [_make_hashable(r) for r in gold_rows]
+    return collections.Counter(hashable_pred) == collections.Counter(hashable_gold)
 
-    active_translate = translate_fn or generate_sql_from_nl
 
-    conn = duckdb.connect(db_path, read_only=True)
-    total = len(test_data)
-    em_count = 0
-    ex_count = 0
-    syntax_error_count = 0
-    results: list[EvalItemResultDict] = []
+def _evaluate_single_sql_sample(
+    conn: duckdb.DuckDBPyConnection,
+    db_path: str,
+    sample: Mapping[str, str],
+    model: str,
+    translate_fn: Callable[..., Union[TranslationResult, tuple[str, str]]],
+) -> EvalItemResultDict:
+    """
+    Evaluate a single Text-to-SQL benchmark item and return its `EvalItemResultDict`.
 
-    for item in test_data:
-        question = item.get("prompt") or item.get("question") or ""
-        gold_sql = (
-            item.get("gold_sql") or item.get("chosen") or item.get("completion") or ""
-        )
+    Args:
+    ----
+        conn: Read-only DuckDB connection.
+        db_path: Path to the DuckDB file.
+        sample: Benchmark item dictionary containing `prompt`/`question` and `gold_sql`/`chosen`.
+        model: Model identifier string.
+        translate_fn: NL-to-SQL translation callable.
 
-        try:
-            _, pred_sql = active_translate(db_path, question, model_name=model)
-        except Exception as e:
-            logger.debug(f"SQL generation failed for question '{question}': {e}")
-            pred_sql = ""
+    Returns:
+    -------
+        EvalItemResultDict: Evaluation result record for the single sample.
 
-        em = (
-            normalize_sql(pred_sql) == normalize_sql(gold_sql)
-            if pred_sql and gold_sql
-            else False
-        )
-        if em:
-            em_count += 1
+    """
+    question = sample.get("prompt") or sample.get("question") or ""
+    gold_sql = (
+        sample.get("gold_sql") or sample.get("chosen") or sample.get("completion") or ""
+    )
 
-        pred_rows, syntax_err = _execute_eval_sql(conn, pred_sql)
-        if syntax_err:
-            syntax_error_count += 1
-        gold_rows, _ = _execute_eval_sql(conn, gold_sql)
+    try:
+        _, pred_sql = translate_fn(db_path, question, model_name=model)
+    except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
+        logger.debug(f"SQL generation failed for question '{question}': {e}")
+        pred_sql = ""
 
-        ex = False
-        if pred_rows is not None and gold_rows is not None:
-            if "order by" in gold_sql.lower() or "order by" in pred_sql.lower():
-                ex = pred_rows == gold_rows
-            else:
-                import collections
+    em = (
+        normalize_sql(pred_sql) == normalize_sql(gold_sql)
+        if pred_sql and gold_sql
+        else False
+    )
 
-                hashable_pred = [_make_hashable(r) for r in pred_rows]
-                hashable_gold = [_make_hashable(r) for r in gold_rows]
-                ex = collections.Counter(hashable_pred) == collections.Counter(
-                    hashable_gold
-                )
-            if ex:
-                ex_count += 1
+    pred_rows, syntax_err = _execute_eval_sql(conn, pred_sql)
+    gold_rows, _ = _execute_eval_sql(conn, gold_sql)
 
-        results.append(
-            {
-                "question": question,
-                "gold_sql": gold_sql,
-                "pred_sql": pred_sql,
-                "exact_match": em,
-                "execution_accuracy": ex,
-                "syntax_error": syntax_err,
-            }
-        )
+    ex = False
+    if pred_rows is not None and gold_rows is not None:
+        has_order_by = "order by" in gold_sql.lower() or "order by" in pred_sql.lower()
+        ex = _compare_sql_result_sets(gold_rows, pred_rows, has_order_by)
 
-    conn.close()
+    return {
+        "question": question,
+        "gold_sql": gold_sql,
+        "pred_sql": pred_sql,
+        "exact_match": em,
+        "execution_accuracy": ex,
+        "syntax_error": syntax_err,
+    }
 
-    em_rate = (em_count / total * 100) if total else 0.0
-    ex_rate = (ex_count / total * 100) if total else 0.0
-    syntax_rate = (syntax_error_count / total * 100) if total else 0.0
 
-    # Markdown report
+def _format_benchmark_reports(
+    model: str,
+    total: int,
+    em_count: int,
+    ex_count: int,
+    syntax_error_count: int,
+    em_rate: float,
+    ex_rate: float,
+    syntax_rate: float,
+    results: Sequence[EvalItemResultDict],
+) -> tuple[str, str]:
+    """
+    Format Markdown and CSV reports for `evaluate_text_to_sql`.
+
+    Args:
+    ----
+        model: Evaluated model name.
+        total: Total sample count.
+        em_count: Exact match count.
+        ex_count: Execution accuracy match count.
+        syntax_error_count: Syntax failure count.
+        em_rate: Exact match percentage.
+        ex_rate: Execution accuracy percentage.
+        syntax_rate: Syntax failure percentage.
+        results: Per-sample evaluation records.
+
+    Returns:
+    -------
+        tuple[str, str]: `(markdown_report, csv_report)`.
+
+    """
+    nl = chr(10)
     md_lines = [
         f"# Text-to-SQL Benchmark Report: {model}",
         "",
@@ -917,9 +951,8 @@ def evaluate_text_to_sql(
         md_lines.append(
             f"| {r['question'][:50]} | {'PASS' if r['exact_match'] else 'FAIL'} | {'PASS' if r['execution_accuracy'] else 'FAIL'} | {'ERROR' if r['syntax_error'] else 'OK'} |"
         )
-    md_report = "\n".join(md_lines)
+    md_report = nl.join(md_lines)
 
-    # CSV report
     csv_buf = io.StringIO()
     writer = csv.DictWriter(
         csv_buf,
@@ -935,7 +968,67 @@ def evaluate_text_to_sql(
     writer.writeheader()
     for r in results:
         writer.writerow(r)
-    csv_report = csv_buf.getvalue()
+    return md_report, csv_buf.getvalue()
+
+
+def evaluate_text_to_sql(
+    db_path: str,
+    test_data: list[dict[str, str]],
+    model: str = "gemma4",
+    translate_fn: Optional[
+        Callable[..., Union[TranslationResult, tuple[str, str]]]
+    ] = None,
+) -> TextToSqlEvalReportDict:
+    """
+    Evaluate Text-to-SQL generation accuracy against a holdout test set.
+
+    Computes Exact Match (EM), Execution Accuracy (EX), and Syntax Failure Rates.
+
+    Args:
+    ----
+        db_path: Path to DuckDB instance.
+        test_data: List of test cases with 'prompt'/'question' and 'gold_sql'/'chosen'.
+        model: Model identifier.
+        translate_fn: Optional injectable NL-to-SQL translation callable.
+
+    Returns:
+    -------
+        TextToSqlEvalReportDict: Evaluation summary metrics and generated markdown/CSV reports.
+
+    """
+    from t1d_analytics.chat_service import translate_nl_to_sql
+
+    active_translate = translate_fn or translate_nl_to_sql
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        results = [
+            _evaluate_single_sql_sample(conn, db_path, item, model, active_translate)
+            for item in test_data
+        ]
+    finally:
+        conn.close()
+
+    total = len(results)
+    em_count = sum(1 for r in results if r["exact_match"])
+    ex_count = sum(1 for r in results if r["execution_accuracy"])
+    syntax_error_count = sum(1 for r in results if r["syntax_error"])
+
+    em_rate = (em_count / total * 100) if total else 0.0
+    ex_rate = (ex_count / total * 100) if total else 0.0
+    syntax_rate = (syntax_error_count / total * 100) if total else 0.0
+
+    md_report, csv_report = _format_benchmark_reports(
+        model=model,
+        total=total,
+        em_count=em_count,
+        ex_count=ex_count,
+        syntax_error_count=syntax_error_count,
+        em_rate=em_rate,
+        ex_rate=ex_rate,
+        syntax_rate=syntax_rate,
+        results=results,
+    )
 
     return {
         "total_samples": total,

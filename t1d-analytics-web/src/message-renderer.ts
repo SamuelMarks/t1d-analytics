@@ -22,9 +22,31 @@ import {
 import { renderCgmCard } from "./chart";
 import { type ProviderSettingsModalController } from "./controllers/provider-modal-controller";
 import { type SchemaExplorerController } from "./controllers/schema-explorer-controller";
+import {
+  type SchemaDiagnosticCardOptions,
+  buildEmptyStateView,
+  createSchemaDiagnosticCard,
+} from "./empty-state-builder";
 import { exportRowsToCsv, exportRowsToJson } from "./exporters";
 import { classifySqlResult, type SqlCellValue } from "./formatters";
-import { type Chat, type ChatState, type Message } from "./state";
+import {
+  DEFAULT_DB_NAME,
+  RAW_SQL_MODEL,
+  type Chat,
+  type ChatState,
+  type Message,
+} from "./state";
+import {
+  TABLE_1_EXAMPLE_QUERIES,
+  type Table1ExampleSpec,
+} from "./table1-queries";
+
+export {
+  type SchemaDiagnosticCardOptions,
+  type Table1ExampleSpec,
+  TABLE_1_EXAMPLE_QUERIES,
+  createSchemaDiagnosticCard,
+};
 
 /**
  * Response payload returned by `/api/chat` and `/api/execute-sql`.
@@ -93,78 +115,51 @@ export function createSvgIcon(
 }
 
 /**
- * Options for constructing a schema diagnostic card via DOM APIs.
+ * Formatted SQL execution outcome containing display content and optional tabular rows.
  */
-export interface SchemaDiagnosticCardOptions {
-  /** Leading icon text. */
-  icon: string;
-  /** Header title text. */
-  title: string;
-  /** Optional descriptive paragraph text. */
-  description?: string;
-  /** Optional CLI command string to render with a copy button. */
-  command?: string;
-  /** Whether to include a reload schema button. */
-  showReload?: boolean;
-  /** Whether to apply the `.error-text` styling and `role="alert"`. */
-  isError?: boolean;
-  /** Whether to set `role="alert"` on the card container. */
-  isAlert?: boolean;
+export interface SqlExecutionOutcome {
+  /** Localized or scalar-formatted text content for the assistant message. */
+  content: string;
+  /** Tabular SQL result rows (undefined when rendered inline as a scalar). */
+  sqlResult?: Record<string, SqlCellValue>[];
+  /** Optional screen-reader announcement string when rows are empty. */
+  announcement?: string;
 }
 
 /**
- * Constructs a `.schema-diagnostic-card` element using safe DOM APIs without `innerHTML`.
- * @param {SchemaDiagnosticCardOptions} options - Card configuration options.
- * @returns {HTMLDivElement} The constructed diagnostic card element.
+ * Formats a SQL result set (`rows`) and `baseContent` into display text and table rows.
+ * @param {Record<string, SqlCellValue>[] | undefined} rows - Tabular SQL result rows.
+ * @param {string} baseContent - Base assistant text (when coming from `/api/chat`).
+ * @param {boolean} isDirectExecution - True when invoked from direct `/api/execute-sql` play/refresh actions.
+ * @returns {SqlExecutionOutcome} Formatted content, normalized `sqlResult`, and optional announcement.
  */
-export function createSchemaDiagnosticCard(
-  options: SchemaDiagnosticCardOptions,
-): HTMLDivElement {
-  const card = document.createElement("div");
-  card.className = options.isError
-    ? "schema-diagnostic-card error-text"
-    : "schema-diagnostic-card";
-  if (options.isAlert || options.isError) {
-    card.setAttribute("role", "alert");
+export function formatSqlExecutionOutcome(
+  rows: Record<string, SqlCellValue>[] | undefined,
+  baseContent: string,
+  isDirectExecution: boolean,
+): SqlExecutionOutcome {
+  const classified = classifySqlResult(rows);
+  if (isDirectExecution) {
+    if (classified.kind === "empty") {
+      const noRowsMsg = i18next.t("ui.noRows", "No rows returned");
+      return { content: noRowsMsg, sqlResult: [], announcement: noRowsMsg };
+    }
+    if (classified.kind === "scalar") {
+      return { content: classified.formattedValue, sqlResult: undefined };
+    }
+    return {
+      content: i18next.t("app.tableData", "Table Data"),
+      sqlResult: rows,
+    };
   }
 
-  const header = document.createElement("div");
-  header.className = "schema-diagnostic-header";
-  const iconSpan = document.createElement("span");
-  iconSpan.textContent = options.icon;
-  const titleSpan = document.createElement("span");
-  titleSpan.textContent = options.title;
-  header.append(iconSpan, titleSpan);
-  card.appendChild(header);
-
-  if (options.description) {
-    const descP = document.createElement("p");
-    descP.className = "schema-diagnostic-desc";
-    descP.textContent = options.description;
-    card.appendChild(descP);
+  if (classified.kind === "scalar") {
+    const content = baseContent
+      ? `${baseContent} **${classified.column}:** ${classified.formattedValue}`
+      : classified.formattedValue;
+    return { content, sqlResult: rows };
   }
-
-  if (options.command) {
-    const cmdBox = document.createElement("div");
-    cmdBox.className = "schema-command-box";
-    const codeEl = document.createElement("code");
-    codeEl.textContent = options.command;
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "btn btn-xs btn-secondary copy-cmd-btn";
-    copyBtn.setAttribute("data-cmd", options.command);
-    copyBtn.textContent = i18next.t("status.copyCommand");
-    cmdBox.append(codeEl, copyBtn);
-    card.appendChild(cmdBox);
-  }
-
-  if (options.showReload) {
-    const reloadBtn = document.createElement("button");
-    reloadBtn.className = "btn btn-xs btn-primary reload-schema-btn";
-    reloadBtn.textContent = i18next.t("status.reloadSchema");
-    card.appendChild(reloadBtn);
-  }
-
-  return card;
+  return { content: baseContent, sqlResult: rows };
 }
 
 /**
@@ -208,253 +203,6 @@ interface CachedMessageEntry {
 }
 
 /**
- * Specification for an Academic Table 1 clinical starter query.
- */
-export interface Table1ExampleSpec {
-  /** Unique identifier for the Table 1 example tier. */
-  id: string;
-  /** Complexity rating label ('Low', 'Low-Medium', 'Medium', 'Medium-High', 'High', 'Very High'). */
-  complexity:
-    | "Low"
-    | "Low-Medium"
-    | "Medium"
-    | "Medium-High"
-    | "High"
-    | "Very High";
-  /** i18n translation key for the button label. */
-  i18nKey: string;
-  /** Natural language clinical question corresponding to the Table 1 query. */
-  question: string;
-  /** Validated DuckDB SQL query producing the HTML Table 1 result. */
-  sql: string;
-}
-
-/**
- * Curated Academic "Table 1" clinical baseline and stratified outcome examples across 7 complexity tiers.
- */
-export const TABLE_1_EXAMPLE_QUERIES: ReadonlyArray<Table1ExampleSpec> = [
-  {
-    id: "table1-overall",
-    complexity: "Low",
-    i18nKey: "ui.exampleQueries.table1Overall",
-    question:
-      "Generate a Table 1 summary of overall participant count, mean age, percent female, mean HbA1c, and mean Time in Range from the patients table.",
-    sql: `SELECT
-    COUNT(*) AS "N Participants",
-    ROUND(AVG(age), 1) AS "Mean Age (yr)",
-    ROUND(STDDEV_SAMP(age), 1) AS "SD Age (yr)",
-    SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) AS "Female (n)",
-    ROUND(100.0 * AVG(CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END), 1) AS "Female (%)",
-    ROUND(AVG(hba1c), 2) AS "Mean HbA1c (%)",
-    ROUND(AVG(tir), 1) AS "Mean TIR 70-180 (%)",
-    ROUND(AVG(tbr), 2) AS "Mean TBR <70 (%)",
-    ROUND(AVG(tar), 1) AS "Mean TAR >180 (%)",
-    ROUND(AVG(mean_glucose), 1) AS "Mean CGM (mg/dL)"
-FROM patients;`,
-  },
-  {
-    id: "table1-by-arm",
-    complexity: "Low-Medium",
-    i18nKey: "ui.exampleQueries.table1ByArm",
-    question:
-      "Create a Table 1 comparing Closed-Loop vs Control treatment arms in patients with N, Age (Mean ± SD), Female n (%), Baseline HbA1c (Mean ± SD), TIR, TBR, TAR, and total DKA events.",
-    sql: `SELECT
-    TxGroup AS "Treatment Arm",
-    COUNT(*) AS "N",
-    ROUND(AVG(age), 1) || ' ± ' || ROUND(STDDEV_SAMP(age), 1) AS "Age (yr, Mean ± SD)",
-    SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END), 1) || '%)' AS "Female, n (%)",
-    ROUND(AVG(hba1c), 2) || ' ± ' || ROUND(STDDEV_SAMP(hba1c), 2) AS "HbA1c (%, Mean ± SD)",
-    ROUND(AVG(tir), 1) || ' ± ' || ROUND(STDDEV_SAMP(tir), 1) AS "TIR 70-180 (%, Mean ± SD)",
-    ROUND(AVG(tbr), 2) || ' ± ' || ROUND(STDDEV_SAMP(tbr), 2) AS "TBR <70 (%, Mean ± SD)",
-    ROUND(AVG(tar), 1) || ' ± ' || ROUND(STDDEV_SAMP(tar), 1) AS "TAR >180 (%, Mean ± SD)",
-    SUM(numhospdka) AS "Total DKA Events"
-FROM patients
-GROUP BY TxGroup
-ORDER BY TxGroup;`,
-  },
-  {
-    id: "table1-by-age",
-    complexity: "Medium",
-    i18nKey: "ui.exampleQueries.table1ByAge",
-    question:
-      "Build an age-stratified Table 1 across Pediatric (<18 yr), Adult (18-49 yr), and Older Adult (>=50 yr) cohorts showing sample size, % Closed-Loop, mean and median HbA1c, mean TIR, and % achieving ADA targets (TIR >= 70% and HbA1c < 7.0%).",
-    sql: `SELECT
-    CASE
-        WHEN age < 18 THEN '1. Pediatric (<18 yr)'
-        WHEN age < 50 THEN '2. Adult (18-49 yr)'
-        ELSE '3. Older Adult (>=50 yr)'
-    END AS "Age Stratum",
-    COUNT(*) AS "N",
-    ROUND(AVG(age), 1) AS "Mean Age (yr)",
-    ROUND(100.0 * AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN 1.0 ELSE 0.0 END), 1) AS "Closed-Loop (%)",
-    ROUND(AVG(hba1c), 2) AS "Mean HbA1c (%)",
-    ROUND(MEDIAN(hba1c), 2) AS "Median HbA1c (%)",
-    ROUND(AVG(tir), 1) AS "Mean TIR (%)",
-    ROUND(100.0 * AVG(CASE WHEN tir >= 70.0 AND hba1c < 7.0 THEN 1.0 ELSE 0.0 END), 1) AS "ADA Goal Achieved (%)"
-FROM patients
-GROUP BY 1
-ORDER BY 1;`,
-  },
-  {
-    id: "table1-by-pump",
-    complexity: "Medium",
-    i18nKey: "ui.exampleQueries.table1ByPump",
-    question:
-      "Produce a device-stratified Table 1 joining subjects and patients by pump manufacturer (Insulet, Medtronic, Tandem) with N, Age (Mean ± SD), % Female, mean HbA1c, mean TIR, mean CGM glucose, and DKA count.",
-    sql: `SELECT
-    s.Pt_PumpManuf AS "Pump Manufacturer",
-    COUNT(*) AS "N",
-    ROUND(AVG(p.age), 1) || ' ± ' || ROUND(STDDEV_SAMP(p.age), 1) AS "Age (Mean ± SD)",
-    ROUND(100.0 * AVG(CASE WHEN p.gender = 'F' THEN 1.0 ELSE 0.0 END), 1) AS "Female (%)",
-    ROUND(AVG(p.hba1c), 2) AS "Mean HbA1c (%)",
-    ROUND(AVG(p.tir), 1) AS "Mean TIR (%)",
-    ROUND(AVG(p.mean_glucose), 1) AS "Mean Glucose (mg/dL)",
-    SUM(p.numhospdka) AS "DKA Events"
-FROM subjects s
-JOIN patients p ON s.PtID = p.subject_id
-GROUP BY s.Pt_PumpManuf
-ORDER BY s.Pt_PumpManuf;`,
-  },
-  {
-    id: "table1-longitudinal-lab",
-    complexity: "Medium-High",
-    i18nKey: "ui.exampleQueries.table1LongitudinalLab",
-    question:
-      "Generate a longitudinal laboratory Table 1 joining patients and hba1c_labs by treatment arm showing randomized N, lab completers N, baseline vs endpoint HbA1c, HbA1c change (delta), and baseline vs endpoint C-Peptide.",
-    sql: `WITH lab_bounds AS (
-    SELECT
-        subject_id,
-        FIRST(hba1c ORDER BY VisitDate ASC) AS baseline_hba1c,
-        LAST(hba1c ORDER BY VisitDate ASC) AS endpoint_hba1c,
-        FIRST(C_Peptide ORDER BY VisitDate ASC) AS baseline_c_peptide,
-        LAST(C_Peptide ORDER BY VisitDate ASC) AS endpoint_c_peptide
-    FROM hba1c_labs
-    GROUP BY subject_id
-)
-SELECT
-    p.TxGroup AS "Treatment Arm",
-    COUNT(p.subject_id) AS "Randomized (N)",
-    COUNT(l.subject_id) AS "Lab Completers (n)",
-    ROUND(AVG(l.baseline_hba1c), 2) AS "Baseline HbA1c (%)",
-    ROUND(AVG(l.endpoint_hba1c), 2) AS "Endpoint HbA1c (%)",
-    ROUND(AVG(l.endpoint_hba1c - l.baseline_hba1c), 2) AS "Delta HbA1c (%)",
-    ROUND(AVG(l.baseline_c_peptide), 3) AS "Baseline C-Peptide (nmol/L)",
-    ROUND(AVG(l.endpoint_c_peptide), 3) AS "Endpoint C-Peptide (nmol/L)"
-FROM patients p
-LEFT JOIN lab_bounds l ON p.subject_id = l.subject_id
-GROUP BY p.TxGroup
-ORDER BY p.TxGroup;`,
-  },
-  {
-    id: "table1-multi-domain-rollup",
-    complexity: "High",
-    i18nKey: "ui.exampleQueries.table1MultiDomainRollup",
-    question:
-      "Construct a multi-domain Table 1 with an Overall Cohort rollup joining patients, raw cgm_readings, and dka_adverse_events by treatment arm, reporting N, Age, HbA1c, raw sensor CGM Mean ± SD, sensor CV%, TIR%, DKA events, severe hypoglycemia events, and hospitalizations.",
-    sql: `WITH cgm_agg AS (
-    SELECT
-        subject_id,
-        AVG(glucose_value) AS sensor_mean_mgdl,
-        STDDEV_SAMP(glucose_value) AS sensor_sd_mgdl,
-        100.0 * STDDEV_SAMP(glucose_value) / NULLIF(AVG(glucose_value), 0) AS sensor_cv_pct
-    FROM cgm_readings
-    GROUP BY subject_id
-),
-ae_agg AS (
-    SELECT
-        subject_id,
-        SUM(CASE WHEN EventType = 'DKA' THEN 1 ELSE 0 END) AS dka_ae,
-        SUM(CASE WHEN EventType = 'Severe Hypoglycemia' THEN 1 ELSE 0 END) AS sev_hypo_ae,
-        SUM(CASE WHEN Hospitalized THEN 1 ELSE 0 END) AS hosp_ae
-    FROM dka_adverse_events
-    GROUP BY subject_id
-)
-SELECT
-    COALESCE(p.TxGroup, 'Overall Cohort') AS "Cohort Arm",
-    COUNT(*) AS "N",
-    ROUND(AVG(p.age), 1) || ' ± ' || ROUND(STDDEV_SAMP(p.age), 1) AS "Age (yr, Mean ± SD)",
-    ROUND(AVG(p.hba1c), 2) || ' ± ' || ROUND(STDDEV_SAMP(p.hba1c), 2) AS "HbA1c (%, Mean ± SD)",
-    ROUND(AVG(c.sensor_mean_mgdl), 1) || ' ± ' || ROUND(AVG(c.sensor_sd_mgdl), 1) AS "Sensor CGM (mg/dL, Mean ± SD)",
-    ROUND(AVG(c.sensor_cv_pct), 1) AS "Sensor CV (%)",
-    ROUND(AVG(p.tir), 1) AS "TIR 70-180 (%)",
-    COALESCE(SUM(a.dka_ae), 0) AS "DKA Events",
-    COALESCE(SUM(a.sev_hypo_ae), 0) AS "Severe Hypo Events",
-    COALESCE(SUM(a.hosp_ae), 0) AS "Hospitalizations"
-FROM patients p
-LEFT JOIN cgm_agg c ON p.subject_id = c.subject_id
-LEFT JOIN ae_agg a ON p.subject_id = a.subject_id
-GROUP BY ROLLUP(p.TxGroup)
-ORDER BY CASE WHEN p.TxGroup IS NULL THEN 1 ELSE 0 END, p.TxGroup;`,
-  },
-  {
-    id: "table1-transposed-nejm",
-    complexity: "Very High",
-    i18nKey: "ui.exampleQueries.table1TransposedNejm",
-    question:
-      "Generate a transposed NEJM/Lancet-style Table 1 where each row is a clinical characteristic (Sample Size N, Age Mean ± SD, Female Sex n (%), Baseline HbA1c Mean ± SD, Time in Range Mean ± SD, Time Below Range Median (IQR)) and columns are Closed-Loop Arm, Control Arm, Overall Cohort, and Arm Difference.",
-    sql: `WITH base AS (
-    SELECT p.*, s.Pt_PumpManuf
-    FROM patients p
-    LEFT JOIN subjects s ON p.subject_id = s.PtID
-)
-SELECT
-    1 AS sort_ord,
-    'Sample Size (N)' AS "Characteristic",
-    CAST(SUM(CASE WHEN TxGroup = 'Closed-Loop' THEN 1 ELSE 0 END) AS VARCHAR) AS "Closed-Loop Arm",
-    CAST(SUM(CASE WHEN TxGroup = 'Control' THEN 1 ELSE 0 END) AS VARCHAR) AS "Control Arm",
-    CAST(COUNT(*) AS VARCHAR) AS "Overall Cohort",
-    '—' AS "Arm Difference"
-FROM base
-UNION ALL
-SELECT
-    2,
-    'Age (years), Mean ± SD',
-    ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN age END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Closed-Loop' THEN age END), 1),
-    ROUND(AVG(CASE WHEN TxGroup = 'Control' THEN age END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Control' THEN age END), 1),
-    ROUND(AVG(age), 1) || ' ± ' || ROUND(STDDEV_SAMP(age), 1),
-    CAST(ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN age END) - AVG(CASE WHEN TxGroup = 'Control' THEN age END), 2) AS VARCHAR)
-FROM base
-UNION ALL
-SELECT
-    3,
-    'Female Sex, n (%)',
-    SUM(CASE WHEN TxGroup = 'Closed-Loop' AND gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END END), 1) || '%)',
-    SUM(CASE WHEN TxGroup = 'Control' AND gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN TxGroup = 'Control' THEN CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END END), 1) || '%)',
-    SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) || ' (' || ROUND(100.0 * AVG(CASE WHEN gender = 'F' THEN 1.0 ELSE 0.0 END), 1) || '%)',
-    '—'
-FROM base
-UNION ALL
-SELECT
-    4,
-    'Baseline HbA1c (%), Mean ± SD',
-    ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN hba1c END), 2) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Closed-Loop' THEN hba1c END), 2),
-    ROUND(AVG(CASE WHEN TxGroup = 'Control' THEN hba1c END), 2) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Control' THEN hba1c END), 2),
-    ROUND(AVG(hba1c), 2) || ' ± ' || ROUND(STDDEV_SAMP(hba1c), 2),
-    CAST(ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN hba1c END) - AVG(CASE WHEN TxGroup = 'Control' THEN hba1c END), 2) AS VARCHAR)
-FROM base
-UNION ALL
-SELECT
-    5,
-    'Time in Range 70-180 mg/dL (%), Mean ± SD',
-    ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN tir END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Closed-Loop' THEN tir END), 1),
-    ROUND(AVG(CASE WHEN TxGroup = 'Control' THEN tir END), 1) || ' ± ' || ROUND(STDDEV_SAMP(CASE WHEN TxGroup = 'Control' THEN tir END), 1),
-    ROUND(AVG(tir), 1) || ' ± ' || ROUND(STDDEV_SAMP(tir), 1),
-    CAST(ROUND(AVG(CASE WHEN TxGroup = 'Closed-Loop' THEN tir END) - AVG(CASE WHEN TxGroup = 'Control' THEN tir END), 2) AS VARCHAR)
-FROM base
-UNION ALL
-SELECT
-    6,
-    'Time Below Range <70 mg/dL (%), Median (IQR)',
-    ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Closed-Loop' THEN tbr END, 0.5), 2) || ' (' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Closed-Loop' THEN tbr END, 0.25), 2) || '-' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Closed-Loop' THEN tbr END, 0.75), 2) || ')',
-    ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Control' THEN tbr END, 0.5), 2) || ' (' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Control' THEN tbr END, 0.25), 2) || '-' || ROUND(QUANTILE_CONT(CASE WHEN TxGroup = 'Control' THEN tbr END, 0.75), 2) || ')',
-    ROUND(QUANTILE_CONT(tbr, 0.5), 2) || ' (' || ROUND(QUANTILE_CONT(tbr, 0.25), 2) || '-' || ROUND(QUANTILE_CONT(tbr, 0.75), 2) || ')',
-    '—'
-FROM base
-ORDER BY sort_ord;`,
-  },
-];
-
-/**
  * Renders chat message lists, empty-state query chips, SQL action blocks, and result tables.
  */
 export class MessageRenderer {
@@ -476,157 +224,7 @@ export class MessageRenderer {
    * @returns {HTMLDivElement} The constructed `.empty-state` element.
    */
   private buildEmptyState(): HTMLDivElement {
-    const emptyStateDiv = document.createElement("div");
-    emptyStateDiv.className = "empty-state";
-    emptyStateDiv.setAttribute("role", "status");
-    emptyStateDiv.setAttribute("aria-live", "polite");
-
-    if (
-      this.ui.state.systemStatus.dbStatusCode === "empty_db" ||
-      this.ui.state.systemStatus.dbStatusCode === "missing_initial_data" ||
-      this.ui.state.systemStatus.dbStatusCode === "missing_file"
-    ) {
-      const dbNotice = createSchemaDiagnosticCard({
-        icon: "ℹ️",
-        title: i18next.t("status.emptyDbPrompt"),
-        command: "t1d-analytics load",
-      });
-      dbNotice.style.marginBottom = "1rem";
-      this.ui.schemaExplorerController.bindSchemaDiagnosticButtons(dbNotice);
-      emptyStateDiv.appendChild(dbNotice);
-    }
-
-    const noMessagesP = document.createElement("p");
-    noMessagesP.style.marginBottom = "1rem";
-    noMessagesP.textContent = i18next.t("ui.noMessagesYet");
-    emptyStateDiv.appendChild(noMessagesP);
-
-    const chipsContainer = document.createElement("div");
-    chipsContainer.className = "chips-container";
-
-    const exampleQueries: Array<{
-      label: string;
-      query: string;
-      mode: "sql" | "gemma:2b";
-    }> = [
-      {
-        label: i18next.t("ui.exampleQueries.patientDemographics"),
-        query: `${i18next.t("ui.exampleQueries.patientDemographicsComment", "-- Patient Demographics & Treatment Breakdown")}
-
-SELECT 
-    TxGroup, 
-    COUNT(*) as total_patients, 
-    ROUND(AVG(AgeAsOfRandDt), 1) as avg_age,
-    SUM(NumSevHypo) as total_severe_hypo_events
-FROM tblaptsummary 
-GROUP BY TxGroup;`,
-        mode: "sql",
-      },
-      {
-        label: i18next.t("ui.exampleQueries.adverseEvents"),
-        query: `${i18next.t("ui.exampleQueries.adverseEventsComment", "-- Frequency of Adverse Events")}
-
-SELECT 
-    event as adverse_event_type, 
-    COUNT(*) as occurrence_count 
-FROM adverseevents 
-GROUP BY event 
-ORDER BY occurrence_count DESC;`,
-        mode: "sql",
-      },
-      {
-        label: i18next.t("ui.exampleQueries.pumpManufacturers"),
-        query: `${i18next.t("ui.exampleQueries.pumpManufacturersComment", "-- Patient Pump Manufacturers")}
-
-SELECT 
-    Pt_PumpManuf as pump_manufacturer, 
-    COUNT(*) as user_count 
-FROM subjects 
-WHERE Pt_PumpManuf IS NOT NULL 
-GROUP BY Pt_PumpManuf 
-ORDER BY user_count DESC;`,
-        mode: "sql",
-      },
-      {
-        label: i18next.t("ui.exampleQueries.hba1cDemographics"),
-        query: `${i18next.t("ui.exampleQueries.hba1cDemographicsComment", "-- Joining Subject Summaries with HbA1c Lab Results")}
-
-SELECT 
-    t.TxGroup, 
-    t.Gender,
-    ROUND(AVG(h.HbA1c), 2) as average_hba1c,
-    COUNT(h.HbA1c) as total_tests_run
-FROM tblaptsummary t
-JOIN hba1c h ON t.PtID = h.PtID
-WHERE h.HbA1c IS NOT NULL
-GROUP BY t.TxGroup, t.Gender
-ORDER BY t.TxGroup, average_hba1c DESC;`,
-        mode: "sql",
-      },
-      {
-        label: i18next.t("ui.exampleQueries.nlpFirst5"),
-        query: i18next.t(
-          "ui.exampleQueries.nlpFirst5Prompt",
-          "Show me the first 5 patients in the demographics table.",
-        ),
-        mode: "gemma:2b",
-      },
-    ];
-
-    exampleQueries.forEach((item) => {
-      const chip = document.createElement("button");
-      chip.className = "chip";
-      chip.textContent = item.label;
-      chip.addEventListener("click", () => {
-        this.ui.chatInput.value = item.query;
-        const hasChipModeOption = Array.from(this.ui.modelSelect.options).some(
-          (opt) => opt.value === item.mode,
-        );
-        const targetChipMode = hasChipModeOption ? item.mode : "sql";
-        this.ui.modelSelect.value = targetChipMode;
-        this.ui.state.setActiveChatModel(targetChipMode);
-        this.ui.chatInput.focus();
-        this.ui.syncHighlight();
-      });
-      chipsContainer.appendChild(chip);
-    });
-
-    emptyStateDiv.appendChild(chipsContainer);
-
-    const table1HeaderP = document.createElement("p");
-    table1HeaderP.className = "table1-examples-heading";
-    table1HeaderP.style.marginTop = "1.25rem";
-    table1HeaderP.style.marginBottom = "0.75rem";
-    table1HeaderP.textContent = i18next.t(
-      "ui.exampleQueries.table1SectionTitle",
-    );
-    emptyStateDiv.appendChild(table1HeaderP);
-
-    const table1Container = document.createElement("div");
-    table1Container.className = "table1-chips-container chips-container";
-
-    TABLE_1_EXAMPLE_QUERIES.forEach((spec) => {
-      const t1Btn = document.createElement("button");
-      t1Btn.type = "button";
-      t1Btn.className = "table1-chip";
-      t1Btn.setAttribute("data-table1-id", spec.id);
-      t1Btn.setAttribute("data-complexity", spec.complexity);
-      const labelText = i18next.t(spec.i18nKey);
-      t1Btn.textContent = labelText;
-      t1Btn.title = spec.question;
-      t1Btn.setAttribute("aria-label", `${labelText}: ${spec.question}`);
-      t1Btn.addEventListener("click", () => {
-        this.ui.chatInput.value = `-- ${spec.question}\n${spec.sql}`;
-        this.ui.modelSelect.value = "sql";
-        this.ui.state.setActiveChatModel("sql");
-        this.ui.chatInput.focus();
-        this.ui.syncHighlight();
-      });
-      table1Container.appendChild(t1Btn);
-    });
-
-    emptyStateDiv.appendChild(table1Container);
-    return emptyStateDiv;
+    return buildEmptyStateView(this.ui);
   }
 
   /**
@@ -799,12 +397,12 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
       assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
       this.ui.announce(assistantMsg, true);
     } else {
-      const classified = classifySqlResult(data.sqlResult);
-      if (classified.kind === "scalar") {
-        assistantMsg = assistantMsg
-          ? `${assistantMsg} **${classified.column}:** ${classified.formattedValue}`
-          : classified.formattedValue;
-      }
+      const outcome = formatSqlExecutionOutcome(
+        data.sqlResult,
+        assistantMsg,
+        false,
+      );
+      assistantMsg = outcome.content;
     }
 
     this.ui.state.addMessageToActiveChat({
@@ -815,6 +413,43 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
       isError: !!data.error,
       model,
     });
+  }
+
+  /**
+   * Applies an assistant message update either in-place (on refresh) or as a new chat turn.
+   * @param {Message | undefined} messageToUpdate - Optional target message to update in place.
+   * @param {string} content - Message text content.
+   * @param {Record<string, SqlCellValue>[] | undefined} sqlResult - Optional SQL result rows.
+   * @param {string} queryToPlay - Executed SQL query string.
+   * @param {boolean} isError - Whether the execution resulted in an error.
+   * @returns {void}
+   */
+  private applyDirectSqlMessageUpdate(
+    messageToUpdate: Message | undefined,
+    content: string,
+    sqlResult: Record<string, SqlCellValue>[] | undefined,
+    queryToPlay: string,
+    isError: boolean,
+  ): void {
+    if (messageToUpdate) {
+      this.ui.state.updateMessageInActiveChat(messageToUpdate, {
+        content,
+        sqlResult,
+        isError,
+      });
+    } else {
+      this.ui.state.addMessageToActiveChat({
+        role: "assistant",
+        content,
+        sqlResult,
+        sqlQuery: queryToPlay,
+        isError,
+        model: RAW_SQL_MODEL,
+      });
+    }
+    this.renderMessages();
+    this.ui.messagesContainer.scrollTop =
+      this.ui.messagesContainer.scrollHeight;
   }
 
   /**
@@ -832,7 +467,7 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
     triggerBtn.disabled = true;
     try {
       const dbPathOpt =
-        this.ui.state.currentDb && this.ui.state.currentDb !== "t1d.duckdb"
+        this.ui.state.currentDb && this.ui.state.currentDb !== DEFAULT_DB_NAME
           ? { db_path: this.ui.state.currentDb }
           : {};
       const response = await fetchWithBackendError("/api/execute-sql", {
@@ -850,58 +485,34 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
         contentStr = i18next.t("ui.errorDetails", { error: parsedError });
         this.ui.announce(contentStr, true);
       } else {
-        const classified = classifySqlResult(sqlRes);
-        if (classified.kind === "empty") {
-          contentStr = i18next.t("ui.noRows", "No rows returned");
-          this.ui.announce(contentStr, false);
-          sqlRes = [];
-        } else if (classified.kind === "scalar") {
-          contentStr = classified.formattedValue;
-          sqlRes = undefined;
-        } else {
-          contentStr = i18next.t("app.tableData", "Table Data");
+        const outcome = formatSqlExecutionOutcome(sqlRes, "", true);
+        contentStr = outcome.content;
+        sqlRes = outcome.sqlResult;
+        if (outcome.announcement) {
+          this.ui.announce(outcome.announcement, false);
         }
       }
 
-      if (messageToUpdate) {
-        messageToUpdate.content = contentStr;
-        messageToUpdate.sqlResult = sqlRes;
-        messageToUpdate.isError = !!data.error;
-        this.ui.state.saveToLocalStorage();
-      } else {
-        this.ui.state.addMessageToActiveChat({
-          role: "assistant",
-          content: contentStr,
-          sqlResult: sqlRes,
-          sqlQuery: queryToPlay,
-          isError: !!data.error,
-          model: "sql",
-        });
-      }
-      this.renderMessages();
-      this.ui.messagesContainer.scrollTop =
-        this.ui.messagesContainer.scrollHeight;
+      this.applyDirectSqlMessageUpdate(
+        messageToUpdate,
+        contentStr,
+        sqlRes,
+        queryToPlay,
+        !!data.error,
+      );
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
-      if (messageToUpdate) {
-        messageToUpdate.content = announcedErr;
-        messageToUpdate.sqlResult = undefined;
-        messageToUpdate.isError = true;
-        this.ui.state.saveToLocalStorage();
-      } else {
+      if (!messageToUpdate) {
         this.ui.announce(announcedErr, true);
-        this.ui.state.addMessageToActiveChat({
-          role: "assistant",
-          content: announcedErr,
-          isError: true,
-          sqlQuery: queryToPlay,
-          model: "sql",
-        });
       }
-      this.renderMessages();
-      this.ui.messagesContainer.scrollTop =
-        this.ui.messagesContainer.scrollHeight;
+      this.applyDirectSqlMessageUpdate(
+        messageToUpdate,
+        announcedErr,
+        undefined,
+        queryToPlay,
+        true,
+      );
     } finally {
       triggerBtn.disabled = false;
     }
@@ -1019,7 +630,7 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
       const badge = document.createElement("span");
       badge.className = "model-badge";
       badge.textContent =
-        msg.model === "sql"
+        msg.model === RAW_SQL_MODEL
           ? i18next.t("ui.rawSql")
           : i18next.t("ui.modelName", { name: msg.model });
 
@@ -1036,7 +647,8 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
     const contentDiv = document.createElement("div");
     const isSqlMessage =
       msg.role === "user" &&
-      (msg.model === "sql" || (!msg.model && activeChat.model === "sql"));
+      (msg.model === RAW_SQL_MODEL ||
+        (!msg.model && activeChat.model === RAW_SQL_MODEL));
 
     if (isSqlMessage) {
       contentDiv.className = "sql-user-query-wrapper";
@@ -1116,7 +728,7 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
       const headerDiv = document.createElement("div");
       headerDiv.className = "sql-query-header";
       headerDiv.appendChild(this.createCopyBtn(msg.sqlQuery));
-      if (msg.role === "assistant" && msg.model === "sql") {
+      if (msg.role === "assistant" && msg.model === RAW_SQL_MODEL) {
         headerDiv.appendChild(this.createRefreshBtn(msg.sqlQuery, msg));
       } else {
         headerDiv.appendChild(this.createPlayBtn(msg.sqlQuery));
@@ -1241,7 +853,9 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
     const hasActiveModelOption = Array.from(this.ui.modelSelect.options).some(
       (opt) => opt.value === activeChat.model,
     );
-    this.ui.modelSelect.value = hasActiveModelOption ? activeChat.model : "sql";
+    this.ui.modelSelect.value = hasActiveModelOption
+      ? activeChat.model
+      : RAW_SQL_MODEL;
     this.ui.providerModalController.updateProviderBadgeStatus();
     this.ui.syncHighlight();
     this.renderMessages();

@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import (
     List,
     Optional,
+    Sequence,
+    Tuple,
 )
 
 import duckdb
@@ -14,6 +16,7 @@ from t1d_analytics.diagnostics import DatabaseStatusCode, check_database_health
 from t1d_analytics.errors import (
     InvalidTableNameError,
     ReadOnlyViolationError,
+    T1DError,
     TableNotFoundError,
 )
 from t1d_analytics.i18n import get_translator
@@ -23,6 +26,7 @@ from t1d_analytics.llm_client import (
     resolve_provider_and_model,
 )
 from t1d_analytics.sql_utils import (
+    SqlRawInputValue,
     SqlValue,
     coerce_numeric_aggregates_in_sql,
     connect_duckdb_read_only_pooled,
@@ -31,6 +35,15 @@ from t1d_analytics.sql_utils import (
     extract_table_columns_map,
     is_read_only_sql_query,
     is_sql_query,
+)
+
+_NUMERIC_SQL_TYPE_SUBSTRINGS: Tuple[str, ...] = (
+    "INT",
+    "FLOAT",
+    "DOUBLE",
+    "DECIMAL",
+    "NUMERIC",
+    "HUGEINT",
 )
 
 
@@ -94,7 +107,7 @@ def get_database_schema_models(
             sample_desc = (
                 f"Sample row: {sample}" if sample else "Sample row: (empty table)"
             )
-        except Exception:
+        except (duckdb.Error, RuntimeError, ValueError, TypeError):
             sample_desc = "Sample row: (could not fetch)"
 
         models.append(
@@ -120,7 +133,10 @@ def get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
         The database schema string.
 
     """
-    return "\n\n".join(m.to_prompt_block() for m in get_database_schema_models(conn))
+    nl = chr(10)
+    return f"{nl}{nl}".join(
+        m.to_prompt_block() for m in get_database_schema_models(conn)
+    )
 
 
 def handle_natural_language(
@@ -166,6 +182,7 @@ def handle_natural_language(
         nl_query=query,
         require_markdown_fence=False,
     )
+    nl = chr(10)
     try:
         full_response = complete_llm_prompt(
             prompt=prompt,
@@ -174,18 +191,18 @@ def handle_natural_language(
         )
         sql_query = extract_sql_from_response(full_response)
 
-        print(_("Generated SQL: \n{}\n", sql_query))
+        print(_(f"Generated SQL: {nl}{{}}{nl}", sql_query))
         if not is_read_only_sql_query(sql_query):
             raise ReadOnlyViolationError(
                 f"Generated query is not read-only: {sql_query}"
             )
-        print(_("Executing...\n"))
+        print(_(f"Executing...{nl}"))
 
         result = conn.sql(coerce_numeric_aggregates_in_sql(sql_query))
         if result:
             result.show()
 
-    except Exception as e:
+    except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
         print(_("Failed to generate or execute query: {}", e))
 
 
@@ -221,12 +238,13 @@ def run_query_repl(
         )
 
     print(_("Connecting to DuckDB at {}...", db_path))
+    nl = chr(10)
     with connect_duckdb_read_only_pooled(
         db_path=db_path,
         connect_fn=duckdb.connect,
         disable_external_access=True,
     ) as conn:
-        print("\n" + "=" * 50)
+        print(nl + "=" * 50)
         print(_("Welcome to T1D Analytics Interface!"))
         print(_("You can enter:"))
         print(
@@ -236,13 +254,13 @@ def run_query_repl(
         )
         print(_("  - Natural language queries (will be translated to SQL via LLM)"))
         print(_("  - 'exit' or 'quit' to close."))
-        print("=" * 50 + "\n")
+        print("=" * 50 + nl)
 
         while True:
             try:
                 user_input = input("query> ").strip()
             except (EOFError, KeyboardInterrupt):
-                print("\n" + _("Exiting."))
+                print(nl + _("Exiting."))
                 break
 
             if not user_input:
@@ -258,12 +276,138 @@ def run_query_repl(
                     result = conn.sql(coerce_numeric_aggregates_in_sql(user_input))
                     if result:
                         result.show()
-                except Exception as e:
+                except (duckdb.Error, RuntimeError, ValueError, TypeError) as e:
                     print(_("SQL Error: {}", e))
             else:
                 handle_natural_language(
                     conn, user_input, model=model, provider=provider
                 )
+
+
+def _build_profile_select_expressions(
+    cols: Sequence[Tuple[SqlRawInputValue, ...]],
+) -> Tuple[List[str], List[_ColumnMetaRecord]]:
+    """
+    Build SQL aggregate projection expressions and metadata records for `profile_table`.
+
+    Args:
+    ----
+        cols: Output rows from `DESCRIBE "<table_name>"`.
+
+    Returns:
+    -------
+        Tuple[List[str], List[_ColumnMetaRecord]]: `(select_expressions, column_metadata_list)`.
+
+    """
+    select_exprs: List[str] = ['COUNT(*) AS "_total_rows"']
+    col_meta: List[_ColumnMetaRecord] = []
+
+    for idx, col_info in enumerate(cols):
+        col_name = str(col_info[0])
+        col_type = str(col_info[1])
+        escaped_col = col_name.replace('"', '""')
+
+        select_exprs.append(
+            f'SUM(CASE WHEN "{escaped_col}" IS NULL THEN 1 ELSE 0 END) AS "null_{idx}"'
+        )
+        select_exprs.append(f'COUNT(DISTINCT "{escaped_col}") AS "dist_{idx}"')
+
+        type_upper = col_type.upper()
+        is_numeric = any(t in type_upper for t in _NUMERIC_SQL_TYPE_SUBSTRINGS)
+        if is_numeric:
+            select_exprs.append(f'MIN("{escaped_col}") AS "min_{idx}"')
+            select_exprs.append(f'MAX("{escaped_col}") AS "max_{idx}"')
+            select_exprs.append(f'AVG("{escaped_col}") AS "avg_{idx}"')
+
+        col_meta.append(
+            {
+                "column_name": col_name,
+                "data_type": col_type,
+                "is_numeric": is_numeric,
+            }
+        )
+    return select_exprs, col_meta
+
+
+def _profile_numeric_column(
+    col_stat: ColumnProfileRecord,
+    agg_res: Optional[Tuple[SqlRawInputValue, ...]],
+    cursor: int,
+) -> int:
+    """
+    Populate `min`, `max`, and `mean` fields on `col_stat` from `agg_res` and return updated cursor.
+
+    Args:
+    ----
+        col_stat: Mutable `ColumnProfileRecord` to enrich.
+        agg_res: Fetched aggregate tuple from DuckDB.
+        cursor: Current offset in `agg_res`.
+
+    Returns:
+    -------
+        int: Advanced cursor offset (`cursor + 3`).
+
+    """
+    min_val = agg_res[cursor] if agg_res else None
+    max_val = agg_res[cursor + 1] if agg_res else None
+    avg_val = agg_res[cursor + 2] if agg_res else None
+
+    if min_val is not None and max_val is not None:
+        col_stat["min"] = (
+            min_val
+            if isinstance(min_val, (int, float, str, bool))
+            else float(str(min_val))
+        )
+        col_stat["max"] = (
+            max_val
+            if isinstance(max_val, (int, float, str, bool))
+            else float(str(max_val))
+        )
+        col_stat["mean"] = (
+            round(float(str(avg_val)), 2) if avg_val is not None else None
+        )
+    else:
+        col_stat["min"] = None
+        col_stat["max"] = None
+        col_stat["mean"] = None
+    return cursor + 3
+
+
+def _profile_categorical_column(
+    meta: _ColumnMetaRecord,
+    total_rows: int,
+    agg_res: Optional[Tuple[SqlRawInputValue, ...]],
+    cursor: int,
+) -> Tuple[ColumnProfileRecord, int]:
+    """
+    Build the base `ColumnProfileRecord` (nulls, null percentage, distinct count) and advance cursor.
+
+    Args:
+    ----
+        meta: Column metadata record.
+        total_rows: Total row count of the table.
+        agg_res: Fetched aggregate tuple from DuckDB.
+        cursor: Current offset in `agg_res`.
+
+    Returns:
+    -------
+        Tuple[ColumnProfileRecord, int]: `(base_column_profile, advanced_cursor)`.
+
+    """
+    null_val = agg_res[cursor] if agg_res else 0
+    null_count = int(str(null_val)) if null_val is not None else 0
+    dist_val = agg_res[cursor + 1] if agg_res else 0
+    distinct_count = int(str(dist_val)) if dist_val is not None else 0
+    null_pct = (null_count / total_rows * 100.0) if total_rows > 0 else 0.0
+
+    col_stat: ColumnProfileRecord = {
+        "column_name": meta["column_name"],
+        "data_type": meta["data_type"],
+        "null_count": null_count,
+        "null_percentage": round(null_pct, 2),
+        "distinct_count": distinct_count,
+    }
+    return col_stat, cursor + 2
 
 
 def profile_table(db_path: str, table_name: str) -> TableProfileResult:
@@ -303,8 +447,6 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
             )
 
         cols = conn.execute(f'DESCRIBE "{table_name}"').fetchall()
-        column_profiles: List[ColumnProfileRecord] = []
-
         if not cols:
             count_row = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
             empty_total_rows = int(count_row[0]) if count_row else 0
@@ -315,97 +457,20 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
                 "columns": [],
             }
 
-        select_exprs: List[str] = ['COUNT(*) AS "_total_rows"']
-        col_meta: List[_ColumnMetaRecord] = []
-
-        for idx, col_info in enumerate(cols):
-            col_name = str(col_info[0])
-            col_type = str(col_info[1])
-            escaped_col = col_name.replace('"', '""')
-
-            select_exprs.append(
-                f'SUM(CASE WHEN "{escaped_col}" IS NULL THEN 1 ELSE 0 END) AS "null_{idx}"'
-            )
-            select_exprs.append(f'COUNT(DISTINCT "{escaped_col}") AS "dist_{idx}"')
-
-            type_upper = col_type.upper()
-            is_numeric = any(
-                t in type_upper
-                for t in (
-                    "INT",
-                    "FLOAT",
-                    "DOUBLE",
-                    "DECIMAL",
-                    "NUMERIC",
-                    "HUGEINT",
-                )
-            )
-            if is_numeric:
-                select_exprs.append(f'MIN("{escaped_col}") AS "min_{idx}"')
-                select_exprs.append(f'MAX("{escaped_col}") AS "max_{idx}"')
-                select_exprs.append(f'AVG("{escaped_col}") AS "avg_{idx}"')
-
-            col_meta.append(
-                {
-                    "column_name": col_name,
-                    "data_type": col_type,
-                    "is_numeric": is_numeric,
-                }
-            )
-
+        select_exprs, col_meta = _build_profile_select_expressions(cols)
         escaped_tbl = table_name.replace('"', '""')
         agg_sql = f'SELECT {", ".join(select_exprs)} FROM "{escaped_tbl}"'
         agg_res = conn.execute(agg_sql).fetchone()
 
-        total_rows: int = int(agg_res[0]) if (agg_res and agg_res[0] is not None) else 0
-
+        total_rows = int(agg_res[0]) if (agg_res and agg_res[0] is not None) else 0
+        column_profiles: List[ColumnProfileRecord] = []
         cursor = 1
         for meta in col_meta:
-            null_val = agg_res[cursor] if agg_res else 0
-            null_count: int = int(null_val) if null_val is not None else 0
-            cursor += 1
-
-            dist_val = agg_res[cursor] if agg_res else 0
-            distinct_count: int = int(dist_val) if dist_val is not None else 0
-            cursor += 1
-
-            null_pct = (null_count / total_rows * 100.0) if total_rows > 0 else 0.0
-
-            col_stat: ColumnProfileRecord = {
-                "column_name": meta["column_name"],
-                "data_type": meta["data_type"],
-                "null_count": null_count,
-                "null_percentage": round(null_pct, 2),
-                "distinct_count": distinct_count,
-            }
-
+            col_stat, cursor = _profile_categorical_column(
+                meta, total_rows, agg_res, cursor
+            )
             if meta["is_numeric"]:
-                min_val = agg_res[cursor] if agg_res else None
-                cursor += 1
-                max_val = agg_res[cursor] if agg_res else None
-                cursor += 1
-                avg_val = agg_res[cursor] if agg_res else None
-                cursor += 1
-
-                if min_val is not None and max_val is not None:
-                    col_stat["min"] = (
-                        min_val
-                        if isinstance(min_val, (int, float, str, bool))
-                        else float(min_val)
-                    )
-                    col_stat["max"] = (
-                        max_val
-                        if isinstance(max_val, (int, float, str, bool))
-                        else float(max_val)
-                    )
-                    col_stat["mean"] = (
-                        round(float(avg_val), 2) if avg_val is not None else None
-                    )
-                else:
-                    col_stat["min"] = None
-                    col_stat["max"] = None
-                    col_stat["mean"] = None
-
+                cursor = _profile_numeric_column(col_stat, agg_res, cursor)
             column_profiles.append(col_stat)
 
         return {

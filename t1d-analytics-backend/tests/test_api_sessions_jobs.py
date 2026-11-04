@@ -13,20 +13,13 @@ from t1d_analytics.api import app
 client = TestClient(app)
 
 
-def test_sessions_crud_endpoints(tmp_path: Path) -> None:
+def test_sessions_crud_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Test conversation history session persistence CRUD endpoints."""
-    from t1d_analytics.api import _get_sessions_db_conn
-
     test_db = str(tmp_path / "sessions_test.duckdb")
-    p_sess = patch(
-        "t1d_analytics.api._get_sessions_db_conn",
-        lambda: _get_sessions_db_conn(test_db),
-    )
-    p_sess.start()
-    try:
-        _run_sessions_crud_assertions()
-    finally:
-        p_sess.stop()
+    monkeypatch.setenv("T1D_SESSIONS_DB_PATH", test_db)
+    _run_sessions_crud_assertions()
 
 
 def _run_sessions_crud_assertions() -> None:
@@ -87,13 +80,15 @@ def test_sessions_malformed_json_and_default_conn(
     """Test sessions endpoints with corrupted messages_json, legacy sum(VARCHAR) sanitization, and default db_path."""
     import json
 
-    from t1d_analytics.api import _get_sessions_db_conn
-    from t1d_analytics.seed import seed_sessions_database
-    from t1d_analytics.session_store import sanitize_legacy_error_sessions
+    from t1d_analytics.seed import (
+        sanitize_legacy_error_sessions,
+        seed_sessions_database,
+    )
+    from t1d_analytics.session_store import open_sessions_db_conn
 
     monkeypatch.delenv("T1D_SESSIONS_DB_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
-    conn = _get_sessions_db_conn()
+    conn = open_sessions_db_conn()
     conn.execute(
         "INSERT INTO chat_sessions VALUES ('bad-json-id', 'Bad JSON', now(), now(), 'not-json{')"
     )
@@ -213,11 +208,11 @@ def test_delete_session_not_found() -> None:
 
 def test_sessions_db_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test T1D_SESSIONS_DB environment variable controls session database path."""
-    from t1d_analytics.api import _get_sessions_db_conn
+    from t1d_analytics.session_store import open_sessions_db_conn
 
     env_db = str(tmp_path / "env_sessions.duckdb")
     monkeypatch.setenv("T1D_SESSIONS_DB", env_db)
-    conn = _get_sessions_db_conn()
+    conn = open_sessions_db_conn()
     conn.close()
     assert Path(env_db).exists()
 
@@ -265,15 +260,15 @@ def test_sessions_db_lock_failure(tmp_path: Path, mocker: MagicMock) -> None:
 
 
 def test_sessions_db_non_lock_error(tmp_path: Path, mocker: MagicMock) -> None:
-    """Test _get_sessions_db_conn immediately raises for non-lock IOException."""
-    from t1d_analytics.api import _get_sessions_db_conn
+    """Test open_sessions_db_conn immediately raises for non-lock IOException."""
+    from t1d_analytics.session_store import open_sessions_db_conn
 
     mocker.patch(
         "duckdb.connect",
         side_effect=duckdb.IOException("Permission denied"),
     )
     with pytest.raises(duckdb.IOException):
-        _get_sessions_db_conn(str(tmp_path / "perm.duckdb"))
+        open_sessions_db_conn(str(tmp_path / "perm.duckdb"))
 
 
 def test_concurrency_and_lock_contention(mock_db: str) -> None:
@@ -396,7 +391,7 @@ def test_sliding_window_rate_limiting(
     assert check_rate_limit(ip, limit=3, window_seconds=60.0) is True
 
     monkeypatch.setenv("T1D_DB_PATH", mock_db)
-    with patch("t1d_analytics.api.check_rate_limit", return_value=False):
+    with patch("t1d_analytics.api_dependencies.check_rate_limit", return_value=False):
         resp_sql = client.post("/api/execute-sql", json={"query": "SELECT 1"})
         assert resp_sql.status_code == 429
         assert resp_sql.json()["detail"]["error_code"] == "backend.rateLimitExceeded"

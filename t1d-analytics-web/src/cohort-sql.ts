@@ -225,6 +225,34 @@ export interface CohortFilterParams {
   maxTIR?: number;
   /** Minimum glycated hemoglobin (HbA1c) threshold. */
   minHbA1c?: number;
+  /** Optional schema column names for the primary table (`tableName`). */
+  tableColumns?: string[];
+  /** Optional schema column names for the secondary joined table (`joinTableName`). */
+  joinTableColumns?: string[];
+}
+
+/**
+ * Resolves the best matching column name from `tableColumns` for a candidate list, or returns `fallback`.
+ * @param {string[] | undefined} tableColumns - Available column names on the table.
+ * @param {string[]} candidates - Prioritized lowercase candidate column names.
+ * @param {string} fallback - Default column name when no schema match is found.
+ * @returns {string} Resolved column identifier.
+ */
+export function resolveCohortColumnName(
+  tableColumns: string[] | undefined,
+  candidates: string[],
+  fallback: string,
+): string {
+  if (!tableColumns || tableColumns.length === 0) {
+    return fallback;
+  }
+  for (const cand of candidates) {
+    const found = tableColumns.find((col) => col.toLowerCase() === cand);
+    if (found) {
+      return found;
+    }
+  }
+  return fallback;
 }
 
 /**
@@ -253,32 +281,68 @@ export function buildCohortSql(params: CohortFilterParams): string {
   const prefix = isJoin ? `"${table1.replace(/"/g, '""')}".` : "";
   const predicates: string[] = [];
 
+  const ageCol = resolveCohortColumnName(
+    params.tableColumns,
+    ["age", "ageasofranddt", "agebaseline"],
+    "age",
+  );
+  const genderCol = resolveCohortColumnName(
+    params.tableColumns,
+    ["gender", "sex"],
+    "gender",
+  );
+  const txCol = resolveCohortColumnName(
+    params.tableColumns,
+    ["txgroup", "treatment_group", "studyarm", "arm"],
+    "txgroup",
+  );
+  const tirCol = resolveCohortColumnName(
+    params.tableColumns,
+    ["tir", "time_in_range"],
+    "tir",
+  );
+  const hba1cCol = resolveCohortColumnName(
+    params.tableColumns,
+    ["hba1c", "baseline_hba1c", "a1c"],
+    "hba1c",
+  );
+
   if (params.minAge !== undefined && Number.isFinite(params.minAge)) {
-    predicates.push(`${prefix}age >= ${params.minAge}`);
+    predicates.push(`${prefix}${ageCol} >= ${params.minAge}`);
   }
   if (params.maxAge !== undefined && Number.isFinite(params.maxAge)) {
-    predicates.push(`${prefix}age <= ${params.maxAge}`);
+    predicates.push(`${prefix}${ageCol} <= ${params.maxAge}`);
   }
   if (params.gender) {
     const safeGender = params.gender.replace(/'/g, "''");
-    predicates.push(`${prefix}gender = '${safeGender}'`);
+    predicates.push(`${prefix}${genderCol} = '${safeGender}'`);
   }
   if (params.txGroup) {
     const safeTx = params.txGroup.replace(/'/g, "''");
-    predicates.push(`${prefix}txgroup ILIKE '%${safeTx}%'`);
+    predicates.push(`${prefix}${txCol} ILIKE '%${safeTx}%'`);
   }
   if (params.maxTIR !== undefined && Number.isFinite(params.maxTIR)) {
-    predicates.push(`${prefix}tir <= ${params.maxTIR}`);
+    predicates.push(`${prefix}${tirCol} <= ${params.maxTIR}`);
   }
   if (params.minHbA1c !== undefined && Number.isFinite(params.minHbA1c)) {
-    predicates.push(`${prefix}hba1c >= ${params.minHbA1c}`);
+    predicates.push(`${prefix}${hba1cCol} >= ${params.minHbA1c}`);
   }
 
   let fromClause = `FROM "${table1.replace(/"/g, '""')}"`;
   if (isJoin && table2) {
-    const defaultOn = `"${table1.replace(/"/g, '""')}".patient_id = "${table2.replace(/"/g, '""')}".patient_id`;
+    const escT1 = table1.replace(/"/g, '""');
+    const escT2 = table2.replace(/"/g, '""');
+    const resolvedJoin = resolveTableJoin(
+      table1,
+      table2,
+      params.tableColumns,
+      params.joinTableColumns,
+    );
+    const defaultOn = resolvedJoin
+      ? `"${escT1}".${resolvedJoin.fromColumn} = "${escT2}".${resolvedJoin.toColumn}`
+      : `"${escT1}".patient_id = "${escT2}".patient_id`;
     fromClause += `
-${joinType} "${table2.replace(/"/g, '""')}"
+${joinType} "${escT2}"
   ON ${joinOn || defaultOn}`;
   }
 

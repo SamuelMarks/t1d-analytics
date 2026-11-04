@@ -14,7 +14,6 @@ from typing import (
     Iterator,
     List,
     Optional,
-    Tuple,
 )
 
 import duckdb
@@ -27,115 +26,6 @@ from t1d_analytics.api_schemas import (
 )
 from t1d_analytics.errors import SessionNotFoundError
 from t1d_analytics.sql_utils import global_read_only_duckdb_pool
-
-
-def _is_legacy_sum_varchar_error_message(msg: ChatMessageModel) -> bool:
-    """
-    Determine whether a `ChatMessageModel` is a legacy `sum(VARCHAR)` or `avg(VARCHAR)` Binder Error.
-
-    Args:
-    ----
-        msg: Validated `ChatMessageModel` instance.
-
-    Returns:
-    -------
-        bool: True if the assistant message contains a stale `sum(VARCHAR)` / `avg(VARCHAR)` Binder Error.
-
-    """
-    if msg.role != "assistant":
-        return False
-    lower_content = msg.content.lower()
-    if "binder error" not in lower_content:
-        return False
-    return (
-        "sum(varchar)" in lower_content
-        or "avg(varchar)" in lower_content
-        or "numsevhypo" in lower_content
-        or "tblaptsummary" in lower_content
-    )
-
-
-def filter_legacy_error_messages(
-    messages: List[ChatMessageModel],
-    session_id: str = "",
-) -> Tuple[List[ChatMessageModel], bool]:
-    """
-    Filter out legacy `sum(VARCHAR)` / `NumSevHypo` binder error messages from a session transcript.
-
-    Also strips any preceding duplicate user prompt that immediately preceded a failed `sum(VARCHAR)` turn
-    when a subsequent retry turn follows, and clears any error message in `session-default-welcome`.
-
-    Args:
-    ----
-        messages: Ordered list of `ChatMessageModel` items in the session.
-        session_id: Optional session identifier for `session-default-welcome` checks.
-
-    Returns:
-    -------
-        Tuple[List[ChatMessageModel], bool]: `(cleaned_messages, was_modified)`.
-
-    """
-    cleaned: List[ChatMessageModel] = []
-    changed = False
-    total = len(messages)
-    for idx, item in enumerate(messages):
-        is_welcome_err = session_id == "session-default-welcome" and (
-            bool(item.isError) or "binder error" in item.content.lower()
-        )
-        is_superseded_legacy_err = (
-            _is_legacy_sum_varchar_error_message(item) and idx + 1 < total
-        )
-        if is_welcome_err or is_superseded_legacy_err:
-            changed = True
-            if cleaned and cleaned[-1].role == "user":
-                cleaned.pop()
-        else:
-            cleaned.append(item)
-    return cleaned, changed
-
-
-def sanitize_legacy_error_sessions(conn: duckdb.DuckDBPyConnection) -> int:
-    """
-    Inspect `chat_sessions` for stale `sum(VARCHAR)` / `NumSevHypo` binder error transcripts and repair them.
-
-    Removes legacy `sum(VARCHAR)` assistant error messages (and their immediately preceding duplicate
-    user retry prompt when followed by a retry) or resets `session-default-welcome` if it contains errors.
-
-    Args:
-    ----
-        conn: Open writable DuckDB connection to the sessions database.
-
-    Returns:
-    -------
-        int: Number of session rows updated or cleaned.
-
-    """
-    rows = conn.execute(
-        "SELECT session_id, messages_json FROM chat_sessions"
-    ).fetchall()
-    updated_count = 0
-    for session_id_raw, messages_json_raw in rows:
-        session_id = str(session_id_raw)
-        messages_json = str(messages_json_raw or "[]")
-        try:
-            parsed = json.loads(messages_json)
-            models = [ChatMessageModel(**m) for m in parsed]
-        except Exception:
-            continue
-
-        cleaned_msgs, changed = filter_legacy_error_messages(
-            models, session_id=session_id
-        )
-        if changed:
-            conn.execute(
-                "UPDATE chat_sessions SET messages_json = ? WHERE session_id = ?",
-                [
-                    json.dumps([m.model_dump() for m in cleaned_msgs]),
-                    session_id,
-                ],
-            )
-            updated_count += 1
-    return updated_count
 
 
 def open_sessions_db_conn(
@@ -270,7 +160,6 @@ class SessionStore:
     @staticmethod
     def _deserialize_messages(
         messages_json: str,
-        session_id: str = "",
     ) -> List[ChatMessageModel]:
         """
         Parse a JSON string of chat messages into a list of ChatMessageModel instances.
@@ -278,7 +167,6 @@ class SessionStore:
         Args:
         ----
             messages_json: Raw JSON string from DuckDB.
-            session_id: Optional session ID used to sanitize legacy error messages.
 
         Returns:
         -------
@@ -287,9 +175,7 @@ class SessionStore:
         """
         try:
             msgs_raw = json.loads(messages_json)
-            models = [ChatMessageModel(**m) for m in msgs_raw]
-            cleaned, _ = filter_legacy_error_messages(models, session_id=session_id)
-            return cleaned
+            return [ChatMessageModel(**m) for m in msgs_raw]
         except Exception:
             return []
 
@@ -318,7 +204,7 @@ class SessionStore:
                 title=r[1],
                 created_at=str(r[2]),
                 updated_at=str(r[3]),
-                messages=self._deserialize_messages(r[4], session_id=str(r[0])),
+                messages=self._deserialize_messages(r[4]),
             )
             for r in rows
         ]

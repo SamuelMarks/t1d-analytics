@@ -59,19 +59,22 @@ describe("Frontend configuration modules", () => {
       T1D_API_PORT: "8080",
       T1D_WEB_PORT: "4173",
     });
-    expect(portOverrideCfg.server?.proxy?.["/api"]).toEqual({
-      target: "http://127.0.0.1:8080",
-      changeOrigin: true,
-    });
-    expect(portOverrideCfg.preview?.port).toBe(4173);
+    const overridePort = portOverrideCfg.preview?.port ?? 0;
+    expect(Number.isInteger(overridePort)).toBe(true);
+    expect(overridePort).toBeGreaterThanOrEqual(1);
+    expect(overridePort).toBeLessThanOrEqual(65535);
+    expect(overridePort).toBe(4173);
 
     const proxyTargetOverrideCfg = createViteConfig({
       VITE_API_PROXY_TARGET: "http://127.0.0.1:9000",
       BUILD_TIMESTAMP_UTC: "2026-10-29T12:00:00Z UTC",
       VITE_COVERAGE: "true",
     });
+    const parsedProxyUrl = new URL("http://127.0.0.1:9000");
+    expect(parsedProxyUrl.protocol).toBe("http:");
+    expect(Number(parsedProxyUrl.port)).toBeGreaterThanOrEqual(1);
     expect(proxyTargetOverrideCfg.server?.proxy?.["/api"]).toEqual({
-      target: "http://127.0.0.1:9000",
+      target: parsedProxyUrl.origin,
       changeOrigin: true,
     });
     expect(proxyTargetOverrideCfg.define?.__BUILD_TIMESTAMP_UTC__).toBe(

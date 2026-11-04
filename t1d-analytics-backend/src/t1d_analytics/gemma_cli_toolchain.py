@@ -1,5 +1,6 @@
 """CLI toolchain discovery and subprocess execution for external gemma-4-sql binaries."""
 
+import contextlib
 import importlib.util
 import logging
 import re
@@ -331,7 +332,8 @@ class SubprocessGemmaToolchain:
                 raise SubprocessTimeoutError(
                     f"gemma-4-sql {stage_lower} training timed out after {timeout} seconds."
                 )
-            time.sleep(0.01)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                popen_proc.communicate(timeout=0.01)
 
     def run_train(
         self,

@@ -18,6 +18,15 @@ import {
 
 export { type TableRelationship, CLINICAL_RELATIONSHIPS, resolveTableJoin };
 
+/** Default DuckDB database filename. */
+export const DEFAULT_DB_NAME = "t1d.duckdb";
+
+/** Default local LLM model identifier. */
+export const DEFAULT_CHAT_MODEL = "gemma:2b";
+
+/** Direct SQL execution mode identifier. */
+export const RAW_SQL_MODEL = "sql";
+
 /**
  * Shape of the serialized ChatState payload persisted in localStorage.
  */
@@ -70,6 +79,16 @@ export function decodeLegacyHtmlEntities(text: string): string {
 }
 
 /**
+ * Sanitizes a single message record by decoding legacy HTML entities in its content.
+ * @param {Message} msg - Raw message record.
+ * @returns {Message} Sanitized message record.
+ */
+export function sanitizeMessageRecord(msg: Message): Message {
+  msg.content = decodeLegacyHtmlEntities(msg.content);
+  return msg;
+}
+
+/**
  * Filters out legacy `sum(VARCHAR)` / `avg(VARCHAR)` Binder Error retry turns that were
  * immediately superseded by a subsequent turn in the same session transcript.
  * @param {Message[]} messages - Ordered list of chat messages in a session.
@@ -77,7 +96,7 @@ export function decodeLegacyHtmlEntities(text: string): string {
  */
 export function sanitizeLegacySessionMessages(messages: Message[]): Message[] {
   for (const msg of messages) {
-    msg.content = decodeLegacyHtmlEntities(msg.content);
+    sanitizeMessageRecord(msg);
   }
   const cleaned: Message[] = [];
   for (let i = 0; i < messages.length; i++) {
@@ -99,6 +118,65 @@ export function sanitizeLegacySessionMessages(messages: Message[]): Message[] {
 }
 
 /**
+ * Sanitizes the messages of each chat in a stored chat list.
+ * @param {Chat[] | undefined} chats - Stored chats array.
+ * @returns {Chat[]} Sanitized chats array.
+ */
+export function parseStoredChatList(chats?: Chat[]): Chat[] {
+  if (!Array.isArray(chats)) {
+    return [];
+  }
+  for (const chat of chats) {
+    if (Array.isArray(chat.messages)) {
+      chat.messages = sanitizeLegacySessionMessages(chat.messages);
+    }
+  }
+  return chats;
+}
+
+/**
+ * Merges a remote session payload into the local `chats` array.
+ * @param {Chat[]} chats - Mutable local chats list.
+ * @param {RemoteSessionPayload<Message>} remoteSession - Remote session payload from `/api/sessions`.
+ * @returns {void}
+ */
+export function mergeRemoteSessionIntoLocalChats(
+  chats: Chat[],
+  remoteSession: RemoteSessionPayload<Message>,
+): void {
+  const local = chats.find((c) => c.id === remoteSession.session_id);
+  const remoteTime = remoteSession.updated_at
+    ? new Date(remoteSession.updated_at).getTime()
+    : 0;
+  const remoteMessages = sanitizeLegacySessionMessages(
+    remoteSession.messages || [],
+  );
+  if (!local) {
+    chats.push({
+      id: remoteSession.session_id,
+      title: remoteSession.title,
+      messages: remoteMessages,
+      model: DEFAULT_CHAT_MODEL,
+      isTemporary: false,
+      updatedAt: remoteTime,
+    });
+    return;
+  }
+  if (remoteMessages.length > local.messages.length) {
+    local.messages = remoteMessages;
+    local.updatedAt = remoteTime;
+  }
+  if (
+    remoteSession.title &&
+    remoteSession.title !== local.title &&
+    !local.titleModified
+  ) {
+    local.title = remoteSession.title;
+    local.updatedAt = remoteTime;
+  }
+}
+
+/**
  * Parses a serialized ChatState JSON string into a typed PersistedChatStatePayload.
  * @param {string} rawJson - Serialized JSON string from localStorage.
  * @returns {PersistedChatStatePayload} Parsed state payload object.
@@ -108,11 +186,7 @@ export function parsePersistedChatState(
 ): PersistedChatStatePayload {
   const parsed: PersistedChatStatePayload = JSON.parse(rawJson);
   if (Array.isArray(parsed.chats)) {
-    for (const chat of parsed.chats) {
-      if (Array.isArray(chat.messages)) {
-        chat.messages = sanitizeLegacySessionMessages(chat.messages);
-      }
-    }
+    parsed.chats = parseStoredChatList(parsed.chats);
   }
   return parsed;
 }
@@ -120,7 +194,6 @@ export function parsePersistedChatState(
 /**
  * Represents a single chat message.
  */
-
 export interface Message {
   /** The role of the message sender. */
   role: "user" | "assistant";
@@ -257,6 +330,149 @@ export interface AvailableDatabaseItem {
 }
 
 /**
+ * Composable store managing cloud LLM provider API keys and custom model configurations in localStorage.
+ */
+export class ProviderCredentialsStore {
+  /**
+   * Retrieves a stored custom API key for a cloud LLM provider from localStorage.
+   * @param {string} provider - The provider identifier (e.g. 'openai', 'anthropic', 'google').
+   * @returns {string | null} The API key if stored, otherwise null.
+   */
+  public getApiKey(provider: string): string | null {
+    return safeStorageGet(`t1d_api_key_${provider.toLowerCase()}`);
+  }
+
+  /**
+   * Stores a custom API key for a cloud LLM provider in localStorage.
+   * @param {string} provider - The provider identifier.
+   * @param {string} key - The API key to store.
+   * @returns {void}
+   */
+  public setApiKey(provider: string, key: string): void {
+    safeStorageSet(`t1d_api_key_${provider.toLowerCase()}`, key.trim());
+  }
+
+  /**
+   * Removes a stored custom API key for a cloud LLM provider from localStorage.
+   * @param {string} provider - The provider identifier.
+   * @returns {void}
+   */
+  public removeApiKey(provider: string): void {
+    safeStorageRemove(`t1d_api_key_${provider.toLowerCase()}`);
+  }
+
+  /**
+   * Retrieves all custom API keys stored for cloud LLM providers.
+   * @returns {Record<string, string>} A mapping of provider names to configured API keys.
+   */
+  public getAllApiKeys(): Record<string, string> {
+    const keys: Record<string, string> = {};
+    const providers = ["openai", "anthropic", "google"];
+    for (const p of providers) {
+      const val = this.getApiKey(p);
+      if (val) {
+        keys[p] = val;
+      }
+    }
+    return keys;
+  }
+
+  /**
+   * Retrieves user-configured Mozilla any-llm model identifiers from localStorage.
+   * @returns {string[]} Array of configured 'provider/model' or 'provider:model' identifiers.
+   */
+  public getConfiguredModels(): string[] {
+    const raw = safeStorageGet("t1d_configured_any_llm_models");
+    if (!raw) return [];
+    return raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * Persists user-configured Mozilla any-llm model identifiers to localStorage.
+   * @param {string} modelsCsv - Comma-separated 'provider/model' or 'provider:model' string.
+   * @returns {void}
+   */
+  public setConfiguredModels(modelsCsv: string): void {
+    const cleaned = modelsCsv
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(", ");
+    if (cleaned) {
+      safeStorageSet("t1d_configured_any_llm_models", cleaned);
+    } else {
+      safeStorageRemove("t1d_configured_any_llm_models");
+    }
+  }
+
+  /**
+   * Removes user-configured Mozilla any-llm model identifiers from localStorage.
+   * @returns {void}
+   */
+  public removeConfiguredModels(): void {
+    safeStorageRemove("t1d_configured_any_llm_models");
+  }
+}
+
+/**
+ * Composable service handling bidirectional session synchronization with `/api/sessions`.
+ */
+export class SessionSyncService {
+  /**
+   * Pushes modified local chats to `/api/sessions` and merges remote sessions into `chats`.
+   * @param {Chat[]} chats - Mutable local chats list.
+   * @param {Set<string>} deletedChatIds - Tombstone set of deleted chat IDs.
+   * @returns {Promise<void>}
+   */
+  public async synchronizeChats(
+    chats: Chat[],
+    deletedChatIds: Set<string>,
+  ): Promise<void> {
+    const sessionsList = await fetchRemoteSessions<Message>();
+
+    const serverMap = new Map<string, RemoteSessionPayload<Message>>();
+    for (const s of sessionsList) {
+      if (s && s.session_id) {
+        serverMap.set(s.session_id, s);
+      }
+    }
+
+    for (const localChat of chats) {
+      if (localChat.isTemporary) continue;
+      const remote = serverMap.get(localChat.id);
+      const hasNewerMessages =
+        !remote || localChat.messages.length > remote.messages.length;
+      const hasModifiedTitle =
+        Boolean(localChat.titleModified) && localChat.title !== remote?.title;
+
+      if (hasNewerMessages || hasModifiedTitle) {
+        await pushRemoteSession(
+          localChat.id,
+          localChat.title,
+          localChat.messages,
+        );
+        if (remote) {
+          remote.title = localChat.title;
+        }
+        localChat.titleModified = false;
+      }
+    }
+
+    for (const s of sessionsList) {
+      if (!s || !s.session_id) continue;
+      if (deletedChatIds.has(s.session_id)) {
+        deleteRemoteSession(s.session_id).catch(() => {});
+        continue;
+      }
+      mergeRemoteSessionIntoLocalChats(chats, s);
+    }
+  }
+}
+
+/**
  * State manager for the Chat Application.
  */
 export class ChatState {
@@ -268,6 +484,12 @@ export class ChatState {
   public chatCounter: number = 1;
   /** Monotonic sequence counter preventing same-millisecond chat ID collisions. */
   private idSequence: number = 0;
+  /** Composable store for cloud LLM credentials and custom models. */
+  public readonly credentialsStore: ProviderCredentialsStore =
+    new ProviderCredentialsStore();
+  /** Composable service for remote session synchronization. */
+  public readonly sessionSyncService: SessionSyncService =
+    new SessionSyncService();
   /** Diagnostic health status of backend and database. */
   public systemStatus: SystemStatus = {
     backendOnline: true,
@@ -286,9 +508,9 @@ export class ChatState {
   };
 
   /** Currently selected DuckDB database path. */
-  public currentDb: string = "t1d.duckdb";
+  public currentDb: string = DEFAULT_DB_NAME;
   /** Default selected LLM model identifier. */
-  public selectedModel: string = "gemma:2b";
+  public selectedModel: string = DEFAULT_CHAT_MODEL;
   /** List of discovered workspace DuckDB databases. */
   public availableDbs: AvailableDatabaseItem[] = [];
   /** Whether server-side chat session synchronization is enabled. */
@@ -332,7 +554,7 @@ export class ChatState {
     if (!data) return;
     try {
       const parsed = parsePersistedChatState(data);
-      this.chats = parsed.chats || [];
+      this.chats = parseStoredChatList(parsed.chats);
       this.activeChatId = parsed.activeChatId || null;
       this.chatCounter = parsed.chatCounter || 1;
       if (parsed.currentDb) this.currentDb = parsed.currentDb;
@@ -396,68 +618,10 @@ export class ChatState {
    */
   public async syncWithServer(): Promise<boolean> {
     try {
-      // 1. Fetch remote sessions from server
-      const sessionsList = await fetchRemoteSessions<Message>();
-
-      const serverMap = new Map<string, RemoteSessionPayload<Message>>();
-      for (const s of sessionsList) {
-        if (s && s.session_id) {
-          serverMap.set(s.session_id, s);
-        }
-      }
-
-      // 2. Upload any local non-temporary chats not on server or having newer local messages or modified titles
-      for (const localChat of this.chats) {
-        if (localChat.isTemporary) continue;
-        const remote = serverMap.get(localChat.id);
-        const hasNewerMessages =
-          !remote || localChat.messages.length > remote.messages.length;
-        const hasModifiedTitle =
-          Boolean(localChat.titleModified) && localChat.title !== remote?.title;
-
-        if (hasNewerMessages || hasModifiedTitle) {
-          await pushRemoteSession(
-            localChat.id,
-            localChat.title,
-            localChat.messages,
-          );
-          if (remote) {
-            remote.title = localChat.title;
-          }
-          localChat.titleModified = false;
-        }
-      }
-
-      // 3. Merge server sessions into local chats
-      for (const s of sessionsList) {
-        if (!s || !s.session_id) continue;
-        if (this.deletedChatIds.has(s.session_id)) {
-          deleteRemoteSession(s.session_id).catch(() => {});
-          continue;
-        }
-        const local = this.chats.find((c) => c.id === s.session_id);
-        const remoteTime = s.updated_at ? new Date(s.updated_at).getTime() : 0;
-        const remoteMessages = sanitizeLegacySessionMessages(s.messages || []);
-        if (!local) {
-          this.chats.push({
-            id: s.session_id,
-            title: s.title,
-            messages: remoteMessages,
-            model: "gemma:2b",
-            isTemporary: false,
-            updatedAt: remoteTime,
-          });
-        } else {
-          if (remoteMessages.length > local.messages.length) {
-            local.messages = remoteMessages;
-            local.updatedAt = remoteTime;
-          }
-          if (s.title && s.title !== local.title && !local.titleModified) {
-            local.title = s.title;
-            local.updatedAt = remoteTime;
-          }
-        }
-      }
+      await this.sessionSyncService.synchronizeChats(
+        this.chats,
+        this.deletedChatIds,
+      );
 
       if (!this.activeChatId && this.chats.length > 0) {
         this.activeChatId = this.chats[0].id;
@@ -467,7 +631,6 @@ export class ChatState {
       this.saveToLocalStorage();
       return true;
     } catch (e) {
-      // Offline fallback: load from localStorage and persist locally
       console.warn(
         "Server sync failed, falling back to offline localStorage:",
         e,
@@ -480,7 +643,6 @@ export class ChatState {
 
   /**
    * Creates a new chat and sets it as active.
-
    * @param {string} [title] Optional title for the chat.
    * @param {boolean} [isTemporary=false] Whether the chat should be treated as temporary.
    * @returns {Chat} The newly created chat.
@@ -491,7 +653,7 @@ export class ChatState {
       title:
         title || i18next.t("app.chatNumber", { count: this.chatCounter++ }),
       messages: [],
-      model: "gemma:2b",
+      model: DEFAULT_CHAT_MODEL,
       isTemporary,
       updatedAt: Date.now(),
     };
@@ -580,7 +742,7 @@ export class ChatState {
     const duplicate: Chat = {
       id: `chat-${Date.now()}-${++this.idSequence}-${Math.floor(Math.random() * 1000)}`,
       title: i18next.t("app.copyOf", { title: original.title }),
-      messages: JSON.parse(JSON.stringify(original.messages)), // Deep copy
+      messages: JSON.parse(JSON.stringify(original.messages)),
       model: original.model,
       isTemporary: false,
     };
@@ -606,6 +768,20 @@ export class ChatState {
       }
       this.saveToLocalStorage();
     }
+  }
+
+  /**
+   * Updates an existing message in place and persists state to localStorage.
+   * @param {Message} targetMessage The target message instance to update.
+   * @param {Partial<Message>} patch Partial message properties to apply.
+   * @returns {void}
+   */
+  updateMessageInActiveChat(
+    targetMessage: Message,
+    patch: Partial<Message>,
+  ): void {
+    Object.assign(targetMessage, patch);
+    this.saveToLocalStorage();
   }
 
   /**
@@ -650,7 +826,7 @@ export class ChatState {
    * @returns {string | null} The API key if stored, otherwise null.
    */
   getApiKey(provider: string): string | null {
-    return safeStorageGet(`t1d_api_key_${provider.toLowerCase()}`);
+    return this.credentialsStore.getApiKey(provider);
   }
 
   /**
@@ -660,7 +836,7 @@ export class ChatState {
    * @returns {void}
    */
   setApiKey(provider: string, key: string): void {
-    safeStorageSet(`t1d_api_key_${provider.toLowerCase()}`, key.trim());
+    this.credentialsStore.setApiKey(provider, key);
   }
 
   /**
@@ -669,7 +845,7 @@ export class ChatState {
    * @returns {void}
    */
   removeApiKey(provider: string): void {
-    safeStorageRemove(`t1d_api_key_${provider.toLowerCase()}`);
+    this.credentialsStore.removeApiKey(provider);
   }
 
   /**
@@ -677,15 +853,7 @@ export class ChatState {
    * @returns {Record<string, string>} A mapping of provider names to configured API keys.
    */
   getAllApiKeys(): Record<string, string> {
-    const keys: Record<string, string> = {};
-    const providers = ["openai", "anthropic", "google"];
-    for (const p of providers) {
-      const val = this.getApiKey(p);
-      if (val) {
-        keys[p] = val;
-      }
-    }
-    return keys;
+    return this.credentialsStore.getAllApiKeys();
   }
 
   /**
@@ -693,12 +861,7 @@ export class ChatState {
    * @returns {string[]} Array of configured 'provider/model' or 'provider:model' identifiers.
    */
   getConfiguredModels(): string[] {
-    const raw = safeStorageGet("t1d_configured_any_llm_models");
-    if (!raw) return [];
-    return raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    return this.credentialsStore.getConfiguredModels();
   }
 
   /**
@@ -707,16 +870,7 @@ export class ChatState {
    * @returns {void}
    */
   setConfiguredModels(modelsCsv: string): void {
-    const cleaned = modelsCsv
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .join(", ");
-    if (cleaned) {
-      safeStorageSet("t1d_configured_any_llm_models", cleaned);
-    } else {
-      safeStorageRemove("t1d_configured_any_llm_models");
-    }
+    this.credentialsStore.setConfiguredModels(modelsCsv);
   }
 
   /**
@@ -724,7 +878,7 @@ export class ChatState {
    * @returns {void}
    */
   removeConfiguredModels(): void {
-    safeStorageRemove("t1d_configured_any_llm_models");
+    this.credentialsStore.removeConfiguredModels();
   }
 
   /**

@@ -61,7 +61,17 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.archive_extractor
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.chat_service
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.clinical_prompts
    :members:
    :undoc-members:
    :show-inheritance:
@@ -101,7 +111,17 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.duckdb_pool
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.errors
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.gcs_storage
    :members:
    :undoc-members:
    :show-inheritance:
@@ -151,7 +171,17 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.llm_stream_protocols
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.models
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.ollama_discovery
    :members:
    :undoc-members:
    :show-inheritance:
@@ -182,6 +212,11 @@ t1d_analytics
    :show-inheritance:
 
 .. automodule:: t1d_analytics.sql_executor
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.sql_fallback_synthesizer
    :members:
    :undoc-members:
    :show-inheritance:

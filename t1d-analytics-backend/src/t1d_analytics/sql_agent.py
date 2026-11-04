@@ -5,17 +5,21 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Union
+from typing import Callable, Dict, List, Optional, Sequence, Set, Union
 
+import duckdb
 from typing_extensions import TypedDict
 
-from t1d_analytics.api_schemas import TableSchemaModel
+from t1d_analytics.api_schemas import ColumnInfo, TableSchemaModel
+from t1d_analytics.errors import T1DError
 from t1d_analytics.sql_utils import (
     SqlValue,
     coerce_numeric_aggregates_in_sql,
     extract_sql_from_response,
     is_read_only_sql_query,
     is_sql_query,
+    parse_schema_text_to_column_pairs,
+    parse_schema_text_to_map,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,54 +35,28 @@ class AgenticSqlResult(TypedDict):
     error: Optional[str]
 
 
-def _append_parsed_columns(cols_list: List[str], cols_str: str) -> None:
+def parse_schema_text_to_models(schema_text: str) -> List[TableSchemaModel]:
     """
-    Parse comma-separated column descriptors (`col (TYPE)`) and append unique column names.
+    Parse a formatted schema string or SQL DDL into structured `TableSchemaModel` instances.
 
     Args:
     ----
-        cols_list: Target list of column names to mutate.
-        cols_str: Raw comma-separated column specifications.
-
-    """
-    for raw_col in cols_str.split(","):
-        c_name = raw_col.split("(", 1)[0].strip()
-        if c_name and c_name not in cols_list:
-            cols_list.append(c_name)
-
-
-def _extract_ddl_schema_map(schema_text: str) -> Dict[str, List[str]]:
-    """
-    Extract table-to-columns mapping from `CREATE TABLE` DDL statements.
-
-    Args:
-    ----
-        schema_text: Raw SQL DDL string.
+        schema_text: Formatted database schema or SQL DDL string.
 
     Returns:
     -------
-        Dict[str, List[str]]: Mapping of table names to column name lists.
+        List[TableSchemaModel]: Ordered list of parsed `TableSchemaModel` instances.
 
     """
-    schema_map: Dict[str, List[str]] = {}
-    ddl_pattern = re.compile(
-        r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|([a-zA-Z0-9_]+))\s*\((.*?)\)',
-        re.IGNORECASE | re.DOTALL,
-    )
-    excluded_keywords = {"PRIMARY", "FOREIGN", "CONSTRAINT", "UNIQUE", "CHECK"}
-    for match in ddl_pattern.finditer(schema_text):
-        t_name = match.group(1) or match.group(2)
-        cols_body = match.group(3)
-        cols: List[str] = []
-        for col_def in cols_body.split(","):
-            c_clean = col_def.strip()
-            if not c_clean:
-                continue
-            first_tok = c_clean.split()[0].strip('"`[]')
-            if first_tok.upper() not in excluded_keywords:
-                cols.append(first_tok)
-        schema_map[t_name] = cols
-    return schema_map
+    return [
+        TableSchemaModel(
+            table_name=tbl,
+            columns=[
+                ColumnInfo(name=c_name, type=c_type) for c_name, c_type in col_pairs
+            ],
+        )
+        for tbl, col_pairs in parse_schema_text_to_column_pairs(schema_text).items()
+    ]
 
 
 def _extract_schema_map_from_text(
@@ -100,38 +78,7 @@ def _extract_schema_map_from_text(
         return {
             tbl.table_name: [col.name for col in tbl.columns] for tbl in schema_source
         }
-
-    schema_text = schema_source
-    schema_map: Dict[str, List[str]] = {}
-    current_table: Optional[str] = None
-    for raw_line in schema_text.splitlines():
-        line = raw_line.strip()
-        if line.startswith("--"):
-            line = line.lstrip("-").strip()
-        if line.startswith("Table:"):
-            after_table = line.split("Table:", 1)[1].strip()
-            if "|" in after_table:
-                table_part, rest_part = after_table.split("|", 1)
-                t_inline = table_part.strip()
-                if t_inline:
-                    cols_inline = schema_map.setdefault(t_inline, [])
-                    if "Columns:" in rest_part:
-                        _append_parsed_columns(
-                            cols_inline, rest_part.split("Columns:", 1)[1].strip()
-                        )
-                current_table = None
-            else:
-                current_table = after_table
-                if current_table:
-                    schema_map.setdefault(current_table, [])
-        elif line.startswith("Columns:") and current_table is not None:
-            _append_parsed_columns(
-                schema_map[current_table], line.split("Columns:", 1)[1].strip()
-            )
-        elif line.startswith("-") and current_table is not None:
-            _append_parsed_columns(schema_map[current_table], line.lstrip("-").strip())
-
-    return schema_map if schema_map else _extract_ddl_schema_map(schema_text)
+    return parse_schema_text_to_map(schema_source)
 
 
 _TABLE_1_RAG_KEYWORDS = {
@@ -184,6 +131,90 @@ def _is_table_1_broad_query(nl_query: str) -> bool:
     return len(query_words.intersection(_TABLE_1_RAG_KEYWORDS)) >= 2
 
 
+def _score_tables_by_query_tokens(
+    schema_map: Dict[str, List[str]],
+    prompt_words: Set[str],
+    is_broad_t1: bool,
+) -> Dict[str, int]:
+    """
+    Score each table in `schema_map` by lexical overlap with `prompt_words` and clinical priority.
+
+    Args:
+    ----
+        schema_map: Mapping of table names to column names.
+        prompt_words: Lowercase words extracted from the user prompt.
+        is_broad_t1: Whether the prompt requests a broad Table 1 summary.
+
+    Returns:
+    -------
+        Dict[str, int]: Mapping of table name to integer relevance score.
+
+    """
+    scores: Dict[str, int] = {}
+    for table, cols in schema_map.items():
+        score = 5 if table.lower() in prompt_words else 0
+        if is_broad_t1 and table.lower() in _CORE_CLINICAL_TABLES:
+            score += 3
+        score += sum(1 for col in cols if col.lower() in prompt_words)
+        scores[table] = score
+    return scores
+
+
+def _expand_related_clinical_tables(
+    schema_map: Dict[str, List[str]],
+    scores: Dict[str, int],
+    effective_top_k: int,
+) -> List[str]:
+    """
+    Select the top-k highest-scoring tables from `scores` or fall back to the first `effective_top_k` tables.
+
+    Args:
+    ----
+        schema_map: Mapping of table names to column names.
+        scores: Table relevance score mapping.
+        effective_top_k: Maximum number of tables to include.
+
+    Returns:
+    -------
+        List[str]: Ordered list of selected table names.
+
+    """
+    ranked = [
+        t
+        for t, s in sorted(scores.items(), key=lambda item: item[1], reverse=True)[
+            :effective_top_k
+        ]
+        if s > 0
+    ]
+    return ranked if ranked else list(schema_map.keys())[:effective_top_k]
+
+
+def _fetch_sample_rows_for_tables(
+    ranked_tables: Sequence[str],
+    schema_map: Dict[str, List[str]],
+    rendered_schema: str,
+) -> str:
+    """
+    Format the `-- Relevant Schema Context:` header block and prepend it to `rendered_schema`.
+
+    Args:
+    ----
+        ranked_tables: Ordered list of prioritized table names.
+        schema_map: Mapping of table names to column names.
+        rendered_schema: Full rendered schema text including sample rows.
+
+    Returns:
+    -------
+        str: Enriched schema string.
+
+    """
+    nl = chr(10)
+    lines = ["-- Relevant Schema Context:"]
+    for t in ranked_tables:
+        lines.append(f"-- Table: {t} | Columns: {', '.join(schema_map[t])}")
+    return nl.join(lines) + f"{nl}{nl}" + rendered_schema
+
+
 def prune_schema_with_gemma_rag(
     nl_query: str,
     full_schema_text: Union[str, Sequence[TableSchemaModel]],
@@ -221,10 +252,9 @@ def prune_schema_with_gemma_rag(
     if not schema_map:
         return rendered_schema
 
+    is_broad_t1 = _is_table_1_broad_query(nl_query)
     effective_top_k = (
-        max(top_k_tables, len(schema_map))
-        if _is_table_1_broad_query(nl_query)
-        else top_k_tables
+        max(top_k_tables, len(schema_map)) if is_broad_t1 else top_k_tables
     )
 
     if repo_resolver is not None:
@@ -237,35 +267,21 @@ def prune_schema_with_gemma_rag(
         )
         if rag_header.strip():
             return f"{rag_header}{nl}{nl}{rendered_schema}"
-    except Exception as e:
+    except (
+        ImportError,
+        SyntaxError,
+        AttributeError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as e:
         logger.debug("Falling back to built-in BM25 schema ranking: %s", e)
 
     prompt_words = {w.lower() for w in re.findall(r"\b\w+\b", nl_query)}
-    is_broad_t1 = _is_table_1_broad_query(nl_query)
-    scores: Dict[str, int] = {}
-    for table, cols in schema_map.items():
-        score = 5 if table.lower() in prompt_words else 0
-        if is_broad_t1 and table.lower() in _CORE_CLINICAL_TABLES:
-            score += 3
-        for col in cols:
-            if col.lower() in prompt_words:
-                score += 1
-        scores[table] = score
-
-    ranked = [
-        t
-        for t, s in sorted(scores.items(), key=lambda item: item[1], reverse=True)[
-            :effective_top_k
-        ]
-        if s > 0
-    ]
-    if not ranked:
-        ranked = list(schema_map.keys())[:effective_top_k]
-
-    lines = ["-- Relevant Schema Context:"]
-    for t in ranked:
-        lines.append(f"-- Table: {t} | Columns: {', '.join(schema_map[t])}")
-    return nl.join(lines) + f"{nl}{nl}" + rendered_schema
+    scores = _score_tables_by_query_tokens(schema_map, prompt_words, is_broad_t1)
+    ranked = _expand_related_clinical_tables(schema_map, scores, effective_top_k)
+    return _fetch_sample_rows_for_tables(ranked, schema_map, rendered_schema)
 
 
 def score_sql_completion_logprob(
@@ -339,7 +355,15 @@ def validate_sql_tokens(
         encoded = tokenizer.encode(sql)
         if isinstance(encoded, list):
             return [int(x) for x in encoded if isinstance(x, int)]
-    except Exception as e:
+    except (
+        ImportError,
+        SyntaxError,
+        AttributeError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as e:
         logger.debug("Falling back to byte-level SQL tokenization: %s", e)
     return list(sql.encode("utf-8", errors="replace"))
 
@@ -453,7 +477,7 @@ def execute_agentic_nl_to_sql(
                 "rows": rows,
                 "error": None,
             }
-        except Exception as exc:
+        except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as exc:
             nl = chr(10)
             err_str = str(exc)
             last_error = err_str

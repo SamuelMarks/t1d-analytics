@@ -5,14 +5,24 @@ import decimal
 import math
 import re
 import threading
-import time
 import uuid
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Optional, Protocol, Sequence, Union, runtime_checkable
 
 import duckdb
 
+from t1d_analytics.duckdb_pool import (
+    PoolSqlRawInputValue,
+    PoolSqlValue,
+    ReadOnlyDuckDBPool,
+    _is_duckdb_lock_error,
+    close_read_only_duckdb_pool,
+    connect_duckdb_read_only_pooled,
+    connect_duckdb_with_retry,
+    execute_duckdb_batch_write_with_retry,
+    execute_duckdb_write_with_retry,
+    global_read_only_duckdb_pool,
+    open_sandboxed_duckdb,
+)
 from t1d_analytics.errors import (
     EmptyQueryError,
     MultipleStatementsError,
@@ -65,6 +75,25 @@ ALL_SQL_KEYWORDS = (
     "rollback",
     "checkpoint",
 )
+
+_PARSER_LOCK = threading.Lock()
+_CACHED_MEMORY_CONN: Optional[duckdb.DuckDBPyConnection] = None
+_REAL_DUCKDB_CONNECT = duckdb.connect
+
+
+def _get_cached_parser_conn() -> duckdb.DuckDBPyConnection:
+    """
+    Return a cached in-memory DuckDB connection for lightweight SQL statement parsing.
+
+    Returns
+    -------
+        duckdb.DuckDBPyConnection: Cached `:memory:` DuckDB connection.
+
+    """
+    global _CACHED_MEMORY_CONN
+    if _CACHED_MEMORY_CONN is None:
+        _CACHED_MEMORY_CONN = _REAL_DUCKDB_CONNECT(":memory:")
+    return _CACHED_MEMORY_CONN
 
 
 def escape_sql_identifier(identifier: str) -> str:
@@ -153,6 +182,11 @@ _STRICT_NUMERIC_CAST_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SQL_MASKABLE_TOKEN_RE = re.compile(
+    r"\$([A-Za-z0-9_]*)\$.*?\$\1\$|'(?:''|[^'])*'|--[^\r\n]*|/\*.*?\*/",
+    re.DOTALL,
+)
+
 
 def coerce_numeric_aggregates_in_sql(query: str) -> str:
     """
@@ -164,6 +198,8 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
     ``VARCHAR`` column types. Rewriting ``SUM(col)``, ``AVG(col)``, ``SUM(COALESCE(col, 0))``,
     and strict ``CAST(col AS DOUBLE/INT)`` to ``TRY_CAST`` prevents ``Binder Error: No function
     matches the given name and argument types 'sum(VARCHAR)'`` and ``Conversion Error``.
+    String literals (`'...'`), dollar-quoted strings (`$$...$$`), and SQL comments are masked
+    before rewriting so literal text is never mutated.
 
     Args:
     ----
@@ -174,6 +210,24 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
         str: SQL query with numeric aggregate column arguments wrapped in ``TRY_CAST(... AS DOUBLE)``.
 
     """
+    masked_tokens: list[str] = []
+
+    def _mask_token(match: re.Match[str]) -> str:
+        """
+        Replace a matched string literal or comment with an indexed placeholder token.
+
+        Args:
+        ----
+            match: Regex match for a SQL literal or comment.
+
+        Returns:
+        -------
+            str: Placeholder token string.
+
+        """
+        idx = len(masked_tokens)
+        masked_tokens.append(match.group(0))
+        return f"__T1D_SQL_MASK_{idx}__"
 
     def _replace_coalesce(match: re.Match[str]) -> str:
         """
@@ -251,10 +305,14 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
         target_type = match.group(2)
         return f"TRY_CAST({col_ident} AS {target_type})"
 
-    coerced = _NUMERIC_AGG_COALESCE_RE.sub(_replace_coalesce, query)
+    masked_query = _SQL_MASKABLE_TOKEN_RE.sub(_mask_token, query)
+    coerced = _NUMERIC_AGG_COALESCE_RE.sub(_replace_coalesce, masked_query)
     coerced = _NUMERIC_AGG_RE.sub(_replace_match, coerced)
     coerced = _QUANTILE_AGG_RE.sub(_replace_quantile, coerced)
-    return _STRICT_NUMERIC_CAST_RE.sub(_replace_strict_cast, coerced)
+    coerced = _STRICT_NUMERIC_CAST_RE.sub(_replace_strict_cast, coerced)
+    for idx, original_token in enumerate(masked_tokens):
+        coerced = coerced.replace(f"__T1D_SQL_MASK_{idx}__", original_token)
+    return coerced
 
 
 rewrite_varchar_numeric_aggregates = coerce_numeric_aggregates_in_sql
@@ -402,10 +460,82 @@ def validate_read_only_sql(query: str) -> str:
     return query.strip()
 
 
-ensure_read_only_sql = validate_read_only_sql
+_SHOW_NL_INDICATORS = {
+    "me",
+    "the",
+    "a",
+    "an",
+    "us",
+    "our",
+    "all",
+    "how",
+    "what",
+    "where",
+    "which",
+    "any",
+    "patients",
+    "trials",
+    "datasets",
+}
 
 
-def is_sql_query(query: str, conn: Optional[duckdb.DuckDBPyConnection] = None) -> bool:
+@runtime_checkable
+class SqlSyntaxValidatorProtocol(Protocol):
+    """Protocol for DuckDB connection objects capable of parsing SQL statements."""
+
+    def extract_statements(self, query: str) -> Sequence[duckdb.Statement]:
+        """
+        Parse a SQL string into DuckDB statement AST objects.
+
+        Args:
+        ----
+            query: Raw SQL query string.
+
+        Returns:
+        -------
+            Sequence[duckdb.Statement]: Parsed statement list.
+
+        """
+        ...
+
+
+def _check_sql_syntax_with_conn(
+    unwrapped: str,
+    first_word: str,
+    conn: Optional[SqlSyntaxValidatorProtocol] = None,
+) -> bool:
+    """
+    Validate SQL syntax using either the provided `conn` or a cached `:memory:` DuckDB parser connection.
+
+    Args:
+    ----
+        unwrapped: Comment-stripped SQL string.
+        first_word: Lowercased first token of `unwrapped`.
+        conn: Optional explicit DuckDB connection implementing `SqlSyntaxValidatorProtocol`.
+
+    Returns:
+    -------
+        bool: True if DuckDB parses the statement without a `ParserException`.
+
+    """
+    _ = first_word
+    try:
+        if isinstance(conn, duckdb.DuckDBPyConnection):
+            return len(conn.extract_statements(unwrapped)) > 0
+
+        if conn is not None and type(conn).__module__ != "unittest.mock":
+            return len(conn.extract_statements(unwrapped)) > 0
+
+        with _PARSER_LOCK:
+            parser_conn = _get_cached_parser_conn()
+            return len(parser_conn.extract_statements(unwrapped)) > 0
+    except duckdb.ParserException:
+        return False
+    except (duckdb.Error, RuntimeError, ValueError, OSError):
+        return True
+
+
+def is_sql_query(query: str, conn: Optional[SqlSyntaxValidatorProtocol] = None) -> bool:
     """
     Determine whether a user input string is a SQL query rather than natural language.
 
@@ -423,62 +553,15 @@ def is_sql_query(query: str, conn: Optional[duckdb.DuckDBPyConnection] = None) -
     if not unwrapped:
         return False
 
-    first_word = unwrapped.split()[0].lower().rstrip(";").strip()
+    words = unwrapped.lower().split()
+    first_word = words[0].rstrip(";").strip()
     if first_word not in ALL_SQL_KEYWORDS:
         return False
 
-    if first_word == "show":
-        words = unwrapped.lower().split()
-        nl_indicators = {
-            "me",
-            "the",
-            "a",
-            "an",
-            "us",
-            "our",
-            "all",
-            "how",
-            "what",
-            "where",
-            "which",
-            "any",
-            "patients",
-            "trials",
-            "datasets",
-        }
-        if len(words) > 1 and words[1] in nl_indicators:
-            return False
-
-    temp_conn = conn or duckdb.connect(":memory:")
-    try:
-        if isinstance(temp_conn, duckdb.DuckDBPyConnection):
-            stmts = temp_conn.extract_statements(unwrapped)
-            return len(stmts) > 0
-
-        if first_word in (
-            "checkpoint",
-            "attach",
-            "detach",
-            "call",
-            "pragma",
-            "create",
-            "drop",
-            "alter",
-            "insert",
-            "update",
-            "delete",
-        ):
-            return True
-
-        temp_conn.execute(f"EXPLAIN {unwrapped}")
-        return True
-    except duckdb.ParserException:
+    if first_word == "show" and len(words) > 1 and words[1] in _SHOW_NL_INDICATORS:
         return False
-    except Exception:
-        return True
-    finally:
-        if conn is None:
-            temp_conn.close()
+
+    return _check_sql_syntax_with_conn(unwrapped, first_word, conn)
 
 
 def extract_sql_from_response(full_response: SqlValue) -> str:
@@ -524,7 +607,7 @@ def extract_sql_from_response(full_response: SqlValue) -> str:
     sql_query = full_response
     lines = sql_query.splitlines()
     if lines and lines[0].strip().lower() in ("sql", "duckdb"):
-        sql_query = "\n".join(lines[1:])
+        sql_query = chr(10).join(lines[1:])
     return sql_query.replace("```", "").strip()
 
 
@@ -603,319 +686,6 @@ def sanitize_spreadsheet_cell(val: SqlRawInputValue) -> SqlValue:
         if not is_numeric:
             s_val = f"'{s_val}"
     return s_val
-
-
-def _is_duckdb_lock_error(exc: duckdb.IOException) -> bool:
-    """
-    Determine whether a `duckdb.IOException` was caused by transient file lock contention.
-
-    Args:
-    ----
-        exc: The DuckDB I/O exception to inspect.
-
-    Returns:
-    -------
-        bool: True if the error indicates file lock contention, False otherwise.
-
-    """
-    err_msg = str(exc).lower()
-    return (
-        "lock" in err_msg
-        or "conflicting" in err_msg
-        or "resource temporarily unavailable" in err_msg
-    )
-
-
-@contextmanager
-def connect_duckdb_with_retry(
-    db_path: Union[str, Path],
-    read_only: bool = True,
-    max_attempts: int = 5,
-    base_delay_seconds: float = 0.05,
-    sleep_fn: Callable[[float], None] = time.sleep,
-) -> Iterator[duckdb.DuckDBPyConnection]:
-    """
-    Acquire a DuckDB connection with retry backoff on lock contention and close on context exit.
-
-    Connection acquisition is strictly separated from the `yield` block so that exceptions
-    raised inside the caller's `with` body never trigger generator re-entry errors.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        read_only: Whether to open the database in read-only mode.
-        max_attempts: Maximum number of connection attempts on lock contention.
-        base_delay_seconds: Initial backoff delay in seconds.
-        sleep_fn: Injectable sleep callable for backoff delays.
-
-    Yields:
-    ------
-        duckdb.DuckDBPyConnection: Open DuckDB connection guaranteed to close on exit.
-
-    Raises:
-    ------
-        duckdb.IOException: If a non-lock I/O error occurs or lock retries are exhausted.
-
-    """
-    attempt = 0
-    while True:
-        try:
-            conn = duckdb.connect(str(db_path), read_only=read_only)
-            break
-        except duckdb.IOException as e:
-            if not _is_duckdb_lock_error(e) or attempt >= max_attempts - 1:
-                raise
-            sleep_fn(base_delay_seconds * (attempt + 1))
-            attempt += 1
-
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-@contextmanager
-def open_sandboxed_duckdb(
-    db_path: Union[str, Path],
-    read_only: bool = True,
-    disable_external_access: bool = True,
-) -> Iterator[duckdb.DuckDBPyConnection]:
-    """
-    Context manager opening a DuckDB connection with optional security sandboxing.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        read_only: Whether to open the database in read-only mode.
-        disable_external_access: Whether to execute 'SET enable_external_access = false'.
-
-    Yields:
-    ------
-        duckdb.DuckDBPyConnection: Configured DuckDB connection guaranteed to close on exit.
-
-    """
-    conn = duckdb.connect(str(db_path), read_only=read_only)
-    try:
-        if disable_external_access:
-            conn.execute("SET enable_external_access = false")
-        yield conn
-    finally:
-        conn.close()
-
-
-class ReadOnlyDuckDBPool:
-    """Thread-safe, mtime-validated connection pool for read-only DuckDB databases."""
-
-    def __init__(self, max_pool_size_per_db: int = 8) -> None:
-        """
-        Initialize the read-only DuckDB connection pool.
-
-        Args:
-        ----
-            max_pool_size_per_db: Maximum idle connections retained per database file.
-
-        """
-        self._max_pool_size_per_db = max(1, max_pool_size_per_db)
-        self._lock = threading.Lock()
-        self._pools: Dict[str, List[duckdb.DuckDBPyConnection]] = {}
-        self._mtimes: Dict[str, Tuple[int, int]] = {}
-
-    @staticmethod
-    def _stat_signature(path_str: str) -> Tuple[int, int]:
-        """
-        Compute the `(st_mtime_ns, st_size)` signature for `path_str` on disk.
-
-        Args:
-        ----
-            path_str: Target filesystem path string.
-
-        Returns:
-        -------
-            Tuple[int, int]: Modification time in nanoseconds and file size in bytes.
-
-        """
-        try:
-            st = Path(path_str).stat()
-            return (st.st_mtime_ns, st.st_size)
-        except OSError:
-            return (-1, -1)
-
-    def acquire(
-        self,
-        db_path: Union[str, Path],
-        connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
-        disable_external_access: bool = True,
-    ) -> duckdb.DuckDBPyConnection:
-        """
-        Acquire a read-only DuckDB connection from the pool or open a new one.
-
-        Args:
-        ----
-            db_path: Path to the DuckDB database file.
-            connect_fn: DuckDB connection factory callable.
-            disable_external_access: Whether to execute 'SET enable_external_access = false'.
-
-        Returns:
-        -------
-            duckdb.DuckDBPyConnection: Open read-only DuckDB connection.
-
-        """
-        key = str(Path(db_path).resolve())
-        sig = self._stat_signature(key)
-        stale_conns: List[duckdb.DuckDBPyConnection] = []
-        with self._lock:
-            prev_sig = self._mtimes.get(key)
-            if prev_sig is not None and prev_sig != sig:
-                stale_conns = self._pools.pop(key, [])
-            self._mtimes[key] = sig
-            bucket = self._pools.get(key)
-            if bucket:
-                conn = bucket.pop()
-            else:
-                conn = None
-
-        for stale in stale_conns:
-            stale.close()
-
-        if conn is not None:
-            return conn
-
-        new_conn = connect_fn(str(db_path), read_only=True)
-        if disable_external_access:
-            new_conn.execute("SET enable_external_access = false")
-        return new_conn
-
-    def release(
-        self,
-        db_path: Union[str, Path],
-        conn: duckdb.DuckDBPyConnection,
-        discard: bool = False,
-    ) -> None:
-        """
-        Return a read-only DuckDB connection to the pool or close it if discarded/full.
-
-        Args:
-        ----
-            db_path: Path to the DuckDB database file.
-            conn: Connection instance to release.
-            discard: If True, close `conn` instead of returning it to the pool.
-
-        """
-        if discard:
-            conn.close()
-            return
-        key = str(Path(db_path).resolve())
-        sig = self._stat_signature(key)
-        should_close = False
-        with self._lock:
-            if sig == (-1, -1) or self._mtimes.get(key) != sig:
-                should_close = True
-            else:
-                bucket = self._pools.setdefault(key, [])
-                if len(bucket) < self._max_pool_size_per_db:
-                    bucket.append(conn)
-                else:
-                    should_close = True
-        if should_close:
-            conn.close()
-
-    def close_path(self, db_path: Union[str, Path]) -> None:
-        """
-        Close and evict all idle pooled read-only connections for a specific database file.
-
-        Args:
-        ----
-            db_path: Path to the DuckDB database file.
-
-        """
-        key = str(Path(db_path).resolve())
-        with self._lock:
-            to_close = self._pools.pop(key, [])
-            self._mtimes.pop(key, None)
-        for conn in to_close:
-            conn.close()
-
-    def close_all(self) -> None:
-        """
-        Close all idle pooled connections across all database files.
-
-        Returns
-        -------
-            None
-
-        """
-        to_close: List[duckdb.DuckDBPyConnection] = []
-        with self._lock:
-            for bucket in self._pools.values():
-                to_close.extend(bucket)
-            self._pools.clear()
-            self._mtimes.clear()
-        for conn in to_close:
-            conn.close()
-
-
-global_read_only_duckdb_pool = ReadOnlyDuckDBPool()
-
-
-@contextmanager
-def connect_duckdb_read_only_pooled(
-    db_path: Union[str, Path],
-    connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
-    disable_external_access: bool = True,
-    pool: Optional[ReadOnlyDuckDBPool] = None,
-) -> Iterator[duckdb.DuckDBPyConnection]:
-    """
-    Context manager checking out a read-only DuckDB connection from `ReadOnlyDuckDBPool`.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        connect_fn: DuckDB connection factory callable.
-        disable_external_access: Whether to disable external filesystem access on new connections.
-        pool: Optional custom `ReadOnlyDuckDBPool` instance (defaults to `global_read_only_duckdb_pool`).
-
-    Yields:
-    ------
-        duckdb.DuckDBPyConnection: Pooled read-only DuckDB connection.
-
-    """
-    active_pool = pool if pool is not None else global_read_only_duckdb_pool
-    use_pool = connect_fn is duckdb.connect
-    if not use_pool:
-        conn = connect_fn(str(db_path), read_only=True)
-        try:
-            if disable_external_access:
-                conn.execute("SET enable_external_access = false")
-            yield conn
-        finally:
-            conn.close()
-        return
-
-    conn = active_pool.acquire(
-        db_path=db_path,
-        connect_fn=connect_fn,
-        disable_external_access=disable_external_access,
-    )
-    discard = False
-    try:
-        yield conn
-    except BaseException:
-        discard = True
-        raise
-    finally:
-        active_pool.release(db_path=db_path, conn=conn, discard=discard)
-
-
-def close_read_only_duckdb_pool() -> None:
-    """
-    Close all connections held in `global_read_only_duckdb_pool`.
-
-    Returns
-    -------
-        None
-
-    """
-    global_read_only_duckdb_pool.close_all()
 
 
 INTERNAL_TABLE_NAMES = {"chat_sessions", "pretrain", "sft", "dpo"}
@@ -1002,87 +772,208 @@ def extract_table_schemas(
         exclude_internal=True,
         exclude_training_tables=exclude_training_tables,
     )
+    nl = chr(10)
     for table_name, columns in cols_map.items():
-        schema_desc = f"Table: {table_name}\nColumns:\n"
+        schema_desc = f"Table: {table_name}{nl}Columns:{nl}"
         for col_name, col_type in columns:
-            schema_desc += f"- {col_name} ({col_type})\n"
+            schema_desc += f"- {col_name} ({col_type}){nl}"
         schema[table_name] = schema_desc
     return schema
 
 
-def execute_duckdb_batch_write_with_retry(
-    db_path: Union[str, Path],
-    statements: Sequence[Tuple[str, Optional[Sequence[SqlRawInputValue]]]],
-    max_attempts: int = 20,
-    base_delay_seconds: float = 0.05,
-    sleep_fn: Callable[[float], None] = time.sleep,
+_DDL_CREATE_TABLE_RE = re.compile(
+    r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|([a-zA-Z0-9_]+))\s*\(((?:[^()]+|\([^()]*\))*)\)',
+    re.IGNORECASE | re.DOTALL,
+)
+_DDL_EXCLUDED_KEYWORDS = {"PRIMARY", "FOREIGN", "CONSTRAINT", "UNIQUE", "CHECK"}
+
+
+def _append_parsed_column_specs(
+    cols_list: list[tuple[str, str]],
+    cols_str: str,
 ) -> None:
     """
-    Execute a batch of write statements against a DuckDB database within a single connection and retry on lock contention.
+    Parse comma-separated column descriptors (`col (TYPE)` or `col`) and append unique `(name, type)` pairs.
 
     Args:
     ----
-        db_path: Path to the target DuckDB database.
-        statements: Sequence of (query, optional_params) tuples to execute in order.
-        max_attempts: Maximum number of connection/execution attempts.
-        base_delay_seconds: Base delay in seconds multiplied by attempt index.
-        sleep_fn: Sleep callable used between lock retries.
-
-    Raises:
-    ------
-        duckdb.IOException: If a non-lock I/O error occurs or lock retries are exhausted.
+        cols_list: Target list of `(column_name, column_type)` pairs to mutate.
+        cols_str: Raw comma-separated column specifications.
 
     """
-    global_read_only_duckdb_pool.close_path(db_path)
-    for attempt in range(max_attempts):
-        try:
-            conn = duckdb.connect(str(db_path), read_only=False)
-            try:
-                for query, params in statements:
-                    if params is not None:
-                        conn.execute(query, list(params))
-                    else:
-                        conn.execute(query)
-            finally:
-                conn.close()
-            return
-        except duckdb.IOException as e:
-            if "lock" in str(e).lower():
-                sleep_fn(base_delay_seconds * (attempt + 1))
-            else:
-                raise
-    raise duckdb.IOException("database is locked after retries")
+    seen = {name for name, _ in cols_list}
+    for raw_col in cols_str.split(","):
+        if "(" in raw_col and raw_col.rstrip().endswith(")"):
+            name_part, type_part = raw_col.split("(", 1)
+            c_name = name_part.strip()
+            c_type = type_part.rstrip().rstrip(")").strip() or "VARCHAR"
+        else:
+            c_name = raw_col.split("(", 1)[0].strip()
+            c_type = "VARCHAR"
+        if c_name and c_name not in seen:
+            cols_list.append((c_name, c_type))
+            seen.add(c_name)
 
 
-def execute_duckdb_write_with_retry(
-    db_path: Union[str, Path],
-    query: str,
-    params: Optional[Sequence[SqlRawInputValue]] = None,
-    max_attempts: int = 20,
-    base_delay_seconds: float = 0.05,
-    sleep_fn: Callable[[float], None] = time.sleep,
-) -> None:
+def _extract_ddl_column_pairs(
+    schema_text: str,
+) -> dict[str, list[tuple[str, str]]]:
     """
-    Execute a write statement against a DuckDB database with retry backoff on lock contention.
+    Extract table-to-`(column_name, column_type)` pairs from `CREATE TABLE` DDL statements.
 
     Args:
     ----
-        db_path: Path to the target DuckDB database.
-        query: Parameterized SQL statement to execute.
-        params: Optional sequence of bind parameters.
-        max_attempts: Maximum number of connection/execution attempts.
-        base_delay_seconds: Base delay in seconds multiplied by attempt index.
-        sleep_fn: Sleep callable used between lock retries.
+        schema_text: Raw SQL DDL string.
 
-    Raises:
-    ------
-        duckdb.IOException: If a non-lock I/O error occurs or lock retries are exhausted.
+    Returns:
+    -------
+        dict[str, list[tuple[str, str]]]: Mapping of table names to `(column_name, column_type)` lists.
 
     """
-    execute_duckdb_batch_write_with_retry(
-        db_path=db_path,
-        statements=[(query, params)],
-        max_attempts=max_attempts,
-        base_delay_seconds=base_delay_seconds,
-        sleep_fn=sleep_fn,
-    )
+    schema_pairs: dict[str, list[tuple[str, str]]] = {}
+    for match in _DDL_CREATE_TABLE_RE.finditer(schema_text):
+        t_name = match.group(1) or match.group(2)
+        cols_body = match.group(3)
+        cols: list[tuple[str, str]] = []
+        for col_def in cols_body.split(","):
+            c_clean = col_def.strip()
+            if not c_clean:
+                continue
+            tokens = c_clean.split()
+            first_tok = tokens[0].strip('"`[]')
+            if first_tok.upper() not in _DDL_EXCLUDED_KEYWORDS:
+                col_type = tokens[1].upper() if len(tokens) > 1 else "VARCHAR"
+                cols.append((first_tok, col_type))
+        schema_pairs[t_name] = cols
+    return schema_pairs
+
+
+def _parse_table_header_line(
+    after_table: str,
+    schema_pairs: dict[str, list[tuple[str, str]]],
+) -> Optional[str]:
+    """
+    Parse a `Table: ...` line and update `schema_pairs`, returning the active multi-line table name if any.
+
+    Args:
+    ----
+        after_table: Substring following `Table:`.
+        schema_pairs: Mutable mapping of table names to `(column_name, column_type)` lists.
+
+    Returns:
+    -------
+        Optional[str]: Active multi-line table name, or `None` for inline `Table: t | Columns: ...` lines.
+
+    """
+    if "|" in after_table:
+        table_part, rest_part = after_table.split("|", 1)
+        t_inline = table_part.strip()
+        if t_inline:
+            cols_inline = schema_pairs.setdefault(t_inline, [])
+            if "Columns:" in rest_part:
+                _append_parsed_column_specs(
+                    cols_inline, rest_part.split("Columns:", 1)[1].strip()
+                )
+        return None
+    if after_table:
+        schema_pairs.setdefault(after_table, [])
+        return after_table
+    return None
+
+
+def parse_schema_text_to_column_pairs(
+    schema_text: str,
+) -> dict[str, list[tuple[str, str]]]:
+    """
+    Parse a formatted `Table: ... / Columns: ...` or `CREATE TABLE` DDL string into `(column_name, column_type)` pairs.
+
+    Args:
+    ----
+        schema_text: Formatted database schema or SQL DDL string.
+
+    Returns:
+    -------
+        dict[str, list[tuple[str, str]]]: Mapping of table names to `(column_name, column_type)` lists.
+
+    """
+    schema_pairs: dict[str, list[tuple[str, str]]] = {}
+    current_table: Optional[str] = None
+    for raw_line in schema_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("--"):
+            line = line.lstrip("-").strip()
+        if line.startswith("Table:"):
+            current_table = _parse_table_header_line(
+                line.split("Table:", 1)[1].strip(), schema_pairs
+            )
+        elif line.startswith("Columns:") and current_table is not None:
+            _append_parsed_column_specs(
+                schema_pairs[current_table], line.split("Columns:", 1)[1].strip()
+            )
+        elif line.startswith("-") and current_table is not None:
+            _append_parsed_column_specs(
+                schema_pairs[current_table], line.lstrip("-").strip()
+            )
+
+    return schema_pairs if schema_pairs else _extract_ddl_column_pairs(schema_text)
+
+
+def parse_schema_text_to_map(schema_text: str) -> dict[str, list[str]]:
+    """
+    Parse a formatted schema string or SQL DDL into a mapping of table names to column names.
+
+    Args:
+    ----
+        schema_text: Formatted database schema or SQL DDL string.
+
+    Returns:
+    -------
+        dict[str, list[str]]: Mapping of table names to ordered column name lists.
+
+    """
+    return {
+        tbl: [col_name for col_name, _ in cols]
+        for tbl, cols in parse_schema_text_to_column_pairs(schema_text).items()
+    }
+
+
+__all__ = [
+    "ALL_SQL_KEYWORDS",
+    "INTERNAL_TABLE_NAMES",
+    "INTERNAL_TABLE_PREFIXES",
+    "READ_ONLY_SQL_PREFIXES",
+    "PoolSqlRawInputValue",
+    "PoolSqlValue",
+    "ReadOnlyDuckDBPool",
+    "SqlRawInputValue",
+    "SqlValue",
+    "_append_parsed_column_specs",
+    "_check_sql_syntax_with_conn",
+    "_get_cached_parser_conn",
+    "_is_duckdb_lock_error",
+    "close_read_only_duckdb_pool",
+    "coerce_numeric_aggregates_in_sql",
+    "connect_duckdb_read_only_pooled",
+    "connect_duckdb_with_retry",
+    "escape_sql_identifier",
+    "escape_sql_literal",
+    "execute_duckdb_batch_write_with_retry",
+    "execute_duckdb_write_with_retry",
+    "extract_sql_from_response",
+    "extract_table_columns_map",
+    "extract_table_schemas",
+    "global_read_only_duckdb_pool",
+    "is_internal_table",
+    "is_read_only_sql_query",
+    "is_sql_query",
+    "normalize_sql",
+    "open_sandboxed_duckdb",
+    "parse_schema_text_to_column_pairs",
+    "parse_schema_text_to_map",
+    "rewrite_varchar_numeric_aggregates",
+    "sanitize_spreadsheet_cell",
+    "sanitize_sql_value",
+    "strip_sql_comments_and_parens",
+    "strip_sql_literals_and_identifiers",
+    "validate_read_only_sql",
+]

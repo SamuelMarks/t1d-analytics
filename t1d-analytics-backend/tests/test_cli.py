@@ -1791,12 +1791,16 @@ def test_seed_subcommand_and_doctor_thresholds(
         assert exc_tbl.value.code == 1
 
     # Seed verification failure when fewer than 4 tables exist
+    from t1d_analytics.errors import SeedVerificationError
+
     with patch("t1d_analytics.seed.load_data_to_duckdb"):
         bad_db = tmp_path / "bad_seed.duckdb"
         conn = duckdb.connect(str(bad_db))
         conn.execute("CREATE TABLE only_one (id INT)")
         conn.close()
-        with pytest.raises(RuntimeError, match="expected >= 4 clinical tables"):
+        with pytest.raises(
+            SeedVerificationError, match="expected >= 4 clinical tables"
+        ):
             seed_database(
                 data_dir=str(data_dir),
                 db_path=str(bad_db),
@@ -1815,7 +1819,7 @@ def test_seed_subcommand_and_doctor_thresholds(
             conn2.execute(f"CREATE TABLE {tbl} (id INT)")
         conn2.close()
         with pytest.raises(
-            RuntimeError, match="required table 'patients' is missing or empty"
+            SeedVerificationError, match="required table 'patients' is missing or empty"
         ):
             seed_database(
                 data_dir=str(data_dir),

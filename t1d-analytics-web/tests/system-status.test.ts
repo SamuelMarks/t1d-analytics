@@ -467,7 +467,11 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
 
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
     await ui.schemaExplorerController.fetchDatabases();
+    expect(state.availableDbs.length).toBe(2);
+
     mockFetch.mockRejectedValueOnce(new Error("net err"));
     await ui.schemaExplorerController.fetchDatabases();
+    expect(state.availableDbs.length).toBe(2);
+    expect(dbSelect.options.length).toBe(2);
   });
 });

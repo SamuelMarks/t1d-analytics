@@ -40,13 +40,17 @@ def test_execute_sql_error(mock_db: str) -> None:
 
 def test_execute_sql_sandboxed_external_access(mock_db: str) -> None:
     """Test SQL execution sandboxing blocks external filesystem access."""
-    with pytest.raises(ValueError, match=r"backend\.sqlExecution"):
+    from t1d_analytics.errors import SqlExecutionError
+
+    with pytest.raises(SqlExecutionError, match=r"backend\.sqlExecution"):
         execute_sql(mock_db, "SELECT * FROM read_csv('/etc/passwd')")
 
 
 def test_execute_sql_db_not_found() -> None:
     """Test execute_sql when database file is missing."""
-    with pytest.raises(ValueError, match=r"backend\.dbNotFound.*"):
+    from t1d_analytics.errors import DatabaseNotFoundError
+
+    with pytest.raises(DatabaseNotFoundError, match=r"backend\.dbNotFound.*"):
         execute_sql("missing_file.duckdb", "SELECT 1")
 
 
@@ -58,7 +62,11 @@ def test_execute_sql_max_rows(mock_db: str) -> None:
 
 
 def test_execute_sql_timeout(mock_db: str) -> None:
-    """Test execute_sql timeout triggers ValueError with queryTimeout error code."""
+    """Test execute_sql timeout triggers SqlTimeoutError and evicts the interrupted connection from the pool."""
+    from t1d_analytics.errors import SqlTimeoutError
+    from t1d_analytics.sql_utils import global_read_only_duckdb_pool
+
+    global_read_only_duckdb_pool.close_path(mock_db)
     with patch("duckdb.connect") as mock_connect:
         mock_conn = MagicMock()
         mock_connect.return_value = mock_conn
@@ -66,40 +74,58 @@ def test_execute_sql_timeout(mock_db: str) -> None:
             None,
             duckdb.InterruptException("Query interrupted"),
         ]
-        with pytest.raises(ValueError, match=r"backend\.queryTimeout"):
+        with pytest.raises(SqlTimeoutError, match=r"backend\.queryTimeout"):
             execute_sql(mock_db, "SELECT 1", timeout_seconds=0.001)
+        mock_conn.close.assert_called_once()
+        resolved_key = str(Path(mock_db).resolve())
+        assert global_read_only_duckdb_pool._pools.get(resolved_key, []) == []
 
 
 def test_execute_sql_timer_safe_interrupt_branch(mock_db: str) -> None:
-    """Test that timeout timer firing after connection close does not call interrupt() on a closed connection."""
+    """Test that timeout timer firing concurrently after connection release does not call interrupt() on a closed connection."""
     import threading
 
-    timer_callback = None
+    fired = threading.Event()
     original_timer = threading.Timer
 
-    def mock_timer(
+    def post_close_timer(
         interval: float, function: typing.Callable[[], None]
     ) -> threading.Timer:
-        """Capture timer callback and return a real threading.Timer."""
-        nonlocal timer_callback
-        timer_callback = function
-        return original_timer(interval, function)
+        """Return a real threading.Timer that also invokes function once after timer.cancel()."""
+        _ = interval
 
-    with patch("threading.Timer", side_effect=mock_timer):
+        def _wrapped() -> None:
+            """Execute the timer callback."""
+            function()
+            fired.set()
+
+        t = original_timer(10.0, _wrapped)
+        orig_cancel = t.cancel
+
+        def _cancel_and_fire_late() -> None:
+            """Cancel timer and simulate late callback execution after active_conn is cleared."""
+            orig_cancel()
+            threading.Thread(target=_wrapped, daemon=True).start()
+
+        t.cancel = _cancel_and_fire_late  # type: ignore[method-assign]
+        return t
+
+    with patch("threading.Timer", side_effect=post_close_timer):
         rows = execute_sql(mock_db, "SELECT id, name FROM users ORDER BY id")
 
+    assert fired.wait(timeout=2.0) is True
     assert rows == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
-    assert timer_callback is not None
-    timer_callback()
 
 
 def test_query_timeout_cartesian_product(mock_db: str) -> None:
     """TEST-API-02: Interruption of pathological Cartesian cross-join query within 1.0s."""
+    from t1d_analytics.errors import SqlTimeoutError
+
     pathological_query = (
         "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n+1 FROM t WHERE n < 100000000) "
         "SELECT a.n, b.n FROM t a CROSS JOIN t b"
     )
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(SqlTimeoutError) as exc_info:
         execute_sql(mock_db, pathological_query, timeout_seconds=0.1)
 
     assert "backend.queryTimeout" in str(exc_info.value)
@@ -120,7 +146,8 @@ SELECT * FROM users;
     mock_create.return_value = mock_llm
 
     sql = generate_sql_from_nl(mock_db, "get users")
-    assert sql[1] == "SELECT * FROM users;"
+    assert sql.sql_query == "SELECT * FROM users;"
+    assert sql.is_rule_based_sql is False
 
 
 @patch("any_llm.AnyLLM.create")
@@ -136,7 +163,7 @@ def test_generate_sql_from_nl_single_line_codeblock(
     mock_create.return_value = mock_llm
 
     sql = generate_sql_from_nl(mock_db, "get users")
-    assert sql[1] == "SELECT * FROM users"
+    assert sql.sql_query == "SELECT * FROM users"
 
 
 @patch("any_llm.AnyLLM.create")
@@ -153,44 +180,52 @@ SELECT * FROM a"""
     mock_create.return_value = mock_llm
 
     sql = generate_sql_from_nl(mock_db, "test")
-    assert sql[1] == "SELECT * FROM a"
+    assert sql.sql_query == "SELECT * FROM a"
 
     mock_msg.content = """duckdb
 SELECT * FROM b"""
     sql = generate_sql_from_nl(mock_db, "test")
-    assert sql[1] == "SELECT * FROM b"
+    assert sql.sql_query == "SELECT * FROM b"
 
 
 def test_generate_sql_from_nl_no_module(mock_db: str) -> None:
     """Test handling of missing any_llm module."""
+    from t1d_analytics.errors import MissingSdkError
+
     with patch.dict("sys.modules", {"any_llm": None}):
-        with pytest.raises(RuntimeError, match=r"backend\.missingSdk.*"):
+        with pytest.raises(MissingSdkError, match=r"backend\.missingSdk.*"):
             generate_sql_from_nl(mock_db, "test")
 
 
 def test_generate_sql_from_nl_schema_error() -> None:
     """Test handling of DB connection error."""
+    from t1d_analytics.errors import SchemaReadError
 
     def failing_connect(path: str, read_only: bool = True) -> duckdb.DuckDBPyConnection:
-        """Raise generic exception simulating schema read failure."""
-        raise Exception("DB error")
+        """Raise duckdb.Error simulating schema read failure."""
+        _ = (path, read_only)
+        raise duckdb.Error("DB error")
 
-    with pytest.raises(ValueError, match=r"backend\.readSchemaFailed.*"):
+    with pytest.raises(SchemaReadError, match=r"backend\.readSchemaFailed.*"):
         generate_sql_from_nl("dummy.db", "test", connect_fn=failing_connect)
 
 
 @patch("any_llm.AnyLLM.create")
 def test_generate_sql_from_nl_llm_error(mock_create: MagicMock, mock_db: str) -> None:
     """Test handling of LLM completion error."""
+    from t1d_analytics.errors import LlmTranslationError
+
     mock_create.side_effect = Exception("API limit")
-    with pytest.raises(RuntimeError, match=r"backend\.llmTranslationError.*"):
+    with pytest.raises(LlmTranslationError, match=r"backend\.llmTranslationError.*"):
         generate_sql_from_nl(mock_db, "test")
 
 
 @patch("any_llm.AnyLLM.create")
 def test_generate_sql_from_nl_db_not_found(mock_create: MagicMock) -> None:
     """Test generate_sql_from_nl when database file is missing."""
-    with pytest.raises(ValueError, match=r"backend\.dbNotFound.*"):
+    from t1d_analytics.errors import DatabaseNotFoundError
+
+    with pytest.raises(DatabaseNotFoundError, match=r"backend\.dbNotFound.*"):
         generate_sql_from_nl("missing_file.duckdb", "SELECT 1")
 
 
@@ -279,7 +314,7 @@ def test_chat_endpoint_sql_success(mock_db: str) -> None:
     assert data["sqlResult"][0]["name"] == "Alice"
 
 
-@patch("t1d_analytics.api.generate_sql_from_nl")
+@patch("t1d_analytics.api_dependencies.translate_nl_to_sql")
 def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> None:
     """Test API handles NLP queries successfully, passes expected arguments, and auto-executes the query."""
     mock_generate.return_value = ("Generated Markdown", "SELECT * FROM users")
@@ -300,7 +335,7 @@ def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> Non
     assert call_kwargs["model_name"] == "gemma4"
 
 
-@patch("t1d_analytics.api.generate_sql_from_nl")
+@patch("t1d_analytics.api_dependencies.translate_nl_to_sql")
 def test_chat_endpoint_nl_sql_execution_failure(
     mock_generate: MagicMock, mock_db: str
 ) -> None:
@@ -321,7 +356,7 @@ def test_chat_endpoint_nl_sql_execution_failure(
     assert data["error"]["error_code"] == "backend.sqlExecution"
 
 
-@patch("t1d_analytics.api.generate_sql_from_nl")
+@patch("t1d_analytics.api_dependencies.translate_nl_to_sql")
 def test_chat_endpoint_nl_no_sql_query(mock_generate: MagicMock, mock_db: str) -> None:
     """Test API handles NLP response that contains no SQL query."""
     mock_generate.return_value = ("Just an explanation, no query.", "")
@@ -362,7 +397,7 @@ def test_chat_endpoint_runtime_error(mock_create: MagicMock, mock_db: str) -> No
     assert data["content"] == "backend.errorNlpTranslation"
 
 
-@patch("t1d_analytics.api.generate_sql_from_nl")
+@patch("t1d_analytics.api_dependencies.translate_nl_to_sql")
 def test_chat_endpoint_generic_exception(
     mock_generate: MagicMock, mock_db: str
 ) -> None:
@@ -414,7 +449,7 @@ def test_execute_sql_endpoint_value_error(mock_db: str) -> None:
     assert data["error"]["error_code"] == "backend.sqlExecution"
 
 
-@patch("t1d_analytics.api.execute_sql")
+@patch("t1d_analytics.api_dependencies.execute_sql")
 def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -> None:
     """Test execute_sql_endpoint catching general Exception."""
     mock_execute.side_effect = Exception("System crash")
@@ -430,19 +465,12 @@ def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -
 
 def test_execute_sql_endpoint_invalid_db() -> None:
     """Test /api/execute-sql returns 400 for out-of-workspace db_path."""
-    from fastapi import HTTPException
-
-    with patch("t1d_analytics.api.validate_db_path") as mock_val:
-        mock_val.side_effect = HTTPException(
-            status_code=400,
-            detail={"error_code": "backend.invalidDatabasePath", "params": {}},
-        )
-        resp = client.post(
-            "/api/execute-sql",
-            json={"query": "SELECT 1", "db_path": "/etc/shadow"},
-        )
-        assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "backend.invalidDatabasePath"
+    resp = client.post(
+        "/api/execute-sql",
+        json={"query": "SELECT 1", "db_path": "/etc/shadow"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error_code"] == "backend.invalidDatabasePath"
 
 
 def test_chat_stream_empty_message() -> None:
@@ -482,7 +510,7 @@ def test_chat_stream_literal_sql_error(mock_db: str) -> None:
     assert "backend.errorDbExecution" in resp.text
 
 
-@patch("t1d_analytics.api.stream_llm_tokens")
+@patch("t1d_analytics.api_dependencies.stream_llm_completion_tokens")
 def test_chat_stream_nl_success(mock_stream: MagicMock, mock_db: str) -> None:
     """Test /api/chat/stream streams NL tokens and executes generated SQL."""
     mock_stream.return_value = iter(
@@ -509,7 +537,7 @@ def test_chat_stream_nl_success(mock_stream: MagicMock, mock_db: str) -> None:
     assert "Alice" in text
 
 
-@patch("t1d_analytics.api.stream_llm_tokens")
+@patch("t1d_analytics.api_dependencies.stream_llm_completion_tokens")
 def test_chat_stream_nl_no_sql_generated(mock_stream: MagicMock, mock_db: str) -> None:
     """Test /api/chat/stream when NL prompt does not yield a SQL query."""
     mock_stream.return_value = iter(["I cannot answer this with SQL"])
@@ -529,7 +557,7 @@ def test_chat_stream_nl_no_sql_generated(mock_stream: MagicMock, mock_db: str) -
     assert "sql_generated" not in resp_empty_sql.text
 
 
-@patch("t1d_analytics.api.stream_llm_tokens")
+@patch("t1d_analytics.api_dependencies.stream_llm_completion_tokens")
 def test_chat_stream_nl_sql_execution_error(
     mock_stream: MagicMock, mock_db: str
 ) -> None:
@@ -552,7 +580,7 @@ def test_chat_stream_nl_sql_execution_error(
     assert "missing_table" in resp.text or "sql_err" in resp.text
 
 
-@patch("t1d_analytics.api.stream_llm_tokens")
+@patch("t1d_analytics.api_dependencies.stream_llm_completion_tokens")
 def test_chat_stream_nl_translation_error(mock_stream: MagicMock, mock_db: str) -> None:
     """Test /api/chat/stream handles LLM translation failure."""
     mock_stream.side_effect = RuntimeError("Ollama offline")
@@ -588,7 +616,7 @@ def test_server_auth_header_not_leaked_to_llm_provider(
     monkeypatch.setenv("T1D_API_KEY", "server-auth-secret-token")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    with patch("t1d_analytics.api.generate_sql_from_nl") as mock_gen:
+    with patch("t1d_analytics.api_dependencies.translate_nl_to_sql") as mock_gen:
         mock_gen.return_value = ("Here is the query", "SELECT 1")
         resp = client.post(
             "/api/chat",
@@ -682,7 +710,7 @@ def test_stream_llm_tokens_branches(mock_create: MagicMock) -> None:
     assert "".join(tokens4) == "fallback words stream"
 
 
-@patch("t1d_analytics.api.stream_llm_tokens")
+@patch("t1d_analytics.api_dependencies.stream_llm_completion_tokens")
 def test_chat_stream_true_tokens_and_events(
     mock_stream: MagicMock, mock_db: str
 ) -> None:
@@ -729,8 +757,9 @@ def test_sse_streaming_httpx_integration(mock_db: str) -> None:
 
 
 def test_multi_turn_history_in_prompt_and_chat(mock_db: str, mocker: MagicMock) -> None:
-    """Test _build_sql_prompt and chat endpoints with multi-turn conversation history."""
-    from t1d_analytics.api import ChatMessageModel, _build_sql_prompt
+    """Test build_sql_prompt_with_history and chat endpoints with multi-turn conversation history."""
+    from t1d_analytics.api_schemas import ChatMessageModel
+    from t1d_analytics.chat_service import build_sql_prompt_with_history
 
     history = [
         ChatMessageModel(
@@ -746,16 +775,22 @@ def test_multi_turn_history_in_prompt_and_chat(mock_db: str, mocker: MagicMock) 
         ChatMessageModel(role="user", content="Now filter by age < 18"),
     ]
 
-    prompt = _build_sql_prompt("schema text", "Show only females", history=history)
+    prompt = build_sql_prompt_with_history(
+        "schema text", "Show only females", history=history
+    )
     assert "Prior Conversation History:" in prompt
     assert "Show me all patients (SQL: SELECT * FROM patients)" in prompt
     assert "Now filter by age < 18" in prompt
 
-    prompt_empty = _build_sql_prompt("schema text", "Show patients", history=[])
+    prompt_empty = build_sql_prompt_with_history(
+        "schema text", "Show patients", history=[]
+    )
     assert "Prior Conversation History:" not in prompt_empty
 
     mock_llm_res = ("Explanation", "SELECT * FROM users WHERE age < 18")
-    mocker.patch("t1d_analytics.api.generate_sql_from_nl", return_value=mock_llm_res)
+    mocker.patch(
+        "t1d_analytics.api_dependencies.translate_nl_to_sql", return_value=mock_llm_res
+    )
     resp = client.post(
         "/api/chat",
         json={
@@ -949,7 +984,8 @@ async def test_stream_chat_events_client_disconnect(mock_db: str) -> None:
 
     chat_req_nl = ChatRequest(message="Count users", model="gemma4", db_path=mock_db)
     with patch(
-        "t1d_analytics.api.stream_llm_tokens", return_value=iter(["tok1", "tok2"])
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
+        return_value=iter(["tok1", "tok2"]),
     ):
         gen = stream_chat_events(chat_req_nl, req=req_disc_during)
         with pytest.raises(StopAsyncIteration):
@@ -959,7 +995,8 @@ async def test_stream_chat_events_client_disconnect(mock_db: str) -> None:
 def test_chat_endpoints_with_provider_headers(mock_db: str) -> None:
     """Test /api/chat and /api/chat/stream forward x-provider and x-provider-api-key headers to LLM translation."""
     with patch(
-        "t1d_analytics.api.generate_sql_from_nl", return_value=("answer", "SELECT 1")
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
+        return_value=("answer", "SELECT 1"),
     ) as mock_gen:
         resp = client.post(
             "/api/chat",
@@ -973,7 +1010,8 @@ def test_chat_endpoints_with_provider_headers(mock_db: str) -> None:
         assert gen_kwargs["api_key"] == "sk-header-test"
 
     with patch(
-        "t1d_analytics.api.stream_llm_tokens", return_value=iter(["Done"])
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
+        return_value=iter(["Done"]),
     ) as mock_stream:
         resp_stream = client.post(
             "/api/chat/stream",
@@ -1018,7 +1056,7 @@ SELECT 1;
 def test_stream_chat_events_nl_without_sql(mock_db: str) -> None:
     """Test stream_chat_events when LLM response contains plain answer without SQL code blocks."""
     with patch(
-        "t1d_analytics.api.stream_llm_tokens",
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
         return_value=iter(["I cannot answer this question."]),
     ):
         resp = client.post(
@@ -1126,7 +1164,8 @@ def test_stream_llm_tokens_with_direct_api_key(monkeypatch: pytest.MonkeyPatch) 
 
 def test_multiturn_history_truncation_50_plus_turns() -> None:
     """Test conversations with 50+ turns properly truncate to sliding window without token overflow."""
-    from t1d_analytics.api import ChatMessageModel, _build_sql_prompt
+    from t1d_analytics.api_schemas import ChatMessageModel
+    from t1d_analytics.chat_service import build_sql_prompt_with_history
 
     history = [
         ChatMessageModel(
@@ -1136,7 +1175,9 @@ def test_multiturn_history_truncation_50_plus_turns() -> None:
         )
         for i in range(60)
     ]
-    prompt = _build_sql_prompt("schema text", "Final query", history=history)
+    prompt = build_sql_prompt_with_history(
+        "schema text", "Final query", history=history
+    )
     assert "Turn message 0" not in prompt
     assert "Turn message 40" not in prompt
     assert "Turn message 50" not in prompt
@@ -1147,12 +1188,12 @@ def test_multiturn_history_truncation_50_plus_turns() -> None:
 
 def test_malformed_prior_assistant_responses() -> None:
     """Test SQL extraction robustly handles unclosed code fences and malformed markdown."""
-    from t1d_analytics.api import _extract_sql_from_response
+    from t1d_analytics.sql_utils import extract_sql_from_response
 
     malformed_unclosed = """Here is the query:
 ```sql
 SELECT * FROM patients WHERE id = 1"""
-    sql1 = _extract_sql_from_response(malformed_unclosed)
+    sql1 = extract_sql_from_response(malformed_unclosed)
     assert "SELECT * FROM patients" in sql1
 
     mixed_fences = """Some thoughts...
@@ -1163,12 +1204,12 @@ And another:
 ```sql
 SELECT 2;
 ```"""
-    sql2 = _extract_sql_from_response(mixed_fences)
+    sql2 = extract_sql_from_response(mixed_fences)
     assert "SELECT 2" in sql2 or "SELECT 1" in sql2
 
     plain_select = """You can run this query:
 SELECT id, glucose FROM cgm LIMIT 10;"""
-    sql3 = _extract_sql_from_response(plain_select)
+    sql3 = extract_sql_from_response(plain_select)
     assert "SELECT id, glucose FROM cgm" in sql3
 
 
@@ -1198,7 +1239,7 @@ GROUP BY TxGroup, Gender"""
     assert total_hypo == 5.0
 
     with patch(
-        "t1d_analytics.api.generate_sql_from_nl",
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
         return_value=(
             """```sql
 SELECT * FROM tblaptsummary
@@ -1221,7 +1262,7 @@ SELECT * FROM tblaptsummary
         assert data["sqlResult"] is None
 
     with patch(
-        "t1d_analytics.api.stream_llm_tokens",
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
         return_value=iter(
             [
                 """```sql
@@ -1281,8 +1322,19 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         is False
     )
 
-    # 1. Empty schema map
-    resp_empty, sql_empty = synthesize_fallback_clinical_sql("", "How many patients?")
+    # 1. Empty schema map + TranslationResult contract
+    from t1d_analytics.sql_fallback_synthesizer import (
+        TranslationResult,
+        coerce_translation_result,
+    )
+
+    tr_res = synthesize_fallback_clinical_sql("", "How many patients?")
+    assert isinstance(tr_res, TranslationResult)
+    assert tr_res.used_fallback is True
+    assert tr_res.is_rule_based_sql is True
+    assert tr_res.generation_mode == "rule_based_fallback"
+    assert coerce_translation_result(tr_res) is tr_res
+    resp_empty, sql_empty = tr_res
     assert 'SELECT COUNT(*) AS count FROM "patients";' in sql_empty
     assert "```sql" in resp_empty
 
@@ -1456,7 +1508,7 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
 
     # 6. /api/chat/stream recovers when stream_fn raises a local Ollama OOM / sync-in-async crash
     with patch(
-        "t1d_analytics.api.stream_llm_tokens",
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
         side_effect=RuntimeError(
             "Cannot use the `sync` API in an `async` context. Use the `async` API instead."
         ),
@@ -1474,7 +1526,7 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         assert 'SELECT * FROM \\"users\\" LIMIT 5;' in resp_crash_stream.text
 
     with patch(
-        "t1d_analytics.api.stream_llm_tokens",
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
         side_effect=RuntimeError(
             "Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download"
         ),

@@ -1,31 +1,37 @@
 """Background model training job CRUD endpoints (`/api/training/jobs`)."""
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Request
 
+from t1d_analytics.api_dependencies import AppServices, get_app_services
 from t1d_analytics.api_schemas import TrainingJobRequest
 from t1d_analytics.errors import (
     InvalidTrainingBackendError,
     TrainingJobNotFoundError,
 )
 from t1d_analytics.job_manager import TrainingJobDict, TrainingJobManager
+from t1d_analytics.models import TrainingBackend, TrainingJobConfig
 
 training_router = APIRouter()
 
 
-def _resolve_job_manager_dependency() -> TrainingJobManager:
+def _resolve_job_manager_dependency(
+    svc: AppServices = Depends(get_app_services),
+) -> TrainingJobManager:
     """
-    Delegate training job manager dependency resolution to `t1d_analytics.api.get_training_job_manager`.
+    Resolve the active `TrainingJobManager` via injected `AppServices`.
 
-    Returns
+    Args:
+    ----
+        svc: Injected AppServices dependency bundle.
+
+    Returns:
     -------
         TrainingJobManager: Active background training job manager.
 
     """
-    import t1d_analytics.api as api_mod
-
-    return api_mod.get_training_job_manager()
+    return svc.get_training_job_manager()
 
 
 @training_router.post("/api/training/jobs")
@@ -33,6 +39,7 @@ def submit_training_job(
     job_req: TrainingJobRequest,
     req: Request,
     job_manager: TrainingJobManager = Depends(_resolve_job_manager_dependency),
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> TrainingJobDict:
     """
     Submit a background training job using the configured accelerator backend.
@@ -42,6 +49,7 @@ def submit_training_job(
         job_req: Training job specification.
         req: Incoming FastAPI request.
         job_manager: Injected TrainingJobManager dependency.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
@@ -52,14 +60,14 @@ def submit_training_job(
         InvalidTrainingBackendError: If requested training backend is unsupported.
 
     """
-    import t1d_analytics.api as api_mod
-    from t1d_analytics.models import TrainingBackend, TrainingJobConfig
-
     _ = req
-    validated_dataset_path = api_mod.validate_workspace_artifact_path(
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
+    validated_dataset_path = active_svc.validate_workspace_artifact_path(
         job_req.dataset_path
     )
-    validated_output_dir = api_mod.validate_workspace_artifact_path(job_req.output_dir)
+    validated_output_dir = active_svc.validate_workspace_artifact_path(
+        job_req.output_dir
+    )
 
     backend_val = job_req.backend.lower()
     if backend_val == "cpu":

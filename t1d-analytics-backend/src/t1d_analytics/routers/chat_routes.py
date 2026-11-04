@@ -3,9 +3,10 @@
 import logging
 from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from t1d_analytics.api_dependencies import AppServices, get_app_services
 from t1d_analytics.api_schemas import (
     ApiError,
     ChatRequest,
@@ -27,6 +28,7 @@ chat_router = APIRouter()
 def stream_chat_events(
     request: ChatRequest,
     req: Optional[Request] = None,
+    services: Optional[AppServices] = None,
 ) -> AsyncIterator[str]:
     """
     Generate Server-Sent Events for streaming chat queries and SQL results.
@@ -34,29 +36,33 @@ def stream_chat_events(
     Args:
     ----
         request: The incoming ChatRequest.
-        req: Optional FastAPI Request object to detect client disconnection.
+        req: Optional FastAPI Request instance to detect client disconnection.
+        services: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         AsyncIterator[str]: SSE data lines formatted as JSON strings.
 
     """
-    import t1d_analytics.api as api_mod
-
+    svc = services or get_app_services()
     return generate_sse_chat_events(
         request=request,
         req=req,
-        db_validator=api_mod.validate_db_path,
-        execute_fn=api_mod.execute_sql,
-        connect_fn=api_mod.duckdb.connect,
-        schema_fn=api_mod.get_database_schema,
-        stream_fn=api_mod.stream_llm_tokens,
-        error_parser=api_mod.parse_error,
+        db_validator=svc.validate_db_path,
+        execute_fn=svc.execute_sql,
+        connect_fn=svc.duckdb_connect,
+        schema_fn=svc.get_database_schema,
+        stream_fn=svc.stream_llm_tokens,
+        error_parser=svc.parse_error,
     )
 
 
 @chat_router.post("/api/chat", response_model=ChatResponse)
-def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
+def chat_endpoint(
+    request: ChatRequest,
+    req: Request,
+    svc: AppServices = Depends(get_app_services),
+) -> ChatResponse:
     """
     Handle incoming chat messages and execute SQL or NLP queries.
 
@@ -64,6 +70,7 @@ def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
     ----
         request: The incoming ChatRequest.
         req: The incoming FastAPI HTTP request.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
@@ -74,9 +81,7 @@ def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
         HTTPException: If request parameters are invalid.
 
     """
-    import t1d_analytics.api as api_mod
-
-    api_mod.enforce_rate_limit(req)
+    svc.enforce_rate_limit(req)
     provider_hdr = req.headers.get("x-provider")
     api_key_hdr = req.headers.get("x-provider-api-key")
     if provider_hdr and not request.provider:
@@ -92,15 +97,19 @@ def chat_endpoint(request: ChatRequest, req: Request) -> ChatResponse:
 
     return execute_chat_turn(
         request=request,
-        db_validator=api_mod.validate_db_path,
-        execute_fn=api_mod.execute_sql,
-        translate_fn=api_mod.generate_sql_from_nl,
-        error_parser=api_mod.parse_error,
+        db_validator=svc.validate_db_path,
+        execute_fn=svc.execute_sql,
+        translate_fn=svc.generate_sql_from_nl,
+        error_parser=svc.parse_error,
     )
 
 
 @chat_router.post("/api/chat/stream")
-async def chat_stream_endpoint(request: ChatRequest, req: Request) -> StreamingResponse:
+async def chat_stream_endpoint(
+    request: ChatRequest,
+    req: Request,
+    svc: AppServices = Depends(get_app_services),
+) -> StreamingResponse:
     """
     Handle chat requests with Server-Sent Events (SSE) streaming.
 
@@ -108,15 +117,14 @@ async def chat_stream_endpoint(request: ChatRequest, req: Request) -> StreamingR
     ----
         request: The incoming ChatRequest.
         req: The incoming FastAPI HTTP request.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: StreamingResponse streaming SSE token and result events.
 
     """
-    import t1d_analytics.api as api_mod
-
-    api_mod.enforce_rate_limit(req)
+    svc.enforce_rate_limit(req)
     provider_hdr = req.headers.get("x-provider")
     api_key_hdr = req.headers.get("x-provider-api-key")
     if provider_hdr and not request.provider:
@@ -125,7 +133,7 @@ async def chat_stream_endpoint(request: ChatRequest, req: Request) -> StreamingR
         request.api_key = api_key_hdr
 
     return StreamingResponse(
-        api_mod.stream_chat_events(request, req=req),
+        svc.stream_chat_events(request, req=req),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -137,7 +145,9 @@ async def chat_stream_endpoint(request: ChatRequest, req: Request) -> StreamingR
 
 @chat_router.post("/api/execute-sql", response_model=ExecuteSqlResponse)
 def execute_sql_endpoint(
-    request: ExecuteSqlRequest, req: Request
+    request: ExecuteSqlRequest,
+    req: Request,
+    svc: AppServices = Depends(get_app_services),
 ) -> ExecuteSqlResponse:
     """
     Execute an arbitrary SQL query against the database.
@@ -146,29 +156,28 @@ def execute_sql_endpoint(
     ----
         request: The request containing the query and optional db_path.
         req: The incoming FastAPI HTTP request.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         ExecuteSqlResponse: The execution response containing results or error.
 
     """
-    import t1d_analytics.api as api_mod
-
-    api_mod.enforce_rate_limit(req)
+    svc.enforce_rate_limit(req)
     if not request.query.strip():
         return ExecuteSqlResponse(
             error=ApiError(error_code="backend.emptyMessage", params={})
         )
 
     try:
-        db_path = api_mod.validate_db_path(request.db_path)
-        results = api_mod.execute_sql(db_path, request.query)
+        db_path = svc.validate_db_path(request.db_path)
+        results = svc.execute_sql(db_path, request.query)
         return ExecuteSqlResponse(sqlResult=results, rows=results)
     except (HTTPException, InvalidDatabasePathError):
         raise
     except ValueError as ve:
         logger.error(f"Database error during sql execution request: {ve}")
-        return ExecuteSqlResponse(error=api_mod.parse_error(ve))
+        return ExecuteSqlResponse(error=svc.parse_error(ve))
     except Exception as e:
         logger.exception("Unexpected error during sql execution request.")
-        return ExecuteSqlResponse(error=api_mod.parse_error(e))
+        return ExecuteSqlResponse(error=svc.parse_error(e))

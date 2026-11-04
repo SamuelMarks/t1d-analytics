@@ -49,7 +49,7 @@ export interface SseStreamResult {
   finalData: SseFinalChatData | null;
 }
 
-const DOUBLE_LF = String.fromCharCode(10) + String.fromCharCode(10);
+const SSE_FRAME_DELIM_RE = /\r?\n\r?\n/;
 
 /**
  * Parses a raw JSON string from an SSE `data:` frame into a structured `SseFinalChatData` object.
@@ -78,31 +78,37 @@ export async function consumeSseChatStream(
   let streamUsed = false;
   let finalData: SseFinalChatData | null = null;
 
+  const processFrame = (rawFrame: string): void => {
+    const line = rawFrame.trim();
+    if (!line.startsWith("data: ")) return;
+    try {
+      const eventData = parseSseEventPayload(line.slice(6));
+      if (eventData.event === "token" && eventData.token) {
+        streamText += eventData.token;
+        onToken(streamText);
+      } else if (eventData.event === "result" || eventData.event === "done") {
+        finalData = eventData;
+        streamUsed = true;
+      }
+    } catch {
+      // ignore JSON parse errors on partial chunks
+    }
+  };
+
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        processFrame(buffer);
+      }
+      break;
+    }
     buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split(DOUBLE_LF);
+    const parts = buffer.split(SSE_FRAME_DELIM_RE);
     buffer = parts.pop() || "";
     for (const part of parts) {
-      const line = part.trim();
-      if (line.startsWith("data: ")) {
-        try {
-          const eventData = parseSseEventPayload(line.slice(6));
-          if (eventData.event === "token" && eventData.token) {
-            streamText += eventData.token;
-            onToken(streamText);
-          } else if (
-            eventData.event === "result" ||
-            eventData.event === "done"
-          ) {
-            finalData = eventData;
-            streamUsed = true;
-          }
-        } catch {
-          // ignore JSON parse errors on partial chunks
-        }
-      }
+      processFrame(part);
     }
   }
 

@@ -8,9 +8,12 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from t1d_analytics.dataset_loader import prepare_torch_dataset
+from t1d_analytics.dataset_loader import (
+    _tokenize_pair_with_masking,
+    prepare_torch_dataset,
+)
 from t1d_analytics.errors import (
     GemmaToolchainError,
     HardwareUnavailableError,
@@ -23,7 +26,6 @@ from t1d_analytics.hf_models import (
     AutocastTorchProtocol,
     BaseCausalLMFactory,
     BaseTrainingRunner,
-    CosineSchedulerNamespaceProtocol,
     DeviceLike,
     HuggingFaceCausalLMFactory,
     PretrainedSavableProtocol,
@@ -121,6 +123,57 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         model.train()
         return {"eval_loss": round(avg_loss, 4), "perplexity": perplexity}
 
+    _evaluate_validation_dataset = _evaluate
+
+    @staticmethod
+    def _compute_batch_causal_lm_loss(
+        model: TorchCausalLMProtocol,
+        batch: Sequence[Tuple[TensorLike, TensorLike]],
+        loss_fn: Callable[[TensorLike, TensorLike], TensorLike],
+        target_dev: Optional[DeviceLike],
+        mixed_precision: str,
+        accum_steps: int = 1,
+    ) -> float:
+        """
+        Collate a batch of `(input_ids, labels)` pairs, compute causal LM loss, backpropagate, and return scalar step loss.
+
+        Args:
+        ----
+            model: PyTorch causal LM model instance.
+            batch: Sequence of `(input_ids, labels)` tensor pairs.
+            loss_fn: CrossEntropyLoss callable.
+            target_dev: Optional target compute device.
+            mixed_precision: Precision mode (`'fp32'` or `'fp16'`).
+            accum_steps: Gradient accumulation steps divisor.
+
+        Returns:
+        -------
+            float: Unscaled scalar loss float for the step.
+
+        """
+        import torch
+
+        inps = torch.stack([b[0] for b in batch])
+        lbls = torch.stack([b[1] for b in batch])
+        if target_dev is not None:
+            inps = inps.to(target_dev)
+            lbls = lbls.to(target_dev)
+
+        if mixed_precision == "fp16" and isinstance(torch, AutocastTorchProtocol):
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                outputs = model(inps)
+                logits = _extract_output_logits(outputs)
+                raw_loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
+        else:
+            outputs = model(inps)
+            logits = _extract_output_logits(outputs)
+            raw_loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
+
+        scaled_loss = raw_loss / accum_steps
+        backward_fn: Callable[[], None] = scaled_loss.backward
+        backward_fn()
+        return round(float(scaled_loss.item() * accum_steps), 4)
+
     def _run_torch_optimizer_loop(
         self,
         model: TorchCausalLMProtocol,
@@ -173,15 +226,8 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
             if ignore_index is not None
             else torch.nn.CrossEntropyLoss()
         )
-        sched_cls = (
-            torch.optim.lr_scheduler.CosineAnnealingLR
-            if isinstance(torch.optim.lr_scheduler, CosineSchedulerNamespaceProtocol)
-            else None
-        )
-        scheduler = (
-            sched_cls(optimizer, T_max=max(1, total_steps))
-            if callable(sched_cls)
-            else None
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, total_steps)
         )
 
         loss_history: List[float] = []
@@ -196,26 +242,14 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
                 ):
                     break
                 batch = dataset[i : i + batch_size]
-                inps = torch.stack([b[0] for b in batch])
-                lbls = torch.stack([b[1] for b in batch])
-                if target_dev is not None:
-                    inps = inps.to(target_dev)
-                    lbls = lbls.to(target_dev)
-
-                if mixed_precision == "fp16" and isinstance(
-                    torch, AutocastTorchProtocol
-                ):
-                    with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        outputs = model(inps)
-                        logits = _extract_output_logits(outputs)
-                        loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
-                else:
-                    outputs = model(inps)
-                    logits = _extract_output_logits(outputs)
-                    loss = loss_fn(logits.view(-1, logits.size(-1)), lbls.view(-1))
-
-                loss = loss / accum_steps
-                loss.backward()
+                step_loss = self._compute_batch_causal_lm_loss(
+                    model=model,
+                    batch=batch,
+                    loss_fn=loss_fn,
+                    target_dev=target_dev,
+                    mixed_precision=mixed_precision,
+                    accum_steps=accum_steps,
+                )
 
                 if (step_idx + 1) % accum_steps == 0 or (step_idx + 1) == total_steps:
                     torch.nn.utils.clip_grad_norm_(
@@ -223,11 +257,10 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
                         max_norm=max_norm,
                     )
                     optimizer.step()
-                    if scheduler is not None:
-                        scheduler.step()
+                    scheduler.step()
                     optimizer.zero_grad()
 
-                loss_history.append(round(float(loss.item() * accum_steps), 4))
+                loss_history.append(step_loss)
                 step_idx += 1
 
         final_loss = loss_history[-1] if loss_history else 0.0
@@ -424,6 +457,82 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         }
         return metadata_payload, metrics_payload
 
+    _save_training_checkpoint = _save_model_checkpoint
+
+    def _prepare_model_and_datasets(
+        self,
+        config: TrainingJobConfig,
+        profile: TorchRunnerProfile,
+        ds_path: Path,
+    ) -> Tuple[
+        TorchCausalLMProtocol,
+        List[Tuple[TensorLike, TensorLike]],
+        Optional[List[Tuple[TensorLike, TensorLike]]],
+        Optional[DeviceLike],
+    ]:
+        """
+        Load training and optional validation datasets and instantiate the target causal LM model.
+
+        Args:
+        ----
+            config: Training job configuration.
+            profile: Runner execution profile.
+            ds_path: Validated training dataset path.
+
+        Returns:
+        -------
+            Tuple[TorchCausalLMProtocol, List[Tuple[TensorLike, TensorLike]], Optional[List[Tuple[TensorLike, TensorLike]]], Optional[DeviceLike]]:
+                `(model, train_dataset, eval_dataset, target_device)`.
+
+        """
+        import torch
+
+        hparams = config.hyperparameters
+        max_seq_len = (
+            (hparams.max_seq_length if hparams else 128)
+            if profile.include_eval_metrics_in_result
+            else 128
+        )
+        dataset = prepare_torch_dataset(
+            ds_path,
+            max_seq_length=max_seq_len,
+            tokenizer_name=config.model_name,
+        )
+        factory = profile.custom_factory or resolve_causal_lm_factory(config)
+        model = factory.create_model(
+            model_name=config.model_name,
+            device=profile.device,
+            quantization=config.quantization,
+            use_lora=config.use_lora,
+        )
+
+        target_dev: Optional[DeviceLike] = None
+        if profile.include_device_in_result or profile.move_model_to_device:
+            target_dev = (
+                torch.device(profile.device)
+                if isinstance(torch, TorchDeviceFactoryProtocol)
+                else "cpu"
+            )
+        if profile.move_model_to_device and target_dev is not None:
+            try:
+                model = model.to(target_dev)
+            except (AttributeError, RuntimeError, ValueError, TypeError, OSError) as e:
+                logger.debug(f"Failed to move HF model to device: {e}")
+
+        eval_dataset: Optional[List[Tuple[TensorLike, TensorLike]]] = None
+        if (
+            profile.include_eval_metrics_in_result
+            and config.validation_dataset_path
+            and Path(config.validation_dataset_path).exists()
+        ):
+            eval_dataset = prepare_torch_dataset(
+                Path(config.validation_dataset_path),
+                max_seq_length=max_seq_len,
+                tokenizer_name=config.model_name,
+            )
+
+        return model, dataset, eval_dataset, target_dev
+
     def _run_local_torch_training(
         self,
         config: TrainingJobConfig,
@@ -466,51 +575,9 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
         eval_metrics: Dict[str, float] = {}
 
         try:
-            import torch
-
-            max_seq_len = (
-                (hparams.max_seq_length if hparams else 128)
-                if profile.include_eval_metrics_in_result
-                else 128
+            model, dataset, eval_dataset, target_dev = self._prepare_model_and_datasets(
+                config, profile, ds_path
             )
-            dataset = prepare_torch_dataset(
-                ds_path,
-                max_seq_length=max_seq_len,
-                tokenizer_name=config.model_name,
-            )
-            factory = profile.custom_factory or resolve_causal_lm_factory(config)
-            model = factory.create_model(
-                model_name=config.model_name,
-                device=profile.device,
-                quantization=config.quantization,
-                use_lora=config.use_lora,
-            )
-
-            target_dev: Optional[DeviceLike] = None
-            if profile.include_device_in_result or profile.move_model_to_device:
-                target_dev = (
-                    torch.device(profile.device)
-                    if isinstance(torch, TorchDeviceFactoryProtocol)
-                    else "cpu"
-                )
-            if profile.move_model_to_device and target_dev is not None:
-                try:
-                    model = model.to(target_dev)
-                except Exception as e:
-                    logger.debug(f"Failed to move HF model to device: {e}")
-
-            eval_dataset: Optional[List[Tuple[TensorLike, TensorLike]]] = None
-            if (
-                profile.include_eval_metrics_in_result
-                and config.validation_dataset_path
-                and Path(config.validation_dataset_path).exists()
-            ):
-                eval_dataset = prepare_torch_dataset(
-                    Path(config.validation_dataset_path),
-                    max_seq_length=max_seq_len,
-                    tokenizer_name=config.model_name,
-                )
-
             if config.dry_run:
                 inp, _ = dataset[0]
                 dry_input = (
@@ -539,13 +606,15 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
                     cancel_event=cancel_event,
                 )
                 if eval_dataset and target_dev is not None:
-                    eval_metrics = self._evaluate(
+                    eval_metrics = self._evaluate_validation_dataset(
                         model,
                         eval_dataset,
                         target_dev,
                         batch_size=batch_size,
                     )
-                self._save_model_checkpoint(model, out_path / profile.checkpoint_subdir)
+                self._save_training_checkpoint(
+                    model, out_path / profile.checkpoint_subdir
+                )
         except Exception as e:
             raise TrainingExecutionError(f"{profile.error_prefix}: {e}") from e
 
@@ -823,6 +892,96 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
             ),
             cancel_event=cancel_event,
         )
+
+
+def optimize_dpo_preference_pairs(
+    pairs: Sequence[Dict[str, str]],
+    beta: float,
+    num_steps: int = 1,
+) -> Tuple[List[float], List[float]]:
+    """
+    Execute a PyTorch Bradley-Terry preference optimization pass over `(prompt, chosen_sql, rejected_sql)`.
+
+    Computes token-level log-probabilities for chosen and rejected SQL completions under a
+    causal LM and minimizes `-log(sigmoid(beta * (logp_chosen - logp_rejected)))`.
+
+    Args:
+    ----
+        pairs: Preference dataset triplets with `'prompt'`, `'chosen_sql'`, and `'rejected_sql'`.
+        beta: DPO temperature hyperparameter.
+        num_steps: Number of optimization epochs over the preference pairs.
+
+    Returns:
+    -------
+        Tuple[List[float], List[float]]: `(dpo_losses, reward_margins)` per preference pair step.
+
+    """
+    import torch
+
+    from t1d_analytics.hf_models import TokenizerProtocol
+
+    class _ByteTokenizer(TokenizerProtocol):
+        """Lightweight byte-level tokenizer for in-process DPO optimization."""
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+            """
+            Encode UTF-8 text into byte token IDs in `[1, 999]`.
+
+            Args:
+            ----
+                text: Input string to tokenize.
+                add_special_tokens: Whether to append special boundary tokens.
+
+            Returns:
+            -------
+                List[int]: Token ID list.
+
+            """
+            _ = add_special_tokens
+            return [min(999, max(1, b)) for b in text.encode("utf-8")]
+
+    tokenizer = _ByteTokenizer()
+    factory = TinyCausalLMFactory()
+    model = factory.create_model("tiny-dpo", vocab_size=1000, embed_dim=32)
+    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+
+    losses: List[float] = []
+    margins: List[float] = []
+    for _ in range(max(1, num_steps)):
+        for pair in pairs:
+            c_in, c_lbl = _tokenize_pair_with_masking(
+                pair["prompt"], pair["chosen_sql"], tokenizer, max_seq_length=256
+            )
+            r_in, r_lbl = _tokenize_pair_with_masking(
+                pair["prompt"],
+                pair["rejected_sql"] or "SELECT 0",
+                tokenizer,
+                max_seq_length=256,
+            )
+
+            optimizer.zero_grad()
+            c_logits = _extract_output_logits(model(c_in.unsqueeze(0))).view(-1, 1000)
+            r_logits = _extract_output_logits(model(r_in.unsqueeze(0))).view(-1, 1000)
+
+            c_token_nll = loss_fn(c_logits, c_lbl.view(-1))
+            r_token_nll = loss_fn(r_logits, r_lbl.view(-1))
+            logp_chosen = -float(c_token_nll.item())
+            logp_rejected = -float(r_token_nll.item())
+            margin_val = beta * (logp_chosen - logp_rejected)
+            sigmoid_neg_margin = 1.0 / (1.0 + math.exp(margin_val))
+            dpo_grad_scale = max(1e-6, beta * sigmoid_neg_margin)
+            (c_token_nll / (1.0 / dpo_grad_scale)).backward()
+            ((-r_token_nll) / (1.0 / dpo_grad_scale)).backward()
+            optimizer.step()
+
+            dpo_loss_val = -math.log(1.0 / (1.0 + math.exp(-margin_val)))
+
+            losses.append(round(dpo_loss_val, 4))
+            margins.append(round(margin_val, 4))
+
+    return losses, margins
 
 
 def get_training_runner(backend: TrainingBackend) -> BaseTrainingRunner:

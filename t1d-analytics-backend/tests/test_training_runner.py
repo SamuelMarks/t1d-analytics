@@ -791,12 +791,6 @@ def test_runner_eval_scheduler_and_cancellation(tmp_path: Path) -> None:
         )
         assert res_cancelled["final_loss"] == 0.0
 
-        with patch("torch.optim.lr_scheduler.CosineAnnealingLR", None, create=True):
-            res_no_sched = get_training_runner(TrainingBackend.LOCAL_CPU).run_training(
-                config
-            )
-            assert res_no_sched["status"] == "completed"
-
     config.dry_run = True
     config.backend = TrainingBackend.HUGGINGFACE
     runner_hf = get_training_runner(TrainingBackend.HUGGINGFACE)
@@ -1044,9 +1038,9 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
     orig_get_runner = training_runner.get_training_runner
 
     def cancel_on_get_runner(backend: TrainingBackend) -> BaseTrainingRunner:
-        """Set all cancel flags before returning training runner."""
-        for f in mgr3._cancel_flags.values():
-            f.set()
+        """Cancel all active jobs via public cancel_job API before returning runner."""
+        for job_rec in mgr3.list_jobs():
+            mgr3.cancel_job(str(job_rec["job_id"]))
         return orig_get_runner(backend)
 
     mocker.patch(

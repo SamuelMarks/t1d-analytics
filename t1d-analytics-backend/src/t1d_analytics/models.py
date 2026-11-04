@@ -204,7 +204,6 @@ class MaxTextConfig:
         max_preemption_retries: Maximum automated retry attempts when spot instance is preempted.
         execute_tpu_dispatch: Whether to dispatch the workload via XPK/gcloud during non-dry-run execution.
         auto_sync_gcs: Whether to automatically upload local dataset files to GCS prior to dispatch.
-        status_override: Optional explicit workload status override for deterministic orchestration testing.
 
     """
 
@@ -221,7 +220,6 @@ class MaxTextConfig:
     max_preemption_retries: int = 3
     execute_tpu_dispatch: bool = False
     auto_sync_gcs: bool = False
-    status_override: Optional[str] = None
 
     def build_full_maxtext_parameters(self) -> Dict[str, MaxTextParamValue]:
         """

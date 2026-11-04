@@ -56,7 +56,7 @@ def test_check_database_health_connect_exception(tmp_path: Path) -> None:
     """Test check_database_health when duckdb.connect fails."""
     corrupt_file = tmp_path / "corrupt.duckdb"
     corrupt_file.write_text("corrupt content")
-    with patch("duckdb.connect", side_effect=Exception("Corrupt database")):
+    with patch("duckdb.connect", side_effect=duckdb.Error("Corrupt database")):
         status = check_database_health(str(corrupt_file))
         assert status.status_code == DatabaseStatusCode.UNREADABLE
         assert "Failed to open DuckDB database" in status.message
@@ -411,7 +411,7 @@ def test_check_database_health_integrity_fail(tmp_path: Path) -> None:
         def execute(self, sql: str) -> MagicMock:
             """Raise corruption error on duckdb_tables query."""
             if "duckdb_tables" in sql:
-                raise Exception("Corrupt block detected")
+                raise duckdb.Error("Corrupt block detected")
             res = MagicMock()
             res.fetchall.return_value = [("patients",)]
             res.fetchone.return_value = (1,)
@@ -486,10 +486,10 @@ def test_check_ollama_health_version_error(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_check_disk_space_exception() -> None:
-    """Test check_disk_space fallback when resolving path raises Exception."""
+    """Test check_disk_space fallback when resolving path raises OSError."""
     from t1d_analytics.diagnostics import check_disk_space
 
-    with patch("pathlib.Path.resolve", side_effect=Exception("Disk error")):
+    with patch("pathlib.Path.resolve", side_effect=OSError("Disk error")):
         usage = check_disk_space("any_path")
         assert usage["total_bytes"] > 0
 

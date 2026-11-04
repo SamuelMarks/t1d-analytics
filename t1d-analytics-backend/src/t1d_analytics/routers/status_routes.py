@@ -3,9 +3,10 @@
 import urllib.request
 from typing import Optional, Union
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from t1d_analytics.api_dependencies import AppServices, get_app_services
 from t1d_analytics.api_schemas import (
     ModelsResponse,
     ProvidersStatusResponse,
@@ -30,25 +31,26 @@ def get_status(
     request: Request,
     db_path: Optional[str] = None,
     require_ready: bool = False,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> Union[StatusResponse, JSONResponse]:
     """
     Return comprehensive system status, table counts, row counts, and LLM availability.
 
     Args:
     ----
-        request: FastAPI request object.
+        request: FastAPI request instance.
         db_path: Optional custom database path.
         require_ready: If True, return HTTP 503 when database is unpopulated or not ready.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         Union[StatusResponse, JSONResponse]: StatusResponse or JSONResponse with status details.
 
     """
-    import t1d_analytics.api as api_mod
-
-    target_db = api_mod.validate_db_path(db_path) if db_path else None
-    lang = api_mod.get_request_locale(request)
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
+    target_db = active_svc.validate_db_path(db_path) if db_path else None
+    lang = active_svc.get_request_locale(request)
     health = get_system_health(db_path=target_db, lang=lang)
     db = health.database
 
@@ -79,45 +81,50 @@ def get_status(
 
 @status_router.get("/api/ready", response_model=None)
 def get_ready(
-    request: Request, db_path: Optional[str] = None
+    request: Request,
+    db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> Union[StatusResponse, JSONResponse]:
     """
     Readiness probe endpoint returning HTTP 200 when database is populated or HTTP 503 otherwise.
 
     Args:
     ----
-        request: FastAPI request object.
+        request: FastAPI request instance.
         db_path: Optional custom database path.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         Union[StatusResponse, JSONResponse]: StatusResponse or 503 JSONResponse.
 
     """
-    return get_status(request=request, db_path=db_path, require_ready=True)
+    return get_status(request=request, db_path=db_path, require_ready=True, svc=svc)
 
 
 @status_router.get("/api/health", response_model=None)
 def get_health(
-    request: Request, db_path: Optional[str] = None
+    request: Request,
+    db_path: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> Union[SystemHealthDict, JSONResponse]:
     """
     Deep health check endpoint returning HTTP 503 if the DuckDB database is missing or empty.
 
     Args:
     ----
-        request: FastAPI request object.
+        request: FastAPI request instance.
         db_path: Optional custom database path.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         Union[SystemHealthDict, JSONResponse]: Dictionary or HTTP 503 JSONResponse containing system health details.
 
     """
-    import t1d_analytics.api as api_mod
-
-    target_db = api_mod.validate_db_path(db_path) if db_path else None
-    lang = api_mod.get_request_locale(request)
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
+    target_db = active_svc.validate_db_path(db_path) if db_path else None
+    lang = active_svc.get_request_locale(request)
     health = run_system_diagnostics(db_path=target_db, lang=lang)
     db = health.database
     payload = health.to_dict()
@@ -148,6 +155,7 @@ def get_providers_status() -> ProvidersStatusResponse:
 def list_models(
     include_cloud: bool = True,
     configured_models: Optional[str] = None,
+    svc: Optional[AppServices] = Depends(get_app_services),
 ) -> ModelsResponse:
     """
     List available local Ollama models and configured any-llm cloud providers.
@@ -156,17 +164,17 @@ def list_models(
     ----
         include_cloud: Whether to include cloud and configured any-llm provider models.
         configured_models: Optional comma-separated list of custom configured provider/model IDs.
+        svc: Optional injected AppServices dependency bundle.
 
     Returns:
     -------
         ModelsResponse: List of available local and cloud models.
 
     """
-    import t1d_analytics.api as api_mod
-
+    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return fetch_available_models(
         include_cloud=include_cloud,
         configured_models=configured_models,
-        cloud_catalog=api_mod.CLOUD_PROVIDER_MODELS,
+        cloud_catalog=active_svc.cloud_provider_models,
         urlopen_fn=urllib.request.urlopen,
     )

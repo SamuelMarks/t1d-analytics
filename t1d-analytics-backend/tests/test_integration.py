@@ -263,7 +263,7 @@ def test_cli_evaluate_integration(temp_workspace: Path, mocker: MagicMock) -> No
         json.dump([{"prompt": "Get count", "gold_sql": "SELECT count(*) FROM tbl"}], f)
 
     mocker.patch(
-        "t1d_analytics.api.generate_sql_from_nl",
+        "t1d_analytics.chat_service.translate_nl_to_sql",
         return_value=("ok", "SELECT count(*) FROM tbl"),
     )
 

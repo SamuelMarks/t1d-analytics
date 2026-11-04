@@ -7,7 +7,7 @@ import urllib.request
 from dataclasses import field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import duckdb
 from pydantic.dataclasses import dataclass
@@ -36,7 +36,6 @@ SystemHealthDict = Dict[
 
 logger = logging.getLogger(__name__)
 
-# Clinical trial tables commonly expected in a populated T1D dataset
 EXPECTED_T1D_TABLES = {
     "patients",
     "cgms",
@@ -80,6 +79,15 @@ SYNTHETIC_SEED_BASE_TABLES = {
     "hba1c_labs",
     "dka_adverse_events",
     "tiny",
+}
+
+_COMPAT_VIEW_NAMES = {
+    "tblaptsummary",
+    "adverseevents",
+    "subjects",
+    "hba1c",
+    "demographics",
+    "cgm_data",
 }
 
 
@@ -156,7 +164,7 @@ def check_disk_space(path: Union[str, Path]) -> dict[str, int]:
         target = p.parent
         if not target.exists():
             target = Path.cwd()
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         target = Path.cwd()
     usage = shutil.disk_usage(str(target))
     return {
@@ -320,183 +328,212 @@ def check_sessions_database_health(sessions_db_path: Optional[str] = None) -> bo
             return "chat_sessions" in tables
         finally:
             conn.close()
-    except Exception as e:
+    except (duckdb.Error, OSError, RuntimeError, ValueError) as e:
         logger.debug(f"Sessions database health check failed: {e}")
         return False
 
 
-def check_database_health(
-    db_path: Optional[str] = None, lang: Optional[str] = None
-) -> DatabaseStatus:
+def _inspect_db_file_state(
+    target_path_str: str,
+    target_path: Path,
+    disk_free: int,
+    translate_fn: Callable[..., str],
+) -> Tuple[Optional[DatabaseStatus], int, bool]:
     """
-    Validate the configuration, presence, connectivity, and data contents of the database.
+    Inspect filesystem existence, byte size, and permissions for `target_path`.
 
     Args:
     ----
-        db_path: Path to the DuckDB database file. Defaults to T1D_DB_PATH or 't1d.duckdb'.
-        lang: Optional language code for localized messages.
+        target_path_str: String representation of `target_path`.
+        target_path: Resolved Path instance.
+        disk_free: Available free disk space in bytes.
+        translate_fn: Localized translation callable.
 
     Returns:
     -------
-        DatabaseStatus containing diagnostic results and actionable remediation advice.
+        Tuple[Optional[DatabaseStatus], int, bool]: `(early_status_or_none, file_size_bytes, writable)`.
 
     """
-    _ = get_translator(lang)
-    target_path_str = resolve_default_db_path(db_path)
-    target_path = Path(target_path_str)
-
-    # 1. Check if database file exists on disk
-    disk_free = check_disk_space(target_path)["free_bytes"]
     file_size = 0
     writable = False
     try:
         if target_path.exists():
             file_size = target_path.stat().st_size
             writable = os.access(target_path_str, os.W_OK)
-    except Exception:
+    except OSError:
         pass
 
     try:
         if not target_path.exists():
-            msg = _("Database file '{}' does not exist.", target_path_str)
-            remediation = _(
+            msg = translate_fn("Database file '{}' does not exist.", target_path_str)
+            remediation = translate_fn(
                 "Run 't1d-analytics load --data-dir <data_dir> --db {}' to create and populate the database.",
                 target_path_str,
             )
-            return DatabaseStatus(
-                configured_path=target_path_str,
-                exists=False,
-                connected=False,
-                status_code=DatabaseStatusCode.MISSING_FILE,
-                message=msg,
-                remediation=remediation,
-                file_size_bytes=0,
-                writable=False,
-                integrity_ok=True,
-                disk_free_bytes=disk_free,
-                status=HealthStatus.UNHEALTHY,
+            return (
+                DatabaseStatus(
+                    configured_path=target_path_str,
+                    exists=False,
+                    connected=False,
+                    status_code=DatabaseStatusCode.MISSING_FILE,
+                    message=msg,
+                    remediation=remediation,
+                    file_size_bytes=0,
+                    writable=False,
+                    integrity_ok=True,
+                    disk_free_bytes=disk_free,
+                    status=HealthStatus.UNHEALTHY,
+                ),
+                0,
+                False,
             )
 
-        # 2. Check if file is non-empty
         if target_path.stat().st_size == 0:
-            msg = _("Database file '{}' is empty (0 bytes).", target_path_str)
-            remediation = _(
+            msg = translate_fn(
+                "Database file '{}' is empty (0 bytes).", target_path_str
+            )
+            remediation = translate_fn(
                 "Populate the database with 't1d-analytics load --data-dir <data_dir> --db {}'.",
                 target_path_str,
             )
-            return DatabaseStatus(
-                configured_path=target_path_str,
-                exists=True,
-                connected=False,
-                status_code=DatabaseStatusCode.EMPTY_FILE,
-                message=msg,
-                remediation=remediation,
-                file_size_bytes=file_size,
-                writable=writable,
-                integrity_ok=True,
-                disk_free_bytes=disk_free,
-                status=HealthStatus.UNHEALTHY,
+            return (
+                DatabaseStatus(
+                    configured_path=target_path_str,
+                    exists=True,
+                    connected=False,
+                    status_code=DatabaseStatusCode.EMPTY_FILE,
+                    message=msg,
+                    remediation=remediation,
+                    file_size_bytes=file_size,
+                    writable=writable,
+                    integrity_ok=True,
+                    disk_free_bytes=disk_free,
+                    status=HealthStatus.UNHEALTHY,
+                ),
+                file_size,
+                writable,
             )
     except OSError as e:
-        msg = _(
+        msg = translate_fn(
             "Cannot access database file '{}': {}",
             target_path_str,
             e,
         )
-        return DatabaseStatus(
-            configured_path=target_path_str,
-            exists=True,
-            connected=False,
-            status_code=DatabaseStatusCode.UNREADABLE,
-            message=msg,
-            remediation=_("Verify filesystem read permissions for the database file."),
-            file_size_bytes=file_size,
-            writable=writable,
-            integrity_ok=False,
-            disk_free_bytes=disk_free,
-            status=HealthStatus.UNHEALTHY,
+        return (
+            DatabaseStatus(
+                configured_path=target_path_str,
+                exists=True,
+                connected=False,
+                status_code=DatabaseStatusCode.UNREADABLE,
+                message=msg,
+                remediation=translate_fn(
+                    "Verify filesystem read permissions for the database file."
+                ),
+                file_size_bytes=file_size,
+                writable=writable,
+                integrity_ok=False,
+                disk_free_bytes=disk_free,
+                status=HealthStatus.UNHEALTHY,
+            ),
+            file_size,
+            writable,
         )
 
-    # 3. Attempt DuckDB connection, run integrity check, and count rows
+    return None, file_size, writable
+
+
+def _inspect_db_tables_and_manifest(
+    target_path_str: str,
+) -> Tuple[List[str], int, bool, str]:
+    """
+    Connect to `target_path_str` read-only and return `(tables, total_rows, integrity_ok, provenance)`.
+
+    Args:
+    ----
+        target_path_str: Path to the DuckDB database file.
+
+    Returns:
+    -------
+        Tuple[List[str], int, bool, str]: `(user_tables, total_rows, integrity_ok, data_provenance)`.
+
+    """
     integrity_ok = True
     total_rows = 0
-    provenance = "synthetic_seed"
+    conn = duckdb.connect(target_path_str, read_only=True)
     try:
-        conn = duckdb.connect(target_path_str, read_only=True)
+        base_table_names: Optional[set[str]] = None
         try:
-            base_table_names: Optional[set[str]] = None
-            try:
-                bt_rows = conn.execute(
-                    "SELECT table_name FROM duckdb_tables()"
-                ).fetchall()
-                base_table_names = {str(r[0]) for r in bt_rows}
-            except Exception:
-                integrity_ok = False
-            raw_tables = conn.execute("SHOW TABLES").fetchall()
-            all_tables = [row[0] for row in raw_tables]
-            provenance = detect_database_provenance(
-                all_tables, base_tables=base_table_names
-            )
-            compat_views = {
-                "tblaptsummary",
-                "adverseevents",
-                "subjects",
-                "hba1c",
-                "demographics",
-                "cgm_data",
-            }
-            primary_tables = [
-                t
-                for t in all_tables
-                if not t.startswith("_t1d_") and t not in compat_views
-            ]
-            tables = (
-                primary_tables
-                if primary_tables
-                else [t for t in all_tables if not t.startswith("_t1d_")]
-            )
-            if provenance == "jaeb_authentic" and len(tables) > 25:
-                # Avoid scanning 50M+ rows across 544 tables on every /api/status poll
-                sample_tables = tables[:10]
-            else:
-                sample_tables = tables
-            for tbl_name in sample_tables:
-                safe_tbl = tbl_name.replace('"', '""')
-                cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
-                total_rows += int(cnt_res[0]) if cnt_res else 0
-        finally:
-            conn.close()
-    except Exception as e:
-        msg = _(
-            "Failed to open DuckDB database '{}': {}",
-            target_path_str,
-            e,
+            bt_rows = conn.execute("SELECT table_name FROM duckdb_tables()").fetchall()
+            base_table_names = {str(r[0]) for r in bt_rows}
+        except (duckdb.Error, RuntimeError, ValueError):
+            integrity_ok = False
+        raw_tables = conn.execute("SHOW TABLES").fetchall()
+        all_tables = [str(row[0]) for row in raw_tables]
+        provenance = detect_database_provenance(
+            all_tables, base_tables=base_table_names
         )
-        remediation = _(
-            "Check that the database is not corrupted or locked by another process."
+        primary_tables = [
+            t
+            for t in all_tables
+            if not t.startswith("_t1d_") and t not in _COMPAT_VIEW_NAMES
+        ]
+        tables = (
+            primary_tables
+            if primary_tables
+            else [t for t in all_tables if not t.startswith("_t1d_")]
         )
-        return DatabaseStatus(
-            configured_path=target_path_str,
-            exists=True,
-            connected=False,
-            status_code=DatabaseStatusCode.UNREADABLE,
-            message=msg,
-            remediation=remediation,
-            file_size_bytes=file_size,
-            writable=writable,
-            integrity_ok=False,
-            disk_free_bytes=disk_free,
-            status=HealthStatus.UNHEALTHY,
+        sample_tables = (
+            tables[:10]
+            if (provenance == "jaeb_authentic" and len(tables) > 25)
+            else tables
         )
+        for tbl_name in sample_tables:
+            safe_tbl = tbl_name.replace('"', '""')
+            cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
+            total_rows += int(cnt_res[0]) if cnt_res else 0
+        return tables, total_rows, integrity_ok, provenance
+    finally:
+        conn.close()
 
-    # 4. Check table count
+
+def _classify_db_health_status(
+    target_path_str: str,
+    tables: List[str],
+    total_rows: int,
+    file_size: int,
+    writable: bool,
+    integrity_ok: bool,
+    disk_free: int,
+    provenance: str,
+    translate_fn: Callable[..., str],
+) -> DatabaseStatus:
+    """
+    Classify the connected database's table inventory into `EMPTY_DB`, `MISSING_INITIAL_DATA`, or `HEALTHY`.
+
+    Args:
+    ----
+        target_path_str: Configured database file path.
+        tables: Discovered user tables.
+        total_rows: Sampled total row count.
+        file_size: Database file size in bytes.
+        writable: Whether the database file is writable.
+        integrity_ok: Whether `duckdb_tables()` succeeded.
+        disk_free: Free disk space in bytes.
+        provenance: Detected data provenance string.
+        translate_fn: Localized translation callable.
+
+    Returns:
+    -------
+        DatabaseStatus: Populated diagnostic status object.
+
+    """
     table_count = len(tables)
     if table_count == 0:
-        msg = _(
+        msg = translate_fn(
             "Database '{}' connected successfully but contains 0 tables.",
             target_path_str,
         )
-        remediation = _(
+        remediation = translate_fn(
             "Run 't1d-analytics load --data-dir <data_dir> --db {}' to load clinical trial data.",
             target_path_str,
         )
@@ -518,7 +555,6 @@ def check_database_health(
             status=HealthStatus.UNHEALTHY,
         )
 
-    # 5. Check for initial/default clinical trial datasets
     found_expected = [
         t
         for t in tables
@@ -534,14 +570,13 @@ def check_database_health(
         HealthStatus.HEALTHY if total_rows > 0 else HealthStatus.UNHEALTHY
     )
 
-    # Specifically detect if lacking default standard T1D clinical trial datasets
     if not found_expected:
-        msg = _(
+        msg = translate_fn(
             "Database '{}' contains {} custom table(s), but lacks standard T1D clinical trial datasets (e.g. patients, cgms, dclp3).",
             target_path_str,
             table_count,
         )
-        remediation = _(
+        remediation = translate_fn(
             "Download and load public clinical trial datasets using 't1d-analytics download' and 't1d-analytics load'."
         )
         return DatabaseStatus(
@@ -564,7 +599,7 @@ def check_database_health(
             is_synthetic_faked_data=(provenance != "jaeb_authentic"),
         )
 
-    msg = _(
+    msg = translate_fn(
         "Database '{}' is healthy with {} table(s) ready.",
         target_path_str,
         table_count,
@@ -587,6 +622,73 @@ def check_database_health(
         status=db_health_status,
         data_provenance=provenance,
         is_synthetic_faked_data=(provenance != "jaeb_authentic"),
+    )
+
+
+def check_database_health(
+    db_path: Optional[str] = None, lang: Optional[str] = None
+) -> DatabaseStatus:
+    """
+    Validate the configuration, presence, connectivity, and data contents of the database.
+
+    Args:
+    ----
+        db_path: Path to the DuckDB database file. Defaults to T1D_DB_PATH or 't1d.duckdb'.
+        lang: Optional language code for localized messages.
+
+    Returns:
+    -------
+        DatabaseStatus containing diagnostic results and actionable remediation advice.
+
+    """
+    _ = get_translator(lang)
+    target_path_str = resolve_default_db_path(db_path)
+    target_path = Path(target_path_str)
+    disk_free = check_disk_space(target_path)["free_bytes"]
+
+    early_status, file_size, writable = _inspect_db_file_state(
+        target_path_str, target_path, disk_free, _
+    )
+    if early_status is not None:
+        return early_status
+
+    try:
+        tables, total_rows, integrity_ok, provenance = _inspect_db_tables_and_manifest(
+            target_path_str
+        )
+    except (duckdb.Error, OSError, RuntimeError, ValueError) as e:
+        msg = _(
+            "Failed to open DuckDB database '{}': {}",
+            target_path_str,
+            e,
+        )
+        remediation = _(
+            "Check that the database is not corrupted or locked by another process."
+        )
+        return DatabaseStatus(
+            configured_path=target_path_str,
+            exists=True,
+            connected=False,
+            status_code=DatabaseStatusCode.UNREADABLE,
+            message=msg,
+            remediation=remediation,
+            file_size_bytes=file_size,
+            writable=writable,
+            integrity_ok=False,
+            disk_free_bytes=disk_free,
+            status=HealthStatus.UNHEALTHY,
+        )
+
+    return _classify_db_health_status(
+        target_path_str=target_path_str,
+        tables=tables,
+        total_rows=total_rows,
+        file_size=file_size,
+        writable=writable,
+        integrity_ok=integrity_ok,
+        disk_free=disk_free,
+        provenance=provenance,
+        translate_fn=_,
     )
 
 
@@ -656,7 +758,13 @@ def check_ollama_health(
             remediation=None,
             version=version,
         )
-    except (urllib.error.URLError, TimeoutError, OSError, Exception) as e:
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        ValueError,
+        RuntimeError,
+    ) as e:
         logger.debug(f"Ollama health check failed: {e}")
         msg = _("Cannot connect to local Ollama LLM service at {}.", ollama_url)
         remediation = _(
@@ -809,7 +917,6 @@ def log_startup_diagnostics(db_path: Optional[str] = None) -> None:
     logger.info("T1D Analytics Backend Service - Startup Diagnostics")
     logger.info("=" * 60)
 
-    # Database report
     if db.status_code == DatabaseStatusCode.HEALTHY and db.total_rows > 0:
         logger.info(f"[OK] Database ({db.configured_path}): {db.message}")
     elif db.status_code in (
@@ -825,7 +932,6 @@ def log_startup_diagnostics(db_path: Optional[str] = None) -> None:
         if db.remediation:
             logger.error(f"  -> Action: {db.remediation}")
 
-    # Ollama report
     if ollama.accessible and not ollama.remediation:
         logger.info(f"[OK] Ollama LLM Service: {ollama.message}")
     else:

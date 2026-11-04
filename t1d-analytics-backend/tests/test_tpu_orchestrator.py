@@ -347,16 +347,9 @@ def test_remote_tpu_dispatch_xpk_and_gcloud_branches(tmp_path: Path) -> None:
 
 
 def test_remote_tpu_poll_workload_status_branches() -> None:
-    """Test poll_workload_status under status override, success, failure, and timeout."""
+    """Test poll_workload_status under xpk/gcloud polling, success, failure, and timeout."""
     runner = RemoteTpuMaxTextRunner()
     max_cfg = MaxTextConfig(project_id="test-proj")
-
-    assert (
-        asyncio.run(
-            runner.poll_workload_status("t1d-test", max_cfg, status_override="SUCCESS")
-        )
-        == "SUCCESS"
-    )
 
     with patch("shutil.which", return_value=None):
         with pytest.raises(RuntimeError, match=r"Google Cloud CLI .* is not installed"):
@@ -512,75 +505,58 @@ def test_remote_tpu_run_training_with_dispatch_flag(tmp_path: Path) -> None:
 
 
 def test_tpu_workload_status_override_and_xla_preempted() -> None:
-    """Test poll_workload_status overrides, PREEMPTED status, and XLA errors."""
+    """Test poll_workload_status with PREEMPTED status and XLA errors via SubprocessExecutorProtocol."""
+    from t1d_analytics.errors import TpuOrchestrationError, TpuPreemptionError
+
     runner = RemoteTpuMaxTextRunner()
     max_cfg = MaxTextConfig(project_id="p1")
 
-    with patch.dict(os.environ, {"T1D_TPU_STATUS_OVERRIDE": "PREEMPTED"}):
-        with pytest.raises(RuntimeError, match="was PREEMPTED on spot TPU capacity"):
-            asyncio.run(runner.poll_workload_status("workload-1", max_cfg))
-
-    with patch.dict(os.environ, {"T1D_TPU_STATUS_OVERRIDE": "XLA_ERROR"}):
-        with pytest.raises(RuntimeError, match="fatal XLA compilation error"):
-            asyncio.run(runner.poll_workload_status("workload-1", max_cfg))
-
-    with patch.dict(os.environ, {"T1D_TPU_STATUS_OVERRIDE": "PROVISIONING"}):
-        assert (
-            asyncio.run(runner.poll_workload_status("workload-1", max_cfg))
-            == "PROVISIONING"
+    with patch("shutil.which", return_value="/usr/bin/xpk"):
+        mock_proc_success = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="Workload workload-1 | Status: SUCCESS | Slice: v4-8",
+            stderr="",
         )
-
-    cfg_override = MaxTextConfig(project_id="p1", status_override="PROVISIONING")
-    assert (
-        asyncio.run(runner.poll_workload_status("workload-1", cfg_override))
-        == "PROVISIONING"
-    )
-
-    with patch.dict(os.environ, {"T1D_TPU_STATUS_OVERRIDE": ""}):
-        with patch("shutil.which", return_value="/usr/bin/xpk"):
-            mock_proc_success = subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout="Workload workload-1 | Status: SUCCESS | Slice: v4-8",
-                stderr="",
-            )
-            with patch("subprocess.run", return_value=mock_proc_success):
-                assert (
-                    asyncio.run(
-                        runner.poll_workload_status(
-                            "workload-1", max_cfg, timeout_seconds=1
-                        )
+        with patch("subprocess.run", return_value=mock_proc_success):
+            assert (
+                asyncio.run(
+                    runner.poll_workload_status(
+                        "workload-1", max_cfg, timeout_seconds=1
                     )
-                    == "SUCCESS"
+                )
+                == "SUCCESS"
+            )
+
+        mock_proc_preempt = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="STATUS: PREEMPTED by node eviction",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_proc_preempt):
+            with pytest.raises(TpuPreemptionError, match="was PREEMPTED"):
+                asyncio.run(
+                    runner.poll_workload_status(
+                        "workload-1", max_cfg, timeout_seconds=1
+                    )
                 )
 
-            mock_proc_preempt = subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout="STATUS: PREEMPTED by node eviction",
-                stderr="",
-            )
-            with patch("subprocess.run", return_value=mock_proc_preempt):
-                with pytest.raises(RuntimeError, match="was PREEMPTED"):
-                    asyncio.run(
-                        runner.poll_workload_status(
-                            "workload-1", max_cfg, timeout_seconds=1
-                        )
+        mock_proc_xla = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="FATAL: XLA COMPILATION ERROR",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=mock_proc_xla):
+            with pytest.raises(
+                TpuOrchestrationError, match="fatal XLA compilation error"
+            ):
+                asyncio.run(
+                    runner.poll_workload_status(
+                        "workload-1", max_cfg, timeout_seconds=1
                     )
-
-            mock_proc_xla = subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout="FATAL: XLA COMPILATION ERROR",
-                stderr="",
-            )
-            with patch("subprocess.run", return_value=mock_proc_xla):
-                with pytest.raises(RuntimeError, match="fatal XLA compilation error"):
-                    asyncio.run(
-                        runner.poll_workload_status(
-                            "workload-1", max_cfg, timeout_seconds=1
-                        )
-                    )
+                )
 
 
 def test_tpu_workload_reclamation() -> None:
@@ -682,32 +658,58 @@ def test_remote_tpu_run_training_preemption_and_retries(tmp_path: Path) -> None:
         async def _fake_async_poll(
             w_name: str, m_cfg: MaxTextConfig, timeout_seconds: float = 5.0
         ) -> str:
-            """Return SUCCESS from async coroutine."""
-            _ = (w_name, m_cfg, timeout_seconds)
-            return "SUCCESS"
+            """Delegate to real poll_workload_status."""
+            return await RemoteTpuMaxTextRunner.poll_workload_status(
+                runner,
+                w_name,
+                m_cfg,
+                timeout_seconds=timeout_seconds,
+            )
 
         async def _fake_async_reclaim(w_name: str, m_cfg: MaxTextConfig) -> bool:
-            """Return True from async coroutine."""
-            _ = (w_name, m_cfg)
-            return True
+            """Delegate to real reclaim_tpu_workload."""
+            return await RemoteTpuMaxTextRunner.reclaim_tpu_workload(
+                runner, w_name, m_cfg
+            )
 
-        with patch.object(runner, "poll_workload_status", new=_fake_async_poll):
-            assert (
-                runner._invoke_status_poll_sync(
-                    "wl-1", MaxTextConfig(project_id="p1"), timeout_seconds=1.0
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="Status: SUCCESS", stderr=""
+            ),
+        ):
+            with patch.object(runner, "poll_workload_status", new=_fake_async_poll):
+                assert (
+                    runner._invoke_status_poll_sync(
+                        "wl-1", MaxTextConfig(project_id="p1"), timeout_seconds=1.0
+                    )
+                    == "SUCCESS"
                 )
-                == "SUCCESS"
-            )
-        with patch.object(runner, "reclaim_tpu_workload", new=_fake_async_reclaim):
-            assert (
-                runner._invoke_reclaim_sync("wl-1", MaxTextConfig(project_id="p1"))
-                is True
-            )
+            with patch.object(runner, "reclaim_tpu_workload", new=_fake_async_reclaim):
+                assert (
+                    runner._invoke_reclaim_sync("wl-1", MaxTextConfig(project_id="p1"))
+                    is True
+                )
 
 
-def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
-    """Test _poll_gcloud_tpu_status, _reclaim_gcloud_tpu_workload, and synchronous helpers."""
-    runner = RemoteTpuMaxTextRunner()
+def test_poll_gcloud_tpu_status_terminal_states() -> None:
+    """Test _poll_gcloud_tpu_status terminal READY, STOPPED, and non-JSON READY responses and CLI flags."""
+    recorded_cmds: list[list[str]] = []
+
+    def _recording_executor(
+        cmd: Sequence[str],
+        capture_output: bool = True,
+        text: bool = True,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """Record gcloud describe CLI command and return READY JSON."""
+        _ = (capture_output, text, check)
+        recorded_cmds.append(list(cmd))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"state": "READY"}', stderr=""
+        )
+
+    runner = RemoteTpuMaxTextRunner(subprocess_executor=_recording_executor)
     with patch("shutil.which", return_value=None):
         with pytest.raises(RuntimeError, match=r"Google Cloud CLI .* is not installed"):
             asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
@@ -715,24 +717,49 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             asyncio.run(runner._reclaim_gcloud_tpu_workload("node-1", "us-central2-b"))
 
     with patch("shutil.which", return_value="/usr/bin/gcloud"):
-        mock_proc_ready = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout='{"state": "READY"}', stderr=""
+        assert (
+            asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
+            == "SUCCESS"
         )
-        with patch("subprocess.run", return_value=mock_proc_ready):
-            assert (
-                asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
-                == "SUCCESS"
-            )
+        assert recorded_cmds[-1] == [
+            "/usr/bin/gcloud",
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "describe",
+            "node-1",
+            "--zone=us-central2-b",
+            "--format=json",
+        ]
 
+        runner_default = RemoteTpuMaxTextRunner()
         mock_proc_stopped = subprocess.CompletedProcess(
             args=[], returncode=0, stdout='{"state": "STOPPED"}', stderr=""
         )
         with patch("subprocess.run", return_value=mock_proc_stopped):
             assert (
-                asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
+                asyncio.run(
+                    runner_default._poll_gcloud_tpu_status("node-1", "us-central2-b")
+                )
                 == "SUCCESS"
             )
 
+        mock_proc_text_ready = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="State: READY (non-json output)", stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_proc_text_ready):
+            assert (
+                asyncio.run(
+                    runner_default._poll_gcloud_tpu_status("node-1", "us-central2-b")
+                )
+                == "SUCCESS"
+            )
+
+
+def test_poll_gcloud_tpu_status_preemption_and_errors() -> None:
+    """Test _poll_gcloud_tpu_status preemption, fatal hardware error, and NOT_FOUND states."""
+    runner = RemoteTpuMaxTextRunner()
+    with patch("shutil.which", return_value="/usr/bin/gcloud"):
         mock_proc_preempt = subprocess.CompletedProcess(
             args=[], returncode=0, stdout='{"state": "PREEMPTED"}', stderr=""
         )
@@ -760,15 +787,6 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             with pytest.raises(RuntimeError, match="encountered fatal error"):
                 asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
 
-        mock_proc_text_ready = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="State: READY (non-json output)", stderr=""
-        )
-        with patch("subprocess.run", return_value=mock_proc_text_ready):
-            assert (
-                asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
-                == "SUCCESS"
-            )
-
         mock_proc_nf = subprocess.CompletedProcess(
             args=[],
             returncode=1,
@@ -779,90 +797,65 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             with pytest.raises(RuntimeError, match="not found in zone"):
                 asyncio.run(runner._poll_gcloud_tpu_status("node-1", "us-central2-b"))
 
-        mock_proc_pending = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout='{"state": "CREATING"}', stderr=""
-        )
-        with patch("subprocess.run", return_value=mock_proc_pending):
-            with pytest.raises(TimeoutError, match="polling timed out"):
-                asyncio.run(
-                    runner._poll_gcloud_tpu_status(
-                        "node-1", "us-central2-b", timeout_seconds=0.08
-                    )
-                )
 
-        mock_proc_bad_json = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="Some garbled text without status",
-            stderr="",
-        )
-        with patch("subprocess.run", return_value=mock_proc_bad_json):
-            with pytest.raises(TimeoutError, match="polling timed out"):
-                asyncio.run(
-                    runner._poll_gcloud_tpu_status(
-                        "node-1", "us-central2-b", timeout_seconds=0.08
-                    )
-                )
+def test_poll_gcloud_tpu_status_timeout_and_cancellation() -> None:
+    """Test _poll_gcloud_tpu_status and _poll_workload_status_sync timeout and cancellation branches."""
+    import threading
 
-        mock_proc_transient = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="Connection reset by peer"
-        )
-        with patch("subprocess.run", return_value=mock_proc_transient):
-            with pytest.raises(TimeoutError, match="polling timed out"):
-                asyncio.run(
-                    runner._poll_gcloud_tpu_status(
-                        "node-1", "us-central2-b", timeout_seconds=0.08
+    runner = RemoteTpuMaxTextRunner()
+    with patch("shutil.which", return_value="/usr/bin/gcloud"):
+        for pending_proc in (
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout='{"state": "CREATING"}', stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="Some garbled text without status",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="Connection reset by peer"
+            ),
+        ):
+            with patch("subprocess.run", return_value=pending_proc):
+                with pytest.raises(TimeoutError, match="polling timed out"):
+                    asyncio.run(
+                        runner._poll_gcloud_tpu_status(
+                            "node-1", "us-central2-b", timeout_seconds=0.05
+                        )
                     )
-                )
-
-        mock_ok = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
-        )
-        with patch("subprocess.run", return_value=mock_ok):
-            assert (
-                asyncio.run(
-                    runner._reclaim_gcloud_tpu_workload("node-1", "us-central2-b")
-                )
-                is True
-            )
-
-        mock_fail = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="PermissionDenied"
-        )
-        with patch("subprocess.run", return_value=mock_fail):
-            with pytest.raises(RuntimeError, match="Failed to reclaim TPU VM workload"):
-                asyncio.run(
-                    runner._reclaim_gcloud_tpu_workload(
-                        "node-1", "us-central2-b", max_retries=2
-                    )
-                )
 
     max_cfg_sync = MaxTextConfig(project_id="p-sync", zone="us-central2-b")
-    assert (
-        runner._poll_workload_status_sync(
-            "wl-sync", max_cfg_sync, status_override="SUCCESS"
-        )
-        == "SUCCESS"
-    )
-    import threading
+    with (
+        patch("shutil.which", return_value="/usr/bin/xpk"),
+        patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="Status: SUCCESS", stderr=""
+            ),
+        ),
+    ):
+        assert runner._poll_workload_status_sync("wl-sync", max_cfg_sync) == "SUCCESS"
 
     cancel_ev = threading.Event()
     cancel_ev.set()
     with patch("shutil.which", return_value="/usr/bin/xpk"):
-        assert runner._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync) is True
-        assert runner._invoke_reclaim_sync("wl-sync", max_cfg_sync) is True
-        with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
-            runner._poll_workload_status_sync(
-                "wl-sync", max_cfg_sync, cancel_event=cancel_ev
-            )
-        with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
-            asyncio.run(
-                runner.poll_workload_status(
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=""),
+        ):
+            with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+                runner._poll_workload_status_sync(
                     "wl-sync", max_cfg_sync, cancel_event=cancel_ev
                 )
-            )
+            with pytest.raises(RuntimeError, match="cancelled and reclaimed"):
+                asyncio.run(
+                    runner.poll_workload_status(
+                        "wl-sync", max_cfg_sync, cancel_event=cancel_ev
+                    )
+                )
 
-        # Cancel set mid-loop during XPK describe polling (sync and async)
         mid_ev_sync = threading.Event()
 
         def _set_mid_sync(
@@ -875,7 +868,7 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             _ = (cmd, capture_output, text, check)
             mid_ev_sync.set()
             return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="Status: PENDING", stderr=""
+                args=cmd, returncode=0, stdout="Status: PENDING", stderr=""
             )
 
         with patch("subprocess.run", side_effect=_set_mid_sync):
@@ -899,7 +892,7 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             _ = (cmd, capture_output, text, check)
             mid_ev_async.set()
             return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="Status: PENDING", stderr=""
+                args=cmd, returncode=0, stdout="Status: PENDING", stderr=""
             )
 
         with (
@@ -940,8 +933,66 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
                         cancel_event=cancel_ev,
                     )
                 )
+
+
+def test_reclaim_gcloud_tpu_workload_retries() -> None:
+    """Test _reclaim_gcloud_tpu_workload and sync/async reclamation command flags and retry behavior."""
+    recorded_cmds: list[list[str]] = []
+
+    def _reclaim_executor(
+        cmd: Sequence[str],
+        capture_output: bool = True,
+        text: bool = True,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """Record gcloud/xpk delete commands and return success."""
+        _ = (capture_output, text, check)
+        recorded_cmds.append(list(cmd))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"state": "READY"}', stderr=""
+        )
+
+    runner = RemoteTpuMaxTextRunner(subprocess_executor=_reclaim_executor)
+    max_cfg_sync = MaxTextConfig(project_id="p-sync", zone="us-central2-b")
+
+    with patch("shutil.which", return_value="/usr/bin/gcloud"):
+        assert (
+            asyncio.run(runner._reclaim_gcloud_tpu_workload("node-1", "us-central2-b"))
+            is True
+        )
+        assert recorded_cmds[-1] == [
+            "/usr/bin/gcloud",
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "delete",
+            "node-1",
+            "--zone=us-central2-b",
+            "--quiet",
+        ]
+
+    runner_default = RemoteTpuMaxTextRunner()
+    with patch("shutil.which", return_value="/usr/bin/gcloud"):
+        mock_fail = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="PermissionDenied"
+        )
+        with patch("subprocess.run", return_value=mock_fail):
+            with pytest.raises(RuntimeError, match="Failed to reclaim TPU VM workload"):
+                asyncio.run(
+                    runner_default._reclaim_gcloud_tpu_workload(
+                        "node-1", "us-central2-b", max_retries=2
+                    )
+                )
+
     with patch("shutil.which", return_value="/usr/bin/xpk"):
         assert runner._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync) is True
+        assert recorded_cmds[-1] == [
+            "/usr/bin/xpk",
+            "workload",
+            "delete",
+            "--workload=wl-sync",
+            "--cluster=tpu-cluster-v4-8",
+        ]
         assert runner._invoke_reclaim_sync("wl-sync", max_cfg_sync) is True
         with patch(
             "subprocess.run",
@@ -950,13 +1001,13 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             ),
         ):
             assert (
-                runner._poll_workload_status_sync(
+                runner_default._poll_workload_status_sync(
                     "wl-sync", max_cfg_sync, timeout_seconds=1.0
                 )
                 == "SUCCESS"
             )
             assert (
-                runner._invoke_status_poll_sync(
+                runner_default._invoke_status_poll_sync(
                     "wl-sync", max_cfg_sync, timeout_seconds=1.0
                 )
                 == "SUCCESS"
@@ -968,7 +1019,7 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             ),
         ):
             with pytest.raises(TimeoutError):
-                runner._poll_workload_status_sync(
+                runner_default._poll_workload_status_sync(
                     "wl-sync", max_cfg_sync, timeout_seconds=0.01
                 )
         with patch(
@@ -978,7 +1029,7 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             ),
         ):
             with pytest.raises(RuntimeError, match="Failed to reclaim TPU workload"):
-                runner._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync)
+                runner_default._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync)
 
     with patch(
         "shutil.which",
@@ -993,7 +1044,7 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             ),
         ):
             with pytest.raises(TimeoutError):
-                runner._poll_gcloud_tpu_status_sync(
+                runner_default._poll_gcloud_tpu_status_sync(
                     "wl-sync", "us-central2-b", timeout_seconds=0.01
                 )
         with patch(
@@ -1003,18 +1054,18 @@ def test_poll_gcloud_tpu_status_and_reclaim_states() -> None:
             ),
         ):
             with pytest.raises(RuntimeError, match="Failed to reclaim TPU VM workload"):
-                runner._reclaim_gcloud_tpu_workload_sync(
+                runner_default._reclaim_gcloud_tpu_workload_sync(
                     "wl-sync", "us-central2-b", max_retries=2
                 )
     with patch("shutil.which", return_value=None):
         with pytest.raises(RuntimeError):
-            runner._poll_gcloud_tpu_status_sync("wl-sync", "us-central2-b")
+            runner_default._poll_gcloud_tpu_status_sync("wl-sync", "us-central2-b")
         with pytest.raises(RuntimeError):
-            runner._reclaim_gcloud_tpu_workload_sync("wl-sync", "us-central2-b")
+            runner_default._reclaim_gcloud_tpu_workload_sync("wl-sync", "us-central2-b")
         with pytest.raises(RuntimeError):
-            runner._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync)
+            runner_default._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync)
         with pytest.raises(RuntimeError):
-            runner._invoke_reclaim_sync("wl-sync", max_cfg_sync)
+            runner_default._invoke_reclaim_sync("wl-sync", max_cfg_sync)
 
 
 def test_tpu_orchestrator_protocol_stubs(tmp_path: Path) -> None:

@@ -1,9 +1,6 @@
 """Google Cloud TPU MaxText orchestration, XPK/gcloud command builders, and GCS synchronization."""
 
 import asyncio
-import base64
-import hashlib
-import importlib
 import json
 import os
 import shutil
@@ -14,76 +11,34 @@ from pathlib import Path
 from typing import (
     Callable,
     Dict,
-    Iterable,
     List,
     Optional,
     Protocol,
     Sequence,
-    Union,
     runtime_checkable,
 )
 
 from t1d_analytics.errors import (
-    ChecksumMismatchError,
-    DatabaseNotFoundError,
-    GcsStorageError,
     HardwareUnavailableError,
-    InvalidGcsUriError,
-    MissingSdkError,
     TpuOrchestrationError,
     TpuPollingTimeoutError,
     TpuPreemptionError,
 )
+from t1d_analytics.gcs_storage import (
+    GcsBlobProtocol,
+    GcsBucketProtocol,
+    GcsClientProtocol,
+    Md5BlobProtocol,
+    _compute_md5_base64,
+    _resolve_gcs_client,
+    download_checkpoints_from_gcs,
+    parse_gcs_uri,
+    sync_dataset_to_gcs,
+    verify_gcs_blob_md5,
+)
 from t1d_analytics.hf_models import BaseTrainingRunner
 from t1d_analytics.job_manager import JobMetricValue
 from t1d_analytics.models import MaxTextConfig, TrainingJobConfig
-
-
-class GcsBlobProtocol(Protocol):
-    """Protocol representing a Google Cloud Storage Blob."""
-
-    name: str
-    md5_hash: Optional[str]
-
-    def download_to_filename(self, filename: str) -> None:
-        """Download blob contents to local file."""
-        ...
-
-    def upload_from_filename(self, filename: str) -> None:
-        """Upload local file contents to blob."""
-        ...
-
-
-@runtime_checkable
-class Md5BlobProtocol(Protocol):
-    """Runtime-checkable protocol for GCS blobs exposing md5_hash."""
-
-    @property
-    def md5_hash(self) -> Optional[str]:
-        """Return base64-encoded MD5 hash string."""
-        ...
-
-
-class GcsBucketProtocol(Protocol):
-    """Protocol representing a Google Cloud Storage Bucket."""
-
-    def blob(self, blob_name: str) -> GcsBlobProtocol:
-        """Create a blob reference within this bucket."""
-        ...
-
-
-class GcsClientProtocol(Protocol):
-    """Protocol representing a Google Cloud Storage Client."""
-
-    def bucket(self, bucket_name: str) -> GcsBucketProtocol:
-        """Return bucket reference by name."""
-        ...
-
-    def list_blobs(
-        self, bucket_or_name: Union[GcsBucketProtocol, str], prefix: str = ""
-    ) -> Iterable[GcsBlobProtocol]:
-        """List blobs in bucket matching prefix."""
-        ...
 
 
 @runtime_checkable
@@ -99,24 +54,6 @@ class SubprocessExecutorProtocol(Protocol):
     ) -> subprocess.CompletedProcess[str]:
         """Execute a command and return a CompletedProcess record."""
         ...
-
-
-def _compute_md5_base64(payload: bytes) -> str:
-    """
-    Compute the base64-encoded MD5 digest of a byte payload for GCS integrity verification.
-
-    Args:
-    ----
-        payload: Raw file bytes to hash.
-
-    Returns:
-    -------
-        str: ASCII base64-encoded MD5 digest string.
-
-    """
-    return base64.b64encode(
-        hashlib.md5(payload, usedforsecurity=False).digest()
-    ).decode("ascii")
 
 
 def _build_xpk_create_command(
@@ -442,41 +379,6 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 return "FAILED"
         return None
 
-    @staticmethod
-    def _evaluate_status_override(
-        workload_name: str,
-        override_status: Optional[str],
-    ) -> Optional[str]:
-        """
-        Evaluate an explicit status override string if provided.
-
-        Args:
-        ----
-            workload_name: Dispatched workload identifier.
-            override_status: Optional status override string.
-
-        Returns:
-        -------
-            Optional[str]: Resolved status override or `None` if no override is active.
-
-        Raises:
-        ------
-            TpuPreemptionError: If override is `'PREEMPTED'`.
-            TpuOrchestrationError: If override is `'FAILED'` or `'XLA_ERROR'`.
-
-        """
-        if not override_status:
-            return None
-        if override_status == "PREEMPTED":
-            raise TpuPreemptionError(
-                f"Workload '{workload_name}' was PREEMPTED on spot TPU capacity."
-            )
-        if override_status in ("FAILED", "XLA_ERROR"):
-            raise TpuOrchestrationError(
-                f"Workload '{workload_name}' encountered fatal XLA compilation error."
-            )
-        return override_status
-
     def _build_gcloud_describe_cmd(self, workload_name: str, zone: str) -> List[str]:
         """
         Build the `gcloud compute tpus tpu-vm describe` command and validate `gcloud` availability.
@@ -541,12 +443,36 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             "--quiet",
         ]
 
+    def _step_gcloud_tpu_poll(
+        self,
+        cmd: Sequence[str],
+        workload_name: str,
+        zone: str,
+    ) -> Optional[str]:
+        """
+        Execute a single `gcloud compute tpus tpu-vm describe` command and parse its output.
+
+        Args:
+        ----
+            cmd: Prepared gcloud describe command sequence.
+            workload_name: TPU VM instance identifier.
+            zone: GCP availability zone.
+
+        Returns:
+        -------
+            Optional[str]: `'SUCCESS'` if ready, or `None` if still pending.
+
+        """
+        res = self._run_subprocess(cmd)
+        return self._parse_gcloud_describe_response(workload_name, zone, res)
+
     def _poll_gcloud_tpu_status_sync(
         self,
         workload_name: str,
         zone: str,
         timeout_seconds: float = 30.0,
         cancel_event: Optional[threading.Event] = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> str:
         """
         Poll TPU VM workload status synchronously using Google Cloud CLI (gcloud).
@@ -557,6 +483,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             zone: GCP availability zone of the TPU VM instance.
             timeout_seconds: Timeout threshold in seconds.
             cancel_event: Optional cooperative cancellation event.
+            sleep_fn: Injectable sleep function for backoff intervals.
 
         Returns:
         -------
@@ -576,11 +503,10 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 raise TpuOrchestrationError(
                     f"Workload '{workload_name}' cancelled and reclaimed."
                 )
-            res = self._run_subprocess(cmd)
-            parsed = self._parse_gcloud_describe_response(workload_name, zone, res)
+            parsed = self._step_gcloud_tpu_poll(cmd, workload_name, zone)
             if parsed is not None:
                 return parsed
-            time.sleep(min(0.02, timeout_seconds / 2.0))
+            sleep_fn(min(0.02, timeout_seconds / 2.0))
 
         raise TpuPollingTimeoutError(
             f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
@@ -621,11 +547,10 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 raise TpuOrchestrationError(
                     f"Workload '{workload_name}' cancelled and reclaimed."
                 )
-            res = self._run_subprocess(cmd)
-            parsed = self._parse_gcloud_describe_response(workload_name, zone, res)
+            parsed = self._step_gcloud_tpu_poll(cmd, workload_name, zone)
             if parsed is not None:
                 return parsed
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(min(0.02, timeout_seconds / 2.0))
 
         raise TpuPollingTimeoutError(
             f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
@@ -636,6 +561,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         workload_name: str,
         zone: str,
         max_retries: int = 3,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> bool:
         """
         Reclaim and delete TPU VM instance synchronously using Google Cloud CLI (gcloud).
@@ -645,6 +571,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             workload_name: Identifier of the TPU VM instance to delete.
             zone: GCP availability zone of the TPU VM.
             max_retries: Maximum deletion retry attempts upon failure.
+            sleep_fn: Injectable sleep function for retry backoff.
 
         Returns:
         -------
@@ -663,7 +590,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 return True
             last_error = res.stderr.strip()
             if attempt < max_retries:
-                time.sleep(0.01 * (2 ** (attempt - 1)))
+                sleep_fn(0.01 * (2 ** (attempt - 1)))
 
         raise TpuOrchestrationError(
             f"Failed to reclaim TPU VM workload '{workload_name}' via gcloud: {last_error}"
@@ -693,18 +620,10 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             TpuOrchestrationError: If deletion fails after maximum retries or gcloud CLI is missing.
 
         """
-        cmd = self._build_gcloud_delete_cmd(workload_name, zone)
-        last_error = ""
-        for attempt in range(1, max_retries + 1):
-            res = self._run_subprocess(cmd)
-            if res.returncode == 0:
-                return True
-            last_error = res.stderr.strip()
-            if attempt < max_retries:
-                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-
-        raise TpuOrchestrationError(
-            f"Failed to reclaim TPU VM workload '{workload_name}' via gcloud: {last_error}"
+        return self._reclaim_gcloud_tpu_workload_sync(
+            workload_name=workload_name,
+            zone=zone,
+            max_retries=max_retries,
         )
 
     @staticmethod
@@ -759,13 +678,50 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             f"--cluster=tpu-cluster-{max_cfg.accelerator_type.value}",
         ]
 
+    def _step_xpk_poll_or_cancel(
+        self,
+        xpk_bin: str,
+        cmd: Sequence[str],
+        workload_name: str,
+        max_cfg: MaxTextConfig,
+        cancel_event: Optional[threading.Event],
+    ) -> Optional[str]:
+        """
+        Check cancellation or execute a single `xpk workload describe` step.
+
+        Args:
+        ----
+            xpk_bin: Path to `xpk` executable.
+            cmd: Prepared `xpk workload describe` command sequence.
+            workload_name: Dispatched workload identifier.
+            max_cfg: MaxText infrastructure configuration.
+            cancel_event: Optional cooperative cancellation event.
+
+        Returns:
+        -------
+            Optional[str]: Terminal status string (`'SUCCESS'` or `'FAILED'`) or `None` if pending.
+
+        Raises:
+        ------
+            TpuOrchestrationError: If cancelled or fatal XLA error occurs.
+            TpuPreemptionError: If workload is preempted.
+
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            self._execute_xpk_reclaim_command(xpk_bin, workload_name, max_cfg)
+            raise TpuOrchestrationError(
+                f"Workload '{workload_name}' cancelled and reclaimed."
+            )
+        res = self._run_subprocess(cmd)
+        return self._parse_xpk_describe_response(workload_name, res)
+
     def _poll_workload_status_sync(
         self,
         workload_name: str,
         max_cfg: MaxTextConfig,
         timeout_seconds: float = 30.0,
-        status_override: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> str:
         """
         Poll workload execution status synchronously from XPK or Google Cloud TPU API.
@@ -775,8 +731,8 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             workload_name: Identifier of the dispatched training workload.
             max_cfg: MaxText infrastructure configuration.
             timeout_seconds: Timeout threshold in seconds.
-            status_override: Optional explicit status override string.
             cancel_event: Optional cooperative cancellation event.
+            sleep_fn: Injectable sleep function for polling intervals.
 
         Returns:
         -------
@@ -794,15 +750,6 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 f"Workload '{workload_name}' cancelled and reclaimed."
             )
 
-        resolved_override = self._evaluate_status_override(
-            workload_name,
-            status_override
-            or max_cfg.status_override
-            or os.environ.get("T1D_TPU_STATUS_OVERRIDE"),
-        )
-        if resolved_override is not None:
-            return resolved_override
-
         xpk_bin = shutil.which("xpk")
         if not xpk_bin:
             return self._poll_gcloud_tpu_status_sync(
@@ -810,21 +757,18 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 zone=max_cfg.zone,
                 timeout_seconds=timeout_seconds,
                 cancel_event=cancel_event,
+                sleep_fn=sleep_fn,
             )
 
         cmd = self._build_xpk_describe_cmd(xpk_bin, workload_name, max_cfg)
         start = time.time()
         while time.time() - start < timeout_seconds:
-            if cancel_event is not None and cancel_event.is_set():
-                self._execute_xpk_reclaim_command(xpk_bin, workload_name, max_cfg)
-                raise TpuOrchestrationError(
-                    f"Workload '{workload_name}' cancelled and reclaimed."
-                )
-            res = self._run_subprocess(cmd)
-            parsed = self._parse_xpk_describe_response(workload_name, res)
+            parsed = self._step_xpk_poll_or_cancel(
+                xpk_bin, cmd, workload_name, max_cfg, cancel_event
+            )
             if parsed is not None:
                 return parsed
-            time.sleep(min(0.02, timeout_seconds / 2.0))
+            sleep_fn(min(0.02, timeout_seconds / 2.0))
 
         raise TpuPollingTimeoutError(
             f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
@@ -835,7 +779,6 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         workload_name: str,
         max_cfg: MaxTextConfig,
         timeout_seconds: float = 30.0,
-        status_override: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> str:
         """
@@ -846,7 +789,6 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             workload_name: Identifier of the dispatched training workload.
             max_cfg: MaxText infrastructure configuration.
             timeout_seconds: Timeout threshold in seconds.
-            status_override: Optional explicit status override string.
             cancel_event: Optional cooperative cancellation event.
 
         Returns:
@@ -865,15 +807,6 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 f"Workload '{workload_name}' cancelled and reclaimed."
             )
 
-        resolved_override = self._evaluate_status_override(
-            workload_name,
-            status_override
-            or max_cfg.status_override
-            or os.environ.get("T1D_TPU_STATUS_OVERRIDE"),
-        )
-        if resolved_override is not None:
-            return resolved_override
-
         xpk_bin = shutil.which("xpk")
         if not xpk_bin:
             return await self._poll_gcloud_tpu_status(
@@ -886,16 +819,12 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         cmd = self._build_xpk_describe_cmd(xpk_bin, workload_name, max_cfg)
         start = time.time()
         while time.time() - start < timeout_seconds:
-            if cancel_event is not None and cancel_event.is_set():
-                self._execute_xpk_reclaim_command(xpk_bin, workload_name, max_cfg)
-                raise TpuOrchestrationError(
-                    f"Workload '{workload_name}' cancelled and reclaimed."
-                )
-            res = self._run_subprocess(cmd)
-            parsed = self._parse_xpk_describe_response(workload_name, res)
+            parsed = self._step_xpk_poll_or_cancel(
+                xpk_bin, cmd, workload_name, max_cfg, cancel_event
+            )
             if parsed is not None:
                 return parsed
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(min(0.02, timeout_seconds / 2.0))
 
         raise TpuPollingTimeoutError(
             f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
@@ -1016,73 +945,14 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         -------
             Path: Path to the local directory containing downloaded checkpoints.
 
-        Raises:
-        ------
-            InvalidGcsUriError: If bucket URI does not begin with 'gs://'.
-            ChecksumMismatchError: If checksum mismatches.
-            GcsStorageError: If gcloud storage copy command fails after retries.
-
         """
-        if not bucket_url.startswith("gs://"):
-            raise InvalidGcsUriError(
-                f"Invalid GCS bucket URI '{bucket_url}'. Must start with 'gs://'."
-            )
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if gcs_client is not None:
-            client = gcs_client
-        else:
-            try:
-                gcs_pkg = importlib.import_module("google.cloud.storage")
-            except ImportError as e:
-                raise MissingSdkError(
-                    "The 'google-cloud-storage' Python package is required. "
-                    "Install via 'pip install google-cloud-storage'."
-                ) from e
-            client = gcs_pkg.Client()
-
-        bucket_name = bucket_url[5:].rstrip("/").split("/")[0]
-        prefix = "/".join(bucket_url[5:].rstrip("/").split("/")[1:])
-
-        last_err: Optional[Exception] = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                bucket = client.bucket(bucket_name)
-                blobs = list(client.list_blobs(bucket, prefix=prefix))
-                if not blobs:
-                    raise GcsStorageError(
-                        f"No checkpoint files found at '{bucket_url}'."
-                    )
-                for blob in blobs:
-                    rel_name = blob.name[len(prefix) :].lstrip("/")
-                    dest_file = output_dir / rel_name
-                    dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    blob.download_to_filename(str(dest_file))
-                    remote_md5 = (
-                        blob.md5_hash
-                        if validate_checksum and isinstance(blob, Md5BlobProtocol)
-                        else None
-                    )
-                    if (
-                        isinstance(remote_md5, str)
-                        and remote_md5
-                        and dest_file.exists()
-                    ):
-                        local_md5 = _compute_md5_base64(dest_file.read_bytes())
-                        if local_md5 != remote_md5:
-                            raise ChecksumMismatchError(
-                                f"Checksum mismatch for '{dest_file.name}': expected {remote_md5}, got {local_md5}"
-                            )
-                return output_dir
-            except ChecksumMismatchError:
-                raise
-            except Exception as e:
-                last_err = e
-                await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
-
-        raise GcsStorageError(
-            f"Checkpoint download failed after {max_retries} attempts: {last_err}"
-        ) from last_err
+        return await download_checkpoints_from_gcs(
+            bucket_url=bucket_url,
+            output_dir=output_dir,
+            max_retries=max_retries,
+            validate_checksum=validate_checksum,
+            gcs_client=gcs_client,
+        )
 
     def _invoke_status_poll_sync(
         self,
@@ -1151,6 +1021,98 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             return bool(asyncio.run(res))
         return bool(res)
 
+    def _dispatch_with_preemption_retries(
+        self,
+        config: TrainingJobConfig,
+        max_cfg: MaxTextConfig,
+        config_path: Path,
+        workload_name: str,
+        cancel_event: Optional[threading.Event],
+    ) -> str:
+        """
+        Dispatch an XPK/gcloud TPU workload and retry up to `max_preemption_retries` times on preemption.
+
+        Args:
+        ----
+            config: Training job configuration.
+            max_cfg: MaxText infrastructure configuration.
+            config_path: Path to the generated MaxText YAML file.
+            workload_name: Dispatched workload identifier.
+            cancel_event: Optional cooperative cancellation event.
+
+        Returns:
+        -------
+            str: Terminal workload status string.
+
+        Raises:
+        ------
+            RuntimeError: If the workload fails or exhausts preemption retries (after reclaiming resources).
+
+        """
+        self._dispatch_xpk_workload(config, max_cfg, config_path)
+        try:
+            return self._invoke_status_poll_sync(
+                workload_name,
+                max_cfg,
+                timeout_seconds=5,
+                cancel_event=cancel_event,
+            )
+        except RuntimeError as e:
+            if "PREEMPTED" not in str(e):
+                self._invoke_reclaim_sync(workload_name, max_cfg)
+                raise
+            for _ in range(max_cfg.max_preemption_retries):
+                self._dispatch_xpk_workload(config, max_cfg, config_path)
+                try:
+                    return self._invoke_status_poll_sync(
+                        workload_name,
+                        max_cfg,
+                        timeout_seconds=2,
+                        cancel_event=cancel_event,
+                    )
+                except RuntimeError:
+                    continue
+            self._invoke_reclaim_sync(workload_name, max_cfg)
+            raise
+
+    @staticmethod
+    def _write_job_manifest(
+        out_path: Path,
+        workload_name: str,
+        tpu_cluster: str,
+        config_path: Path,
+        model_name: str,
+        status_str: str,
+    ) -> None:
+        """
+        Write `job_manifest.json` summarizing the dispatched TPU training job.
+
+        Args:
+        ----
+            out_path: Output directory path.
+            workload_name: Dispatched workload identifier.
+            tpu_cluster: Target TPU cluster accelerator string.
+            config_path: Path to `maxtext_config.yml`.
+            model_name: Trained model name.
+            status_str: Resolved dispatch/polling status string.
+
+        """
+        manifest_path = out_path / "job_manifest.json"
+        with open(manifest_path, "w") as mf:
+            json.dump(
+                {
+                    "workload_name": workload_name,
+                    "tpu_cluster": tpu_cluster,
+                    "config_file": str(config_path),
+                    "output_dir": str(out_path),
+                    "model_name": model_name,
+                    "dispatched_at": time.time(),
+                    "status": status_str,
+                },
+                mf,
+                indent=2,
+            )
+
     def run_training(
         self,
         config: TrainingJobConfig,
@@ -1169,7 +1131,6 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             Dict[str, JobMetricValue]: Remote workload launch details and generated configuration.
 
         """
-        _ = cancel_event
         self.prepare_dataset(config)
         out_path = Path(config.output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
@@ -1209,53 +1170,22 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                 max_cfg_dispatch = config.maxtext_config or MaxTextConfig(
                     project_id=os.environ.get("GCP_PROJECT_ID", "t1d-analytics-gcp")
                 )
-                self._dispatch_xpk_workload(config, max_cfg_dispatch, config_path)
-                try:
-                    status_str = self._invoke_status_poll_sync(
-                        workload_name,
-                        max_cfg_dispatch,
-                        timeout_seconds=5,
-                        cancel_event=cancel_event,
-                    )
-                except RuntimeError as e:
-                    if "PREEMPTED" in str(e):
-                        status_str = "PREEMPTED_RETRY_EXHAUSTED"
-                        for _ in range(max_cfg_dispatch.max_preemption_retries):
-                            self._dispatch_xpk_workload(
-                                config, max_cfg_dispatch, config_path
-                            )
-                            try:
-                                status_str = self._invoke_status_poll_sync(
-                                    workload_name,
-                                    max_cfg_dispatch,
-                                    timeout_seconds=2,
-                                    cancel_event=cancel_event,
-                                )
-                                break
-                            except RuntimeError:
-                                continue
-                        if status_str == "PREEMPTED_RETRY_EXHAUSTED":
-                            self._invoke_reclaim_sync(workload_name, max_cfg_dispatch)
-                            raise
-                    else:
-                        self._invoke_reclaim_sync(workload_name, max_cfg_dispatch)
-                        raise
-
-            manifest_path = out_path / "job_manifest.json"
-            with open(manifest_path, "w") as mf:
-                json.dump(
-                    {
-                        "workload_name": workload_name,
-                        "tpu_cluster": tpu_cluster,
-                        "config_file": str(config_path),
-                        "output_dir": str(out_path),
-                        "model_name": config.model_name,
-                        "dispatched_at": time.time(),
-                        "status": status_str,
-                    },
-                    mf,
-                    indent=2,
+                status_str = self._dispatch_with_preemption_retries(
+                    config=config,
+                    max_cfg=max_cfg_dispatch,
+                    config_path=config_path,
+                    workload_name=workload_name,
+                    cancel_event=cancel_event,
                 )
+
+            self._write_job_manifest(
+                out_path=out_path,
+                workload_name=workload_name,
+                tpu_cluster=tpu_cluster,
+                config_path=config_path,
+                model_name=config.model_name,
+                status_str=status_str,
+            )
 
         return {
             "status": "dry_run_completed" if config.dry_run else status_str,
@@ -1268,81 +1198,19 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         }
 
 
-def sync_dataset_to_gcs(
-    local_path: Path,
-    gcs_bucket: str,
-    max_retries: int = 3,
-    validate_checksum: bool = True,
-    sleep_fn: Optional[Callable[[float], None]] = None,
-    gcs_client: Optional[GcsClientProtocol] = None,
-) -> str:
-    """
-    Synchronize exported dataset file to Google Cloud Storage bucket with retries and checksums.
-
-    Args:
-    ----
-        local_path: Local dataset filepath.
-        gcs_bucket: Destination GCS bucket URL (e.g., 'gs://bucket-name').
-        max_retries: Number of upload retry attempts.
-        validate_checksum: Whether to compute and verify MD5 checksum.
-        sleep_fn: Optional injectable sleep function for retry backoff.
-        gcs_client: Optional injectable GCS client instance.
-
-    Returns:
-    -------
-        str: Remote GCS target URI.
-
-    Raises:
-    ------
-        InvalidGcsUriError: If bucket URL is invalid.
-        DatabaseNotFoundError: If local dataset file does not exist.
-        GcsStorageError: If gcloud storage upload fails after retries.
-
-    """
-    if not gcs_bucket.startswith("gs://"):
-        raise InvalidGcsUriError(
-            f"Invalid GCS bucket URI '{gcs_bucket}'. Must start with 'gs://'."
-        )
-
-    if not local_path.exists():
-        raise DatabaseNotFoundError(f"Local file not found at '{local_path}'.")
-
-    bucket_clean = gcs_bucket.rstrip("/")
-    dest_uri = f"{bucket_clean}/{local_path.name}"
-
-    if gcs_client is not None:
-        client = gcs_client
-    else:
-        try:
-            gcs_pkg = importlib.import_module("google.cloud.storage")
-        except ImportError as e:
-            raise MissingSdkError(
-                "The 'google-cloud-storage' Python package is required. "
-                "Install via 'pip install google-cloud-storage'."
-            ) from e
-        client = gcs_pkg.Client()
-
-    bucket_name = gcs_bucket[5:].rstrip("/").split("/")[0]
-    blob_prefix = "/".join(gcs_bucket[5:].rstrip("/").split("/")[1:])
-    blob_name = f"{blob_prefix}/{local_path.name}".lstrip("/")
-
-    local_md5 = (
-        _compute_md5_base64(local_path.read_bytes()) if validate_checksum else ""
-    )
-
-    backoff_sleep = sleep_fn or time.sleep
-    last_err: Optional[Exception] = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            bucket = client.bucket(bucket_name)
-            blob = bucket.blob(blob_name)
-            blob.md5_hash = local_md5
-            blob.upload_from_filename(str(local_path))
-            return dest_uri
-        except Exception as e:
-            last_err = e
-            backoff_sleep(0.05 * (2 ** (attempt - 1)))
-
-    raise GcsStorageError(
-        f"GCS upload failed after {max_retries} attempts: {last_err}"
-    ) from last_err
+__all__ = [
+    "GcsBlobProtocol",
+    "GcsBucketProtocol",
+    "GcsClientProtocol",
+    "Md5BlobProtocol",
+    "RemoteTpuMaxTextRunner",
+    "SubprocessExecutorProtocol",
+    "_build_gcloud_ssh_command",
+    "_build_xpk_create_command",
+    "_compute_md5_base64",
+    "_resolve_gcs_client",
+    "download_checkpoints_from_gcs",
+    "parse_gcs_uri",
+    "sync_dataset_to_gcs",
+    "verify_gcs_blob_md5",
+]

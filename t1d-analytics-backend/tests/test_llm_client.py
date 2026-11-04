@@ -2,8 +2,9 @@
 
 import os
 import urllib.error
+import urllib.request
 from types import SimpleNamespace
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -537,7 +538,7 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
             self,
             exc_type: Optional[type],
             exc_val: Optional[BaseException],
-            exc_tb: Optional[object],
+            exc_tb: Optional[Union[str, int, float, bool]],
         ) -> Optional[bool]:
             """Exit context."""
             return None
@@ -567,8 +568,11 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
     assert by_name_empty["unpulled:7b"].reachable is False
     assert by_name_empty["unpulled:7b"].error_code == "MODEL_NOT_PULLED"
 
-    def _fail_urlopen(req: object, timeout: float = 5.0) -> _OnlineTagsResp:
+    def _fail_urlopen(
+        req: Union[str, urllib.request.Request], timeout: float = 5.0
+    ) -> _OnlineTagsResp:
         """Raise URLError to simulate offline Ollama."""
+        _ = (req, timeout)
         raise urllib.error.URLError("offline")
 
     res_offline = fetch_available_models(

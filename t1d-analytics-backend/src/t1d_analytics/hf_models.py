@@ -384,7 +384,7 @@ class BaseTrainingRunner(ABC):
         """
         if dataset_path.suffix in (".jsonl", ".json", ".csv"):
             try:
-                with open(dataset_path, "r", encoding="utf-8") as f:
+                with open(dataset_path, encoding="utf-8") as f:
                     return sum(1 for line in f if line.strip())
             except Exception as e:
                 logger.debug(f"Failed to count jsonl samples: {e}")

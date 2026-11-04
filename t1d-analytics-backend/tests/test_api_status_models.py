@@ -110,8 +110,8 @@ def test_list_models_general_error() -> None:
         req: typing.Union[str, urllib.request.Request],
         timeout: typing.Optional[float] = None,
     ) -> None:
-        """Simulate urlopen throwing a generic exception."""
-        raise Exception("Unexpected boom")
+        """Simulate urlopen throwing an unexpected OSError."""
+        raise OSError("Unexpected boom")
 
     with patch("urllib.request.urlopen", mock_urlopen):
         response = client.get("/api/models?include_cloud=false")
@@ -461,7 +461,10 @@ def test_get_providers_status_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
 
-    with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=ConnectionRefusedError("Connection refused"),
+    ):
         resp = client.get("/api/providers/status")
         assert resp.status_code == 200
         data = resp.json()
@@ -520,28 +523,29 @@ def test_get_providers_status_unprefixed_host_and_non_200(
         assert provs["ollama"]["healthy"] is False
 
 
-def test_debug_static_mount() -> None:
+def test_debug_static_mount(tmp_path: Path) -> None:
     """Test static mount behavior in debug mode."""
     import t1d_analytics.api
 
     with patch.dict(os.environ, {}, clear=True):
         t1d_analytics.api._setup_debug()
 
+    existing_dist = tmp_path / "dist"
+    existing_dist.mkdir()
     with (
-        patch.dict(os.environ, {"DEBUG": "1"}),
+        patch.dict(os.environ, {"DEBUG": "1", "T1D_WEB_DIST_DIR": str(existing_dist)}),
         patch("t1d_analytics.api.app.mount") as mock_mount,
         patch("t1d_analytics.api.logger.info") as mock_info,
         patch("t1d_analytics.api.StaticFiles"),
-        patch("os.path.exists", return_value=True),
     ):
         t1d_analytics.api._setup_debug()
         mock_mount.assert_called_once()
         mock_info.assert_called_once()
 
+    missing_dist = tmp_path / "missing_dist"
     with (
-        patch.dict(os.environ, {"DEBUG": "1"}),
+        patch.dict(os.environ, {"DEBUG": "1", "T1D_WEB_DIST_DIR": str(missing_dist)}),
         patch("t1d_analytics.api.logger.warning") as mock_warn,
-        patch("os.path.exists", return_value=False),
     ):
         t1d_analytics.api._setup_debug()
         mock_warn.assert_called_once()
@@ -604,11 +608,22 @@ def test_providers_status_and_models_with_any_llm_configured(
     assert "deepseek/deepseek-chat" in model_names
     assert "mistral/mistral-large-latest" in model_names
 
-    with patch(
-        "t1d_analytics.api.CLOUD_PROVIDER_MODELS",
-        {"groq": ["groq/custom-llama"]},
-    ):
+    from dataclasses import replace
+
+    from t1d_analytics.api_dependencies import (
+        create_default_app_services,
+        get_app_services,
+    )
+
+    custom_svc = replace(
+        create_default_app_services(app),
+        cloud_provider_models={"groq": ["groq/custom-llama"]},
+    )
+    app.dependency_overrides[get_app_services] = lambda: custom_svc
+    try:
         resp_override = client.get("/api/models")
         assert resp_override.status_code == 200
         override_names = [m["name"] for m in resp_override.json()["models"]]
         assert "groq/custom-llama" in override_names
+    finally:
+        app.dependency_overrides.pop(get_app_services, None)

@@ -39,7 +39,7 @@ def parse_lcov_files(
     )
     for lcov_file in lcov_paths:
         try:
-            with open(lcov_file, "r", encoding="utf-8") as f:
+            with open(lcov_file, encoding="utf-8") as f:
                 current_file: str = ""
                 for line in f:
                     line = line.strip()
@@ -167,6 +167,85 @@ def compute_combined_coverage(
     return total_found, total_hit, "".join(lines_out)
 
 
+def parse_lcov_totals(lcov_text: str) -> Tuple[int, int]:
+    """
+    Parse LCOV text directly and return `(total_found, total_hit)` line counts.
+
+    Args:
+    ----
+        lcov_text: Raw LCOV report text.
+
+    Returns:
+    -------
+        Tuple[int, int]: `(total_lines_found, total_lines_hit)`.
+
+    """
+    cov_data: DefaultDict[str, DefaultDict[int, int]] = collections.defaultdict(
+        lambda: collections.defaultdict(int)
+    )
+    current_file = ""
+    for raw_line in lcov_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("SF:"):
+            current_file = line[3:]
+        elif line.startswith("DA:") and current_file:
+            parts = line[3:].split(",")
+            line_num = int(parts[0])
+            hits = int(parts[1])
+            cov_data[current_file][line_num] = max(
+                cov_data[current_file][line_num], hits
+            )
+    total_found, total_hit, _ = compute_combined_coverage(cov_data)
+    return total_found, total_hit
+
+
+def resolve_badge_color(percent: float) -> str:
+    """
+    Determine the shields.io badge color for a given coverage percentage.
+
+    Args:
+    ----
+        percent: Coverage percentage (`0.0` to `100.0`).
+
+    Returns:
+    -------
+        str: `'brightgreen'`, `'yellow'`, or `'red'`.
+
+    """
+    if percent >= 90:
+        return "brightgreen"
+    if percent >= 70:
+        return "yellow"
+    return "red"
+
+
+def update_readme_shields(
+    readme_text: str,
+    test_cov: float,
+    doc_cov: float,
+) -> str:
+    """
+    Rewrite the Coverage and Docs shields in `readme_text` and return the updated Markdown string.
+
+    Args:
+    ----
+        readme_text: Existing `README.md` Markdown content.
+        test_cov: Test coverage percentage.
+        doc_cov: Documentation coverage percentage.
+
+    Returns:
+    -------
+        str: Updated `README.md` Markdown string.
+
+    """
+    updated, _ = update_readme_badges(
+        content=readme_text,
+        test_cov=int(test_cov),
+        doc_cov=int(doc_cov),
+    )
+    return updated
+
+
 def update_readme_badges(
     content: str,
     test_cov: int,
@@ -186,12 +265,10 @@ def update_readme_badges(
         Tuple[str, bool]: `(updated_content, license_shield_found)`.
 
     """
-    test_color = (
-        "brightgreen" if test_cov >= 90 else "yellow" if test_cov >= 70 else "red"
-    )
+    test_color = resolve_badge_color(test_cov)
     test_shield = f"[![Coverage](https://img.shields.io/badge/Coverage-{test_cov}%25-{test_color}.svg)](#)"
 
-    doc_color = "brightgreen" if doc_cov >= 90 else "yellow" if doc_cov >= 70 else "red"
+    doc_color = resolve_badge_color(doc_cov)
     doc_shield = (
         f"[![Docs](https://img.shields.io/badge/Docs-{doc_cov}%25-{doc_color}.svg)](#)"
     )
@@ -431,7 +508,7 @@ def main() -> None:
         sys.exit(1)
 
     readme_path = "README.md"
-    with open(readme_path, "r", encoding="utf-8") as f:
+    with open(readme_path, encoding="utf-8") as f:
         content = f.read()
 
     updated_content, license_found = update_readme_badges(

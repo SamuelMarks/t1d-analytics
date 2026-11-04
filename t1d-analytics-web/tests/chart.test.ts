@@ -390,6 +390,12 @@ describe("CGM Charting Module", () => {
     expect(metrics.lbgi).toBeDefined();
     expect(metrics.hbgi).toBeDefined();
 
+    // Explicit unit parameter ("mg/dL" vs "mmol/L")
+    const smallMgDl = calculateTIR([20, 22, 24], "mg/dL");
+    expect(smallMgDl.mean).toBe(22);
+    const explicitMmol = calculateTIR([5.5, 6.5], "mmol/L");
+    expect(explicitMmol.mean).toBeCloseTo(108.1, 1);
+
     // High CV (> 36%) test
     const volatileReadings = [40, 50, 250, 300, 350];
     const volatileMetrics = calculateTIR(volatileReadings);

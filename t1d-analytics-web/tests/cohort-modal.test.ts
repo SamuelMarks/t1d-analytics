@@ -107,6 +107,43 @@ FROM "patients";`);
     expect(leftJoinSql).toContain(
       'ON "patients".patient_id = "visits".subject_id',
     );
+
+    const jaebSql = buildCohortSql({
+      tableName: "tblaptsummary",
+      joinTableName: "hba1c",
+      minAge: 12,
+      maxAge: 35,
+      gender: "M",
+      txGroup: "Control",
+      maxTIR: 65,
+      minHbA1c: 7.2,
+      tableColumns: [
+        "PtID",
+        "AgeAsOfRandDt",
+        "Gender",
+        "TxGroup",
+        "time_in_range",
+        "baseline_hba1c",
+      ],
+      joinTableColumns: ["PtID", "HbA1c"],
+    });
+    expect(jaebSql).toContain('"tblaptsummary".AgeAsOfRandDt >= 12');
+    expect(jaebSql).toContain('"tblaptsummary".AgeAsOfRandDt <= 35');
+    expect(jaebSql).toContain("\"tblaptsummary\".Gender = 'M'");
+    expect(jaebSql).toContain("\"tblaptsummary\".TxGroup ILIKE '%Control%'");
+    expect(jaebSql).toContain('"tblaptsummary".time_in_range <= 65');
+    expect(jaebSql).toContain('"tblaptsummary".baseline_hba1c >= 7.2');
+    expect(jaebSql).toContain('ON "tblaptsummary".PtID = "hba1c".PtID');
+
+    const fallbackJoinSql = buildCohortSql({
+      tableName: "custom_alpha",
+      joinTableName: "custom_beta",
+      tableColumns: ["unmatched_col"],
+      joinTableColumns: ["other_col"],
+    });
+    expect(fallbackJoinSql).toContain(
+      'ON "custom_alpha".patient_id = "custom_beta".patient_id',
+    );
   });
 
   it("handles cohort modal open, input changes, insert, execute, and closing", async () => {

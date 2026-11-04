@@ -1,23 +1,30 @@
 """Deterministic T1D clinical dataset generator and DuckDB database seeder."""
 
 import csv
+import json
 import os
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import duckdb
 
+from t1d_analytics.api_schemas import ChatMessageModel
 from t1d_analytics.errors import SeedVerificationError
-from t1d_analytics.ingestion import load_data_to_duckdb
-from t1d_analytics.session_store import (
-    open_sessions_db_conn,
-    sanitize_legacy_error_sessions,
+from t1d_analytics.ingestion import (
+    _CLINICAL_NUMERIC_COLUMNS,
+    load_data_to_duckdb,
 )
+from t1d_analytics.ingestion import (
+    coerce_known_clinical_numeric_columns as _coerce_existing_base_table_numeric_columns,
+)
+from t1d_analytics.session_store import open_sessions_db_conn
 from t1d_analytics.sql_utils import (
     escape_sql_identifier,
     global_read_only_duckdb_pool,
 )
+
+_BASE_TABLE_NUMERIC_COLUMNS = _CLINICAL_NUMERIC_COLUMNS
 
 SeedValue = Union[str, int, float]
 
@@ -228,76 +235,6 @@ def write_baseline_csvs(data_dir: str = "data", overwrite: bool = False) -> List
     return written_paths
 
 
-_BASE_TABLE_NUMERIC_COLUMNS = {
-    "ptid",
-    "subject_id",
-    "patient_id",
-    "age",
-    "ageasofranddt",
-    "agebaseline",
-    "numsevhypo",
-    "pt_numsevhypo",
-    "numhospdka",
-    "pt_numhospdka",
-    "hba1c",
-    "c_peptide",
-    "tir",
-    "tbr",
-    "tar",
-    "mean_glucose",
-    "meancgm",
-    "meanglucose",
-    "bmi",
-    "bmibaseline",
-    "bodymassindex",
-    "bmi_kg_m2",
-    "t1d_duration_years",
-    "duration",
-    "diagduration",
-    "yrsdiag",
-    "t1dduration",
-    "pt_duration",
-    "total_daily_insulin",
-    "tdd",
-    "totaldailydose",
-    "unitsperkg",
-    "basalbolustotal",
-    "cgm_active_wear_pct",
-    "pctwear",
-    "activewear",
-    "sensorwearpct",
-    "validcgmdays",
-    "glucose",
-    "glucose_value",
-}
-
-
-def _coerce_existing_base_table_numeric_columns(
-    conn: duckdb.DuckDBPyConnection,
-    table_name: str,
-) -> None:
-    """
-    Alter known clinical numeric columns stored as `VARCHAR` in an existing base table to `DOUBLE`.
-
-    Args:
-    ----
-        conn: Active writable DuckDB connection.
-        table_name: Target base table identifier.
-
-    """
-    safe_tbl = escape_sql_identifier(table_name)
-    cols = conn.execute(f'DESCRIBE "{safe_tbl}"').fetchall()
-    for col_row in cols:
-        col_name = str(col_row[0])
-        col_type = str(col_row[1]).upper()
-        if col_name.lower() in _BASE_TABLE_NUMERIC_COLUMNS and "CHAR" in col_type:
-            safe_col = escape_sql_identifier(col_name)
-            conn.execute(
-                f'ALTER TABLE "{safe_tbl}" ALTER COLUMN "{safe_col}" '
-                f"TYPE DOUBLE USING TRY_CAST(NULLIF(TRIM(\"{safe_col}\"), '') AS DOUBLE)"
-            )
-
-
 def _create_compat_view_if_safe(
     conn: duckdb.DuckDBPyConnection,
     view_name: str,
@@ -473,6 +410,115 @@ def ensure_canonical_clinical_views(db_path: str) -> None:
             )
     finally:
         conn.close()
+
+
+def _is_legacy_sum_varchar_error_message(msg: ChatMessageModel) -> bool:
+    """
+    Determine whether a `ChatMessageModel` is a legacy `sum(VARCHAR)` or `avg(VARCHAR)` Binder Error.
+
+    Args:
+    ----
+        msg: Validated `ChatMessageModel` instance.
+
+    Returns:
+    -------
+        bool: True if the assistant message contains a stale `sum(VARCHAR)` / `avg(VARCHAR)` Binder Error.
+
+    """
+    if msg.role != "assistant":
+        return False
+    lower_content = msg.content.lower()
+    if "binder error" not in lower_content:
+        return False
+    return (
+        "sum(varchar)" in lower_content
+        or "avg(varchar)" in lower_content
+        or "numsevhypo" in lower_content
+        or "tblaptsummary" in lower_content
+    )
+
+
+def filter_legacy_error_messages(
+    messages: List[ChatMessageModel],
+    session_id: str = "",
+) -> Tuple[List[ChatMessageModel], bool]:
+    """
+    Filter out legacy `sum(VARCHAR)` / `NumSevHypo` binder error messages from a session transcript.
+
+    Also strips any preceding duplicate user prompt that immediately preceded a failed `sum(VARCHAR)` turn
+    when a subsequent retry turn follows, and clears any error message in `session-default-welcome`.
+
+    Args:
+    ----
+        messages: Ordered list of `ChatMessageModel` items in the session.
+        session_id: Optional session identifier for `session-default-welcome` checks.
+
+    Returns:
+    -------
+        Tuple[List[ChatMessageModel], bool]: `(cleaned_messages, was_modified)`.
+
+    """
+    cleaned: List[ChatMessageModel] = []
+    changed = False
+    total = len(messages)
+    for idx, item in enumerate(messages):
+        is_welcome_err = session_id == "session-default-welcome" and (
+            bool(item.isError) or "binder error" in item.content.lower()
+        )
+        is_superseded_legacy_err = (
+            _is_legacy_sum_varchar_error_message(item) and idx + 1 < total
+        )
+        if is_welcome_err or is_superseded_legacy_err:
+            changed = True
+            if cleaned and cleaned[-1].role == "user":
+                cleaned.pop()
+        else:
+            cleaned.append(item)
+    return cleaned, changed
+
+
+def sanitize_legacy_error_sessions(conn: duckdb.DuckDBPyConnection) -> int:
+    """
+    Inspect `chat_sessions` for stale `sum(VARCHAR)` / `NumSevHypo` binder error transcripts and repair them.
+
+    Removes legacy `sum(VARCHAR)` assistant error messages (and their immediately preceding duplicate
+    user retry prompt when followed by a retry) or resets `session-default-welcome` if it contains errors.
+
+    Args:
+    ----
+        conn: Open writable DuckDB connection to the sessions database.
+
+    Returns:
+    -------
+        int: Number of session rows updated or cleaned.
+
+    """
+    rows = conn.execute(
+        "SELECT session_id, messages_json FROM chat_sessions"
+    ).fetchall()
+    updated_count = 0
+    for session_id_raw, messages_json_raw in rows:
+        session_id = str(session_id_raw)
+        messages_json = str(messages_json_raw or "[]")
+        try:
+            parsed = json.loads(messages_json)
+            models = [ChatMessageModel(**m) for m in parsed]
+        except Exception:
+            continue
+
+        cleaned_msgs, changed = filter_legacy_error_messages(
+            models, session_id=session_id
+        )
+        if changed:
+            conn.execute(
+                "UPDATE chat_sessions SET messages_json = ? WHERE session_id = ?",
+                [
+                    json.dumps([m.model_dump() for m in cleaned_msgs]),
+                    session_id,
+                ],
+            )
+            updated_count += 1
+    return updated_count
 
 
 def seed_sessions_database(sessions_db_path: str) -> int:

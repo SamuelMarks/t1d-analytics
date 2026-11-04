@@ -84,34 +84,61 @@ def test_hf_factory_direct_coverage() -> None:
     ):
         mock_model.to.side_effect = None
         res = ORIGINAL_CREATE_MODEL(factory, "test", device="cuda:0")
-        assert res is not None
+        assert res is mock_model
+        mock_transformers.AutoModelForCausalLM.from_pretrained.assert_called_with(
+            "test",
+            torch_dtype=torch.float16,
+        )
+        mock_model.to.assert_called_with(torch.device("cuda:0"))
 
-        mock_transformers.BitsAndBytesConfig = MagicMock()
+        mock_transformers.BitsAndBytesConfig = MagicMock(return_value="bnb_cfg_8")
         res_q8 = ORIGINAL_CREATE_MODEL(factory, "test", quantization="8bit")
-        assert res_q8 is not None
+        assert res_q8 is mock_model
+        mock_transformers.BitsAndBytesConfig.assert_called_with(load_in_8bit=True)
+        _, kwargs_q8 = mock_transformers.AutoModelForCausalLM.from_pretrained.call_args
+        assert kwargs_q8["quantization_config"] == "bnb_cfg_8"
 
+        mock_transformers.BitsAndBytesConfig = MagicMock(return_value="bnb_cfg_4")
         res_q4 = ORIGINAL_CREATE_MODEL(factory, "test", quantization="4bit")
-        assert res_q4 is not None
+        assert res_q4 is mock_model
+        mock_transformers.BitsAndBytesConfig.assert_called_with(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+        _, kwargs_q4 = mock_transformers.AutoModelForCausalLM.from_pretrained.call_args
+        assert kwargs_q4["quantization_config"] == "bnb_cfg_4"
 
         res_lora = ORIGINAL_CREATE_MODEL(factory, "test", use_lora=True)
-        assert res_lora is not None
+        assert res_lora is mock_model
+        mock_peft.LoraConfig.assert_called_with(
+            task_type=mock_peft.TaskType.CAUSAL_LM,
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        )
+        mock_peft.get_peft_model.assert_called_once()
 
-        mock_transformers.BitsAndBytesConfig.side_effect = Exception("BNB err")
+        mock_transformers.BitsAndBytesConfig.side_effect = RuntimeError("BNB err")
         res_bnb_err = ORIGINAL_CREATE_MODEL(factory, "test", quantization="8bit")
-        assert res_bnb_err is not None
+        assert res_bnb_err is mock_model
+        _, kwargs_bnb_err = (
+            mock_transformers.AutoModelForCausalLM.from_pretrained.call_args
+        )
+        assert "quantization_config" not in kwargs_bnb_err
         mock_transformers.BitsAndBytesConfig.side_effect = None
 
-        mock_model.to.side_effect = Exception("to err")
+        mock_model.to.side_effect = RuntimeError("to err")
         res_to_err = ORIGINAL_CREATE_MODEL(factory, "test", device="cpu")
-        assert res_to_err is not None
+        assert res_to_err is mock_model
         mock_model.to.side_effect = None
 
-        mock_peft.get_peft_model.side_effect = Exception("LoRA err")
+        mock_peft.get_peft_model.side_effect = RuntimeError("LoRA err")
         with pytest.raises(RuntimeError, match="Failed to apply LoRA"):
             ORIGINAL_CREATE_MODEL(factory, "test", use_lora=True)
         mock_peft.get_peft_model.side_effect = None
 
-    mock_transformers.AutoModelForCausalLM.from_pretrained.side_effect = Exception(
+    mock_transformers.AutoModelForCausalLM.from_pretrained.side_effect = RuntimeError(
         "Load err"
     )
     with patch.dict("sys.modules", {"transformers": mock_transformers}):
@@ -307,23 +334,22 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
         PretrainedSavableProtocol,
         TrainableModelProtocol,
     )
-
-    assert DEFAULT_CHOICE_HF_MODELS == {
-        "google/gemma-4-E4B": "https://huggingface.co/google/gemma-4-E4B",
-        "microsoft/Phi-4-mini-flash-reasoning": "https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning",
-        "meta-llama/Llama-3.2-1B": "https://huggingface.co/meta-llama/Llama-3.2-1B",
-    }
-    assert DEFAULT_CHOICE_OLLAMA_MODELS == (
-        "gemma:2b",
-        "llama3.2:1b",
-        "phi4-mini",
+    from t1d_analytics.llm_client import (
+        ANY_LLM_PROVIDER_CATALOG,
+        DEFAULT_CHOICE_HF_REPOS,
     )
-
     from t1d_analytics.llm_client import (
         DEFAULT_CHOICE_OLLAMA_MODELS as LLM_CLIENT_DEFAULT_MODELS,
     )
 
-    assert LLM_CLIENT_DEFAULT_MODELS == ("gemma:2b", "llama3.2:1b", "phi4-mini")
+    assert len(DEFAULT_CHOICE_HF_MODELS) == len(DEFAULT_CHOICE_HF_REPOS)
+    for repo_id, hf_url in DEFAULT_CHOICE_HF_MODELS.items():
+        assert repo_id in DEFAULT_CHOICE_HF_REPOS
+        assert hf_url == f"https://huggingface.co/{repo_id}"
+        assert f"huggingface/{repo_id}" in ANY_LLM_PROVIDER_CATALOG["huggingface"]
+
+    assert DEFAULT_CHOICE_OLLAMA_MODELS == LLM_CLIENT_DEFAULT_MODELS
+    assert all(bool(m.strip()) for m in DEFAULT_CHOICE_OLLAMA_MODELS)
 
     class _CharWordTokenizer:
         """Deterministic word-level tokenizer satisfying TokenizerProtocol."""

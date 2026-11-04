@@ -300,16 +300,23 @@ def test_gemma_sql_pipeline_engine_library_mode(tmp_path: Path) -> None:
 
 
 def test_gemma_sql_pipeline_engine_missing_package() -> None:
-    """Test GemmaSqlPipelineEngine raises RuntimeError when gemma_4_sql package is not installed."""
-    with patch.dict("sys.modules", {"gemma_4_sql": None}):
+    """Test GemmaSqlPipelineEngine raises GemmaToolchainError when gemma_4_sql package is not installed."""
+    from t1d_analytics.errors import GemmaToolchainError
+
+    with patch(
+        "t1d_analytics.gemma_bridge.importlib.import_module",
+        side_effect=ImportError("No module named 'gemma_4_sql'"),
+    ):
         with pytest.raises(
-            RuntimeError, match="The 'gemma_4_sql' Python package is required"
+            GemmaToolchainError, match="The 'gemma_4_sql' Python package is required"
         ):
             GemmaSqlPipelineEngine()
 
 
 def test_gemma_sql_pipeline_engine_uncallable_functions(tmp_path: Path) -> None:
     """Test GemmaSqlPipelineEngine errors when package functions are not callable or stage is invalid."""
+    from t1d_analytics.errors import GemmaToolchainError, InvalidStageError
+
     db_file = tmp_path / "train.duckdb"
     db_file.write_text("data")
     ds_file = tmp_path / "data.jsonl"
@@ -318,55 +325,100 @@ def test_gemma_sql_pipeline_engine_uncallable_functions(tmp_path: Path) -> None:
     tc_file.write_text("tests")
     out_dir = tmp_path / "out"
 
-    empty_pkg = MagicMock(spec=[])
-    with patch.dict("sys.modules", {"gemma_4_sql": empty_pkg}):
+    empty_pkg = types.ModuleType("gemma_4_sql")
+    with patch(
+        "t1d_analytics.gemma_bridge.importlib.import_module",
+        return_value=empty_pkg,
+    ):
         engine = GemmaSqlPipelineEngine()
 
         # Invalid stage
-        with pytest.raises(ValueError, match="Invalid ETL stage"):
+        with pytest.raises(InvalidStageError, match="Invalid ETL stage"):
             engine.run_etl("invalid_stage", db_file, "table")
 
         # Missing run_etl
-        with pytest.raises(RuntimeError, match="does not expose a callable 'run_etl'"):
+        with pytest.raises(
+            GemmaToolchainError, match="does not expose a callable 'run_etl'"
+        ):
             engine.run_etl("sft", db_file, "table")
 
         # Missing run_sft
-        with pytest.raises(RuntimeError, match="does not expose a callable 'run_sft'"):
+        with pytest.raises(
+            GemmaToolchainError, match="does not expose a callable 'run_sft'"
+        ):
             engine.run_sft("gemma-7b", ds_file, out_dir)
 
         # Missing run_dpo
-        with pytest.raises(RuntimeError, match="does not expose a callable 'run_dpo'"):
+        with pytest.raises(
+            GemmaToolchainError, match="does not expose a callable 'run_dpo'"
+        ):
             engine.run_dpo("gemma-7b", ds_file, out_dir)
 
         # Missing evaluate_sql
         with pytest.raises(
-            RuntimeError, match="does not expose a callable 'evaluate_sql'"
+            GemmaToolchainError, match="does not expose a callable 'evaluate_sql'"
         ):
             engine.evaluate_sql("gemma-7b", tc_file, db_file)
 
+    non_callable_pkg = types.ModuleType("gemma_4_sql")
+    non_callable_pkg.run_etl = "not_a_func"  # type: ignore[attr-defined]
+    non_callable_pkg.run_sft = "not_a_func"  # type: ignore[attr-defined]
+    non_callable_pkg.run_dpo = "not_a_func"  # type: ignore[attr-defined]
+    non_callable_pkg.evaluate_sql = "not_a_func"  # type: ignore[attr-defined]
+    with patch(
+        "t1d_analytics.gemma_bridge.importlib.import_module",
+        return_value=non_callable_pkg,
+    ):
+        engine_nc = GemmaSqlPipelineEngine()
+        with pytest.raises(
+            GemmaToolchainError, match="does not expose a callable 'run_etl'"
+        ):
+            engine_nc.run_etl("sft", db_file, "table")
+        with pytest.raises(
+            GemmaToolchainError, match="does not expose a callable 'run_sft'"
+        ):
+            engine_nc.run_sft("gemma-7b", ds_file, out_dir)
+        with pytest.raises(
+            GemmaToolchainError, match="does not expose a callable 'run_dpo'"
+        ):
+            engine_nc.run_dpo("gemma-7b", ds_file, out_dir)
+        with pytest.raises(
+            GemmaToolchainError, match="does not expose a callable 'evaluate_sql'"
+        ):
+            engine_nc.evaluate_sql("gemma-7b", tc_file, db_file)
+
 
 def test_gemma_sql_pipeline_engine_missing_files(tmp_path: Path) -> None:
-    """Test GemmaSqlPipelineEngine FileNotFoundError validations for missing files."""
-    mock_pkg = MagicMock()
-    with patch.dict("sys.modules", {"gemma_4_sql": mock_pkg}):
+    """Test GemmaSqlPipelineEngine DatabaseNotFoundError validations for missing files."""
+    from t1d_analytics.errors import DatabaseNotFoundError
+
+    fake_pkg = _FakeGemmaLibraryModule()
+    with patch(
+        "t1d_analytics.gemma_bridge.importlib.import_module",
+        return_value=fake_pkg,
+    ):
         engine = GemmaSqlPipelineEngine()
         valid_file = tmp_path / "exists.txt"
         valid_file.write_text("x")
         missing_file = tmp_path / "missing.txt"
 
-        with pytest.raises(FileNotFoundError, match="DuckDB database file not found"):
+        with pytest.raises(
+            DatabaseNotFoundError, match="DuckDB database file not found"
+        ):
             engine.run_etl("sft", missing_file, "table")
 
-        with pytest.raises(FileNotFoundError, match="Training dataset not found"):
+        with pytest.raises(DatabaseNotFoundError, match="Training dataset not found"):
             engine.run_sft("gemma-7b", missing_file, tmp_path / "out")
 
-        with pytest.raises(FileNotFoundError, match="Preference dataset not found"):
+        with pytest.raises(DatabaseNotFoundError, match="Preference dataset not found"):
             engine.run_dpo("gemma-7b", missing_file, tmp_path / "out")
 
-        with pytest.raises(FileNotFoundError, match="Test cases file not found"):
+        with pytest.raises(DatabaseNotFoundError, match="Test cases file not found"):
             engine.evaluate_sql("gemma-7b", missing_file, valid_file)
 
-        with pytest.raises(FileNotFoundError, match="DuckDB database file not found"):
+        with pytest.raises(
+            DatabaseNotFoundError, match="DuckDB database file not found"
+        ):
             engine.evaluate_sql("gemma-7b", valid_file, missing_file)
 
 
@@ -812,12 +864,17 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
             "Count patients by age",
             "SELECT COUNT(subject_id",
         )
+        unbalanced_valid_sql = score_sql_completion_logprob(
+            "Count patients",
+            "SELECT '(' FROM patients",
+        )
         non_readonly = score_sql_completion_logprob(
             "Count patients by age",
             "DROP TABLE patients",
         )
         empty_score = score_sql_completion_logprob("Count patients", "   ")
         assert good_score > bad_syntax
+        assert good_score > unbalanced_valid_sql
         assert good_score > non_readonly
         assert bad_syntax > empty_score
 

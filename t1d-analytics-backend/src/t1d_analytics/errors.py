@@ -390,14 +390,14 @@ class TpuWorkloadError(TrainingError):
     default_status_code = 502
 
 
-class SeedVerificationError(DatabaseError, RuntimeError):
+class SeedVerificationError(DatabaseError):
     """Raised when database seeding verification fails due to missing or empty clinical tables."""
 
     default_error_code = "backend.seedVerificationFailed"
     default_status_code = 500
 
 
-class DownloadError(T1DError, RuntimeError, ValueError):
+class DownloadError(T1DError, RuntimeError):
     """Raised when dataset downloading, checksum verification, or ASP.NET postback fails."""
 
     default_error_code = "backend.downloadFailed"
@@ -481,7 +481,7 @@ class InvalidGcsUriError(GcsStorageError, ValueError):
     default_status_code = 400
 
 
-class ConfigFileNotFoundError(TrainingError, FileNotFoundError, ValueError):
+class ConfigFileNotFoundError(TrainingError, FileNotFoundError):
     """Raised when a required training or ETL configuration file is missing on disk."""
 
     default_error_code = "backend.configNotFound"
@@ -523,7 +523,7 @@ class SubprocessTimeoutError(TrainingError, TimeoutError):
     default_status_code = 504
 
 
-class SchemaExtractionError(DatabaseError, RuntimeError):
+class SchemaExtractionError(DatabaseError):
     """Raised when extracting or formatting database schemas for LLM prompts fails."""
 
     default_error_code = "backend.schemaExtractionFailed"

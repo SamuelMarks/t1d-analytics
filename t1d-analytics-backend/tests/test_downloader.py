@@ -115,10 +115,12 @@ def test_download_file_sha256_verification(tmp_path: Path, requests_mock: Mock) 
     assert (tmp_path / "hashed.csv").exists()
 
     # Mismatch case
+    from t1d_analytics.errors import DownloadError
+
     tmp_path2 = tmp_path / "sub"
     tmp_path2.mkdir()
     requests_mock.get("http://test/bad_hash.csv", content=data)
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+    with pytest.raises(DownloadError, match="SHA-256 mismatch"):
         download_file(
             "http://test/bad_hash.csv",
             tmp_path2,
@@ -671,8 +673,10 @@ def test_download_aspnet_postback_file_sha256_verification(
     )
     assert p.exists()
 
-    # Invalid checksum raises ValueError
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+    # Invalid checksum raises DownloadError
+    from t1d_analytics.errors import DownloadError
+
+    with pytest.raises(DownloadError, match="SHA-256 mismatch"):
         download_aspnet_postback_file(
             page_url="http://test/export.aspx",
             event_target="ctl",

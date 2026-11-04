@@ -213,10 +213,7 @@ class InProcessDuckDbGemmaFallback:
         num_steps: int = 1,
     ) -> Tuple[List[float], List[float]]:
         """
-        Execute a genuine PyTorch Bradley-Terry preference optimization pass over `(prompt, chosen_sql, rejected_sql)`.
-
-        Computes token-level log-probabilities for chosen and rejected SQL completions under a
-        causal LM and minimizes `-log(sigmoid(beta * (logp_chosen - logp_rejected)))`.
+        Delegate DPO preference tensor optimization to the shared training runner engine.
 
         Args:
         ----
@@ -229,69 +226,13 @@ class InProcessDuckDbGemmaFallback:
             Tuple[List[float], List[float]]: `(dpo_losses, reward_margins)` per preference pair step.
 
         """
-        import torch
+        from t1d_analytics.training_runner import optimize_dpo_preference_pairs
 
-        from t1d_analytics.dataset_loader import _tokenize_pair_with_masking
-        from t1d_analytics.hf_models import (
-            TinyCausalLMFactory,
-            TokenizerProtocol,
-            _extract_output_logits,
+        return optimize_dpo_preference_pairs(
+            pairs=pairs,
+            beta=beta,
+            num_steps=num_steps,
         )
-
-        class _ByteTokenizer(TokenizerProtocol):
-            """Lightweight byte-level tokenizer for in-process DPO optimization."""
-
-            def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
-                """Encode UTF-8 text into byte token IDs in `[1, 999]`."""
-                _ = add_special_tokens
-                return [min(999, max(1, b)) for b in text.encode("utf-8")]
-
-        tokenizer = _ByteTokenizer()
-        factory = TinyCausalLMFactory()
-        model = factory.create_model("tiny-dpo", vocab_size=1000, embed_dim=32)
-        model.train()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
-        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
-
-        losses: List[float] = []
-        margins: List[float] = []
-        for _ in range(max(1, num_steps)):
-            for pair in pairs:
-                c_in, c_lbl = _tokenize_pair_with_masking(
-                    pair["prompt"], pair["chosen_sql"], tokenizer, max_seq_length=256
-                )
-                r_in, r_lbl = _tokenize_pair_with_masking(
-                    pair["prompt"],
-                    pair["rejected_sql"] or "SELECT 0",
-                    tokenizer,
-                    max_seq_length=256,
-                )
-
-                optimizer.zero_grad()
-                c_logits = _extract_output_logits(model(c_in.unsqueeze(0))).view(
-                    -1, 1000
-                )
-                r_logits = _extract_output_logits(model(r_in.unsqueeze(0))).view(
-                    -1, 1000
-                )
-
-                c_token_nll = loss_fn(c_logits, c_lbl.view(-1))
-                r_token_nll = loss_fn(r_logits, r_lbl.view(-1))
-                logp_chosen = -float(c_token_nll.item())
-                logp_rejected = -float(r_token_nll.item())
-                margin_val = beta * (logp_chosen - logp_rejected)
-                sigmoid_neg_margin = 1.0 / (1.0 + math.exp(margin_val))
-                dpo_grad_scale = max(1e-6, beta * sigmoid_neg_margin)
-                (c_token_nll / (1.0 / dpo_grad_scale)).backward()
-                ((-r_token_nll) / (1.0 / dpo_grad_scale)).backward()
-                optimizer.step()
-
-                dpo_loss_val = -math.log(1.0 / (1.0 + math.exp(-margin_val)))
-
-                losses.append(round(dpo_loss_val, 4))
-                margins.append(round(margin_val, 4))
-
-        return losses, margins
 
     def run_dpo(
         self,
@@ -325,7 +266,7 @@ class InProcessDuckDbGemmaFallback:
         from t1d_analytics.training_runner import get_training_runner
 
         pairs: List[Dict[str, str]] = []
-        with open(ds_p, "r", encoding="utf-8") as f:
+        with open(ds_p, encoding="utf-8") as f:
             for raw_line in f:
                 raw_line = raw_line.strip()
                 if not raw_line:
@@ -427,7 +368,7 @@ class InProcessDuckDbGemmaFallback:
         import duckdb
 
         cases: List[Dict[str, str]] = []
-        with open(tc_p, "r", encoding="utf-8") as f:
+        with open(tc_p, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

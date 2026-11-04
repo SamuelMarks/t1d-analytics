@@ -18,6 +18,7 @@ import {
 import {
   type ClinicalChartThemeConfig,
   CLINICAL_CHART_THEME,
+  CV_TARGET_PCT,
   type TIRMetrics,
   type DetectedCgmColumns,
   type DayNightTIRMetrics,
@@ -43,6 +44,7 @@ export {
   filter14DayWindow,
   type ClinicalChartThemeConfig,
   CLINICAL_CHART_THEME,
+  CV_TARGET_PCT,
   type TIRMetrics,
   type DetectedCgmColumns,
   type DayNightTIRMetrics,
@@ -85,48 +87,15 @@ export function createSvgElement<K extends keyof SVGElementTagNameMap>(
 }
 
 /**
- * Create an accessible SVG stacked bar chart representing clinical Time-in-Range.
- * @param {TIRMetrics} metrics - The TIR percentages to render.
- * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
- * @returns {SVGSVGElement} The generated SVG chart element.
+ * Appends the stacked TIR segments and legend caption onto an SVG container.
+ * @param {SVGSVGElement} svg - Target SVG element.
+ * @param {TIRMetrics} metrics - Calculated TIR metrics.
+ * @returns {void}
  */
-export function renderTIRBarSvg(
+export function buildTirStackedBar(
+  svg: SVGSVGElement,
   metrics: TIRMetrics,
-  idSuffix: string = "",
-): SVGSVGElement {
-  const suffix = idSuffix ? `-${idSuffix}` : "";
-  const titleId = `tir-svg-title${suffix}`;
-  const descId = `tir-svg-desc${suffix}`;
-  const svg = createSvgElement("svg", {
-    viewBox: "0 0 500 70",
-    width: "100%",
-    height: "70",
-    role: "img",
-  });
-
-  const svgTitle = createSvgElement(
-    "title",
-    { id: titleId },
-    i18next.t(
-      "cgm.title",
-      "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
-    ),
-  );
-  svg.appendChild(svgTitle);
-
-  const descText = i18next.t("cgm.tirChartAria", {
-    inRange: formatNumber(metrics.inRange),
-    low: formatNumber(metrics.low),
-    veryLow: formatNumber(metrics.veryLow),
-    high: formatNumber(metrics.high),
-    veryHigh: formatNumber(metrics.veryHigh),
-    defaultValue: `Time in Range Chart: In Range ${formatNumber(metrics.inRange)}%, Low ${formatNumber(metrics.low)}%, Very Low ${formatNumber(metrics.veryLow)}%, High ${formatNumber(metrics.high)}%, Very High ${formatNumber(metrics.veryHigh)}%`,
-  });
-  const svgDesc = createSvgElement("desc", { id: descId }, descText);
-  svg.appendChild(svgDesc);
-  svg.setAttribute("aria-label", descText);
-  svg.setAttribute("aria-labelledby", `${titleId} ${descId}`);
-
+): void {
   const segments = [
     {
       label: i18next.t("cgm.veryLowLabel", "Very Low (<54)"),
@@ -195,7 +164,6 @@ export function renderTIRBarSvg(
     currentX += width;
   }
 
-  // Legend caption
   svg.appendChild(
     createSvgElement(
       "text",
@@ -214,7 +182,52 @@ export function renderTIRBarSvg(
       }),
     ),
   );
+}
 
+/**
+ * Create an accessible SVG stacked bar chart representing clinical Time-in-Range.
+ * @param {TIRMetrics} metrics - The TIR percentages to render.
+ * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
+ * @returns {SVGSVGElement} The generated SVG chart element.
+ */
+export function renderTIRBarSvg(
+  metrics: TIRMetrics,
+  idSuffix: string = "",
+): SVGSVGElement {
+  const suffix = idSuffix ? `-${idSuffix}` : "";
+  const titleId = `tir-svg-title${suffix}`;
+  const descId = `tir-svg-desc${suffix}`;
+  const svg = createSvgElement("svg", {
+    viewBox: "0 0 500 70",
+    width: "100%",
+    height: "70",
+    role: "img",
+  });
+
+  const svgTitle = createSvgElement(
+    "title",
+    { id: titleId },
+    i18next.t(
+      "cgm.title",
+      "📊 CGM Analytics (Ambulatory Glucose Profile & TIR)",
+    ),
+  );
+  svg.appendChild(svgTitle);
+
+  const descText = i18next.t("cgm.tirChartAria", {
+    inRange: formatNumber(metrics.inRange),
+    low: formatNumber(metrics.low),
+    veryLow: formatNumber(metrics.veryLow),
+    high: formatNumber(metrics.high),
+    veryHigh: formatNumber(metrics.veryHigh),
+    defaultValue: `Time in Range Chart: In Range ${formatNumber(metrics.inRange)}%, Low ${formatNumber(metrics.low)}%, Very Low ${formatNumber(metrics.veryLow)}%, High ${formatNumber(metrics.high)}%, Very High ${formatNumber(metrics.veryHigh)}%`,
+  });
+  const svgDesc = createSvgElement("desc", { id: descId }, descText);
+  svg.appendChild(svgDesc);
+  svg.setAttribute("aria-label", descText);
+  svg.setAttribute("aria-labelledby", `${titleId} ${descId}`);
+
+  buildTirStackedBar(svg, metrics);
   return svg;
 }
 
@@ -271,7 +284,7 @@ export function renderHistogramSvg(
     const y = 90 - barHeight;
     const binCenter = min + i * binSize + binSize / 2;
 
-    let color = "#2ecc71"; // in-range
+    let color = "#2ecc71";
     if (binCenter < 70) color = "#e74c3c";
     else if (binCenter > 180) color = "#f39c12";
 
@@ -301,6 +314,245 @@ export function renderHistogramSvg(
 }
 
 /**
+ * Appends the 70-180 mg/dL target band and dashed reference threshold lines onto an AGP SVG.
+ * @param {SVGSVGElement} svg - Target AGP SVG element.
+ * @param {number} leftX - Left chart margin X coordinate.
+ * @param {number} rightX - Right chart margin X coordinate.
+ * @param {(g: number) => number} mapY - Glucose-to-Y coordinate mapper.
+ * @returns {void}
+ */
+export function buildAgpTargetZone(
+  svg: SVGSVGElement,
+  leftX: number,
+  rightX: number,
+  mapY: (g: number) => number,
+): void {
+  const y70 = mapY(70);
+  const y180 = mapY(180);
+  const targetRect = createSvgElement("rect", {
+    x: String(leftX),
+    y: String(y180),
+    width: String(rightX - leftX),
+    height: String(y70 - y180),
+    fill: CLINICAL_CHART_THEME.colors.agpTargetBand,
+  });
+  targetRect.appendChild(
+    createSvgElement(
+      "title",
+      {},
+      i18next.t("cgm.targetRange", "Target Range (70-180 mg/dL)"),
+    ),
+  );
+  svg.appendChild(targetRect);
+
+  const targetLines: Array<[number, string]> = [
+    [70, "#2ecc71"],
+    [180, "#2ecc71"],
+    [250, "#f39c12"],
+  ];
+  for (const [targetVal, color] of targetLines) {
+    const lineY = mapY(targetVal);
+    svg.appendChild(
+      createSvgElement("line", {
+        x1: String(leftX),
+        y1: String(lineY),
+        x2: String(rightX),
+        y2: String(lineY),
+        stroke: color,
+        "stroke-dasharray": "3,3",
+        "stroke-width": "1",
+      }),
+    );
+    svg.appendChild(
+      createSvgElement(
+        "text",
+        {
+          x: String(leftX - 8),
+          y: String(lineY + 4),
+          "text-anchor": "end",
+          "font-size": "10",
+          fill: "var(--text-muted, #bac2de)",
+        },
+        formatNumber(targetVal),
+      ),
+    );
+  }
+}
+
+/**
+ * Appends the 5th-95th outer ribbon, 25th-75th IQR inner ribbon, and 50th median curve onto an AGP SVG.
+ * @param {SVGSVGElement} svg - Target AGP SVG element.
+ * @param {AGPIntervalMetrics[]} intervals - AGP intervals.
+ * @param {(minute: number) => number} mapX - Minute-of-day to X coordinate mapper.
+ * @param {(g: number) => number} mapY - Glucose to Y coordinate mapper.
+ * @returns {void}
+ */
+export function buildAgpPercentileBands(
+  svg: SVGSVGElement,
+  intervals: AGPIntervalMetrics[],
+  mapX: (minute: number) => number,
+  mapY: (g: number) => number,
+): void {
+  const activeIntervals = intervals.filter(
+    (intv) => intv.count > 0 || intv.p50 > 0,
+  );
+  if (activeIntervals.length <= 1) return;
+
+  const p95Points = activeIntervals.map(
+    (intv) =>
+      `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p95).toFixed(1)}`,
+  );
+  const p5Points = [...activeIntervals]
+    .reverse()
+    .map(
+      (intv) =>
+        `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p5).toFixed(1)}`,
+    );
+  svg.appendChild(
+    createSvgElement("polygon", {
+      points: `${p95Points.join(" ")} ${p5Points.join(" ")}`,
+      fill: CLINICAL_CHART_THEME.colors.agpOuterRibbon,
+    }),
+  );
+
+  const p75Points = activeIntervals.map(
+    (intv) =>
+      `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p75).toFixed(1)}`,
+  );
+  const p25Points = [...activeIntervals]
+    .reverse()
+    .map(
+      (intv) =>
+        `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p25).toFixed(1)}`,
+    );
+  svg.appendChild(
+    createSvgElement("polygon", {
+      points: `${p75Points.join(" ")} ${p25Points.join(" ")}`,
+      fill: CLINICAL_CHART_THEME.colors.agpInnerRibbon,
+    }),
+  );
+
+  const p50Points = activeIntervals.map(
+    (intv) =>
+      `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p50).toFixed(1)}`,
+  );
+  svg.appendChild(
+    createSvgElement("polyline", {
+      points: p50Points.join(" "),
+      stroke: CLINICAL_CHART_THEME.colors.agpMedianLine,
+      "stroke-width": "2.5",
+      fill: "none",
+    }),
+  );
+}
+
+/**
+ * Appends X-axis time ticks, header caption, and X/Y axis titles onto an AGP SVG.
+ * @param {SVGSVGElement} svg - Target AGP SVG element.
+ * @param {number} leftX - Left chart margin X coordinate.
+ * @param {number} rightX - Right chart margin X coordinate.
+ * @param {number} topY - Top chart margin Y coordinate.
+ * @param {number} bottomY - Bottom chart margin Y coordinate.
+ * @param {(minute: number) => number} mapX - Minute-of-day to X coordinate mapper.
+ * @param {string} formattedDays - Formatted day count string.
+ * @param {string} formattedReadings - Formatted reading count string.
+ * @returns {void}
+ */
+export function buildAgpGridAndAxes(
+  svg: SVGSVGElement,
+  leftX: number,
+  rightX: number,
+  topY: number,
+  bottomY: number,
+  mapX: (minute: number) => number,
+  formattedDays: string,
+  formattedReadings: string,
+): void {
+  for (let h = 0; h <= 24; h += 6) {
+    const minVal = h * 60;
+    const xPos = mapX(minVal);
+    svg.appendChild(
+      createSvgElement("line", {
+        x1: String(xPos),
+        y1: String(bottomY),
+        x2: String(xPos),
+        y2: String(bottomY + 5),
+        stroke: "var(--text-muted, #bac2de)",
+      }),
+    );
+
+    const formattedHour = formatNumber(h % 24, {
+      minimumIntegerDigits: 2,
+      useGrouping: false,
+    });
+    const formattedMin = formatNumber(0, {
+      minimumIntegerDigits: 2,
+      useGrouping: false,
+    });
+    svg.appendChild(
+      createSvgElement(
+        "text",
+        {
+          x: String(xPos),
+          y: String(bottomY + 18),
+          "text-anchor": "middle",
+          "font-size": "10",
+          fill: "var(--text-muted, #bac2de)",
+        },
+        `${formattedHour}:${formattedMin}`,
+      ),
+    );
+  }
+
+  svg.appendChild(
+    createSvgElement(
+      "text",
+      {
+        x: String(leftX),
+        y: "14",
+        "font-size": "11",
+        "font-weight": "600",
+        fill: "var(--text-light, #cdd6f4)",
+      },
+      i18next.t("cgm.agpHeaderCaption", {
+        days: formattedDays,
+        readings: formattedReadings,
+        defaultValue: `24-Hour Ambulatory Glucose Profile (AGP) - ${formattedDays} Days (${formattedReadings} Readings)`,
+      }),
+    ),
+  );
+
+  svg.appendChild(
+    createSvgElement(
+      "text",
+      {
+        x: "12",
+        y: String((topY + bottomY) / 2),
+        "text-anchor": "middle",
+        "font-size": "9",
+        fill: "var(--text-muted, #bac2de)",
+        transform: `rotate(-90, 12, ${(topY + bottomY) / 2})`,
+      },
+      i18next.t("cgm.glucoseMgDl", "Glucose (mg/dL)"),
+    ),
+  );
+
+  svg.appendChild(
+    createSvgElement(
+      "text",
+      {
+        x: String((leftX + rightX) / 2),
+        y: String(bottomY + 24),
+        "text-anchor": "middle",
+        "font-size": "9",
+        fill: "var(--text-muted, #bac2de)",
+      },
+      i18next.t("cgm.timeOfDay", "Time of Day (Hour)"),
+    ),
+  );
+}
+
+/**
  * Render an accessible SVG Ambulatory Glucose Profile (AGP) 24-hour curve chart.
  * @param {AGPData} agp - The calculated AGP profile metrics.
  * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
@@ -313,38 +565,33 @@ export function renderAGPSvg(
   const suffix = idSuffix ? `-${idSuffix}` : "";
   const titleId = `agp-svg-title${suffix}`;
   const descId = `agp-svg-desc${suffix}`;
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 600 230");
-  svg.setAttribute("width", "100%");
-  svg.setAttribute("height", "230");
-  svg.setAttribute("role", "img");
+  const svg = createSvgElement("svg", {
+    viewBox: "0 0 600 230",
+    width: "100%",
+    height: "230",
+    role: "img",
+  });
 
-  const svgTitle = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "title",
+  svg.appendChild(
+    createSvgElement(
+      "title",
+      { id: titleId },
+      i18next.t(
+        "cgm.agpCurveTitle",
+        "24-Hour Ambulatory Glucose Profile (Median & Percentiles)",
+      ),
+    ),
   );
-  svgTitle.id = titleId;
-  svgTitle.textContent = i18next.t(
-    "cgm.agpCurveTitle",
-    "24-Hour Ambulatory Glucose Profile (Median & Percentiles)",
-  );
-  svg.appendChild(svgTitle);
 
   const formattedDays = formatNumber(agp.totalDays);
   const formattedReadings = formatNumber(agp.totalReadings);
-
-  const svgDesc = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "desc",
-  );
-  svgDesc.id = descId;
-  svgDesc.textContent = i18next.t("cgm.agpSummaryAria", {
+  const descText = i18next.t("cgm.agpSummaryAria", {
     days: formattedDays,
     readings: formattedReadings,
     defaultValue: `24-Hour Ambulatory Glucose Profile (AGP) Curve: median glucose across 24 hours with 5th to 95th percentile ranges and 70-180 mg/dL target band (${formattedReadings} readings across ${formattedDays} days).`,
   });
-  svg.appendChild(svgDesc);
-  svg.setAttribute("aria-label", svgDesc.textContent);
+  svg.appendChild(createSvgElement("desc", { id: descId }, descText));
+  svg.setAttribute("aria-label", descText);
   svg.setAttribute("aria-labelledby", `${titleId} ${descId}`);
 
   const minG = 40;
@@ -354,224 +601,104 @@ export function renderAGPSvg(
   const leftX = 50;
   const rightX = 575;
 
-  /**
-   * Maps a glucose reading in mg/dL to an SVG Y-coordinate.
-   * @param {number} g - Glucose value in mg/dL.
-   * @returns {number} SVG vertical coordinate.
-   */
   const mapY = (g: number): number => {
     const clamped = Math.max(minG, Math.min(maxG, g));
     return bottomY - ((clamped - minG) / (maxG - minG)) * (bottomY - topY);
   };
+  const mapX = (minute: number): number =>
+    leftX + (minute / 1440) * (rightX - leftX);
 
-  /**
-   * Maps a minute-of-day offset (0-1440) to an SVG X-coordinate.
-   * @param {number} minute - Minute of the day from midnight.
-   * @returns {number} SVG horizontal coordinate.
-   */
-  const mapX = (minute: number): number => {
-    return leftX + (minute / 1440) * (rightX - leftX);
-  };
-
-  // 1. Target range green band (70 - 180 mg/dL)
-  const y70 = mapY(70);
-  const y180 = mapY(180);
-  const targetRect = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "rect",
+  buildAgpTargetZone(svg, leftX, rightX, mapY);
+  buildAgpPercentileBands(svg, agp.intervals, mapX, mapY);
+  buildAgpGridAndAxes(
+    svg,
+    leftX,
+    rightX,
+    topY,
+    bottomY,
+    mapX,
+    formattedDays,
+    formattedReadings,
   );
-  targetRect.setAttribute("x", String(leftX));
-  targetRect.setAttribute("y", String(y180));
-  targetRect.setAttribute("width", String(rightX - leftX));
-  targetRect.setAttribute("height", String(y70 - y180));
-  targetRect.setAttribute("fill", "rgba(46, 204, 113, 0.15)");
-  const targetBandTitle = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "title",
-  );
-  targetBandTitle.textContent = i18next.t(
-    "cgm.targetRange",
-    "Target Range (70-180 mg/dL)",
-  );
-  targetRect.appendChild(targetBandTitle);
-  svg.appendChild(targetRect);
-
-  // Target lines (dashed)
-  const targetLines: Array<[number, string]> = [
-    [70, "#2ecc71"],
-    [180, "#2ecc71"],
-    [250, "#f39c12"],
-  ];
-  for (const [targetVal, color] of targetLines) {
-    const lineY = mapY(targetVal);
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", String(leftX));
-    line.setAttribute("y1", String(lineY));
-    line.setAttribute("x2", String(rightX));
-    line.setAttribute("y2", String(lineY));
-    line.setAttribute("stroke", color);
-    line.setAttribute("stroke-dasharray", "3,3");
-    line.setAttribute("stroke-width", "1");
-    svg.appendChild(line);
-
-    // Y-axis label
-    const yLabel = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "text",
-    );
-    yLabel.setAttribute("x", String(leftX - 8));
-    yLabel.setAttribute("y", String(lineY + 4));
-    yLabel.setAttribute("text-anchor", "end");
-    yLabel.setAttribute("font-size", "10");
-    yLabel.setAttribute("fill", "var(--text-muted, #bac2de)");
-    yLabel.textContent = formatNumber(targetVal);
-    svg.appendChild(yLabel);
-  }
-
-  // Active intervals with readings or interpolated profile values
-  const activeIntervals = agp.intervals.filter(
-    (intv) => intv.count > 0 || intv.p50 > 0,
-  );
-
-  if (activeIntervals.length > 1) {
-    // 2. Outer percentile ribbon (5th - 95th)
-    const p95Points = activeIntervals.map(
-      (intv) =>
-        `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p95).toFixed(1)}`,
-    );
-    const p5Points = [...activeIntervals]
-      .reverse()
-      .map(
-        (intv) =>
-          `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p5).toFixed(1)}`,
-      );
-    const outerPolygon = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "polygon",
-    );
-    outerPolygon.setAttribute(
-      "points",
-      `${p95Points.join(" ")} ${p5Points.join(" ")}`,
-    );
-    outerPolygon.setAttribute("fill", "rgba(52, 152, 219, 0.2)");
-    svg.appendChild(outerPolygon);
-
-    // 3. Inner percentile ribbon (25th - 75th / IQR)
-    const p75Points = activeIntervals.map(
-      (intv) =>
-        `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p75).toFixed(1)}`,
-    );
-    const p25Points = [...activeIntervals]
-      .reverse()
-      .map(
-        (intv) =>
-          `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p25).toFixed(1)}`,
-      );
-    const innerPolygon = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "polygon",
-    );
-    innerPolygon.setAttribute(
-      "points",
-      `${p75Points.join(" ")} ${p25Points.join(" ")}`,
-    );
-    innerPolygon.setAttribute("fill", "rgba(41, 128, 185, 0.35)");
-    svg.appendChild(innerPolygon);
-
-    // 4. Median curve (50th percentile)
-    const p50Points = activeIntervals.map(
-      (intv) =>
-        `${mapX(intv.minuteOfDay).toFixed(1)},${mapY(intv.p50).toFixed(1)}`,
-    );
-    const medianPolyline = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "polyline",
-    );
-    medianPolyline.setAttribute("points", p50Points.join(" "));
-    medianPolyline.setAttribute("stroke", "#1b4f72");
-    medianPolyline.setAttribute("stroke-width", "2.5");
-    medianPolyline.setAttribute("fill", "none");
-    svg.appendChild(medianPolyline);
-  }
-
-  // X-axis time points (00:00, 06:00, 12:00, 18:00, 24:00)
-  for (let h = 0; h <= 24; h += 6) {
-    const minVal = h * 60;
-    const xPos = mapX(minVal);
-    const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    tick.setAttribute("x1", String(xPos));
-    tick.setAttribute("y1", String(bottomY));
-    tick.setAttribute("x2", String(xPos));
-    tick.setAttribute("y2", String(bottomY + 5));
-    tick.setAttribute("stroke", "var(--text-muted, #bac2de)");
-    svg.appendChild(tick);
-
-    const xLabel = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "text",
-    );
-    xLabel.setAttribute("x", String(xPos));
-    xLabel.setAttribute("y", String(bottomY + 18));
-    xLabel.setAttribute("text-anchor", "middle");
-    xLabel.setAttribute("font-size", "10");
-    xLabel.setAttribute("fill", "var(--text-muted, #bac2de)");
-    const formattedHour = formatNumber(h % 24, {
-      minimumIntegerDigits: 2,
-      useGrouping: false,
-    });
-    const formattedMin = formatNumber(0, {
-      minimumIntegerDigits: 2,
-      useGrouping: false,
-    });
-    xLabel.textContent = `${formattedHour}:${formattedMin}`;
-    svg.appendChild(xLabel);
-  }
-
-  // Header caption
-  const header = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  header.setAttribute("x", String(leftX));
-  header.setAttribute("y", "14");
-  header.setAttribute("font-size", "11");
-  header.setAttribute("font-weight", "600");
-  header.setAttribute("fill", "var(--text-light, #cdd6f4)");
-  header.textContent = i18next.t("cgm.agpHeaderCaption", {
-    days: formattedDays,
-    readings: formattedReadings,
-    defaultValue: `24-Hour Ambulatory Glucose Profile (AGP) - ${formattedDays} Days (${formattedReadings} Readings)`,
-  });
-  svg.appendChild(header);
-
-  // Y-axis title (Glucose mg/dL)
-  const yAxisTitle = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "text",
-  );
-  yAxisTitle.setAttribute("x", "12");
-  yAxisTitle.setAttribute("y", String((topY + bottomY) / 2));
-  yAxisTitle.setAttribute("text-anchor", "middle");
-  yAxisTitle.setAttribute("font-size", "9");
-  yAxisTitle.setAttribute("fill", "var(--text-muted, #bac2de)");
-  yAxisTitle.setAttribute(
-    "transform",
-    `rotate(-90, 12, ${(topY + bottomY) / 2})`,
-  );
-  yAxisTitle.textContent = i18next.t("cgm.glucoseMgDl", "Glucose (mg/dL)");
-  svg.appendChild(yAxisTitle);
-
-  // X-axis title (Time of Day)
-  const xAxisTitle = document.createElementNS(
-    "http://www.w3.org/2000/svg",
-    "text",
-  );
-  xAxisTitle.setAttribute("x", String((leftX + rightX) / 2));
-  xAxisTitle.setAttribute("y", String(bottomY + 24));
-  xAxisTitle.setAttribute("text-anchor", "middle");
-  xAxisTitle.setAttribute("font-size", "9");
-  xAxisTitle.setAttribute("fill", "var(--text-muted, #bac2de)");
-  xAxisTitle.textContent = i18next.t("cgm.timeOfDay", "Time of Day (Hour)");
-  svg.appendChild(xAxisTitle);
 
   return svg;
+}
+
+/**
+ * Builds the clinical summary metric badges (GMI, CV, LBGI/HBGI, and Day/Night TIR).
+ * @param {TIRMetrics} metrics - Calculated TIR metrics.
+ * @param {Array<Record<string, ClinicalRowValue>>} displayRows - Filtered rows for the observation window.
+ * @param {string} glucoseCol - Glucose column identifier.
+ * @param {string} [timeCol] - Optional timestamp column identifier.
+ * @returns {HTMLDivElement} Container holding clinical metric badges.
+ */
+export function buildMetricSummaryTiles(
+  metrics: TIRMetrics,
+  displayRows: Array<Record<string, ClinicalRowValue>>,
+  glucoseCol: string,
+  timeCol?: string,
+): HTMLDivElement {
+  const badgesRow = document.createElement("div");
+  badgesRow.className = "cgm-clinical-badges";
+
+  const gmiBadge = document.createElement("div");
+  gmiBadge.className = "cgm-badge cgm-badge-info";
+  const formattedGmi = formatNumber(metrics.gmi);
+  const formattedMean = formatNumber(metrics.mean);
+  gmiBadge.textContent = i18next.t(
+    "cgm.gmi",
+    `GMI: ${formattedGmi}% (Mean: ${formattedMean} mg/dL)`,
+    { gmi: formattedGmi, mean: formattedMean },
+  );
+  badgesRow.appendChild(gmiBadge);
+
+  const cvBadge = document.createElement("div");
+  const isCvOptimal = metrics.cv <= CV_TARGET_PCT;
+  cvBadge.className = `cgm-badge ${isCvOptimal ? "cgm-badge-success" : "cgm-badge-danger"}`;
+  const formattedCv = formatNumber(metrics.cv);
+  const formattedSd = formatNumber(metrics.sd);
+  cvBadge.textContent = i18next.t(
+    "cgm.cv",
+    `CV: ${formattedCv}% (Target ≤36% | SD: ${formattedSd} mg/dL)`,
+    { cv: formattedCv, sd: formattedSd },
+  );
+  badgesRow.appendChild(cvBadge);
+
+  const lbgiBadge = document.createElement("div");
+  lbgiBadge.className = "cgm-badge cgm-badge-purple";
+  const formattedLbgi = formatNumber(metrics.lbgi);
+  const formattedHbgi = formatNumber(metrics.hbgi);
+  lbgiBadge.textContent = i18next.t(
+    "cgm.lbgiHbgi",
+    `LBGI: ${formattedLbgi} | HBGI: ${formattedHbgi}`,
+    { lbgi: formattedLbgi, hbgi: formattedHbgi },
+  );
+  badgesRow.appendChild(lbgiBadge);
+
+  if (timeCol) {
+    const dn = calculateDayNightTIR(displayRows, timeCol, glucoseCol);
+    if (dn.day.count > 0 && dn.night.count > 0) {
+      const dnBadge = document.createElement("div");
+      dnBadge.className = "cgm-badge cgm-badge-warning";
+      const dayPct = formatNumber(dn.day.inRange);
+      const dayCount = formatNumber(dn.day.count);
+      const nightPct = formatNumber(dn.night.inRange);
+      const nightCount = formatNumber(dn.night.count);
+      dnBadge.textContent = i18next.t(
+        "cgm.dayNight",
+        `TIR Day: ${dayPct}% (n=${dayCount}) | Night: ${nightPct}% (n=${nightCount})`,
+        {
+          day: dayPct,
+          dayCount,
+          night: nightPct,
+          nightCount,
+        },
+      );
+      badgesRow.appendChild(dnBadge);
+    }
+  }
+
+  return badgesRow;
 }
 
 /**
@@ -628,7 +755,6 @@ export function renderCgmCard(
   const controlsRow = document.createElement("div");
   controlsRow.className = "cgm-card-controls";
 
-  // Window selector dropdown if time column is available
   if (timeCol) {
     const windowSelect = document.createElement("select");
     windowSelect.className = "agp-window-select form-select form-select-sm";
@@ -673,7 +799,6 @@ export function renderCgmCard(
   headerRow.appendChild(controlsRow);
   container.appendChild(headerRow);
 
-  // Active wear badge if time column present
   if (timeCol) {
     const wear = calculateActiveWear(displayRows, timeCol, 288);
     const wearBadge = document.createElement("div");
@@ -705,85 +830,19 @@ export function renderCgmCard(
     container.appendChild(wearBadge);
   }
 
-  // Clinical Indices Badges (GMI, CV, LBGI, HBGI, Day/Night)
-  const badgesRow = document.createElement("div");
-  badgesRow.className = "cgm-clinical-badges";
-
-  const gmiBadge = document.createElement("div");
-  gmiBadge.className = "cgm-badge cgm-badge-info";
-  const formattedGmi = formatNumber(metrics.gmi);
-  const formattedMean = formatNumber(metrics.mean);
-  gmiBadge.textContent = i18next.t(
-    "cgm.gmi",
-    `GMI: ${formattedGmi}% (Mean: ${formattedMean} mg/dL)`,
-    { gmi: formattedGmi, mean: formattedMean },
+  container.appendChild(
+    buildMetricSummaryTiles(metrics, displayRows, glucoseCol, timeCol),
   );
-  badgesRow.appendChild(gmiBadge);
+  container.appendChild(renderTIRBarSvg(metrics, idSuffix));
 
-  const cvBadge = document.createElement("div");
-  const isCvOptimal = metrics.cv <= 36.0;
-  cvBadge.className = `cgm-badge ${isCvOptimal ? "cgm-badge-success" : "cgm-badge-danger"}`;
-  const formattedCv = formatNumber(metrics.cv);
-  const formattedSd = formatNumber(metrics.sd);
-  cvBadge.textContent = i18next.t(
-    "cgm.cv",
-    `CV: ${formattedCv}% (Target ≤36% | SD: ${formattedSd} mg/dL)`,
-    { cv: formattedCv, sd: formattedSd },
-  );
-  badgesRow.appendChild(cvBadge);
-
-  const lbgiBadge = document.createElement("div");
-  lbgiBadge.className = "cgm-badge cgm-badge-purple";
-  const formattedLbgi = formatNumber(metrics.lbgi);
-  const formattedHbgi = formatNumber(metrics.hbgi);
-  lbgiBadge.textContent = i18next.t(
-    "cgm.lbgiHbgi",
-    `LBGI: ${formattedLbgi} | HBGI: ${formattedHbgi}`,
-    { lbgi: formattedLbgi, hbgi: formattedHbgi },
-  );
-  badgesRow.appendChild(lbgiBadge);
-
-  if (timeCol) {
-    const dn = calculateDayNightTIR(displayRows, timeCol, glucoseCol);
-    if (dn.day.count > 0 && dn.night.count > 0) {
-      const dnBadge = document.createElement("div");
-      dnBadge.className = "cgm-badge cgm-badge-warning";
-      const dayPct = formatNumber(dn.day.inRange);
-      const dayCount = formatNumber(dn.day.count);
-      const nightPct = formatNumber(dn.night.inRange);
-      const nightCount = formatNumber(dn.night.count);
-      dnBadge.textContent = i18next.t(
-        "cgm.dayNight",
-        `TIR Day: ${dayPct}% (n=${dayCount}) | Night: ${nightPct}% (n=${nightCount})`,
-        {
-          day: dayPct,
-          dayCount,
-          night: nightPct,
-          nightCount,
-        },
-      );
-      badgesRow.appendChild(dnBadge);
-    }
-  }
-
-  container.appendChild(badgesRow);
-
-  // 1. Time-in-Range stacked bar
-  const tirChart = renderTIRBarSvg(metrics, idSuffix);
-  container.appendChild(tirChart);
-
-  // 2. 24-Hour Ambulatory Glucose Profile (AGP) Curve
   if (timeCol) {
     const agpData = calculateAGP(displayRows, timeCol, glucoseCol);
     if (agpData && agpData.totalReadings > 0) {
-      const agpChart = renderAGPSvg(agpData, idSuffix);
-      container.appendChild(agpChart);
+      container.appendChild(renderAGPSvg(agpData, idSuffix));
     }
   }
 
-  // 3. Glucose distribution histogram
-  const histChart = renderHistogramSvg(values, idSuffix);
-  container.appendChild(histChart);
+  container.appendChild(renderHistogramSvg(values, idSuffix));
 
   return container;
 }

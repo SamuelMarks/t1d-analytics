@@ -11,6 +11,27 @@ import {
   parseDateAndMinuteOfDay,
 } from "./clinical-dates";
 
+/** Clinical Level 2 hypoglycemia threshold in mg/dL (<54 mg/dL). */
+export const HYPO_LEVEL2_MGDL = 54;
+
+/** Clinical Level 1 hypoglycemia threshold in mg/dL (<70 mg/dL). */
+export const HYPO_LEVEL1_MGDL = 70;
+
+/** Clinical Level 1 hyperglycemia threshold in mg/dL (>180 mg/dL). */
+export const HYPER_LEVEL1_MGDL = 180;
+
+/** Clinical Level 2 hyperglycemia threshold in mg/dL (>250 mg/dL). */
+export const HYPER_LEVEL2_MGDL = 250;
+
+/** Glucose Management Indicator (GMI) regression intercept (Bergenstal et al., 2018). */
+export const GMI_INTERCEPT = 3.31;
+
+/** Glucose Management Indicator (GMI) regression slope per mg/dL (Bergenstal et al., 2018). */
+export const GMI_SLOPE = 0.02392;
+
+/** International Consensus optimal Coefficient of Variation (CV) target percentage (<=36%). */
+export const CV_TARGET_PCT = 36.0;
+
 /**
  * Strongly-typed theme and layout configuration for clinical CGM SVG visualizations.
  */
@@ -52,10 +73,10 @@ export interface ClinicalChartThemeConfig {
  * Default clinical CGM chart layout and threshold constants.
  */
 export const CLINICAL_CHART_THEME: ClinicalChartThemeConfig = {
-  veryLowThresholdMgDl: 54,
-  lowThresholdMgDl: 70,
-  inRangeUpperMgDl: 180,
-  highUpperMgDl: 250,
+  veryLowThresholdMgDl: HYPO_LEVEL2_MGDL,
+  lowThresholdMgDl: HYPO_LEVEL1_MGDL,
+  inRangeUpperMgDl: HYPER_LEVEL1_MGDL,
+  highUpperMgDl: HYPER_LEVEL2_MGDL,
   mmolToMgDlFactor: 18.0182,
   colors: {
     veryLow: "#8b0000",
@@ -246,17 +267,54 @@ export function detectCgmColumns(
   return { glucoseCol, timeCol };
 }
 
+/** Alias for `detectCgmColumns`. */
+export const _detectCgmColumns = detectCgmColumns;
+
 /**
- * Normalize an array of positive sensor glucose readings to mg/dL, automatically scaling mmol/L traces (`median < 25` and `p95 < 55`) by `18.0182`.
+ * Extracts positive numeric glucose values from a cell value.
+ * @param {ClinicalRowValue} rawG - Raw cell value.
+ * @returns {number | null} Positive numeric glucose reading or null.
+ */
+export function _extractValidGlucoseReadings(
+  rawG: ClinicalRowValue,
+): number | null {
+  if (typeof rawG === "number") {
+    return !isNaN(rawG) && rawG > 0 ? rawG : null;
+  }
+  if (typeof rawG === "string") {
+    const p = parseFloat(rawG);
+    return !isNaN(p) && p > 0 ? p : null;
+  }
+  return null;
+}
+
+/**
+ * Glucose measurement unit option for CGM normalization.
+ */
+export type GlucoseUnit = "mg/dL" | "mmol/L" | "auto";
+
+/**
+ * Normalize an array of positive sensor glucose readings to mg/dL.
+ * When `unit` is `"auto"` (default), traces with `median < 25` and `p95 < 55` are scaled by `18.0182` (`mmol/L` to `mg/dL`).
  * @param {number[]} values - Raw numeric sensor glucose values.
+ * @param {GlucoseUnit} [unit="auto"] - Explicit glucose unit (`"mg/dL"`, `"mmol/L"`, or `"auto"` heuristic).
  * @returns {number[]} Positive sensor glucose values normalized to mg/dL.
  */
-export function normalizeGlucoseToMgDl(values: number[]): number[] {
+export function normalizeGlucoseToMgDl(
+  values: number[],
+  unit: GlucoseUnit = "auto",
+): number[] {
   const valid = values.filter(
     (v) => typeof v === "number" && !isNaN(v) && v > 0,
   );
   if (valid.length === 0) {
     return [];
+  }
+  if (unit === "mg/dL") {
+    return valid;
+  }
+  if (unit === "mmol/L") {
+    return valid.map((v) => v * CLINICAL_CHART_THEME.mmolToMgDlFactor);
   }
   const sorted = [...valid].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
@@ -268,12 +326,60 @@ export function normalizeGlucoseToMgDl(values: number[]): number[] {
 }
 
 /**
+ * Raw glycemic range bucket counts and sum across normalized mg/dL readings.
+ */
+export interface GlycemicRangeCounts {
+  /** Count of readings below 54 mg/dL. */
+  vl: number;
+  /** Count of readings between 54 and 69 mg/dL. */
+  l: number;
+  /** Count of readings in target range 70 to 180 mg/dL. */
+  ir: number;
+  /** Count of readings between 181 and 250 mg/dL. */
+  h: number;
+  /** Count of readings above 250 mg/dL. */
+  vh: number;
+  /** Sum of all normalized glucose readings in mg/dL. */
+  sum: number;
+}
+
+/**
+ * Computes raw glycemic range counts and sum across normalized mg/dL readings.
+ * @param {number[]} scaledValues - Normalized mg/dL readings.
+ * @returns {GlycemicRangeCounts} Bucket counts and sum.
+ */
+export function _computeGlycemicRanges(
+  scaledValues: number[],
+): GlycemicRangeCounts {
+  let vl = 0;
+  let l = 0;
+  let ir = 0;
+  let h = 0;
+  let vh = 0;
+  let sum = 0;
+
+  for (const v of scaledValues) {
+    sum += v;
+    if (v < CLINICAL_CHART_THEME.veryLowThresholdMgDl) vl++;
+    else if (v < CLINICAL_CHART_THEME.lowThresholdMgDl) l++;
+    else if (v <= CLINICAL_CHART_THEME.inRangeUpperMgDl) ir++;
+    else if (v <= CLINICAL_CHART_THEME.highUpperMgDl) h++;
+    else vh++;
+  }
+  return { vl, l, ir, h, vh, sum };
+}
+
+/**
  * Calculate clinical Time-in-Range (TIR) percentages from an array of glucose readings.
- * @param {number[]} values - Sensor glucose values in mg/dL.
+ * @param {number[]} values - Sensor glucose values in mg/dL or mmol/L.
+ * @param {GlucoseUnit} [unit="auto"] - Explicit glucose unit (`"mg/dL"`, `"mmol/L"`, or `"auto"`).
  * @returns {TIRMetrics} Calculated clinical TIR metrics.
  */
-export function calculateTIR(values: number[]): TIRMetrics {
-  const scaledValues = normalizeGlucoseToMgDl(values);
+export function calculateTIR(
+  values: number[],
+  unit: GlucoseUnit = "auto",
+): TIRMetrics {
+  const scaledValues = normalizeGlucoseToMgDl(values, unit);
   if (scaledValues.length === 0) {
     return {
       veryLow: 0,
@@ -291,22 +397,7 @@ export function calculateTIR(values: number[]): TIRMetrics {
     };
   }
 
-  let vl = 0;
-  let l = 0;
-  let ir = 0;
-  let h = 0;
-  let vh = 0;
-  let sum = 0;
-
-  for (const v of scaledValues) {
-    sum += v;
-    if (v < CLINICAL_CHART_THEME.veryLowThresholdMgDl) vl++;
-    else if (v < CLINICAL_CHART_THEME.lowThresholdMgDl) l++;
-    else if (v <= CLINICAL_CHART_THEME.inRangeUpperMgDl) ir++;
-    else if (v <= CLINICAL_CHART_THEME.highUpperMgDl) h++;
-    else vh++;
-  }
-
+  const { vl, l, ir, h, vh, sum } = _computeGlycemicRanges(scaledValues);
   const n = scaledValues.length;
   const meanVal = sum / n;
 
@@ -328,7 +419,7 @@ export function calculateTIR(values: number[]): TIRMetrics {
 
   const sd = Math.round(Math.sqrt(varianceSum / (n > 1 ? n - 1 : 1)) * 10) / 10;
   const cv = Math.round((sd / meanVal) * 100 * 10) / 10;
-  const gmi = Math.round((3.31 + 0.02392 * meanVal) * 10) / 10;
+  const gmi = Math.round((GMI_INTERCEPT + GMI_SLOPE * meanVal) * 10) / 10;
   const lbgi = Math.round((lbgiSum / n) * 10) / 10;
   const hbgi = Math.round((hbgiSum / n) * 10) / 10;
 
@@ -364,17 +455,10 @@ export function calculateDayNightTIR(
   const nightValues: number[] = [];
 
   for (const r of rows) {
-    const rawTime = r[timeCol];
-    const rawG = r[glucoseCol];
-    let val: number | null = null;
-    if (typeof rawG === "number") val = rawG;
-    else if (typeof rawG === "string") {
-      const p = parseFloat(rawG);
-      if (!isNaN(p)) val = p;
-    }
-    if (val === null || val <= 0) continue;
+    const val = _extractValidGlucoseReadings(r[glucoseCol]);
+    if (val === null) continue;
 
-    const parsed = parseDateAndMinuteOfDay(rawTime);
+    const parsed = parseDateAndMinuteOfDay(r[timeCol]);
     if (!parsed) continue;
 
     if (parsed.minuteOfDay >= 360 && parsed.minuteOfDay < 1320) {
@@ -412,58 +496,16 @@ export function computePercentile(sortedValues: number[], p: number): number {
 }
 
 /**
- * Compute 24-Hour Ambulatory Glucose Profile (AGP) percentiles across time of day.
- * @param {Array<Record<string, ClinicalRowValue>>} rows - Tabular dataset rows.
- * @param {string} timeCol - Column name representing date/time.
- * @param {string} glucoseCol - Column name representing glucose values.
- * @param {number} [intervalMinutes=30] - Binning interval in minutes.
- * @returns {AGPData | null} Computed AGP profile or null if insufficient data.
+ * Computes raw AGP interval percentile buckets and interpolates empty time bins.
+ * @param {number[][]} buckets - Binned glucose readings per time-of-day bucket.
+ * @param {number} intervalMinutes - Binning interval in minutes.
+ * @returns {AGPIntervalMetrics[]} Populated and interpolated AGP intervals.
  */
-export function calculateAGP(
-  rows: Array<Record<string, ClinicalRowValue>>,
-  timeCol: string,
-  glucoseCol: string,
-  intervalMinutes: number = 30,
-): AGPData | null {
-  const numBuckets = Math.floor(1440 / intervalMinutes);
-  const buckets: number[][] = Array.from({ length: numBuckets }, () => []);
-  const days = new Set<string>();
-  const validEntries: Array<{ bucketIdx: number; glucoseVal: number }> = [];
-
-  for (const r of rows) {
-    const rawTime = r[timeCol];
-    const rawGlucose = r[glucoseCol];
-
-    let glucoseVal: number | null = null;
-    if (typeof rawGlucose === "number") glucoseVal = rawGlucose;
-    else if (typeof rawGlucose === "string") {
-      const p = parseFloat(rawGlucose);
-      if (!isNaN(p)) glucoseVal = p;
-    }
-
-    if (glucoseVal === null || isNaN(glucoseVal) || glucoseVal <= 0) continue;
-
-    const parsedTime = parseDateAndMinuteOfDay(rawTime);
-    if (!parsedTime) continue;
-
-    days.add(parsedTime.dayKey);
-    const bucketIdx = Math.min(
-      numBuckets - 1,
-      Math.floor(parsedTime.minuteOfDay / intervalMinutes),
-    );
-    validEntries.push({ bucketIdx, glucoseVal });
-  }
-
-  if (validEntries.length === 0) return null;
-
-  const normalizedGlucose = normalizeGlucoseToMgDl(
-    validEntries.map((entry) => entry.glucoseVal),
-  );
-  for (let i = 0; i < validEntries.length; i++) {
-    buckets[validEntries[i].bucketIdx].push(normalizedGlucose[i]);
-  }
-  const totalValid = validEntries.length;
-
+export function _computeAgpPercentiles(
+  buckets: number[][],
+  intervalMinutes: number,
+): AGPIntervalMetrics[] {
+  const numBuckets = buckets.length;
   const intervals: AGPIntervalMetrics[] = [];
   for (let i = 0; i < numBuckets; i++) {
     const bVals = buckets[i].sort((a, b) => a - b);
@@ -545,11 +587,57 @@ export function calculateAGP(
       }
     }
   }
+  return intervals;
+}
+
+/**
+ * Compute 24-Hour Ambulatory Glucose Profile (AGP) percentiles across time of day.
+ * @param {Array<Record<string, ClinicalRowValue>>} rows - Tabular dataset rows.
+ * @param {string} timeCol - Column name representing date/time.
+ * @param {string} glucoseCol - Column name representing glucose values.
+ * @param {number} [intervalMinutes=30] - Binning interval in minutes.
+ * @returns {AGPData | null} Computed AGP profile or null if insufficient data.
+ */
+export function calculateAGP(
+  rows: Array<Record<string, ClinicalRowValue>>,
+  timeCol: string,
+  glucoseCol: string,
+  intervalMinutes: number = 30,
+): AGPData | null {
+  const numBuckets = Math.floor(1440 / intervalMinutes);
+  const buckets: number[][] = Array.from({ length: numBuckets }, () => []);
+  const days = new Set<string>();
+  const validEntries: Array<{ bucketIdx: number; glucoseVal: number }> = [];
+
+  for (const r of rows) {
+    const glucoseVal = _extractValidGlucoseReadings(r[glucoseCol]);
+    if (glucoseVal === null) continue;
+
+    const parsedTime = parseDateAndMinuteOfDay(r[timeCol]);
+    if (!parsedTime) continue;
+
+    days.add(parsedTime.dayKey);
+    const bucketIdx = Math.min(
+      numBuckets - 1,
+      Math.floor(parsedTime.minuteOfDay / intervalMinutes),
+    );
+    validEntries.push({ bucketIdx, glucoseVal });
+  }
+
+  if (validEntries.length === 0) return null;
+
+  const normalizedGlucose = normalizeGlucoseToMgDl(
+    validEntries.map((entry) => entry.glucoseVal),
+  );
+  for (let i = 0; i < validEntries.length; i++) {
+    buckets[validEntries[i].bucketIdx].push(normalizedGlucose[i]);
+  }
+  const intervals = _computeAgpPercentiles(buckets, intervalMinutes);
 
   return {
     intervals,
     totalDays: Math.max(1, days.size),
-    totalReadings: totalValid,
+    totalReadings: validEntries.length,
   };
 }
 
@@ -581,23 +669,31 @@ export function detectSensorIntervalMinutes(epochTimesMs: number[]): number {
 }
 
 /**
- * Calculate active CGM sensor wear time percentage according to clinical consensus.
- * Clinical standard expects 288 readings/day for 5-minute sampling (>=70% active wear),
- * or auto-detects 1-minute (1440/day) and 15-minute FreeStyle Libre (96/day) intervals.
- * @param {Array<Record<string, ClinicalRowValue>>} rows - CGM dataset rows.
- * @param {string} timeCol - Column name representing timestamp.
- * @param {number} [expectedReadingsPerDay] - Explicit expected readings per 24 hours override.
- * @param {number} [monitoringDays] - Optional explicit duration of the monitoring/observation window in days.
- * @param {number} [intervalMinutes] - Optional explicit sensor sampling interval in minutes (`1`, `5`, `15`).
- * @returns {ActiveWearMetrics} Active wear metrics.
+ * Intermediate daily wear statistics extracted from CGM dataset rows.
  */
-export function calculateActiveWear(
+export interface DailyWearStats {
+  /** Number of distinct calendar days with readings. */
+  activeDays: number;
+  /** Total number of valid timestamped readings. */
+  totalReadings: number;
+  /** Total calendar days spanned by the observation window. */
+  calendarDays: number;
+  /** Positive epoch timestamps in milliseconds. */
+  epochTimesMs: number[];
+}
+
+/**
+ * Computes active days, epoch timestamp bounds, and calendar day span from CGM rows.
+ * @param {Array<Record<string, ClinicalRowValue>>} rows - CGM dataset rows.
+ * @param {string} timeCol - Timestamp column name.
+ * @param {number} [monitoringDays] - Optional explicit monitoring window duration in days.
+ * @returns {DailyWearStats} Daily wear statistics.
+ */
+export function _computeDailyWearStats(
   rows: Array<Record<string, ClinicalRowValue>>,
   timeCol: string,
-  expectedReadingsPerDay?: number,
   monitoringDays?: number,
-  intervalMinutes?: number,
-): ActiveWearMetrics {
+): DailyWearStats {
   const days = new Set<string>();
   const epochTimesMs: number[] = [];
   let totalReadings = 0;
@@ -605,8 +701,7 @@ export function calculateActiveWear(
   let maxTime = -Infinity;
 
   for (const r of rows) {
-    const rawTime = r[timeCol];
-    const parsed = parseDateAndMinuteOfDay(rawTime);
+    const parsed = parseDateAndMinuteOfDay(r[timeCol]);
     if (parsed) {
       days.add(parsed.dayKey);
       totalReadings++;
@@ -620,14 +715,7 @@ export function calculateActiveWear(
   }
 
   if (totalReadings === 0) {
-    return {
-      activeDays: 0,
-      calendarDays: 0,
-      totalReadings: 0,
-      expectedReadings: 0,
-      wearPercentage: 0,
-      isValidWear: false,
-    };
+    return { activeDays: 0, totalReadings: 0, calendarDays: 0, epochTimesMs };
   }
 
   let calendarDays = monitoringDays;
@@ -657,6 +745,46 @@ export function calculateActiveWear(
     }
   }
 
+  return {
+    activeDays: days.size,
+    totalReadings,
+    calendarDays,
+    epochTimesMs,
+  };
+}
+
+/**
+ * Calculate active CGM sensor wear time percentage according to clinical consensus.
+ * Clinical standard expects 288 readings/day for 5-minute sampling (>=70% active wear),
+ * or auto-detects 1-minute (1440/day) and 15-minute FreeStyle Libre (96/day) intervals.
+ * @param {Array<Record<string, ClinicalRowValue>>} rows - CGM dataset rows.
+ * @param {string} timeCol - Column name representing timestamp.
+ * @param {number} [expectedReadingsPerDay] - Explicit expected readings per 24 hours override.
+ * @param {number} [monitoringDays] - Optional explicit duration of the monitoring/observation window in days.
+ * @param {number} [intervalMinutes] - Optional explicit sensor sampling interval in minutes (`1`, `5`, `15`).
+ * @returns {ActiveWearMetrics} Active wear metrics.
+ */
+export function calculateActiveWear(
+  rows: Array<Record<string, ClinicalRowValue>>,
+  timeCol: string,
+  expectedReadingsPerDay?: number,
+  monitoringDays?: number,
+  intervalMinutes?: number,
+): ActiveWearMetrics {
+  const { activeDays, totalReadings, calendarDays, epochTimesMs } =
+    _computeDailyWearStats(rows, timeCol, monitoringDays);
+
+  if (totalReadings === 0) {
+    return {
+      activeDays: 0,
+      calendarDays: 0,
+      totalReadings: 0,
+      expectedReadings: 0,
+      wearPercentage: 0,
+      isValidWear: false,
+    };
+  }
+
   let resolvedReadingsPerDay: number;
   if (intervalMinutes !== undefined && intervalMinutes > 0) {
     resolvedReadingsPerDay = Math.round(1440 / intervalMinutes);
@@ -667,7 +795,6 @@ export function calculateActiveWear(
     resolvedReadingsPerDay = Math.round(1440 / detectedInterval);
   }
 
-  const activeDays = days.size;
   const expectedReadings = calendarDays * resolvedReadingsPerDay;
   const wearPercentage =
     expectedReadings > 0

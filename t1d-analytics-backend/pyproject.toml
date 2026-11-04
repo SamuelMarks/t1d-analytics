@@ -33,7 +33,7 @@ line-length = 88
 target-version = "py39"
 src = ["src", "t1d-analytics-backend/src", "../scripts", "scripts"]
 lint.select = ["E", "F", "I", "D", "B", "UP", "SIM", "C4", "PIE", "RUF", "C901", "PTH"]
-lint.ignore = ["D203", "D212", "E501", "UP006", "UP007", "UP015", "UP035", "UP037", "UP045", "SIM105", "SIM108", "SIM117", "B008", "RUF001", "RUF002", "PTH110", "PTH123"]
+lint.ignore = ["D203", "D212", "E501", "UP006", "UP007", "UP035", "UP037", "UP045", "SIM117", "B008", "RUF001", "RUF002", "PTH123"]
 lint.mccabe.max-complexity = 12
 
 [tool.mypy]

@@ -3,16 +3,14 @@
 import logging
 import os
 import threading
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import (
     AsyncGenerator,
     Awaitable,
     Callable,
     Dict,
-    Iterator,
     List,
-    Optional,
 )
 
 import duckdb as duckdb
@@ -21,136 +19,59 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from t1d_analytics.analytics import (
-    get_database_schema as get_database_schema,
-)
-from t1d_analytics.analytics import (
-    profile_table as profile_table,
-)
+from t1d_analytics.analytics import get_database_schema, profile_table
 from t1d_analytics.api_dependencies import (
-    BaseRateLimiter as BaseRateLimiter,
-)
-from t1d_analytics.api_dependencies import (
-    DuckDbRateLimiter as DuckDbRateLimiter,
-)
-from t1d_analytics.api_dependencies import (
-    MemoryRateLimiter as MemoryRateLimiter,
-)
-from t1d_analytics.api_dependencies import (
-    check_rate_limit as check_rate_limit,
-)
-from t1d_analytics.api_dependencies import (
-    configure_api_logging as configure_api_logging,
-)
-from t1d_analytics.api_dependencies import (
-    discover_workspace_databases as discover_workspace_databases,
-)
-from t1d_analytics.api_dependencies import (
-    enforce_rate_limit as _enforce_rate_limit_dep,
-)
-from t1d_analytics.api_dependencies import (
-    execute_sql as _execute_sql_dep,
-)
-from t1d_analytics.api_dependencies import (
-    get_allowed_db_dirs as get_allowed_db_dirs,
-)
-from t1d_analytics.api_dependencies import (
-    get_cors_origins as get_cors_origins,
-)
-from t1d_analytics.api_dependencies import (
-    get_rate_limiter as get_rate_limiter,
-)
-from t1d_analytics.api_dependencies import (
-    get_request_locale as get_request_locale,
-)
-from t1d_analytics.api_dependencies import (
-    get_sessions_conn as _get_sessions_conn_dep,
-)
-from t1d_analytics.api_dependencies import (
-    parse_error as parse_error,
-)
-from t1d_analytics.api_dependencies import (
+    AppServices,
+    BaseRateLimiter,
+    DuckDbRateLimiter,
+    MemoryRateLimiter,
+    check_rate_limit,
+    configure_api_logging,
+    create_default_app_services,
+    discover_workspace_databases,
+    enforce_rate_limit,
+    execute_sql,
+    get_allowed_db_dirs,
+    get_app_services,
+    get_cors_origins,
+    get_rate_limiter,
+    get_request_locale,
+    get_sessions_conn,
+    parse_error,
     resolve_session_store,
     resolve_training_job_manager,
-)
-from t1d_analytics.api_dependencies import (
-    validate_db_path as validate_db_path,
-)
-from t1d_analytics.api_dependencies import (
-    validate_workspace_artifact_path as validate_workspace_artifact_path,
-)
-from t1d_analytics.api_dependencies import (
-    verify_api_auth as verify_api_auth,
+    set_default_app_services,
+    validate_db_path,
+    validate_workspace_artifact_path,
+    verify_api_auth,
 )
 from t1d_analytics.api_schemas import (
-    ApiError as ApiError,
-)
-from t1d_analytics.api_schemas import (
-    ChatMessageModel as ChatMessageModel,
-)
-from t1d_analytics.api_schemas import (
-    ChatRequest as ChatRequest,
-)
-from t1d_analytics.api_schemas import (
-    ChatResponse as ChatResponse,
-)
-from t1d_analytics.api_schemas import (
-    ColumnInfo as ColumnInfo,
-)
-from t1d_analytics.api_schemas import (
-    CreateSessionRequest as CreateSessionRequest,
-)
-from t1d_analytics.api_schemas import (
-    DatabaseItem as DatabaseItem,
-)
-from t1d_analytics.api_schemas import (
-    DatabaseListResponse as DatabaseListResponse,
-)
-from t1d_analytics.api_schemas import (
-    ExecuteSqlRequest as ExecuteSqlRequest,
-)
-from t1d_analytics.api_schemas import (
-    ExecuteSqlResponse as ExecuteSqlResponse,
-)
-from t1d_analytics.api_schemas import (
-    ModelInfo as ModelInfo,
-)
-from t1d_analytics.api_schemas import (
-    ModelsResponse as ModelsResponse,
-)
-from t1d_analytics.api_schemas import (
-    ProvidersStatusResponse as ProvidersStatusResponse,
-)
-from t1d_analytics.api_schemas import (
-    ProviderStatus as ProviderStatus,
-)
-from t1d_analytics.api_schemas import (
-    SchemaResponse as SchemaResponse,
-)
-from t1d_analytics.api_schemas import (
-    SessionListResponse as SessionListResponse,
-)
-from t1d_analytics.api_schemas import (
-    SessionModel as SessionModel,
-)
-from t1d_analytics.api_schemas import (
-    StatusResponse as StatusResponse,
-)
-from t1d_analytics.api_schemas import (
-    TableDataResponse as TableDataResponse,
-)
-from t1d_analytics.api_schemas import (
-    TableInfo as TableInfo,
-)
-from t1d_analytics.api_schemas import (
-    TrainingJobRequest as TrainingJobRequest,
+    ApiError,
+    ChatMessageModel,
+    ChatRequest,
+    ChatResponse,
+    ColumnInfo,
+    CreateSessionRequest,
+    DatabaseItem,
+    DatabaseListResponse,
+    ExecuteSqlRequest,
+    ExecuteSqlResponse,
+    ModelInfo,
+    ModelsResponse,
+    ProvidersStatusResponse,
+    ProviderStatus,
+    SchemaResponse,
+    SessionListResponse,
+    SessionModel,
+    StatusResponse,
+    TableDataResponse,
+    TableInfo,
+    TrainingJobRequest,
 )
 from t1d_analytics.chat_service import (
     build_sql_prompt_with_history,
     stream_llm_completion_tokens,
-)
-from t1d_analytics.chat_service import (
-    generate_sql_from_nl as generate_sql_from_nl,
+    translate_nl_to_sql,
 )
 from t1d_analytics.diagnostics import (
     check_database_health,
@@ -163,213 +84,69 @@ from t1d_analytics.ingestion import load_data_to_duckdb
 from t1d_analytics.job_manager import TrainingJobManager
 from t1d_analytics.llm_client import (
     CLOUD_MODEL_CATALOG,
-)
-from t1d_analytics.llm_client import (
-    extract_stream_delta as extract_stream_delta,
-)
-from t1d_analytics.llm_client import (
-    is_provider_configured as is_provider_configured,
-)
-from t1d_analytics.llm_client import (
-    read_configured_ollama_model_list as read_configured_ollama_model_list,
-)
-from t1d_analytics.llm_client import (
-    resolve_provider_and_model as resolve_provider_and_model,
-)
-from t1d_analytics.llm_client import (
-    sort_ollama_models as sort_ollama_models,
+    extract_stream_delta,
+    is_provider_configured,
+    read_configured_ollama_model_list,
+    resolve_provider_and_model,
+    sort_ollama_models,
 )
 from t1d_analytics.rate_limiter import close_all_rate_limiters
 from t1d_analytics.routers.chat_routes import (
-    chat_endpoint as chat_endpoint,
-)
-from t1d_analytics.routers.chat_routes import (
-    chat_router as chat_router,
-)
-from t1d_analytics.routers.chat_routes import (
-    chat_stream_endpoint as chat_stream_endpoint,
-)
-from t1d_analytics.routers.chat_routes import (
-    execute_sql_endpoint as execute_sql_endpoint,
-)
-from t1d_analytics.routers.chat_routes import (
-    stream_chat_events as stream_chat_events,
+    chat_endpoint,
+    chat_router,
+    chat_stream_endpoint,
+    execute_sql_endpoint,
+    stream_chat_events,
 )
 from t1d_analytics.routers.session_routes import (
-    delete_session as delete_session,
-)
-from t1d_analytics.routers.session_routes import (
-    get_session as get_session,
-)
-from t1d_analytics.routers.session_routes import (
-    list_sessions as list_sessions,
-)
-from t1d_analytics.routers.session_routes import (
-    save_session as save_session,
-)
-from t1d_analytics.routers.session_routes import (
-    sessions_router as sessions_router,
+    delete_session,
+    get_session,
+    list_sessions,
+    save_session,
+    sessions_router,
 )
 from t1d_analytics.routers.status_routes import (
-    get_health as get_health,
-)
-from t1d_analytics.routers.status_routes import (
-    get_providers_status as get_providers_status,
-)
-from t1d_analytics.routers.status_routes import (
-    get_ready as get_ready,
-)
-from t1d_analytics.routers.status_routes import (
-    get_status as get_status,
-)
-from t1d_analytics.routers.status_routes import (
-    list_models as list_models,
-)
-from t1d_analytics.routers.status_routes import (
-    status_router as status_router,
+    get_health,
+    get_providers_status,
+    get_ready,
+    get_status,
+    list_models,
+    status_router,
 )
 from t1d_analytics.routers.table_routes import (
-    _build_schema_response as _build_schema_response,
-)
-from t1d_analytics.routers.table_routes import (
-    export_csv as export_csv,
-)
-from t1d_analytics.routers.table_routes import (
-    export_excel as export_excel,
-)
-from t1d_analytics.routers.table_routes import (
-    export_json as export_json,
-)
-from t1d_analytics.routers.table_routes import (
-    export_parquet as export_parquet,
-)
-from t1d_analytics.routers.table_routes import (
-    get_schema as get_schema,
-)
-from t1d_analytics.routers.table_routes import (
-    get_table_data as get_table_data,
-)
-from t1d_analytics.routers.table_routes import (
-    get_table_profile as get_table_profile,
-)
-from t1d_analytics.routers.table_routes import (
-    list_databases as list_databases,
-)
-from t1d_analytics.routers.table_routes import (
-    tables_router as tables_router,
+    _build_schema_response,
+    export_csv,
+    export_excel,
+    export_json,
+    export_parquet,
+    get_schema,
+    get_table_data,
+    get_table_profile,
+    list_databases,
+    tables_router,
 )
 from t1d_analytics.routers.training_routes import (
-    cancel_training_job as cancel_training_job,
-)
-from t1d_analytics.routers.training_routes import (
-    get_training_job as get_training_job,
-)
-from t1d_analytics.routers.training_routes import (
-    list_training_jobs as list_training_jobs,
-)
-from t1d_analytics.routers.training_routes import (
-    submit_training_job as submit_training_job,
-)
-from t1d_analytics.routers.training_routes import (
-    training_router as training_router,
+    cancel_training_job,
+    get_training_job,
+    list_training_jobs,
+    submit_training_job,
+    training_router,
 )
 from t1d_analytics.seed import ensure_canonical_clinical_views, seed_database
 from t1d_analytics.session_store import SessionStore, open_sessions_db_conn
 from t1d_analytics.sql_utils import (
-    SqlValue,
     close_read_only_duckdb_pool,
     extract_sql_from_response,
-)
-from t1d_analytics.sql_utils import (
-    sanitize_spreadsheet_cell as sanitize_spreadsheet_cell,
-)
-from t1d_analytics.sql_utils import (
-    sanitize_sql_value as sanitize_sql_value,
+    sanitize_spreadsheet_cell,
+    sanitize_sql_value,
 )
 
-_sessions_lock = threading.Lock()
-_get_sessions_db_conn = open_sessions_db_conn
-_build_sql_prompt = build_sql_prompt_with_history
+generate_sql_from_nl = translate_nl_to_sql
 stream_llm_tokens = stream_llm_completion_tokens
-_extract_sql_from_response = extract_sql_from_response
 CLOUD_PROVIDER_MODELS: Dict[str, List[str]] = CLOUD_MODEL_CATALOG
 
 configure_api_logging()
 logger = logging.getLogger(__name__)
-
-
-def enforce_rate_limit(
-    request: Request, limit: int = 120, window_seconds: float = 60.0
-) -> None:
-    """
-    Enforce sliding-window rate limiting on a specific endpoint.
-
-    Args:
-    ----
-        request: The incoming FastAPI HTTP request.
-        limit: Maximum requests allowed in the window (default: 120).
-        window_seconds: Window size in seconds (default: 60.0).
-
-    """
-    _enforce_rate_limit_dep(
-        request,
-        limit=limit,
-        window_seconds=window_seconds,
-        limiter_check_fn=check_rate_limit,
-    )
-
-
-def execute_sql(
-    db_path: str,
-    query: str,
-    max_rows: int = 10000,
-    timeout_seconds: float = 30.0,
-) -> List[Dict[str, SqlValue]]:
-    """
-    Execute a SQL query and return results as a list of dictionaries.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        query: SQL query to execute.
-        max_rows: Maximum rows to return to prevent memory exhaustion.
-        timeout_seconds: Execution timeout in seconds.
-
-    Returns:
-    -------
-        List[Dict[str, SqlValue]]: List of dictionaries representing the rows returned.
-
-    """
-    return _execute_sql_dep(
-        db_path=db_path,
-        query=query,
-        max_rows=max_rows,
-        timeout_seconds=timeout_seconds,
-        connect_fn=duckdb.connect,
-    )
-
-
-@contextmanager
-def get_sessions_conn(
-    db_path: Optional[str] = None,
-) -> Iterator[duckdb.DuckDBPyConnection]:
-    """
-    Context manager yielding a persistent chat sessions database connection and ensuring it closes.
-
-    Args:
-    ----
-        db_path: Optional path to the sessions database.
-
-    Yields:
-    ------
-        duckdb.DuckDBPyConnection: Database connection guaranteed to be closed upon exit.
-
-    """
-    with _get_sessions_conn_dep(
-        db_path=db_path,
-        conn_opener=_get_sessions_db_conn,
-    ) as conn:
-        yield conn
 
 
 @asynccontextmanager
@@ -404,7 +181,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
             load_data_to_duckdb(data_dir, db_path)
             ensure_canonical_clinical_views(db_path)
-        except Exception as e:
+        except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
             logger.warning(f"Startup auto-ingestion failed for {db_path}: {e}")
     run_system_diagnostics(db_path=db_path)
     log_startup_diagnostics(db_path=db_path)
@@ -415,8 +192,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         close_read_only_duckdb_pool()
         close_all_rate_limiters()
 
-
-_lifespan = lifespan
 
 app = FastAPI(
     title="T1D Analytics API",
@@ -515,6 +290,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     )
 
 
+_sessions_lock = threading.Lock()
 _session_store = SessionStore(
     conn_factory=get_sessions_conn,
     lock=_sessions_lock,
@@ -545,6 +321,14 @@ def get_training_job_manager() -> TrainingJobManager:
 
     """
     return resolve_training_job_manager(app)
+
+
+app.state.services = create_default_app_services(
+    target_app=app,
+    session_store_getter=get_session_store,
+    job_manager_getter=get_training_job_manager,
+)
+set_default_app_services(app.state.services)
 
 
 app.include_router(sessions_router)
@@ -578,7 +362,7 @@ def _setup_debug(target_app: FastAPI = app) -> None:
             if env_dist
             else Path(__file__).resolve().parents[3] / "t1d-analytics-web" / "dist"
         )
-        if os.path.exists(str(dist_path)):
+        if dist_path.exists():
             logger.info(f"DEBUG mode enabled. Serving static frontend from {dist_path}")
             target_app.mount(
                 "/", StaticFiles(directory=str(dist_path), html=True), name="static"
@@ -587,3 +371,103 @@ def _setup_debug(target_app: FastAPI = app) -> None:
             logger.warning(
                 f"DEBUG mode enabled but static dist folder not found at {dist_path}"
             )
+
+
+__all__ = [
+    "CLOUD_PROVIDER_MODELS",
+    "ApiError",
+    "AppServices",
+    "BaseRateLimiter",
+    "ChatMessageModel",
+    "ChatRequest",
+    "ChatResponse",
+    "ColumnInfo",
+    "CreateSessionRequest",
+    "DatabaseItem",
+    "DatabaseListResponse",
+    "DuckDbRateLimiter",
+    "ExecuteSqlRequest",
+    "ExecuteSqlResponse",
+    "MemoryRateLimiter",
+    "ModelInfo",
+    "ModelsResponse",
+    "ProviderStatus",
+    "ProvidersStatusResponse",
+    "SchemaResponse",
+    "SessionListResponse",
+    "SessionModel",
+    "StatusResponse",
+    "TableDataResponse",
+    "TableInfo",
+    "TrainingJobRequest",
+    "_build_schema_response",
+    "_setup_debug",
+    "app",
+    "auth_and_rate_limit_middleware",
+    "build_sql_prompt_with_history",
+    "cancel_training_job",
+    "chat_endpoint",
+    "chat_router",
+    "chat_stream_endpoint",
+    "check_rate_limit",
+    "configure_api_logging",
+    "create_default_app_services",
+    "delete_session",
+    "discover_workspace_databases",
+    "enforce_rate_limit",
+    "execute_sql",
+    "execute_sql_endpoint",
+    "export_csv",
+    "export_excel",
+    "export_json",
+    "export_parquet",
+    "extract_sql_from_response",
+    "extract_stream_delta",
+    "generate_sql_from_nl",
+    "get_allowed_db_dirs",
+    "get_app_services",
+    "get_cors_origins",
+    "get_database_schema",
+    "get_health",
+    "get_providers_status",
+    "get_rate_limiter",
+    "get_ready",
+    "get_request_locale",
+    "get_schema",
+    "get_session",
+    "get_session_store",
+    "get_sessions_conn",
+    "get_status",
+    "get_table_data",
+    "get_table_profile",
+    "get_training_job",
+    "get_training_job_manager",
+    "global_exception_handler",
+    "is_provider_configured",
+    "lifespan",
+    "list_databases",
+    "list_models",
+    "list_sessions",
+    "list_training_jobs",
+    "open_sessions_db_conn",
+    "parse_error",
+    "profile_table",
+    "read_configured_ollama_model_list",
+    "resolve_provider_and_model",
+    "sanitize_spreadsheet_cell",
+    "sanitize_sql_value",
+    "save_session",
+    "sessions_router",
+    "set_default_app_services",
+    "sort_ollama_models",
+    "status_router",
+    "stream_chat_events",
+    "stream_llm_tokens",
+    "submit_training_job",
+    "t1d_error_exception_handler",
+    "tables_router",
+    "training_router",
+    "validate_db_path",
+    "validate_workspace_artifact_path",
+    "verify_api_auth",
+]

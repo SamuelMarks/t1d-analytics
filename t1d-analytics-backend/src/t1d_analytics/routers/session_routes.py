@@ -4,6 +4,7 @@ from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends
 
+from t1d_analytics.api_dependencies import AppServices, get_app_services
 from t1d_analytics.api_schemas import (
     CreateSessionRequest,
     SessionListResponse,
@@ -14,18 +15,22 @@ from t1d_analytics.session_store import SessionStore
 sessions_router = APIRouter()
 
 
-def _resolve_store_dependency() -> SessionStore:
+def _resolve_store_dependency(
+    svc: AppServices = Depends(get_app_services),
+) -> SessionStore:
     """
-    Delegate session store dependency resolution to `t1d_analytics.api.get_session_store`.
+    Resolve the active `SessionStore` via injected `AppServices`.
 
-    Returns
+    Args:
+    ----
+        svc: Injected AppServices dependency bundle.
+
+    Returns:
     -------
         SessionStore: Active conversation session store.
 
     """
-    import t1d_analytics.api as api_mod
-
-    return api_mod.get_session_store()
+    return svc.get_session_store()
 
 
 @sessions_router.get("/api/sessions", response_model=SessionListResponse)

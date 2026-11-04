@@ -19,8 +19,11 @@ from scripts.run_tests import (
     extract_pytest_coverage_percent,
     main,
     parse_lcov_files,
+    parse_lcov_totals,
+    resolve_badge_color,
     run_cmd,
     update_readme_badges,
+    update_readme_shields,
     wait_for_service_ready,
 )
 
@@ -56,6 +59,15 @@ def test_pure_orchestration_helpers() -> None:
     assert cmds["web_install"] == ["/usr/bin/npm", "install"]
     assert cmds["web_build"] == ["/usr/bin/npm", "run", "build"]
     assert "--cov-report=json" in cmds["backend_pytest"]
+
+    lcov_raw = "SF:src/x.py\nDA:1,2\nDA:2,0\nDA:1,5\nend_of_record\nunrelated\n"
+    assert parse_lcov_totals(lcov_raw) == (2, 1)
+    assert resolve_badge_color(95.0) == "brightgreen"
+    assert resolve_badge_color(75.0) == "yellow"
+    assert resolve_badge_color(50.0) == "red"
+    assert "Coverage-95%25-brightgreen" in update_readme_shields(
+        "# Title\n[![License](http://lic)]\n", 95.0, 100.0
+    )
 
 
 def test_real_filesystem_lcov_merge_and_readme_update(tmp_path: Path) -> None:
