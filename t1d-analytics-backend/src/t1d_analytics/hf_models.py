@@ -39,9 +39,9 @@ DEFAULT_CHOICE_HF_MODELS: Dict[str, str] = {
 }
 
 DEFAULT_CHOICE_OLLAMA_MODELS: Tuple[str, ...] = (
-    "hf.co/google/gemma-4-E4B",
-    "hf.co/microsoft/Phi-4-mini-flash-reasoning",
-    "hf.co/meta-llama/Llama-3.2-1B",
+    "gemma:2b",
+    "llama3.2:1b",
+    "phi4-mini",
 )
 
 

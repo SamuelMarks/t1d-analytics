@@ -372,7 +372,6 @@ DEFAULT_CHOICE_OLLAMA_MODELS: Tuple[str, ...] = (
     "gemma:2b",
     "llama3.2:1b",
     "phi4-mini",
-    "gemma4:latest",
 )
 
 DEFAULT_CHOICE_HF_REPOS: Tuple[str, ...] = (
@@ -381,29 +380,11 @@ DEFAULT_CHOICE_HF_REPOS: Tuple[str, ...] = (
     "meta-llama/Llama-3.2-1B",
 )
 
-LEGACY_OLLAMA_MODEL_ALIASES: Dict[str, str] = {
-    "hf.co/google/gemma-4-e4b": "gemma4:latest",
-    "google/gemma-4-e4b": "gemma4:latest",
-    "gemma-4-e4b": "gemma4:latest",
-    "gemma4": "gemma4:latest",
-    "hf.co/microsoft/phi-4-mini-flash-reasoning": "phi4-mini",
-    "microsoft/phi-4-mini-flash-reasoning": "phi4-mini",
-    "phi-4-mini-flash-reasoning": "phi4-mini",
-    "hf.co/meta-llama/llama-3.2-1b": "llama3.2:1b",
-    "meta-llama/llama-3.2-1b": "llama3.2:1b",
-    "llama-3.2-1b": "llama3.2:1b",
-}
-
 _FAST_SMALL_OLLAMA_ORDER: Tuple[str, ...] = (
     "gemma:2b",
     "llama3.2:1b",
     "phi4-mini",
     "phi4-mini:latest",
-    "gemma-4-e4b",
-    "gemma4:latest",
-    "gemma4",
-    "gemma:latest",
-    "gemma",
 )
 
 _HEAVY_OLLAMA_SUBSTRINGS: Tuple[str, ...] = (
@@ -521,11 +502,11 @@ def resolve_installed_ollama_model_tag(
     installed_models: Sequence[str],
 ) -> Optional[str]:
     """
-    Match a requested Ollama model identifier (or legacy HF alias) against installed `/api/tags` model names.
+    Match a requested Ollama model identifier directly against installed `/api/tags` model names.
 
     Args:
     ----
-        requested_model: Model identifier (e.g., `'gemma4'`, `'ollama/gemma4'`, `'hf.co/google/gemma-4-E4B'`).
+        requested_model: Model identifier (e.g., `'gemma:2b'`, `'ollama/gemma:2b'`, `'phi4-mini'`).
         installed_models: Sequence of model names reported by Ollama `/api/tags`.
 
     Returns:
@@ -537,19 +518,12 @@ def resolve_installed_ollama_model_tag(
     if cleaned.lower().startswith("ollama/"):
         cleaned = cleaned[7:]
     lower_req = cleaned.lower()
-    alias_target = LEGACY_OLLAMA_MODEL_ALIASES.get(lower_req)
 
     installed_by_lower = {
         m.strip().lower(): m.strip() for m in installed_models if m.strip()
     }
     base_req = lower_req[:-7] if lower_req.endswith(":latest") else lower_req
-    candidates = [lower_req, f"{base_req}:latest", base_req]
-    if alias_target:
-        alias_low = alias_target.lower()
-        base_alias = alias_low[:-7] if alias_low.endswith(":latest") else alias_low
-        candidates.extend([alias_low, f"{base_alias}:latest", base_alias])
-
-    for cand in candidates:
+    for cand in (lower_req, f"{base_req}:latest", base_req):
         if cand in installed_by_lower:
             return installed_by_lower[cand]
     return None
@@ -595,6 +569,9 @@ def resolve_ollama_base_url(
     """
     Purely resolve and normalize the Ollama host URL without mutating `os.environ`.
 
+    Strips trailing `/v1` or `/api` path suffixes and replaces `0.0.0.0` bind addresses
+    with `127.0.0.1` so client connections always target a routable loopback endpoint.
+
     Args:
     ----
         raw_host: Optional explicit host URL override.
@@ -608,9 +585,13 @@ def resolve_ollama_base_url(
     candidate = (
         raw_host if raw_host is not None else os.environ.get("OLLAMA_HOST")
     ) or default_host
-    host = candidate.rstrip("/")
+    host = candidate.strip().rstrip("/")
     if not host.startswith(("http://", "https://")):
         host = f"http://{host}"
+    host = host.replace("://0.0.0.0", "://127.0.0.1")
+    for suffix in ("/v1", "/api"):
+        if host.lower().endswith(suffix):
+            host = host[: -len(suffix)].rstrip("/")
     return host
 
 
@@ -637,7 +618,7 @@ def configure_ollama_env(
     return host
 
 
-normalize_ollama_host = resolve_ollama_base_url
+normalize_ollama_host = configure_ollama_env
 
 
 def resolve_provider_and_model(
@@ -1174,6 +1155,8 @@ class _AnyLlmTransportAdapter:
         """
         from any_llm import AnyLLM
 
+        if provider.lower() == "ollama":
+            configure_ollama_env()
         self._client = (
             AnyLLM.create(provider, api_key=api_key)
             if api_key
@@ -1667,23 +1650,21 @@ def fetch_available_models(
             cloud_catalog=cloud_catalog,
         ):
             if prov == "ollama":
-                matched_tag = resolve_installed_ollama_model_tag(
-                    m, installed_ollama_names
-                )
-                if matched_tag is None:
-                    models.append(
-                        ModelInfo(
-                            name=m,
-                            provider="ollama",
-                            configured=True,
-                            requires_key=False,
-                            available=False,
-                            reachable=False,
-                            error_code="MODEL_NOT_PULLED"
-                            if ollama_online
-                            else "PROVIDER_OFFLINE",
-                        )
+                if ollama_online and installed_ollama_names:
+                    continue
+                models.append(
+                    ModelInfo(
+                        name=m,
+                        provider="ollama",
+                        configured=True,
+                        requires_key=False,
+                        available=False,
+                        reachable=False,
+                        error_code="MODEL_NOT_PULLED"
+                        if ollama_online
+                        else "PROVIDER_OFFLINE",
                     )
+                )
             else:
                 models.append(
                     ModelInfo(

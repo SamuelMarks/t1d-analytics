@@ -55,7 +55,7 @@ test.describe("SSE Streaming, Batch Fallback & Error Recovery", () => {
     });
     expect(persistedStream).toBe(true);
 
-    await page.selectOption("#model-select", "gemma4");
+    await page.selectOption("#model-select", "gemma:2b");
     await page.fill("#chat-input", "How many patients are in the cohort?");
     await page.click("#send-btn");
 

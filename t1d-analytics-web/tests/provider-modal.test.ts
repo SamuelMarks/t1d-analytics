@@ -212,6 +212,7 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
     );
     expect(unreachableOpt?.textContent).toContain("🔴");
     expect(unreachableOpt?.title).toBe("custom_unreachable (CONN_ERR)");
+    expect(unreachableOpt?.disabled).toBe(true);
 
     modelSelect.innerHTML = `<option value="openai/custom-gpt">custom-gpt</option><option value="local_plain">local_plain</option>`;
     modelSelect.value = "openai/custom-gpt";
@@ -358,6 +359,28 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
     await ui.modelSelectorController.loadModels();
     expect(modelSelect.value).toBe("ollama/gemma:2b");
     expect(normChat.model).toBe("ollama/gemma:2b");
+
+    // Disabled/unpulled gemma4:latest option is skipped and falls back to gemma:2b
+    normChat.model = "gemma4:latest";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        models: [
+          {
+            name: "gemma4:latest",
+            provider: "ollama",
+            configured: true,
+            available: false,
+            reachable: false,
+            error_code: "MODEL_NOT_PULLED",
+          },
+          { name: "gemma:2b", provider: "ollama", configured: true },
+        ],
+      }),
+    });
+    await ui.modelSelectorController.loadModels();
+    expect(modelSelect.value).toBe("gemma:2b");
+    expect(normChat.model).toBe("gemma:2b");
   });
 
   it("handles provider modal Escape key dismissal, focus restoration, and dispose", async () => {

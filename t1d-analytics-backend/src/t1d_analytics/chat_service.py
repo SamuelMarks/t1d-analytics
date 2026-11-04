@@ -354,6 +354,14 @@ def _is_recoverable_local_ollama_crash(provider: str, exc: BaseException) -> boo
         "timeout",
         "not found, try pulling it first",
         "model_not_pulled",
+        "failed to connect to ollama",
+        "check that ollama is downloaded",
+        "connection refused",
+        "connecterror",
+        "connection error",
+        "connection reset",
+        "remoteprotocolerror",
+        "broken pipe",
     )
     return any(marker in msg for marker in crash_markers)
 
@@ -611,7 +619,7 @@ _stream_llm_with_ollama_fallback = stream_llm_completion_tokens
 def translate_nl_to_sql(
     db_path: str,
     nl_query: str,
-    model_name: str = "gemma4",
+    model_name: str = "gemma:2b",
     history: Optional[List[ChatMessageModel]] = None,
     api_key: Optional[str] = None,
     provider: Optional[str] = None,

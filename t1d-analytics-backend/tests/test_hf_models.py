@@ -314,10 +314,16 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
         "meta-llama/Llama-3.2-1B": "https://huggingface.co/meta-llama/Llama-3.2-1B",
     }
     assert DEFAULT_CHOICE_OLLAMA_MODELS == (
-        "hf.co/google/gemma-4-E4B",
-        "hf.co/microsoft/Phi-4-mini-flash-reasoning",
-        "hf.co/meta-llama/Llama-3.2-1B",
+        "gemma:2b",
+        "llama3.2:1b",
+        "phi4-mini",
     )
+
+    from t1d_analytics.llm_client import (
+        DEFAULT_CHOICE_OLLAMA_MODELS as LLM_CLIENT_DEFAULT_MODELS,
+    )
+
+    assert LLM_CLIENT_DEFAULT_MODELS == ("gemma:2b", "llama3.2:1b", "phi4-mini")
 
     class _CharWordTokenizer:
         """Deterministic word-level tokenizer satisfying TokenizerProtocol."""

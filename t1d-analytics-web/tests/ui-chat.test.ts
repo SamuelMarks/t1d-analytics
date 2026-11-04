@@ -65,22 +65,22 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     document.getElementById("new-chat-btn")?.click();
     expect(state.getActiveChat()?.model).toBe("sql");
 
-    // When Ollama is offline but a cloud key or configured model is present, newChatBtn keeps 'gemma4'
+    // When Ollama is offline but a cloud key or configured model is present, newChatBtn keeps 'gemma:2b'
     state.setApiKey("openai", "sk-test");
     document.getElementById("new-chat-btn")?.click();
-    expect(state.getActiveChat()?.model).toBe("gemma4");
+    expect(state.getActiveChat()?.model).toBe("gemma:2b");
     state.removeApiKey("openai");
     state.setApiKey("anthropic", "sk-ant");
     document.getElementById("new-chat-btn")?.click();
-    expect(state.getActiveChat()?.model).toBe("gemma4");
+    expect(state.getActiveChat()?.model).toBe("gemma:2b");
     state.removeApiKey("anthropic");
     state.setApiKey("google", "sk-goog");
     document.getElementById("new-chat-btn")?.click();
-    expect(state.getActiveChat()?.model).toBe("gemma4");
+    expect(state.getActiveChat()?.model).toBe("gemma:2b");
     state.removeApiKey("google");
     state.setConfiguredModels("groq:llama3");
     document.getElementById("new-chat-btn")?.click();
-    expect(state.getActiveChat()?.model).toBe("gemma4");
+    expect(state.getActiveChat()?.model).toBe("gemma:2b");
     state.removeConfiguredModels();
     state.setSystemStatus({ ollamaOnline: true });
     state.chats = [state.chats[0]!];
@@ -581,14 +581,14 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     }
 
     const select = getTestElement<HTMLSelectElement>("model-select");
-    select.innerHTML = `<option value="gemma4">Gemma</option><option value="sql">SQL</option>`;
+    select.innerHTML = `<option value="gemma:2b">gemma:2b</option><option value="sql">SQL</option>`;
     const chips = queryAllTestElements<HTMLButtonElement>(".chip");
     const nlpChip = Array.from(chips).find((c) =>
       c.textContent?.includes("[NLP]"),
     );
     nlpChip?.click();
-    expect(select.value).toBe("gemma4");
-    expect(state.getActiveChat()?.model).toBe("gemma4");
+    expect(select.value).toBe("gemma:2b");
+    expect(state.getActiveChat()?.model).toBe("gemma:2b");
 
     const themeBtn = getTestElement<HTMLButtonElement>("theme-toggle-btn");
     expect(document.body.classList.contains("light-mode")).toBe(false);
@@ -810,8 +810,8 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(ui.modelSelect.value).toBe("sql");
     expect(chat.model).toBe("sql");
 
-    // renderActiveChat and NLP chip click when "gemma4" option is absent from #model-select
-    chat.model = "gemma4";
+    // renderActiveChat and NLP chip click when "gemma:2b" option is absent from #model-select
+    chat.model = "gemma:2b";
     chat.messages = [];
     ui.render();
     expect(ui.modelSelect.value).toBe("sql");
@@ -821,14 +821,14 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(ui.modelSelect.value).toBe("sql");
     expect(chat.model).toBe("sql");
 
-    chat.model = "gemma4";
+    chat.model = "gemma:2b";
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () =>
-        Promise.resolve({ models: [{ name: "gemma4" }, { name: "other" }] }),
+        Promise.resolve({ models: [{ name: "gemma:2b" }, { name: "other" }] }),
     });
     await ui.modelSelectorController.loadModels();
-    expect(ui.modelSelect.value).toBe("gemma4");
+    expect(ui.modelSelect.value).toBe("gemma:2b");
 
     // Table header expand/collapse and table view button
     mockFetch.mockResolvedValueOnce({

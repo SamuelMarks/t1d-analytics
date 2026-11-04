@@ -25,7 +25,7 @@ test.describe("Initial Chat Window & Default Chat Lifecycle", () => {
     await expect(page.locator("#provider-status-dot")).toHaveClass(/active/);
     await expect(page.locator(".empty-state")).toBeVisible();
     await expect(page.locator(".empty-state .chip")).toHaveCount(5);
-    await expect(page.locator("#model-select")).toHaveValue("gemma4");
+    await expect(page.locator("#model-select")).toHaveValue("gemma:2b");
   });
 
   /**
@@ -239,7 +239,7 @@ test.describe("Initial Chat Window & Default Chat Lifecycle", () => {
   }) => {
     await page.goto("/");
 
-    // Verify all 5 chips when gemma4 is available
+    // Verify all 5 chips when gemma:2b is available
     for (let i = 0; i < 5; i++) {
       if (i > 0) {
         await page.click("#new-chat-btn");
@@ -248,7 +248,7 @@ test.describe("Initial Chat Window & Default Chat Lifecycle", () => {
       await expect(chip).toBeVisible();
       await chip.click();
 
-      const expectedMode = i < 4 ? "sql" : "gemma4";
+      const expectedMode = i < 4 ? "sql" : "gemma:2b";
       await expect(page.locator("#model-select")).toHaveValue(expectedMode);
 
       const inputVal = await page.locator("#chat-input").inputValue();
@@ -259,7 +259,7 @@ test.describe("Initial Chat Window & Default Chat Lifecycle", () => {
       await expect(page.locator('.message [role="alert"]')).toHaveCount(0);
     }
 
-    // Now simulate Ollama offline (no gemma4 option in #model-select) and verify Chip 4 (NLP chip) falls back to 'sql'
+    // Now simulate Ollama offline (no gemma:2b option in #model-select) and verify Chip 4 (NLP chip) falls back to 'sql'
     await page.route("**/api/models*", async (route) => {
       await route.fulfill({
         status: 200,

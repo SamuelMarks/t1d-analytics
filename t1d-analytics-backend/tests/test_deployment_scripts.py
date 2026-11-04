@@ -759,7 +759,9 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert "phi4-mini" in pull_cmd
     assert "gemma4:latest" in pull_cmd
     assert (
-        libscript_cfg["vars"]["OLLAMA_MODEL_LIST"]
-        == "gemma:2b,llama3.2:1b,phi4-mini,gemma4:latest"
+        libscript_cfg["vars"]["OLLAMA_MODEL_LIST"] == "gemma:2b,llama3.2:1b,phi4-mini"
     )
     assert libscript_cfg["vars"]["DEFAULT_OLLAMA_MODEL"] == "gemma:2b"
+    assert (
+        libscript_cfg["service_overrides"]["ollama"]["OLLAMA_HOST"] == "127.0.0.1:11434"
+    )

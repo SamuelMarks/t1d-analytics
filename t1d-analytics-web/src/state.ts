@@ -288,7 +288,7 @@ export class ChatState {
   /** Currently selected DuckDB database path. */
   public currentDb: string = "t1d.duckdb";
   /** Default selected LLM model identifier. */
-  public selectedModel: string = "ollama/gemma:2b";
+  public selectedModel: string = "gemma:2b";
   /** List of discovered workspace DuckDB databases. */
   public availableDbs: AvailableDatabaseItem[] = [];
   /** Whether server-side chat session synchronization is enabled. */
@@ -443,7 +443,7 @@ export class ChatState {
             id: s.session_id,
             title: s.title,
             messages: remoteMessages,
-            model: "gemma4",
+            model: "gemma:2b",
             isTemporary: false,
             updatedAt: remoteTime,
           });
@@ -491,7 +491,7 @@ export class ChatState {
       title:
         title || i18next.t("app.chatNumber", { count: this.chatCounter++ }),
       messages: [],
-      model: "gemma4",
+      model: "gemma:2b",
       isTemporary,
       updatedAt: Date.now(),
     };

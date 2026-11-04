@@ -78,7 +78,7 @@ export const test = baseTest.extend<{ page: Page }>({
         status: 200,
         contentType: "application/json",
         json: {
-          models: [{ name: "gemma4" }],
+          models: [{ name: "gemma:2b" }],
         },
       });
     });

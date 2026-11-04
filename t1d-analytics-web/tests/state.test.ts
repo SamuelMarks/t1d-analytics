@@ -56,7 +56,7 @@ describe("ChatState", () => {
     expect(state.chats.length).toBe(1);
     expect(state.activeChatId).toBe(chat.id);
     expect(chat.title).toBe("Chat #1");
-    expect(chat.model).toBe("gemma4");
+    expect(chat.model).toBe("gemma:2b");
   });
 
   it("retrieves the active chat", () => {

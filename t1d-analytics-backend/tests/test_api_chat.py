@@ -1268,6 +1268,15 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         is True
     )
     assert (
+        _is_recoverable_local_ollama_crash(
+            "ollama",
+            Exception(
+                "Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download"
+            ),
+        )
+        is True
+    )
+    assert (
         _is_recoverable_local_ollama_crash("ollama", RuntimeError("generic error"))
         is False
     )
@@ -1326,7 +1335,7 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
     assert prov_err == "synthetic_seed"
     assert is_synth_err is True
 
-    # 5. translate_nl_to_sql fallback on Ollama OOM crash
+    # 5. translate_nl_to_sql fallback on Ollama OOM crash and Failed to connect to Ollama
     with patch(
         "t1d_analytics.chat_service.complete_llm_prompt",
         side_effect=RuntimeError(
@@ -1338,6 +1347,18 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         )
         assert fb_sql == 'SELECT * FROM "users" LIMIT 5;'
         assert fb_sql in fb_full
+
+    with patch(
+        "t1d_analytics.chat_service.complete_llm_prompt",
+        side_effect=RuntimeError(
+            "Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download"
+        ),
+    ):
+        fb_conn_full, fb_conn_sql = translate_nl_to_sql(
+            mock_db, "Show me the first 5 users", model_name="custom-local:7b"
+        )
+        assert fb_conn_sql == 'SELECT * FROM "users" LIMIT 5;'
+        assert fb_conn_sql in fb_conn_full
 
     # 5b. _resolve_and_select_local_ollama_model and retry-once with lightweight fallback model
     from t1d_analytics.api_schemas import ModelInfo
@@ -1354,10 +1375,10 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         assert _probe_installed_ollama_names() == ["gemma:2b"]
 
     p_empty, fb_empty = _resolve_and_select_local_ollama_model(
-        "gemma4",
+        "gemma:2b",
         probe_fn=MagicMock(side_effect=RuntimeError("offline")),
     )
-    assert p_empty == "gemma4"
+    assert p_empty == "gemma:2b"
     assert fb_empty is None
 
     p_resolved, fb_resolved = _resolve_and_select_local_ollama_model(
@@ -1451,6 +1472,24 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
         assert resp_crash_stream.status_code == 200
         assert "sql_generated" in resp_crash_stream.text
         assert 'SELECT * FROM \\"users\\" LIMIT 5;' in resp_crash_stream.text
+
+    with patch(
+        "t1d_analytics.api.stream_llm_tokens",
+        side_effect=RuntimeError(
+            "Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download"
+        ),
+    ):
+        resp_conn_stream = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "Show me the first 5 users",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+        )
+        assert resp_conn_stream.status_code == 200
+        assert "sql_generated" in resp_conn_stream.text
+        assert 'SELECT * FROM \\"users\\" LIMIT 5;' in resp_conn_stream.text
 
     # 7. is_likely_sql_statement and _resolve_sql_mode_query in batch /api/chat and /api/chat/stream
     from t1d_analytics.chat_service import is_likely_sql_statement

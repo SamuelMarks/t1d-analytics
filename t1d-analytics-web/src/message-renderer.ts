@@ -507,7 +507,7 @@ export class MessageRenderer {
     const exampleQueries: Array<{
       label: string;
       query: string;
-      mode: "sql" | "gemma4";
+      mode: "sql" | "gemma:2b";
     }> = [
       {
         label: i18next.t("ui.exampleQueries.patientDemographics"),
@@ -569,7 +569,7 @@ ORDER BY t.TxGroup, average_hba1c DESC;`,
           "ui.exampleQueries.nlpFirst5Prompt",
           "Show me the first 5 patients in the demographics table.",
         ),
-        mode: "gemma4",
+        mode: "gemma:2b",
       },
     ];
 

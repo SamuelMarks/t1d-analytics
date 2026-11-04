@@ -50,7 +50,7 @@ class ChatRequest(BaseModel):
     """
 
     message: str
-    model: str = "gemma4"
+    model: str = "gemma:2b"
     provider: Optional[str] = None
     api_key: Optional[str] = None
     db_path: Optional[str] = None

@@ -33,7 +33,7 @@ test.describe("SQL Detection, Result Rendering, Exports & Sanitization", () => {
     });
 
     await page.goto("/");
-    await page.selectOption("#model-select", "gemma4");
+    await page.selectOption("#model-select", "gemma:2b");
 
     // 1. Leading SQL comment + WITH CTE should auto-classify as "sql"
     await page.fill(
@@ -47,12 +47,12 @@ test.describe("SQL Detection, Result Rendering, Exports & Sanitization", () => {
     await expect(page.locator(".message.assistant")).toHaveCount(1);
     expect(capturedModels[0]).toBe("sql");
 
-    // 2. Natural language starting with "show me" should remain "gemma4"
-    await page.selectOption("#model-select", "gemma4");
+    // 2. Natural language starting with "show me" should remain "gemma:2b"
+    await page.selectOption("#model-select", "gemma:2b");
     await page.fill("#chat-input", "show me the average HbA1c for patients");
     await page.click("#send-btn");
     await expect(page.locator(".message.assistant")).toHaveCount(2);
-    expect(capturedModels[1]).toBe("gemma4");
+    expect(capturedModels[1]).toBe("gemma:2b");
   });
 
   /**
@@ -233,7 +233,7 @@ test.describe("SQL Detection, Result Rendering, Exports & Sanitization", () => {
     });
 
     await page.goto("/");
-    await page.selectOption("#model-select", "gemma4");
+    await page.selectOption("#model-select", "gemma:2b");
     await page.fill("#chat-input", "Summarize HbA1c data");
     await page.click("#send-btn");
 

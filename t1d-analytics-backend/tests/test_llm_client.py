@@ -39,10 +39,11 @@ def test_normalize_ollama_host() -> None:
         resolve_ollama_base_url,
     )
 
-    with patch.dict(os.environ, {"OLLAMA_HOST": "127.0.0.1:11434/"}):
+    with patch.dict(os.environ, {"OLLAMA_HOST": "0.0.0.0:11434/v1/"}):
         assert normalize_ollama_host() == "http://127.0.0.1:11434"
+        assert os.environ["OLLAMA_HOST"] == "http://127.0.0.1:11434"
         assert (
-            resolve_ollama_base_url("custom.ollama:11434/")
+            resolve_ollama_base_url("custom.ollama:11434/api")
             == "http://custom.ollama:11434"
         )
         configured = configure_ollama_env("https://ollama.example.com/")
@@ -453,14 +454,14 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
             "gemma2:27b",
             "gemma4:26b",
             "custom-mid:7b",
-            "gemma4:latest",
+            "phi4-mini:latest",
             "ollama/gemma:2b",
             "llama3.2:1b",
         ]
     )
     assert ranked[0] == "ollama/gemma:2b"
     assert ranked[1] == "llama3.2:1b"
-    assert ranked[2] == "gemma4:latest"
+    assert ranked[2] == "phi4-mini:latest"
     assert ranked[3] == "custom-mid:7b"
     assert set(ranked[-2:]) == {"gemma2:27b", "gemma4:26b"}
 
@@ -487,23 +488,16 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
     monkeypatch.setenv("OLLAMA_MODEL_LIST", "gemma:2b,llama3.2:1b")
     assert read_configured_ollama_model_list() == ["gemma:2b", "llama3.2:1b"]
 
-    installed = ["gemma4:latest", "phi4-mini:latest", "llama3.2:1b"]
+    installed = ["gemma:2b", "phi4-mini:latest", "llama3.2:1b"]
     assert (
-        resolve_installed_ollama_model_tag("ollama/gemma4", installed)
-        == "gemma4:latest"
+        resolve_installed_ollama_model_tag("ollama/gemma:2b", installed) == "gemma:2b"
+    )
+    assert resolve_installed_ollama_model_tag("gemma:2b", installed) == "gemma:2b"
+    assert (
+        resolve_installed_ollama_model_tag("phi4-mini", installed) == "phi4-mini:latest"
     )
     assert (
-        resolve_installed_ollama_model_tag("gemma4:latest", installed)
-        == "gemma4:latest"
-    )
-    assert (
-        resolve_installed_ollama_model_tag("hf.co/google/gemma-4-E4B", installed)
-        == "gemma4:latest"
-    )
-    assert (
-        resolve_installed_ollama_model_tag(
-            "hf.co/microsoft/Phi-4-mini-flash-reasoning", installed
-        )
+        resolve_installed_ollama_model_tag("phi4-mini:latest", installed)
         == "phi4-mini:latest"
     )
     assert resolve_installed_ollama_model_tag("nonexistent:7b", installed) is None
@@ -525,15 +519,15 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
     assert "Table: t8" in prompt_compact
     assert "Table: t9" not in prompt_compact
 
-    # Test fetch_available_models with configured Ollama models (both matched and unpulled)
+    # Test fetch_available_models with configured Ollama models (online with models vs online empty vs offline)
     class _OnlineTagsResp:
-        """Protocol-compliant URL response returning gemma4:latest."""
+        """Protocol-compliant URL response returning gemma:2b."""
 
         status = 200
 
         def read(self) -> bytes:
             """Return JSON tags."""
-            return b'{"models": [{"name": "gemma4:latest", "size": 100}]}'
+            return b'{"models": [{"name": "gemma:2b", "size": 100}]}'
 
         def __enter__(self) -> "_OnlineTagsResp":
             """Enter context."""
@@ -548,16 +542,30 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
             """Exit context."""
             return None
 
+    class _OnlineEmptyTagsResp(_OnlineTagsResp):
+        """Protocol-compliant URL response returning an empty models list."""
+
+        def read(self) -> bytes:
+            """Return empty JSON tags."""
+            return b'{"models": []}'
+
     monkeypatch.setenv("OLLAMA_MODEL_LIST", "hf.co/google/gemma-4-E4B,unpulled:7b")
     res_online = fetch_available_models(
         include_cloud=True,
         urlopen_fn=lambda req, timeout=5: _OnlineTagsResp(),
     )
     by_name = {m.name: m for m in res_online.models}
-    assert by_name["gemma4:latest"].available is True
-    assert by_name["unpulled:7b"].available is False
-    assert by_name["unpulled:7b"].reachable is False
-    assert by_name["unpulled:7b"].error_code == "MODEL_NOT_PULLED"
+    assert by_name["gemma:2b"].available is True
+    assert "unpulled:7b" not in by_name
+
+    res_online_empty = fetch_available_models(
+        include_cloud=True,
+        urlopen_fn=lambda req, timeout=5: _OnlineEmptyTagsResp(),
+    )
+    by_name_empty = {m.name: m for m in res_online_empty.models}
+    assert by_name_empty["unpulled:7b"].available is False
+    assert by_name_empty["unpulled:7b"].reachable is False
+    assert by_name_empty["unpulled:7b"].error_code == "MODEL_NOT_PULLED"
 
     def _fail_urlopen(req: object, timeout: float = 5.0) -> _OnlineTagsResp:
         """Raise URLError to simulate offline Ollama."""

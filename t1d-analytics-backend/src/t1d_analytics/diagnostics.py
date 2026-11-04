@@ -595,7 +595,7 @@ check_duckdb_health = check_database_health
 
 def check_ollama_health(
     ollama_url: Optional[str] = None,
-    recommended_model: str = "gemma4",
+    recommended_model: str = "gemma:2b",
     timeout: float = 2.0,
     lang: Optional[str] = None,
 ) -> OllamaStatus:
@@ -628,8 +628,7 @@ def check_ollama_health(
         )
         models = sort_ollama_models([m.name for m in model_infos])
         has_recommended = any(
-            recommended_model in m
-            or m in ("gemma:2b", "llama3.2:1b", "phi4-mini", "gemma4:latest")
+            recommended_model in m or m in ("gemma:2b", "llama3.2:1b", "phi4-mini")
             for m in models
         )
 

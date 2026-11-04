@@ -18,10 +18,6 @@ export const DEFAULT_CHOICE_OLLAMA_MODELS: readonly string[] = [
   "gemma:2b",
   "llama3.2:1b",
   "phi4-mini",
-  "gemma4:latest",
-  "hf.co/google/gemma-4-E4B",
-  "hf.co/microsoft/Phi-4-mini-flash-reasoning",
-  "hf.co/meta-llama/Llama-3.2-1B",
 ];
 
 /**
@@ -31,9 +27,6 @@ const PREFERRED_FAST_LOCAL_MODELS: readonly string[] = [
   "gemma:2b",
   "llama3.2:1b",
   "phi4-mini",
-  "gemma4:latest",
-  "gemma-4-e4b",
-  "gemma:latest",
 ];
 
 /**
@@ -240,7 +233,10 @@ export class ModelSelectorController {
     for (const model of modelsList) {
       const prov = resolveModelProvider(model.name, model.provider);
       const hasKey = Boolean(this.ui.state.getApiKey(prov));
-      const isConfigured = Boolean(model.configured || hasKey);
+      const isConfigured =
+        prov === "ollama"
+          ? model.configured !== false
+          : Boolean(model.configured || hasKey);
       const isReachable = model.reachable !== false;
       const isAvailable = model.available !== false && isConfigured;
 
@@ -250,6 +246,9 @@ export class ModelSelectorController {
       option.setAttribute("data-provider", prov);
       option.setAttribute("data-configured", isConfigured ? "true" : "false");
       option.textContent = `${model.name} ${badge}`;
+      if (prov === "ollama" && (!isAvailable || !isReachable)) {
+        option.disabled = true;
+      }
       if (!isAvailable && model.error_code) {
         option.title = `${model.name} (${model.error_code})`;
       }
@@ -279,8 +278,9 @@ export class ModelSelectorController {
     if (!activeChat) return;
 
     const currentModel = activeChat.model;
-    const matchedOpt = Array.from(this.modelSelect.options).find((opt) =>
-      matchesModelTagWithLatest(opt.value, currentModel),
+    const matchedOpt = Array.from(this.modelSelect.options).find(
+      (opt) =>
+        !opt.disabled && matchesModelTagWithLatest(opt.value, currentModel),
     );
     if (matchedOpt) {
       this.modelSelect.value = matchedOpt.value;

@@ -121,7 +121,7 @@ export function mountChatUiTestDom(): void {
         <button id="open-sidebar-btn">Open</button>
         <button id="theme-toggle-btn">Theme</button>
         <select id="model-select">
-          <option value="gemma4">Gemma</option>
+          <option value="gemma:2b">gemma:2b</option>
           <option value="sql">SQL</option>
         </select>
         <button id="provider-settings-btn">⚙️</button>
@@ -168,9 +168,9 @@ export function mountChatUiTestDom(): void {
           <input type="password" id="provider-key-google" />
           <select id="provider-models-multiselect" multiple>
             <option value="sql" selected>Literal SQL</option>
-            <option value="hf.co/google/gemma-4-E4B" selected>hf.co/google/gemma-4-E4B</option>
-            <option value="hf.co/microsoft/Phi-4-mini-flash-reasoning" selected>hf.co/microsoft/Phi-4-mini-flash-reasoning</option>
-            <option value="hf.co/meta-llama/Llama-3.2-1B" selected>hf.co/meta-llama/Llama-3.2-1B</option>
+            <option value="gemma:2b" selected>gemma:2b</option>
+            <option value="llama3.2:1b" selected>llama3.2:1b</option>
+            <option value="phi4-mini" selected>phi4-mini</option>
           </select>
           <input type="checkbox" id="provider-store-consent" checked />
           <span id="provider-badge-openai"></span>
