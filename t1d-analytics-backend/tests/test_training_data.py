@@ -401,6 +401,7 @@ def test_normalize_sql() -> None:
 
 def test_evaluate_text_to_sql_benchmark(tmp_path: Path, mocker: MagicMock) -> None:
     """Test evaluate_text_to_sql computing EM, EX, syntax errors, and reports."""
+    from t1d_analytics.sql_fallback_synthesizer import TranslationResult
     from t1d_analytics.training_data import evaluate_text_to_sql
 
     db_file = tmp_path / "benchmark.duckdb"
@@ -422,16 +423,24 @@ def test_evaluate_text_to_sql_benchmark(tmp_path: Path, mocker: MagicMock) -> No
         {"prompt": "Bad gold query", "gold_sql": "INVALID SQL QUERY !!!"},
     ]
 
-    def mock_generate(db_p: str, q: str, model_name: str) -> tuple[str, str]:
+    def mock_generate(db_p: str, q: str, model_name: str) -> TranslationResult:
         """Return mock SQL query or raise error based on prompt."""
+        _ = (db_p, model_name)
         if "Get all users" in q:
-            return "resp1", "SELECT * FROM users"
+            return TranslationResult(
+                full_response="resp1", sql_query="SELECT * FROM users"
+            )
         elif "Average age" in q:
-            return "resp2", "SELECT   AVG(age) AS avg_age  FROM users"
+            return TranslationResult(
+                full_response="resp2",
+                sql_query="SELECT   AVG(age) AS avg_age  FROM users",
+            )
         elif "Error model query" in q:
             raise RuntimeError("Model crash")
         else:
-            return "resp3", "SELECT FROM users WHERE"
+            return TranslationResult(
+                full_response="resp3", sql_query="SELECT FROM users WHERE"
+            )
 
     metrics = evaluate_text_to_sql(
         str(db_file),
@@ -505,6 +514,7 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
     tmp_path: Path, mocker: MagicMock
 ) -> None:
     """Test evaluate_text_to_sql distinguishes queries with and without ORDER BY."""
+    from t1d_analytics.sql_fallback_synthesizer import TranslationResult
     from t1d_analytics.training_data import evaluate_text_to_sql
 
     db_file = tmp_path / "orders.duckdb"
@@ -536,15 +546,22 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
         },
     ]
 
-    def mock_gen(db_p: str, q: str, model_name: str) -> tuple[str, str]:
+    def mock_gen(db_p: str, q: str, model_name: str) -> TranslationResult:
         """Return ordered or unordered SQL for benchmark test."""
+        _ = (db_p, model_name)
         if "Unordered Mismatch" in q:
-            return "ok", "SELECT val FROM tbl WHERE val = 10"
+            return TranslationResult(
+                full_response="ok", sql_query="SELECT val FROM tbl WHERE val = 10"
+            )
         elif "Ordered Mismatch" in q:
-            return "ok", "SELECT val FROM tbl ORDER BY val ASC"
+            return TranslationResult(
+                full_response="ok", sql_query="SELECT val FROM tbl ORDER BY val ASC"
+            )
         elif "Ordered Match" in q:
-            return "ok", "SELECT val FROM tbl ORDER BY val DESC"
-        return "ok", "SELECT val FROM tbl"
+            return TranslationResult(
+                full_response="ok", sql_query="SELECT val FROM tbl ORDER BY val DESC"
+            )
+        return TranslationResult(full_response="ok", sql_query="SELECT val FROM tbl")
 
     res = evaluate_text_to_sql(str(db_file), test_cases, translate_fn=mock_gen)
     assert res["execution_accuracy"] == 50.0
@@ -554,6 +571,7 @@ def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> 
     """Test error handling in _parse_llm_json_array, _is_valid_sql, and evaluate_text_to_sql with malformed inputs and DB errors."""
     import duckdb
 
+    from t1d_analytics.sql_fallback_synthesizer import TranslationResult
     from t1d_analytics.training_data import (
         TrainingDataGenerator,
         _parse_llm_json_array,
@@ -585,7 +603,9 @@ def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> 
         res = evaluate_text_to_sql(
             str(db_file),
             test_cases,
-            translate_fn=lambda db_p, q, model_name="gemma4": ("", "SELECT 2"),
+            translate_fn=lambda db_p, q, model_name="gemma4": TranslationResult(
+                full_response="", sql_query="SELECT 2"
+            ),
         )
         assert res["execution_accuracy"] == 0.0
         assert res["syntax_failure_rate"] == 100.0
@@ -613,6 +633,7 @@ def test_evaluate_text_to_sql_nested_complex_types(
     tmp_path: Path, mocker: MagicMock
 ) -> None:
     """Test evaluate_text_to_sql handles DuckDB STRUCT and LIST types without unhashable TypeError."""
+    from t1d_analytics.sql_fallback_synthesizer import TranslationResult
     from t1d_analytics.training_data import evaluate_text_to_sql
 
     db_file = tmp_path / "nested.duckdb"
@@ -633,9 +654,9 @@ def test_evaluate_text_to_sql_nested_complex_types(
     res = evaluate_text_to_sql(
         str(db_file),
         test_cases,
-        translate_fn=lambda db_p, q, model_name="gemma4": (
-            "ok",
-            "SELECT items, info FROM complex_tbl",
+        translate_fn=lambda db_p, q, model_name="gemma4": TranslationResult(
+            full_response="ok",
+            sql_query="SELECT items, info FROM complex_tbl",
         ),
     )
     assert res["execution_accuracy"] == 100.0
@@ -767,11 +788,16 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
     assert len(suite) == 7
     gold_lookup = {item["question"]: item["gold_sql"] for item in suite}
 
+    from t1d_analytics.sql_fallback_synthesizer import TranslationResult
+
     def _oracle_translate(
         db_p: str, question: str, model_name: str = "gemma4"
-    ) -> tuple[str, str]:
+    ) -> TranslationResult:
         """Return gold SQL for each Table 1 benchmark question."""
-        return "oracle", gold_lookup[question]
+        _ = (db_p, model_name)
+        return TranslationResult(
+            full_response="oracle", sql_query=gold_lookup[question]
+        )
 
     report = evaluate_text_to_sql(
         str(db_path),
@@ -797,10 +823,11 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
     )
     assert frontend_t1_file.exists()
     ts_content = frontend_t1_file.read_text(encoding="utf-8")
-    ts_ids = re.findall(r'id:\s*"([^"]+)"', ts_content)
-    ts_complexities = re.findall(r'complexity:\s*"([^"]+)"', ts_content)
-    ts_questions = re.findall(r'question:\s*\n?\s*"([^"]+)"', ts_content)
-    ts_sqls = re.findall(r"sql:\s*`([^`]+)`", ts_content)
+    ts_array_body = ts_content.split("TABLE_1_EXAMPLE_QUERIES", 1)[1]
+    ts_ids = re.findall(r'id:\s*"([^"]+)"', ts_array_body)
+    ts_complexities = re.findall(r'complexity:\s*"([^"]+)"', ts_array_body)
+    ts_questions = re.findall(r'question:\s*\n?\s*"([^"]+)"', ts_array_body)
+    ts_sqls = re.findall(r"sql:\s*`([^`]+)`", ts_array_body)
     assert ts_ids == [item["id"] for item in suite]
     assert ts_complexities == [item["complexity"] for item in suite]
     assert ts_questions == [item["question"] for item in suite]
@@ -813,3 +840,98 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
             )
     finally:
         conn_parity.close()
+
+
+def test_gold_sql_comparison_and_overlap_helpers(tmp_path: Path) -> None:
+    """Test _canonicalize_cell_for_overlap, compute_result_value_overlap_pct, _rows_to_tuples_and_columns, and compare_predicted_and_gold_sql."""
+    from t1d_analytics.sql_executor import execute_duckdb_query
+    from t1d_analytics.training_data import (
+        _canonicalize_cell_for_overlap,
+        _rows_to_tuples_and_columns,
+        compare_predicted_and_gold_sql,
+        compute_result_value_overlap_pct,
+    )
+
+    assert _canonicalize_cell_for_overlap(None) == "NULL"
+    assert _canonicalize_cell_for_overlap(True) == "TRUE"
+    assert _canonicalize_cell_for_overlap(False) == "FALSE"
+    assert _canonicalize_cell_for_overlap(42) == "42.0"
+    assert _canonicalize_cell_for_overlap(3.14159) == "3.1"
+    assert _canonicalize_cell_for_overlap("  12.34 ") == "12.3"
+    assert _canonicalize_cell_for_overlap("  Mean   Age ") == "mean age"
+
+    assert compute_result_value_overlap_pct([], []) == 100.0
+    assert compute_result_value_overlap_pct([{"a": 1}], []) == 0.0
+    assert compute_result_value_overlap_pct([], [{"a": 1}]) == 0.0
+    assert compute_result_value_overlap_pct([{}], [{}]) == 100.0
+    overlap = compute_result_value_overlap_pct(
+        [{"stat": "30.0 ± 5.0"}],
+        [{"mean": 30.0, "sd": 5.0}],
+    )
+    assert overlap > 0.0
+
+    assert _rows_to_tuples_and_columns([]) == ([], [])
+    assert _rows_to_tuples_and_columns([{"x": 1, "y": "a"}]) == (
+        [(1, "a")],
+        ["x", "y"],
+    )
+
+    db_file = tmp_path / "comp.duckdb"
+    conn = duckdb.connect(str(db_file))
+    conn.execute("CREATE TABLE users (id INT, age DOUBLE)")
+    conn.execute("INSERT INTO users VALUES (1, 20.0), (2, 40.0)")
+    conn.close()
+
+    # 1. Exact & execution match
+    comp_exact = compare_predicted_and_gold_sql(
+        db_path=str(db_file),
+        pred_sql="SELECT id, age FROM users ORDER BY id",
+        gold_sql="SELECT id, age FROM users ORDER BY id",
+        execute_fn=execute_duckdb_query,
+    )
+    assert comp_exact.exact_match is True
+    assert comp_exact.execution_accuracy is True
+    assert comp_exact.column_overlap_pct == 100.0
+
+    # 2. Precomputed pred_rows with partial overlap (EX=False)
+    comp_partial = compare_predicted_and_gold_sql(
+        db_path=str(db_file),
+        pred_sql="SELECT id FROM users WHERE id = 1",
+        gold_sql="SELECT id, age FROM users",
+        execute_fn=execute_duckdb_query,
+        precomputed_pred_rows=[{"id": 1}],
+    )
+    assert comp_partial.exact_match is False
+    assert comp_partial.execution_accuracy is False
+    assert 0.0 < comp_partial.column_overlap_pct < 100.0
+
+    # 3. Precomputed pred_error
+    comp_pre_err = compare_predicted_and_gold_sql(
+        db_path=str(db_file),
+        pred_sql="SELECT bad FROM users",
+        gold_sql="SELECT id FROM users",
+        execute_fn=execute_duckdb_query,
+        precomputed_pred_error="Binder Error",
+    )
+    assert comp_pre_err.syntax_error is True
+    assert comp_pre_err.error_message == "Binder Error"
+
+    # 4. Empty pred_sql
+    comp_empty_pred = compare_predicted_and_gold_sql(
+        db_path=str(db_file),
+        pred_sql="   ",
+        gold_sql="SELECT id FROM users",
+        execute_fn=execute_duckdb_query,
+    )
+    assert comp_empty_pred.syntax_error is True
+    assert comp_empty_pred.error_message is not None
+
+    # 5. Live execution failure on pred_sql and invalid gold_sql
+    comp_live_err = compare_predicted_and_gold_sql(
+        db_path=str(db_file),
+        pred_sql="SELECT * FROM missing_tbl",
+        gold_sql="SELECT * FROM also_missing_tbl",
+        execute_fn=execute_duckdb_query,
+    )
+    assert comp_live_err.syntax_error is True
+    assert comp_live_err.gold_row_count == 0

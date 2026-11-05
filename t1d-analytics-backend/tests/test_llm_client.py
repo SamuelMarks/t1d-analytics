@@ -11,19 +11,21 @@ import pytest
 
 from t1d_analytics.llm_client import (
     _AnyLlmModelProtocol,
-    _CandidateProtocol,
-    _extract_delta_or_message_str,
     build_clinical_sql_prompt,
     discover_configured_any_llm_models,
-    extract_stream_delta,
     get_effective_api_key,
-    is_mapping_chunk,
     is_provider_configured,
-    is_sequence_of_choices,
-    normalize_ollama_host,
     parse_configured_models_string,
     resolve_provider_and_model,
 )
+from t1d_analytics.llm_stream_protocols import (
+    _CandidateProtocol,
+    _extract_delta_or_message_str,
+    extract_stream_delta,
+    is_mapping_chunk,
+    is_sequence_of_choices,
+)
+from t1d_analytics.ollama_discovery import normalize_ollama_host
 
 
 class _EmptyChunk:

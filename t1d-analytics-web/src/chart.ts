@@ -284,9 +284,9 @@ export function renderHistogramSvg(
     const y = 90 - barHeight;
     const binCenter = min + i * binSize + binSize / 2;
 
-    let color = "#2ecc71";
-    if (binCenter < 70) color = "#e74c3c";
-    else if (binCenter > 180) color = "#f39c12";
+    let color: string = CLINICAL_CHART_THEME.colors.inRange;
+    if (binCenter < 70) color = CLINICAL_CHART_THEME.colors.low;
+    else if (binCenter > 180) color = CLINICAL_CHART_THEME.colors.high;
 
     const binMin = formatNumber(min + i * binSize);
     const binMax = formatNumber(min + (i + 1) * binSize);
@@ -346,9 +346,9 @@ export function buildAgpTargetZone(
   svg.appendChild(targetRect);
 
   const targetLines: Array<[number, string]> = [
-    [70, "#2ecc71"],
-    [180, "#2ecc71"],
-    [250, "#f39c12"],
+    [70, CLINICAL_CHART_THEME.colors.inRange],
+    [180, CLINICAL_CHART_THEME.colors.inRange],
+    [250, CLINICAL_CHART_THEME.colors.high],
   ];
   for (const [targetVal, color] of targetLines) {
     const lineY = mapY(targetVal);
@@ -702,20 +702,23 @@ export function buildMetricSummaryTiles(
 }
 
 /**
- * Render a complete CGM analytics card element from table rows.
- * @param {Array<Record<string, ClinicalRowValue>>} rows - The data rows.
- * @param {number} [observationDays=14] - Duration in days for observation window (default: 14, 0 for all data).
- * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
- * @returns {HTMLElement | null} The analytics card element or null if not CGM data.
+ * Populates the header, controls, wear badge, summary tiles, and SVG charts inside a CGM analytics card container.
+ * @param {HTMLElement} container - Target `.cgm-analytics-card` container element.
+ * @param {Array<Record<string, ClinicalRowValue>>} rows - Full CGM dataset rows.
+ * @param {string} glucoseCol - Detected glucose column identifier.
+ * @param {string | undefined} timeCol - Optional detected timestamp column identifier.
+ * @param {number} observationDays - Duration in days for observation window (0 for all data).
+ * @param {string} idSuffix - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
+ * @returns {boolean} True if valid numeric glucose readings were rendered, false otherwise.
  */
-export function renderCgmCard(
+export function populateCgmCardBody(
+  container: HTMLElement,
   rows: Array<Record<string, ClinicalRowValue>>,
-  observationDays: number = 14,
-  idSuffix: string = "",
-): HTMLElement | null {
-  const { glucoseCol, timeCol } = detectCgmColumns(rows);
-  if (!glucoseCol) return null;
-
+  glucoseCol: string,
+  timeCol: string | undefined,
+  observationDays: number,
+  idSuffix: string,
+): boolean {
   const displayRows =
     timeCol && observationDays > 0
       ? filterObservationWindow(rows, timeCol, observationDays)
@@ -731,14 +734,14 @@ export function renderCgmCard(
     }
   }
 
-  if (values.length === 0) return null;
+  if (values.length === 0) return false;
   const metrics = calculateTIR(values);
 
-  const container = document.createElement("div");
-  container.className = "cgm-analytics-card";
-
+  container.replaceChildren();
   if (isRtlLanguage()) {
     container.setAttribute("dir", "rtl");
+  } else {
+    container.removeAttribute("dir");
   }
 
   const headerRow = document.createElement("div");
@@ -780,10 +783,14 @@ export function renderCgmCard(
     }
     windowSelect.onchange = () => {
       const selectedDays = parseInt(windowSelect.value, 10);
-      const newCard = renderCgmCard(rows, selectedDays, idSuffix);
-      if (newCard && container.parentNode) {
-        container.parentNode.replaceChild(newCard, container);
-      }
+      populateCgmCardBody(
+        container,
+        rows,
+        glucoseCol,
+        timeCol,
+        selectedDays,
+        idSuffix,
+      );
     };
     controlsRow.appendChild(windowSelect);
   }
@@ -843,6 +850,33 @@ export function renderCgmCard(
   }
 
   container.appendChild(renderHistogramSvg(values, idSuffix));
+  return true;
+}
 
-  return container;
+/**
+ * Render a complete CGM analytics card element from table rows.
+ * @param {Array<Record<string, ClinicalRowValue>>} rows - The data rows.
+ * @param {number} [observationDays=14] - Duration in days for observation window (default: 14, 0 for all data).
+ * @param {string} [idSuffix=""] - Optional suffix for unique SVG `<title>` and `<desc>` element IDs.
+ * @returns {HTMLElement | null} The analytics card element or null if not CGM data.
+ */
+export function renderCgmCard(
+  rows: Array<Record<string, ClinicalRowValue>>,
+  observationDays: number = 14,
+  idSuffix: string = "",
+): HTMLElement | null {
+  const { glucoseCol, timeCol } = detectCgmColumns(rows);
+  if (!glucoseCol) return null;
+
+  const container = document.createElement("div");
+  container.className = "cgm-analytics-card";
+  const populated = populateCgmCardBody(
+    container,
+    rows,
+    glucoseCol,
+    timeCol,
+    observationDays,
+    idSuffix,
+  );
+  return populated ? container : null;
 }

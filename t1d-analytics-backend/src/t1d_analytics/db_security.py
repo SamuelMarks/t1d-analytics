@@ -11,12 +11,16 @@ from t1d_analytics.errors import InvalidDatabasePathError
 ALLOWED_DB_EXTENSIONS = (".duckdb", ".db")
 LOCAL_T1D_DB_SEARCH_ROOT = Path("/Volumes/TOSHIBA_EXT/stanford/t1d")
 REMOTE_T1D_DB_SEARCH_ROOT = Path("/mnt/data/t1d")
-DEFAULT_JAEB_EXTERNAL_ROOT = LOCAL_T1D_DB_SEARCH_ROOT / "jaeb"
-DEFAULT_T1D_DB_SEARCH_DIRS: tuple[Path, ...] = (
+DEFAULT_JAEB_EXTERNAL_ROOT = LOCAL_T1D_DB_SEARCH_ROOT
+DEFAULT_DB_SEARCH_DIRS: tuple[Path, ...] = (
+    REMOTE_T1D_DB_SEARCH_ROOT,
     LOCAL_T1D_DB_SEARCH_ROOT,
-    DEFAULT_JAEB_EXTERNAL_ROOT,
+)
+DEFAULT_T1D_DB_SEARCH_DIRS: tuple[Path, ...] = (
     REMOTE_T1D_DB_SEARCH_ROOT,
     REMOTE_T1D_DB_SEARCH_ROOT / "jaeb",
+    LOCAL_T1D_DB_SEARCH_ROOT,
+    LOCAL_T1D_DB_SEARCH_ROOT / "jaeb",
 )
 DB_SEARCH_ENV_VARS: tuple[str, ...] = (
     "T1D_DB_SEARCH_DIR",
@@ -56,31 +60,85 @@ def _split_search_dir_spec(raw_spec: str) -> List[Path]:
     return [Path(part.strip()) for part in parts if part.strip()]
 
 
+def _safe_path_exists(candidate: Path) -> bool:
+    """
+    Check whether `candidate` exists on disk, returning `False` on `OSError`.
+
+    Args:
+    ----
+        candidate: Filesystem `Path` to probe.
+
+    Returns:
+    -------
+        bool: `True` when `candidate.exists()` succeeds and returns `True`.
+
+    """
+    try:
+        return candidate.exists()
+    except OSError:
+        return False
+
+
+def _expand_jaeb_candidates(roots: List[Path]) -> List[Path]:
+    """
+    Expand each root directory `Path` to include both the root and its `jaeb` subdirectory.
+
+    Args:
+    ----
+        roots: Base directory `Path` objects.
+
+    Returns:
+    -------
+        List[Path]: Expanded list of directory `Path` objects.
+
+    """
+    expanded: List[Path] = []
+    for candidate in roots:
+        if candidate.name != "jaeb":
+            expanded.extend((candidate, candidate / "jaeb"))
+        else:
+            expanded.append(candidate)
+    return expanded
+
+
 def get_configured_db_search_dirs() -> List[Path]:
     """
-    Return the list of database search directories explicitly configured via environment variables.
+    Return the ordered, deduplicated list of database search directories from env vars and host defaults.
 
-    Inspects `T1D_DB_SEARCH_DIR`, `T1D_DB_SEARCH_PATH`, `T1D_JAEB_DIR`, and `T1D_DB_DIR`,
-    and for each root directory also includes its `jaeb` subdirectory candidate.
+    Inspects `T1D_DB_SEARCH_DIR`, `T1D_DB_SEARCH_PATH`, `T1D_JAEB_DIR`, and `T1D_DB_DIR`.
+    When no env var is set or when none of the explicitly configured paths exist on the
+    current host, automatically appends `DEFAULT_DB_SEARCH_DIRS` (`/mnt/data/t1d` and
+    `/Volumes/TOSHIBA_EXT/stanford/t1d`) and their `/jaeb` subdirectories.
 
     Returns
     -------
-        List[Path]: Ordered, deduplicated list of configured search directory `Path` objects.
+        List[Path]: Ordered, deduplicated list of search directory `Path` objects.
 
     """
+    explicit_roots: List[Path] = []
+    for env_name in DB_SEARCH_ENV_VARS:
+        explicit_roots.extend(_split_search_dir_spec(os.environ.get(env_name) or ""))
+
+    explicit_expanded = _expand_jaeb_candidates(explicit_roots)
+    include_defaults = not explicit_expanded or not any(
+        _safe_path_exists(p) for p in explicit_expanded
+    )
+
+    ordered_defaults: List[Path] = []
+    if include_defaults:
+        existing_defaults = [d for d in DEFAULT_DB_SEARCH_DIRS if _safe_path_exists(d)]
+        missing_defaults = [
+            d for d in DEFAULT_DB_SEARCH_DIRS if not _safe_path_exists(d)
+        ]
+        ordered_defaults = _expand_jaeb_candidates(existing_defaults + missing_defaults)
+
     configured: List[Path] = []
     seen: set[str] = set()
-    for env_name in DB_SEARCH_ENV_VARS:
-        for candidate in _split_search_dir_spec(os.environ.get(env_name) or ""):
-            for expanded in (
-                (candidate, candidate / "jaeb")
-                if candidate.name != "jaeb"
-                else (candidate,)
-            ):
-                key = str(expanded)
-                if key not in seen:
-                    seen.add(key)
-                    configured.append(expanded)
+    for candidate in (*explicit_expanded, *ordered_defaults):
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            configured.append(candidate)
     return configured
 
 
@@ -88,17 +146,17 @@ def get_t1d_db_search_dirs() -> List[Path]:
     """
     Return all candidate T1D database search directories (configured env vars plus host/remote defaults).
 
-    Includes any directories from `T1D_DB_SEARCH_DIR` / `T1D_JAEB_DIR` followed by the standard
-    local host (`/Volumes/TOSHIBA_EXT/stanford/t1d`) and remote server (`/mnt/data/t1d`) roots.
+    Includes any directories from `get_configured_db_search_dirs()` followed by the standard
+    remote server (`/mnt/data/t1d`) and local host (`/Volumes/TOSHIBA_EXT/stanford/t1d`) roots.
 
     Returns
     -------
         List[Path]: Ordered, deduplicated list of search directory `Path` objects.
 
     """
-    dirs: List[Path] = []
-    seen: set[str] = set()
-    for candidate in (*get_configured_db_search_dirs(), *DEFAULT_T1D_DB_SEARCH_DIRS):
+    dirs: List[Path] = list(get_configured_db_search_dirs())
+    seen: set[str] = {str(d) for d in dirs}
+    for candidate in DEFAULT_T1D_DB_SEARCH_DIRS:
         key = str(candidate)
         if key not in seen:
             seen.add(key)
@@ -110,29 +168,58 @@ def get_jaeb_external_root() -> Path:
     """
     Resolve the external T1D / Jaeb clinical dataset directory from env vars or platform defaults.
 
-    Checks `T1D_JAEB_DIR` and `T1D_DB_SEARCH_DIR` first, then falls back to `/mnt/data/t1d`
-    when present on a remote server or `DEFAULT_JAEB_EXTERNAL_ROOT` (`/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb`).
+    Checks `T1D_DB_SEARCH_DIR` and `T1D_JAEB_DIR` first; if multiple paths are specified or if the
+    specified path does not exist on the current machine, returns the first path that exists on disk
+    among `[configured_paths..., REMOTE_T1D_DB_SEARCH_ROOT, LOCAL_T1D_DB_SEARCH_ROOT]`, falling back
+    to `DEFAULT_JAEB_EXTERNAL_ROOT` when none exist on disk.
 
     Returns
     -------
         Path: Candidate path to the external T1D / Jaeb dataset root directory.
 
     """
-    jaeb_dirs = _split_search_dir_spec(os.environ.get("T1D_JAEB_DIR") or "")
-    if jaeb_dirs:
-        return jaeb_dirs[0]
-
-    search_dirs = [
+    configured_paths = [
         p
-        for env_name in ("T1D_DB_SEARCH_DIR", "T1D_DB_SEARCH_PATH", "T1D_DB_DIR")
+        for env_name in (
+            "T1D_DB_SEARCH_DIR",
+            "T1D_JAEB_DIR",
+            "T1D_DB_SEARCH_PATH",
+            "T1D_DB_DIR",
+        )
         for p in _split_search_dir_spec(os.environ.get(env_name) or "")
     ]
-    if search_dirs:
-        return next((c for c in search_dirs if c.exists()), search_dirs[0])
-
-    if REMOTE_T1D_DB_SEARCH_ROOT.exists() and not DEFAULT_JAEB_EXTERNAL_ROOT.exists():
-        return REMOTE_T1D_DB_SEARCH_ROOT
+    for candidate in (
+        *configured_paths,
+        *DEFAULT_DB_SEARCH_DIRS,
+    ):
+        if _safe_path_exists(candidate):
+            return candidate
+    if configured_paths:
+        return configured_paths[0]
     return DEFAULT_JAEB_EXTERNAL_ROOT
+
+
+def get_recommended_jaeb_db_path() -> str:
+    """
+    Resolve the recommended authentic Jaeb DuckDB file path for the current host.
+
+    Searches `get_configured_db_search_dirs()` for an existing `t1d.duckdb`
+    file on disk, and otherwise returns `<external_root>/jaeb/t1d.duckdb` based on
+    `get_jaeb_external_root()`.
+
+    Returns
+    -------
+        str: Recommended filesystem path to the authentic Jaeb `t1d.duckdb` file.
+
+    """
+    for search_dir in get_configured_db_search_dirs():
+        candidate = search_dir / "t1d.duckdb"
+        if _safe_path_exists(candidate):
+            return str(candidate.resolve())
+    ext_root = get_jaeb_external_root()
+    if ext_root.name == "jaeb":
+        return str(ext_root / "t1d.duckdb")
+    return str(ext_root / "jaeb" / "t1d.duckdb")
 
 
 def get_allowed_db_roots() -> List[Path]:
@@ -206,7 +293,7 @@ def _iter_duckdb_files_in_dir(
 
 def resolve_default_db_path(db_path: Optional[str] = None) -> str:
     """
-    Resolve the target DuckDB database path from an explicit argument, `T1D_DB_PATH`, `data/t1d.duckdb`, or `T1D_DB_SEARCH_DIR`.
+    Resolve the target DuckDB database path from an explicit argument, `T1D_DB_PATH`, `T1D_DB_SEARCH_DIR`, or `data/t1d.duckdb`.
 
     Args:
     ----
@@ -222,21 +309,21 @@ def resolve_default_db_path(db_path: Optional[str] = None) -> str:
         env_db_fallback = os.environ.get("T1D_DB_PATH")
         if env_db_fallback and Path(env_db_fallback).exists():
             raw_path = env_db_fallback
-        elif not env_db_fallback and Path("data/t1d.duckdb").exists():
-            raw_path = "data/t1d.duckdb"
         elif not env_db_fallback:
-            cfg_dirs = get_configured_db_search_dirs()
-            for s_dir in cfg_dirs:
+            search_dirs = get_configured_db_search_dirs()
+            for s_dir in search_dirs:
                 candidate = s_dir / "t1d.duckdb"
                 if candidate.exists():
                     return str(candidate)
             found = [
                 f
-                for s_dir in cfg_dirs
+                for s_dir in search_dirs
                 for f in _iter_duckdb_files_in_dir(s_dir, include_subdirs=True)
             ]
             if found:
                 return str(found[0])
+            if Path("data/t1d.duckdb").exists():
+                raw_path = "data/t1d.duckdb"
     return raw_path
 
 

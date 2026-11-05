@@ -678,7 +678,7 @@ describe("ChatState", () => {
     expect(state.getConfiguredModels()).toEqual([]);
   });
 
-  it("decodes legacy HTML entities and strips superseded sum(VARCHAR) binder errors in persisted chat messages on load", () => {
+  it("decodes legacy HTML entities and strips superseded sum(VARCHAR) binder errors in persisted chat messages on load", async () => {
     const encodedMsg =
       "Error details: SQL execution error: &#39;sum(VARCHAR)&#39; -&gt; DECIMAL (arg, &#x2F;) &quot;test&quot; &lt;tag&gt; &amp; &#x27; &#34; &#x2f; &#47; &apos;";
     expect(decodeLegacyHtmlEntities(encodedMsg)).toBe(
@@ -738,5 +738,30 @@ describe("ChatState", () => {
     expect(parsed.chats?.[2].messages).toHaveLength(2);
     expect(parsed.chats?.[2].messages[0].role).toBe("user");
     expect(parsed.chats?.[2].messages[1].content).toBe("Executed SQL query.");
+
+    // Verify sanitizeMessageRecord does not mutate input object in place
+    const originalMsg = {
+      role: "user" as const,
+      content: "&#39;immutable&#39;",
+    };
+    const sanitizedMsg = decodeLegacyHtmlEntities(originalMsg.content);
+    expect(sanitizedMsg).toBe("'immutable'");
+    expect(originalMsg.content).toBe("&#39;immutable&#39;");
+
+    // Verify flushPendingSyncTasks awaits in-flight background delete before syncWithServer
+    state.serverSyncEnabled = true;
+    const chatToSyncDelete = state.createChat("Pending Delete Chat");
+    let deleteResolved = false;
+    const delayedFetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        deleteResolved = true;
+        return createJsonResponse(JSON.stringify({ sessions: [] }));
+      });
+    state.deleteChat(chatToSyncDelete.id);
+    await state.flushPendingSyncTasks();
+    expect(deleteResolved).toBe(true);
+    delayedFetchSpy.mockRestore();
   });
 });

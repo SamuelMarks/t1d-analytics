@@ -211,6 +211,7 @@ class InProcessDuckDbGemmaFallback:
         pairs: List[Dict[str, str]],
         beta: float,
         num_steps: int = 1,
+        checkpoint_dir: Optional[Union[str, Path]] = None,
     ) -> Tuple[List[float], List[float]]:
         """
         Delegate DPO preference tensor optimization to the shared training runner engine.
@@ -220,6 +221,7 @@ class InProcessDuckDbGemmaFallback:
             pairs: Preference dataset triplets with `'prompt'`, `'chosen_sql'`, and `'rejected_sql'`.
             beta: DPO temperature hyperparameter.
             num_steps: Number of optimization epochs over the preference pairs.
+            checkpoint_dir: Optional checkpoint directory to persist the DPO-optimized weights and metrics.
 
         Returns:
         -------
@@ -228,11 +230,13 @@ class InProcessDuckDbGemmaFallback:
         """
         from t1d_analytics.training_runner import optimize_dpo_preference_pairs
 
-        return optimize_dpo_preference_pairs(
+        dpo_res = optimize_dpo_preference_pairs(
             pairs=pairs,
             beta=beta,
             num_steps=num_steps,
+            checkpoint_dir=checkpoint_dir,
         )
+        return dpo_res.losses, dpo_res.margins
 
     def run_dpo(
         self,
@@ -243,7 +247,7 @@ class InProcessDuckDbGemmaFallback:
         dry_run: bool = True,
     ) -> DpoRunResult:
         """
-        Execute native in-process DPO alignment fallback computing Bradley-Terry log-margins.
+        Execute native in-process DPO alignment using the Bradley-Terry preference objective.
 
         Args:
         ----
@@ -258,12 +262,7 @@ class InProcessDuckDbGemmaFallback:
             DpoRunResult: Structured DPO execution result.
 
         """
-        from t1d_analytics.models import (
-            TrainingBackend,
-            TrainingHyperparameters,
-            TrainingJobConfig,
-        )
-        from t1d_analytics.training_runner import get_training_runner
+        from t1d_analytics.job_manager import JobMetricValue
 
         pairs: List[Dict[str, str]] = []
         with open(ds_p, encoding="utf-8") as f:
@@ -298,9 +297,12 @@ class InProcessDuckDbGemmaFallback:
                 except json.JSONDecodeError:
                     continue
 
+        ckpt_dir = out_p / "checkpoint-final"
         if not dry_run and pairs:
             dpo_losses, reward_margins = self._optimize_dpo_preference_tensors(
-                pairs, beta
+                pairs,
+                beta,
+                checkpoint_dir=ckpt_dir,
             )
         else:
             dpo_losses = []
@@ -317,30 +319,27 @@ class InProcessDuckDbGemmaFallback:
                 dpo_losses.append(round(loss_val, 4))
                 reward_margins.append(round(margin, 4))
 
-        runner = get_training_runner(TrainingBackend.LOCAL_CPU)
-        train_cfg = TrainingJobConfig(
-            model_name=model_name,
-            backend=TrainingBackend.LOCAL_CPU,
-            dataset_path=str(ds_p.resolve()),
-            output_dir=str(out_p.resolve()),
-            dry_run=dry_run,
-            use_tiny_model=not dry_run,
-            hyperparameters=TrainingHyperparameters(
-                learning_rate=1e-6,
-                num_epochs=1,
-            ),
-        )
-        res_runner = runner.run_training(train_cfg)
-        res_runner["dpo_pairs"] = len(pairs)
-        res_runner["beta"] = beta
-        res_runner["dpo_loss"] = (
+        avg_dpo_loss = (
             round(sum(dpo_losses) / len(dpo_losses), 4) if dpo_losses else 0.0
         )
-        res_runner["reward_margin"] = (
+        avg_reward_margin = (
             round(sum(reward_margins) / len(reward_margins), 4)
             if reward_margins
             else 0.0
         )
+        res_runner: Dict[str, JobMetricValue] = {
+            "status": "dry_run_completed" if dry_run else "completed",
+            "backend": "local-cpu",
+            "model_name": model_name,
+            "samples_processed": len(pairs),
+            "dpo_pairs": len(pairs),
+            "beta": beta,
+            "dpo_loss": avg_dpo_loss,
+            "reward_margin": avg_reward_margin,
+            "output_dir": str(out_p.resolve()),
+        }
+        if not dry_run:
+            res_runner["checkpoint_path"] = str(ckpt_dir.resolve())
         return {
             "status": "completed",
             "execution_mode": "native_in_process",
@@ -422,7 +421,7 @@ class InProcessDuckDbGemmaFallback:
                         exec_matches += 1
                 except duckdb.Error as e:
                     logger.debug(f"Execution failed during evaluation: {e}")
-                except Exception as e:
+                except (OSError, RuntimeError, ValueError, TypeError) as e:
                     logger.debug(f"Unexpected error during evaluation: {e}")
         finally:
             conn.close()

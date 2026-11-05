@@ -13,6 +13,7 @@ import {
   CohortBuilderModalController,
 } from "./controllers/cohort-modal-controller";
 import {
+  type ModelApiItem,
   type ModelSelectorHost,
   ModelSelectorController,
 } from "./controllers/model-selector-controller";
@@ -37,10 +38,18 @@ import {
   type TablePreviewHost,
   TablePreviewModalController,
 } from "./controllers/table-modal-controller";
+import {
+  type TemplatePickerHost,
+  TemplatePickerController,
+} from "./controllers/template-picker-controller";
 import { getBuildTimestampUtc } from "./formatters";
 import i18next, { setLanguage } from "./i18n";
 import { type MessageRendererHost, MessageRenderer } from "./message-renderer";
-import { requireElementById, trapModalFocus } from "./modal-utils";
+import {
+  optionalElementById,
+  requireElementById,
+  trapModalFocus,
+} from "./modal-utils";
 import { isReadOnlySqlStatement, updateInputHighlight } from "./sql-highlight";
 import { dispatchChatRequest } from "./sse-stream";
 import { ChatState, safeStorageGet, safeStorageSet } from "./state";
@@ -51,6 +60,7 @@ export {
   isDbStatusCode,
   ModelSelectorController,
   normalizeJoinType,
+  optionalElementById,
   parseResponseJson,
   ProviderSettingsModalController,
   requireElementById,
@@ -58,6 +68,7 @@ export {
   SidebarController,
   SystemStatusController,
   TablePreviewModalController,
+  TemplatePickerController,
   trapModalFocus,
 };
 
@@ -74,6 +85,7 @@ export class ChatUI
     ProviderSettingsHost,
     SystemStatusHost,
     TablePreviewHost,
+    TemplatePickerHost,
     SchemaExplorerHost,
     SidebarHost,
     MessageRendererHost
@@ -96,6 +108,8 @@ export class ChatUI
   public readonly sidebarController: SidebarController;
   /** Sub-controller for the AI/SQL Model Selector dropdown. */
   public readonly modelSelectorController: ModelSelectorController;
+  /** Sub-controller for the Persistent Prompt & SQL Template Library modal. */
+  public readonly templatePickerController: TemplatePickerController;
   /** Renderer for chat messages, SQL blocks, and CGM analytics cards. */
   public readonly messageRenderer: MessageRenderer;
   /** Scrollable container element holding chat messages. */
@@ -110,6 +124,12 @@ export class ChatUI
   public readonly chatInput: HTMLTextAreaElement;
   /** Submit button element for sending messages. */
   public readonly sendBtn: HTMLButtonElement;
+  /** Optional button element to cancel an in-flight chat generation request. */
+  public readonly stopBtn: HTMLButtonElement | null;
+  /** Optional button element to toggle automatic DuckDB execution of LLM-generated SQL. */
+  public readonly autoExecuteToggleBtn: HTMLButtonElement | null;
+  /** Active AbortController for an in-flight chat request, or null when idle. */
+  private activeRequestController: AbortController | null = null;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   public readonly modelSelect: HTMLSelectElement;
   /** Button element to manually trigger server session synchronization. */
@@ -145,6 +165,11 @@ export class ChatUI
     );
     this.chatInput = requireElementById<HTMLTextAreaElement>("chat-input");
     this.sendBtn = requireElementById<HTMLButtonElement>("send-btn");
+    this.stopBtn = optionalElementById("stop-btn", HTMLButtonElement);
+    this.autoExecuteToggleBtn = optionalElementById(
+      "auto-execute-toggle-btn",
+      HTMLButtonElement,
+    );
     this.syncSessionsBtn =
       requireElementById<HTMLButtonElement>("sync-sessions-btn");
     this.streamingToggleBtn = requireElementById<HTMLButtonElement>(
@@ -165,6 +190,7 @@ export class ChatUI
       this,
       this.globalListenerController.signal,
     );
+    this.templatePickerController = new TemplatePickerController(this);
     this.messageRenderer = new MessageRenderer(this);
 
     const savedTheme = safeStorageGet("t1d_theme");
@@ -176,6 +202,7 @@ export class ChatUI
 
     this.streamingEnabled = this.state.streamingMode;
     this.updateStreamingToggleUi();
+    this.updateAutoExecuteToggleUi();
     requireElementById<HTMLElement>("build-timestamp").textContent =
       `built on ${getBuildTimestampUtc()}`;
 
@@ -207,13 +234,26 @@ export class ChatUI
    * @returns {void}
    */
   public dispose(): void {
+    this.cancelActiveRequest();
     this.systemStatusController.stopPolling();
     this.globalListenerController.abort();
     this.tableModalController.abortListeners();
     this.cohortModalController.dispose();
     this.providerModalController.dispose();
+    this.templatePickerController.dispose();
     if (activeChatUIInstance === this) {
       activeChatUIInstance = null;
+    }
+  }
+
+  /**
+   * Cancels any currently in-flight chat generation request.
+   * @returns {void}
+   */
+  public cancelActiveRequest(): void {
+    if (this.activeRequestController) {
+      this.activeRequestController.abort();
+      this.activeRequestController = null;
     }
   }
 
@@ -256,6 +296,25 @@ export class ChatUI
   }
 
   /**
+   * Updates the visual indicator and accessibility attributes on the Auto-Run SQL toggle button.
+   * @returns {void}
+   */
+  public updateAutoExecuteToggleUi(): void {
+    if (!this.autoExecuteToggleBtn) return;
+    const isAuto = this.state.autoExecuteSql;
+    const label = isAuto
+      ? i18next.t("ui.autoExecuteOn", "Auto-Run SQL: ON (Read-Only DuckDB)")
+      : i18next.t("ui.autoExecuteOff", "Auto-Run SQL: OFF (Manual Play)");
+    this.autoExecuteToggleBtn.classList.toggle("active", isAuto);
+    this.autoExecuteToggleBtn.title = label;
+    this.autoExecuteToggleBtn.setAttribute("aria-label", label);
+    this.autoExecuteToggleBtn.setAttribute(
+      "aria-pressed",
+      isAuto ? "true" : "false",
+    );
+  }
+
+  /**
    * Binds form submission, streaming toggle, sync button, locale selector, and theme toggle events.
    * @returns {void}
    */
@@ -265,6 +324,15 @@ export class ChatUI
       this.state.streamingMode = this.streamingEnabled;
       this.state.saveToLocalStorage();
       this.updateStreamingToggleUi();
+    });
+
+    this.autoExecuteToggleBtn?.addEventListener("click", () => {
+      this.state.setAutoExecuteSql(!this.state.autoExecuteSql);
+      this.updateAutoExecuteToggleUi();
+    });
+
+    this.stopBtn?.addEventListener("click", () => {
+      this.cancelActiveRequest();
     });
 
     this.chatForm.addEventListener("submit", (e) => {
@@ -285,6 +353,11 @@ export class ChatUI
       this.syncHighlight();
     });
 
+    this.chatInput.addEventListener("scroll", () => {
+      this.chatInputHighlight.parentElement!.scrollTop =
+        this.chatInput.scrollTop;
+    });
+
     this.syncSessionsBtn.addEventListener("click", () => {
       void this.syncAllChatsWithServer();
     });
@@ -294,6 +367,7 @@ export class ChatUI
       await setLanguage(this.langSelect.value);
       this.updateThemeButtonLabel();
       this.updateStreamingToggleUi();
+      this.updateAutoExecuteToggleUi();
       this.providerModalController.updateProviderBadgeStatus();
       this.schemaExplorerController.renderDatabaseDropdown();
       this.providerModalController.updateModalBadgesFromLocal();
@@ -323,6 +397,117 @@ export class ChatUI
   }
 
   /**
+   * Updates the provider badge status indicator for the active model.
+   * @returns {void}
+   */
+  public updateProviderBadgeStatus(): void {
+    this.providerModalController.updateProviderBadgeStatus();
+  }
+
+  /**
+   * Populates the multi-select model configuration list in the provider modal.
+   * @param {ModelApiItem[]} modelsList - Discovered and configured models list.
+   * @returns {void}
+   */
+  public populateMultiSelectModels(modelsList: ModelApiItem[]): void {
+    this.providerModalController.populateMultiSelectModels(modelsList);
+  }
+
+  /**
+   * Reloads available models in the model selector.
+   * @returns {Promise<void>}
+   */
+  public async reloadModels(): Promise<void> {
+    await this.modelSelectorController.loadModels();
+  }
+
+  /**
+   * Reloads the database schema in the schema explorer.
+   * @param {string} [dbPath] - Optional custom database path.
+   * @returns {Promise<void>}
+   */
+  public async reloadSchema(dbPath?: string): Promise<void> {
+    await this.schemaExplorerController.loadSchema(dbPath);
+  }
+
+  /**
+   * Checks system health and updates UI indicators accordingly.
+   * @param {boolean} [isManualRetry] - Whether this is a manual user retry.
+   * @param {string} [dbPath] - Optional custom database path.
+   * @returns {Promise<void>}
+   */
+  public async checkSystemStatus(
+    isManualRetry?: boolean,
+    dbPath?: string,
+  ): Promise<void> {
+    await this.systemStatusController.check(isManualRetry, dbPath);
+  }
+
+  /**
+   * Opens the Table Preview modal for the specified table name.
+   * @param {string} tableName - Table identifier to preview.
+   * @returns {Promise<void>}
+   */
+  public async openTablePreview(tableName: string): Promise<void> {
+    await this.tableModalController.open(tableName);
+  }
+
+  /**
+   * Shows the system status alert banner with the specified severity and messaging.
+   * @param {"danger" | "warning" | "info"} severity - The alert level.
+   * @param {string} title - The title to display.
+   * @param {string} desc - The description message.
+   * @param {string} [icon] - The icon to render.
+   * @param {boolean} [showRetry] - Whether to show the retry button.
+   * @returns {void}
+   */
+  public showStatusBanner(
+    severity: "danger" | "warning" | "info",
+    title: string,
+    desc: string,
+    icon?: string,
+    showRetry?: boolean,
+  ): void {
+    this.systemStatusController.showBanner(
+      severity,
+      title,
+      desc,
+      icon,
+      showRetry,
+    );
+  }
+
+  /**
+   * Hides the system status alert banner.
+   * @returns {void}
+   */
+  public hideStatusBanner(): void {
+    this.systemStatusController.hideBanner();
+  }
+
+  /**
+   * Updates the status chip in the top header.
+   * @param {"healthy" | "degraded" | "error" | "offline"} level - The status severity.
+   * @param {string} text - The status text.
+   * @returns {void}
+   */
+  public updateStatusChip(
+    level: "healthy" | "degraded" | "error" | "offline",
+    text: string,
+  ): void {
+    this.systemStatusController.updateStatusChip(level, text);
+  }
+
+  /**
+   * Binds interaction events to action buttons inside diagnostic cards.
+   * @param {HTMLElement} container - The container holding diagnostic cards.
+   * @returns {void}
+   */
+  public bindSchemaDiagnosticButtons(container: HTMLElement): void {
+    this.schemaExplorerController.bindSchemaDiagnosticButtons(container);
+  }
+
+  /**
    * Announces a message to screen readers using the aria-live region.
    * @param {string} message - The text message to announce to assistive technology.
    * @param {boolean} [isAssertive=false] - Whether to use an assertive live region instead of polite.
@@ -342,11 +527,13 @@ export class ChatUI
    * Handles sending a user message and processing the streaming or batch response.
    * @param {string} [text] - Optional message text override (used when executing SQL directly).
    * @param {string} [modelOverride] - Optional model identifier override (e.g. 'sql').
+   * @param {string} [goldSqlOverride] - Optional gold-standard SQL reference override for NL-to-SQL benchmarking.
    * @returns {Promise<void>}
    */
   public async handleSendMessage(
     text?: string,
     modelOverride?: string,
+    goldSqlOverride?: string,
   ): Promise<void> {
     const content = text ?? this.chatInput.value.trim();
     if (!content) return;
@@ -357,7 +544,17 @@ export class ChatUI
         ? "sql"
         : this.modelSelect.value);
 
-    this.state.addMessageToActiveChat({ role: "user", content, model });
+    const effectiveGoldSql =
+      goldSqlOverride ??
+      (model !== "sql" ? (this.state.activeGoldSql ?? undefined) : undefined);
+    this.state.setActiveGoldSql(null);
+
+    this.state.addMessageToActiveChat({
+      role: "user",
+      content,
+      model,
+      ...(effectiveGoldSql ? { goldSql: effectiveGoldSql } : {}),
+    });
 
     if (text === undefined) {
       this.state.setActiveChatModel(this.modelSelect.value);
@@ -373,6 +570,7 @@ export class ChatUI
     this.chatInputWrapper.classList.add("disabled");
     this.sendBtn.disabled = true;
     this.modelSelect.disabled = true;
+    this.stopBtn?.classList.remove("hidden");
 
     const loadingDiv = this.messageRenderer.createLoadingIndicator();
     this.messagesContainer.appendChild(loadingDiv);
@@ -410,8 +608,12 @@ export class ChatUI
       provider,
       ...(dbPath ? { db_path: dbPath } : {}),
       history,
-      auto_execute: model === "sql",
+      auto_execute: model === "sql" || this.state.autoExecuteSql,
+      ...(effectiveGoldSql ? { gold_sql: effectiveGoldSql } : {}),
     });
+
+    this.activeRequestController = new AbortController();
+    const reqSignal = this.activeRequestController.signal;
 
     try {
       const outcome = await dispatchChatRequest({
@@ -420,6 +622,7 @@ export class ChatUI
         streamingEnabled: this.streamingEnabled,
         loadingDiv,
         onTokenScroll: () => this.scrollToBottom(),
+        signal: reqSignal,
       });
       loadingDiv.remove();
       if (outcome.data.is_synthetic_data === true) {
@@ -448,6 +651,9 @@ export class ChatUI
         isError: true,
         model,
       });
+    } finally {
+      this.activeRequestController = null;
+      this.stopBtn?.classList.add("hidden");
     }
 
     if (this.state.serverSyncEnabled) {
@@ -474,8 +680,7 @@ export class ChatUI
     try {
       const ok = await this.state.syncWithServer();
       if (ok) {
-        this.sidebarController.renderSidebar();
-        this.messageRenderer.renderMessages();
+        this.render();
         this.announce(i18next.t("ui.sessionsSynced"));
       }
     } catch {

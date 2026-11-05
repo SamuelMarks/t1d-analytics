@@ -215,6 +215,21 @@ describe("SchemaExplorerController & Database Switcher", () => {
     expect(tableDiv?.classList.contains("expanded")).toBe(true);
     expect(toggleHeaderBtn?.getAttribute("aria-expanded")).toBe("true");
 
+    // Click and keyboard-activate .schema-column to insert column identifier into #chat-input
+    ui.chatInput.value = "SELECT";
+    ui.chatInput.setSelectionRange(6, 6);
+    const colLi = document.querySelector<HTMLElement>(".schema-column");
+    colLi?.click();
+    expect(ui.chatInput.value).toBe("SELECT id");
+
+    ui.chatInput.value = "users.";
+    ui.chatInput.setSelectionRange(6, 6);
+    colLi?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(ui.chatInput.value).toBe("users.id");
+
+    colLi?.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
+    expect(ui.chatInput.value).toBe("users.id");
+
     toggleHeaderBtn?.dispatchEvent(new MouseEvent("click"));
     expect(tableDiv?.classList.contains("expanded")).toBe(false);
     expect(toggleHeaderBtn?.getAttribute("aria-expanded")).toBe("false");
@@ -391,10 +406,16 @@ describe("SchemaExplorerController & Database Switcher", () => {
     await ui.handleSendMessage("Hi", "sql");
 
     const triggerBtn = document.createElement("button");
+    const msgCountBefore = state.getActiveChat()?.messages.length ?? 0;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ sqlResult: [{ a: 1 }] }),
     });
     await ui.messageRenderer.executeDirectSqlAction("SELECT 1", triggerBtn);
+    expect(triggerBtn.disabled).toBe(false);
+    const activeMsgs = state.getActiveChat()?.messages ?? [];
+    expect(activeMsgs.length).toBe(msgCountBefore + 1);
+    expect(activeMsgs[activeMsgs.length - 1]?.sqlQuery).toBe("SELECT 1");
+    expect(activeMsgs[activeMsgs.length - 1]?.content).toBe("1");
   });
 });

@@ -7,12 +7,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from t1d_analytics.gcs_storage import sync_dataset_to_gcs
 from t1d_analytics.models import (
     TrainingBackend,
     TrainingHyperparameters,
     TrainingJobConfig,
 )
-from t1d_analytics.tpu_orchestrator import sync_dataset_to_gcs
 from t1d_analytics.training_runner import (
     LocalGpuRunner,
     resolve_device_telemetry,

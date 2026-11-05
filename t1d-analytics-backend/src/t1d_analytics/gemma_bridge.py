@@ -488,6 +488,3 @@ class GemmaSqlPipelineEngine:
             }
 
         return self._fallback.evaluate_sql(tc_p=tc_p, db_p=db_p)
-
-
-GemmaSqlBridge = GemmaSqlPipelineEngine

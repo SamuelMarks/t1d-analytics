@@ -93,9 +93,7 @@ export interface ClassifiedSqlTable {
  * Discriminated union representing a classified SQL query result.
  */
 export type ClassifiedSqlResult =
-  | ClassifiedSqlEmpty
-  | ClassifiedSqlScalar
-  | ClassifiedSqlTable;
+  ClassifiedSqlEmpty | ClassifiedSqlScalar | ClassifiedSqlTable;
 
 /**
  * Classifies a SQL query result array into empty, scalar (1x1), or table variants.

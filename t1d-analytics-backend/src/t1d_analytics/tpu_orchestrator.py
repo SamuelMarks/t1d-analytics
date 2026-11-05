@@ -1,6 +1,5 @@
 """Google Cloud TPU MaxText orchestration, XPK/gcloud command builders, and GCS synchronization."""
 
-import asyncio
 import json
 import os
 import shutil
@@ -29,8 +28,6 @@ from t1d_analytics.gcs_storage import (
     GcsBucketProtocol,
     GcsClientProtocol,
     Md5BlobProtocol,
-    _compute_md5_base64,
-    _resolve_gcs_client,
     download_checkpoints_from_gcs,
     parse_gcs_uri,
     sync_dataset_to_gcs,
@@ -539,21 +536,11 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             TpuPollingTimeoutError: If polling exceeds timeout threshold.
 
         """
-        cmd = self._build_gcloud_describe_cmd(workload_name, zone)
-        start = time.time()
-        while time.time() - start < timeout_seconds:
-            if cancel_event is not None and cancel_event.is_set():
-                await self._reclaim_gcloud_tpu_workload(workload_name, zone)
-                raise TpuOrchestrationError(
-                    f"Workload '{workload_name}' cancelled and reclaimed."
-                )
-            parsed = self._step_gcloud_tpu_poll(cmd, workload_name, zone)
-            if parsed is not None:
-                return parsed
-            await asyncio.sleep(min(0.02, timeout_seconds / 2.0))
-
-        raise TpuPollingTimeoutError(
-            f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
+        return self._poll_gcloud_tpu_status_sync(
+            workload_name=workload_name,
+            zone=zone,
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
         )
 
     def _reclaim_gcloud_tpu_workload_sync(
@@ -806,28 +793,18 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             raise TpuOrchestrationError(
                 f"Workload '{workload_name}' cancelled and reclaimed."
             )
-
-        xpk_bin = shutil.which("xpk")
-        if not xpk_bin:
+        if not shutil.which("xpk"):
             return await self._poll_gcloud_tpu_status(
                 workload_name=workload_name,
                 zone=max_cfg.zone,
                 timeout_seconds=timeout_seconds,
                 cancel_event=cancel_event,
             )
-
-        cmd = self._build_xpk_describe_cmd(xpk_bin, workload_name, max_cfg)
-        start = time.time()
-        while time.time() - start < timeout_seconds:
-            parsed = self._step_xpk_poll_or_cancel(
-                xpk_bin, cmd, workload_name, max_cfg, cancel_event
-            )
-            if parsed is not None:
-                return parsed
-            await asyncio.sleep(min(0.02, timeout_seconds / 2.0))
-
-        raise TpuPollingTimeoutError(
-            f"Workload '{workload_name}' polling timed out after {timeout_seconds} seconds."
+        return self._poll_workload_status_sync(
+            workload_name=workload_name,
+            max_cfg=max_cfg,
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
         )
 
     def _execute_xpk_reclaim_command(
@@ -954,73 +931,6 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             gcs_client=gcs_client,
         )
 
-    def _invoke_status_poll_sync(
-        self,
-        workload_name: str,
-        max_cfg: MaxTextConfig,
-        timeout_seconds: float,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> str:
-        """
-        Invoke workload status polling synchronously, honoring any patched `poll_workload_status`.
-
-        Args:
-        ----
-            workload_name: Dispatched workload identifier.
-            max_cfg: MaxText infrastructure configuration.
-            timeout_seconds: Polling timeout in seconds.
-            cancel_event: Optional cooperative cancellation event.
-
-        Returns:
-        -------
-            str: Resolved workload status string.
-
-        """
-        if (
-            getattr(self.poll_workload_status, "__func__", None)
-            is RemoteTpuMaxTextRunner.poll_workload_status
-        ):
-            return self._poll_workload_status_sync(
-                workload_name,
-                max_cfg,
-                timeout_seconds=timeout_seconds,
-                cancel_event=cancel_event,
-            )
-        res = self.poll_workload_status(
-            workload_name, max_cfg, timeout_seconds=timeout_seconds
-        )
-        if asyncio.iscoroutine(res):
-            return str(asyncio.run(res))
-        return str(res)
-
-    def _invoke_reclaim_sync(
-        self,
-        workload_name: str,
-        max_cfg: MaxTextConfig,
-    ) -> bool:
-        """
-        Invoke TPU workload reclamation synchronously, honoring any patched `reclaim_tpu_workload`.
-
-        Args:
-        ----
-            workload_name: Dispatched workload identifier.
-            max_cfg: MaxText infrastructure configuration.
-
-        Returns:
-        -------
-            bool: True if resources were reclaimed.
-
-        """
-        if (
-            getattr(self.reclaim_tpu_workload, "__func__", None)
-            is RemoteTpuMaxTextRunner.reclaim_tpu_workload
-        ):
-            return self._reclaim_tpu_workload_sync(workload_name, max_cfg)
-        res = self.reclaim_tpu_workload(workload_name, max_cfg)
-        if asyncio.iscoroutine(res):
-            return bool(asyncio.run(res))
-        return bool(res)
-
     def _dispatch_with_preemption_retries(
         self,
         config: TrainingJobConfig,
@@ -1051,7 +961,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
         """
         self._dispatch_xpk_workload(config, max_cfg, config_path)
         try:
-            return self._invoke_status_poll_sync(
+            return self._poll_workload_status_sync(
                 workload_name,
                 max_cfg,
                 timeout_seconds=5,
@@ -1059,12 +969,12 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
             )
         except RuntimeError as e:
             if "PREEMPTED" not in str(e):
-                self._invoke_reclaim_sync(workload_name, max_cfg)
+                self._reclaim_tpu_workload_sync(workload_name, max_cfg)
                 raise
             for _ in range(max_cfg.max_preemption_retries):
                 self._dispatch_xpk_workload(config, max_cfg, config_path)
                 try:
-                    return self._invoke_status_poll_sync(
+                    return self._poll_workload_status_sync(
                         workload_name,
                         max_cfg,
                         timeout_seconds=2,
@@ -1072,7 +982,7 @@ class RemoteTpuMaxTextRunner(BaseTrainingRunner):
                     )
                 except RuntimeError:
                     continue
-            self._invoke_reclaim_sync(workload_name, max_cfg)
+            self._reclaim_tpu_workload_sync(workload_name, max_cfg)
             raise
 
     @staticmethod
@@ -1207,8 +1117,6 @@ __all__ = [
     "SubprocessExecutorProtocol",
     "_build_gcloud_ssh_command",
     "_build_xpk_create_command",
-    "_compute_md5_base64",
-    "_resolve_gcs_client",
     "download_checkpoints_from_gcs",
     "parse_gcs_uri",
     "sync_dataset_to_gcs",

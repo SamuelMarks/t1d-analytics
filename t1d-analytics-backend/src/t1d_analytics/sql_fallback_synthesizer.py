@@ -1,15 +1,20 @@
 """Rule-based clinical SQL fallback synthesis and translation result structures."""
 
 import re
-from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
+import urllib.error
+from typing import Dict, List, Literal, Optional, Set, Tuple, Union
 
 from pydantic.dataclasses import dataclass
 
+from t1d_analytics.errors import T1DError
 from t1d_analytics.sql_utils import escape_sql_identifier, parse_schema_text_to_map
 
 GenerationModeLiteral = Literal["llm", "rule_based_fallback", "literal_sql"]
 
 _FALLBACK_DIAGNOSTIC_PREFIX = "_Note: Local LLM inference"
+_FALLBACK_NOTE_ERROR_RE = re.compile(
+    r"Local LLM inference was unavailable\s*\(\s*([^)]+?)\s*\)"
+)
 
 _TABLE_1_FALLBACK_KEYWORDS: Set[str] = {
     "table 1",
@@ -33,9 +38,8 @@ class TranslationResult:
     """
     Structured result of translating a natural-language clinical query into DuckDB SQL.
 
-    Supports 2-tuple unpacking `(full_response, sql_query)` for backward compatibility
-    with callers expecting `Tuple[str, str]`, while carrying explicit typed metadata
-    about whether rule-based fallback synthesis was used.
+    Carries explicit typed metadata about whether rule-based fallback synthesis
+    was used and any underlying LLM error.
 
     Attributes
     ----------
@@ -43,6 +47,8 @@ class TranslationResult:
         sql_query: Extracted executable DuckDB SQL statement.
         used_fallback: True if rule-based SQL synthesis was used instead of an LLM.
         generation_mode: One of `'llm'`, `'rule_based_fallback'`, or `'literal_sql'`.
+        llm_error: Optional human-readable diagnostic reason why LLM inference failed.
+        llm_error_code: Optional structured error code for the LLM failure.
 
     """
 
@@ -50,6 +56,8 @@ class TranslationResult:
     sql_query: str
     used_fallback: bool = False
     generation_mode: GenerationModeLiteral = "llm"
+    llm_error: Optional[str] = None
+    llm_error_code: Optional[str] = None
 
     @property
     def is_rule_based_sql(self) -> bool:
@@ -63,43 +71,121 @@ class TranslationResult:
         """
         return self.used_fallback or self.generation_mode == "rule_based_fallback"
 
-    def __iter__(self) -> Iterator[str]:
-        """
-        Yield `full_response` and `sql_query` to support 2-tuple unpacking.
 
-        Yields
-        ------
-            str: First `full_response`, then `sql_query`.
-
-        """
-        yield self.full_response
-        yield self.sql_query
-
-
-def coerce_translation_result(
-    raw: Union[TranslationResult, Tuple[str, str]],
-) -> TranslationResult:
+def extract_fallback_error_from_text(response_text: str) -> Optional[str]:
     """
-    Normalize a `TranslationResult` or legacy `(full_response, sql_query)` tuple into a `TranslationResult`.
+    Extract an embedded parenthetical LLM error reason from a fallback response text string.
 
     Args:
     ----
-        raw: Either a `TranslationResult` instance or a 2-tuple `(full_response, sql_query)`.
+        response_text: Assistant response markdown text.
 
     Returns:
     -------
-        TranslationResult: Normalized `TranslationResult` with `used_fallback` and `generation_mode` populated.
+        Optional[str]: Extracted parenthetical error message if present, else None.
 
     """
-    if isinstance(raw, TranslationResult):
-        return raw
-    full_response, sql_query = raw
-    used_fallback = is_fallback_response_text(full_response)
-    return TranslationResult(
-        full_response=full_response,
-        sql_query=sql_query,
-        used_fallback=used_fallback,
-        generation_mode="rule_based_fallback" if used_fallback else "llm",
+    match = _FALLBACK_NOTE_ERROR_RE.search(response_text)
+    return match.group(1) if match else None
+
+
+def format_llm_failure_reason(
+    exc_or_reason: Optional[Union[BaseException, str]],
+    model_name: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Format an LLM exception or failure reason into a sanitized `(human_readable_reason, error_code)` tuple.
+
+    Args:
+    ----
+        exc_or_reason: Caught exception or descriptive failure string.
+        model_name: Optional requested model identifier.
+        provider: Optional resolved LLM provider name.
+
+    Returns:
+    -------
+        Tuple[Optional[str], Optional[str]]: `(sanitized_error_message, structured_error_code)`.
+
+    """
+    if exc_or_reason is None:
+        return None, None
+
+    model_label = f" for model '{model_name}'" if model_name else ""
+    prov_label = f" ({provider})" if provider else ""
+
+    if isinstance(exc_or_reason, str):
+        cleaned_str = " ".join(exc_or_reason.strip().split())
+        if not cleaned_str:
+            return None, None
+        return cleaned_str, "backend.llmInvalidSqlOutput"
+
+    if isinstance(exc_or_reason, T1DError):
+        detail = exc_or_reason.params.get("error")
+        msg = (
+            str(detail).strip()
+            if detail is not None and str(detail).strip()
+            else str(exc_or_reason).strip()
+        )
+        single_line = " ".join(msg.split())
+        return single_line, exc_or_reason.error_code
+
+    if isinstance(exc_or_reason, urllib.error.HTTPError):
+        reason_str = str(exc_or_reason.reason or "HTTP error").strip()
+        return (
+            f"HTTP {exc_or_reason.code} {reason_str}{prov_label}{model_label}",
+            "backend.llmHttpError",
+        )
+
+    if isinstance(exc_or_reason, urllib.error.URLError):
+        reason_text = " ".join(str(exc_or_reason.reason).strip().split())
+        return (
+            f"Connection failed{prov_label}{model_label}: {reason_text}",
+            "backend.llmConnectionError",
+        )
+
+    raw_msg = " ".join(str(exc_or_reason).strip().split())
+    sanitized_msg = re.sub(
+        r"(sk-[A-Za-z0-9_-]{6,}|Bearer\s+[A-Za-z0-9._-]+)",
+        "[REDACTED]",
+        raw_msg,
+    )
+    lower_msg = sanitized_msg.lower()
+
+    if (
+        isinstance(exc_or_reason, TimeoutError)
+        or "timed out" in lower_msg
+        or "timeout" in lower_msg
+    ):
+        return (
+            f"Inference timed out{prov_label}{model_label}: {sanitized_msg}",
+            "backend.llmTimeoutError",
+        )
+
+    if (
+        isinstance(exc_or_reason, ConnectionError)
+        or "connection refused" in lower_msg
+        or "failed to connect to ollama" in lower_msg
+    ):
+        return (
+            f"Connection refused{prov_label}{model_label}: {sanitized_msg}",
+            "backend.llmConnectionError",
+        )
+
+    if (
+        "insufficient memory" in lower_msg
+        or "unable to allocate" in lower_msg
+        or "alloc_tensor_range" in lower_msg
+        or "llama-server process has terminated" in lower_msg
+    ):
+        return (
+            f"Local model memory/process crash{model_label}: {sanitized_msg}",
+            "backend.llmMemoryCrash",
+        )
+
+    return (
+        f"{type(exc_or_reason).__name__}{prov_label}{model_label}: {sanitized_msg}",
+        "backend.llmTranslationError",
     )
 
 
@@ -290,6 +376,10 @@ def synthesize_fallback_clinical_sql(
     schema: str,
     nl_query: str,
     include_diagnostic_note: bool = False,
+    llm_error: Optional[str] = None,
+    llm_error_code: Optional[str] = None,
+    model_name: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> TranslationResult:
     """
     Synthesize a deterministic, schema-validated DuckDB SQL query when local LLM inference crashes.
@@ -302,12 +392,17 @@ def synthesize_fallback_clinical_sql(
         schema: Extracted database schema text.
         nl_query: User's natural language question.
         include_diagnostic_note: Whether to prepend a diagnostic notice explaining that local inference fell back to schema-guided SQL synthesis.
+        llm_error: Optional human-readable diagnostic reason why LLM inference failed.
+        llm_error_code: Optional structured error code for the LLM failure.
+        model_name: Optional requested model identifier.
+        provider: Optional resolved LLM provider name.
 
     Returns:
     -------
         TranslationResult: Structured translation result (unpackable as `(markdown_response_with_sql_fence, raw_sql_query)`).
 
     """
+    _ = (model_name, provider)
     schema_map = _parse_schema_tables_and_columns(schema)
     lower_q = nl_query.lower()
 
@@ -325,22 +420,63 @@ def synthesize_fallback_clinical_sql(
     else:
         sql = f'SELECT * FROM "{safe_tbl}" LIMIT {limit_val};'
 
-    nl = chr(10)
-    note_prefix = (
-        f"_Note: Local LLM inference was unavailable; synthesized schema-guided fallback SQL for `{safe_tbl}`._{nl}{nl}"
-        if include_diagnostic_note
-        else ""
+    cleaned_err = llm_error.strip() if llm_error and llm_error.strip() else None
+    effective_code = (
+        llm_error_code
+        if llm_error_code
+        else ("backend.llmTranslationError" if cleaned_err else None)
     )
+
+    nl = chr(10)
+    if include_diagnostic_note:
+        if cleaned_err:
+            note_prefix = (
+                f"_Note: Local LLM inference was unavailable ({cleaned_err}); "
+                f"synthesized schema-guided fallback SQL for `{safe_tbl}`._{nl}{nl}"
+            )
+        else:
+            note_prefix = (
+                f"_Note: Local LLM inference was unavailable; "
+                f"synthesized schema-guided fallback SQL for `{safe_tbl}`._{nl}{nl}"
+            )
+    else:
+        note_prefix = ""
+
     full_resp = f"{note_prefix}```sql{nl}{sql}{nl}```"
     return TranslationResult(
         full_response=full_resp,
         sql_query=sql,
         used_fallback=True,
         generation_mode="rule_based_fallback",
+        llm_error=cleaned_err,
+        llm_error_code=effective_code,
     )
 
 
-def _is_recoverable_local_ollama_crash(provider: str, exc: BaseException) -> bool:
+def _lookup_table_1_curated_sql(prompt: str) -> Optional[str]:
+    """
+    Match a prompt against the canonical Academic Table 1 benchmark suite.
+
+    Args:
+    ----
+        prompt: Natural language user question.
+
+    Returns:
+    -------
+        Optional[str]: Gold DuckDB SQL if the prompt matches a Table 1 benchmark query, else None.
+
+    """
+    from t1d_analytics.training_data import TABLE_1_BENCHMARK_SUITE
+
+    norm_prompt = " ".join(prompt.strip().lower().split())
+    for item in TABLE_1_BENCHMARK_SUITE:
+        norm_q = " ".join(item["question"].strip().lower().split())
+        if norm_prompt == norm_q:
+            return item["gold_sql"]
+    return None
+
+
+def _is_recoverable_local_ollama_crash(provider: str, exc: Exception) -> bool:
     """
     Return True if `exc` is a local Ollama server crash, timeout, missing model tag, or OOM allocation failure.
 
@@ -389,10 +525,12 @@ __all__ = [
     "_build_fallback_table_1_sql",
     "_find_matching_column",
     "_is_recoverable_local_ollama_crash",
+    "_lookup_table_1_curated_sql",
     "_parse_schema_tables_and_columns",
     "_score_table_for_query",
     "_select_best_fallback_table",
-    "coerce_translation_result",
+    "extract_fallback_error_from_text",
+    "format_llm_failure_reason",
     "is_fallback_response_text",
     "synthesize_fallback_clinical_sql",
 ]

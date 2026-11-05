@@ -44,7 +44,7 @@ def get_table_data(
     order: Optional[str] = "asc",
     search: Optional[str] = None,
     db_path: Optional[str] = None,
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> TableDataResponse:
     """
     Return paginated rows from a specific table with optional sorting and searching.
@@ -58,14 +58,13 @@ def get_table_data(
         order: Sort order, either 'asc' or 'desc' (default: 'asc').
         search: Optional string to filter across columns.
         db_path: Optional path to the DuckDB database.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         TableDataResponse: The data with pagination metadata.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return fetch_paginated_table_data(
         table_name=table_name,
         limit=limit,
@@ -74,7 +73,7 @@ def get_table_data(
         order=order,
         search=search,
         db_path=db_path,
-        db_validator=active_svc.validate_db_path,
+        db_validator=svc.validate_db_path,
     )
 
 
@@ -82,7 +81,7 @@ def get_table_data(
 def get_table_profile(
     table_name: str,
     db_path: Optional[str] = None,
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> TableProfileResult:
     """
     Profile a table to return data quality, completeness, and column statistics.
@@ -91,19 +90,18 @@ def get_table_profile(
     ----
         table_name: The table name to profile.
         db_path: Optional path to the database file.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         TableProfileResult: Profiling summary dictionary.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return fetch_table_profile(
         table_name=table_name,
         db_path=db_path,
-        db_validator=active_svc.validate_db_path,
-        profile_fn=active_svc.profile_table,
+        db_validator=svc.validate_db_path,
+        profile_fn=svc.profile_table,
     )
 
 
@@ -111,7 +109,7 @@ def get_table_profile(
 def export_excel(
     table_name: str,
     db_path: Optional[str] = None,
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a native OpenXML Excel (.xlsx) workbook.
@@ -120,18 +118,17 @@ def export_excel(
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed XLSX file with spreadsheetml MIME type.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_excel_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=active_svc.validate_db_path,
+        db_validator=svc.validate_db_path,
     )
 
 
@@ -139,7 +136,7 @@ def export_excel(
 def export_parquet(
     table_name: str,
     db_path: Optional[str] = None,
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data in columnar Apache Parquet format.
@@ -148,18 +145,17 @@ def export_parquet(
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed Parquet file.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_parquet_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=active_svc.validate_db_path,
+        db_validator=svc.validate_db_path,
     )
 
 
@@ -167,7 +163,7 @@ def export_parquet(
 def export_csv(
     table_name: str,
     db_path: Optional[str] = None,
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a streaming CSV file with spreadsheet formula defense.
@@ -176,18 +172,17 @@ def export_csv(
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed CSV file with text/csv MIME type.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_csv_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=active_svc.validate_db_path,
+        db_validator=svc.validate_db_path,
     )
 
 
@@ -195,7 +190,7 @@ def export_csv(
 def export_json(
     table_name: str,
     db_path: Optional[str] = None,
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a streaming JSON array of row objects.
@@ -204,18 +199,17 @@ def export_json(
     ----
         table_name: Table to export.
         db_path: Optional path to database file.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         StreamingResponse: Streamed JSON file with application/json MIME type.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
     return stream_json_export(
         table_name=table_name,
         db_path=db_path,
-        db_validator=active_svc.validate_db_path,
+        db_validator=svc.validate_db_path,
     )
 
 
@@ -270,7 +264,7 @@ def _build_schema_response(
 def get_schema(
     request: Request,
     db_path: Optional[str] = None,
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> SchemaResponse:
     """
     Return structured schema for the frontend Schema Explorer.
@@ -279,34 +273,32 @@ def get_schema(
     ----
         request: FastAPI request.
         db_path: Optional target DuckDB database path.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         SchemaResponse: The structured schema response including database diagnostics.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
-    target_db = active_svc.validate_db_path(db_path)
-    lang = active_svc.get_request_locale(request)
-    return _build_schema_response(target_db=target_db, lang=lang, services=active_svc)
+    target_db = svc.validate_db_path(db_path)
+    lang = svc.get_request_locale(request)
+    return _build_schema_response(target_db=target_db, lang=lang, services=svc)
 
 
 @tables_router.get("/api/databases", response_model=DatabaseListResponse)
 def list_databases(
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> DatabaseListResponse:
     """
     Discover and list available DuckDB database files in the workspace.
 
     Args:
     ----
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
         DatabaseListResponse: Found databases and current default.
 
     """
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
-    return active_svc.discover_workspace_databases()
+    return svc.discover_workspace_databases()

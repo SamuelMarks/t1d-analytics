@@ -158,7 +158,7 @@ def parse_headers_file(file_path: Path) -> dict[str, str]:
         parsed = json.loads(content)
         if isinstance(parsed, dict):
             return {str(k): str(v) for k, v in parsed.items()}
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
         pass
 
     headers: dict[str, str] = {}
@@ -476,7 +476,7 @@ def download_file(
                 )
             finally:
                 response.close()
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, requests.RequestException) as e:
             if not keep_partial:
                 tmp_path.unlink(missing_ok=True)
             print(_("Failed to download {}: {}", filename, e))
@@ -662,7 +662,7 @@ def process_datasets(
             )
             with print_lock:
                 succeeded_items.append(f"{dataset.protocol}:{kind}")
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, requests.RequestException) as e:
             with print_lock:
                 failed_items.append(
                     {

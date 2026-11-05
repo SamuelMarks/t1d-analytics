@@ -21,6 +21,10 @@ from t1d_analytics.sql_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _noop_interrupt() -> None:
+    """No-op interrupt placeholder when no DuckDB query is actively executing."""
+
+
 def execute_duckdb_query(
     db_path: str,
     query: str,
@@ -51,8 +55,7 @@ def execute_duckdb_query(
     """
     nl = chr(10)
     logger.info(f"Executing SQL query against database at {db_path}:{nl}{query}")
-    noop_interrupt: Callable[[], None] = lambda: None  # noqa: E731
-    interrupt_fn: Callable[[], None] = noop_interrupt
+    interrupt_fn: Callable[[], None] = _noop_interrupt
     lock = threading.Lock()
 
     def safe_interrupt() -> None:
@@ -84,7 +87,7 @@ def execute_duckdb_query(
                 timer.cancel()
                 timer.join(timeout=1.0)
                 with lock:
-                    interrupt_fn = noop_interrupt
+                    interrupt_fn = _noop_interrupt
 
         output = [
             {col: sanitize_sql_value(val) for col, val in zip(columns, row)}
@@ -99,6 +102,6 @@ def execute_duckdb_query(
         raise SqlTimeoutError(
             params={"error": "Query execution timed out."},
         ) from ie
-    except Exception as e:
+    except (duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
         logger.error(f"SQL execution error: {e}")
         raise SqlExecutionError(params={"error": str(e)}) from e

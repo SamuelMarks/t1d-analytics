@@ -13,7 +13,10 @@ import duckdb
 from pydantic.dataclasses import dataclass
 
 from t1d_analytics.api_schemas import JsonLevel1, JsonLevel2
-from t1d_analytics.db_security import resolve_default_db_path
+from t1d_analytics.db_security import (
+    get_recommended_jaeb_db_path,
+    resolve_default_db_path,
+)
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.llm_client import (
     PROVIDER_ENV_KEYS,
@@ -72,6 +75,7 @@ AUTHENTIC_JAEB_TABLES = {
     "gptroster",
     "bptroster",
 }
+AUTHENTIC_JAEB_TABLE_MARKERS = AUTHENTIC_JAEB_TABLES
 
 SYNTHETIC_SEED_BASE_TABLES = {
     "patients",
@@ -92,7 +96,7 @@ _COMPAT_VIEW_NAMES = {
 
 
 def detect_database_provenance(
-    all_tables: List[str],
+    table_names: List[str],
     base_tables: Optional[set[str]] = None,
 ) -> str:
     """
@@ -100,7 +104,7 @@ def detect_database_provenance(
 
     Args:
     ----
-        all_tables: All table and view names discovered in the database.
+        table_names: All table and view names discovered in the database.
         base_tables: Optional set of non-view base table names.
 
     Returns:
@@ -108,10 +112,12 @@ def detect_database_provenance(
         str: `'jaeb_authentic'`, `'synthetic_seed'`, or `'custom'`.
 
     """
-    user_tables = {t.lower() for t in all_tables if not t.lower().startswith("_t1d_")}
-    if not user_tables:
+    lower_tables = {t.lower() for t in table_names if not t.lower().startswith("_t1d_")}
+    if not lower_tables:
         return "custom"
-    if user_tables.intersection(AUTHENTIC_JAEB_TABLES) or len(user_tables) > 20:
+    if lower_tables.intersection(AUTHENTIC_JAEB_TABLE_MARKERS) or (
+        len(lower_tables) > 25 and "tblaptsummary" in lower_tables
+    ):
         return "jaeb_authentic"
     if base_tables is not None:
         lower_base = {
@@ -119,7 +125,7 @@ def detect_database_provenance(
         }
         if "tblaptsummary" in lower_base and "patients" not in lower_base:
             return "jaeb_authentic"
-    if user_tables.intersection(SYNTHETIC_SEED_BASE_TABLES):
+    if lower_tables.intersection(SYNTHETIC_SEED_BASE_TABLES):
         return "synthetic_seed"
     return "custom"
 
@@ -195,6 +201,7 @@ class DatabaseStatus:
     status: HealthStatus = HealthStatus.UNHEALTHY
     data_provenance: str = "synthetic_seed"
     is_synthetic_faked_data: bool = True
+    recommended_jaeb_db_path: str = field(default_factory=get_recommended_jaeb_db_path)
 
     @property
     def details(self) -> DatabaseDetailsDict:
@@ -211,6 +218,7 @@ class DatabaseStatus:
             "disk_free_bytes": self.disk_free_bytes,
             "data_provenance": self.data_provenance,
             "is_synthetic_faked_data": self.is_synthetic_faked_data,
+            "recommended_jaeb_db_path": self.recommended_jaeb_db_path,
         }
 
     def to_dict(self) -> DiagnosticDict:
@@ -233,6 +241,7 @@ class DatabaseStatus:
             "disk_free_bytes": self.disk_free_bytes,
             "data_provenance": self.data_provenance,
             "is_synthetic_faked_data": self.is_synthetic_faked_data,
+            "recommended_jaeb_db_path": self.recommended_jaeb_db_path,
             "details": self.details,
         }
 
@@ -383,6 +392,7 @@ def _inspect_db_file_state(
                     integrity_ok=True,
                     disk_free_bytes=disk_free,
                     status=HealthStatus.UNHEALTHY,
+                    recommended_jaeb_db_path=get_recommended_jaeb_db_path(),
                 ),
                 0,
                 False,
@@ -409,6 +419,7 @@ def _inspect_db_file_state(
                     integrity_ok=True,
                     disk_free_bytes=disk_free,
                     status=HealthStatus.UNHEALTHY,
+                    recommended_jaeb_db_path=get_recommended_jaeb_db_path(),
                 ),
                 file_size,
                 writable,
@@ -434,6 +445,7 @@ def _inspect_db_file_state(
                 integrity_ok=False,
                 disk_free_bytes=disk_free,
                 status=HealthStatus.UNHEALTHY,
+                recommended_jaeb_db_path=get_recommended_jaeb_db_path(),
             ),
             file_size,
             writable,
@@ -472,6 +484,12 @@ def _inspect_db_tables_and_manifest(
         provenance = detect_database_provenance(
             all_tables, base_tables=base_table_names
         )
+        if "_t1d_seed_manifest" in {t.lower() for t in all_tables}:
+            for (manifest_prov,) in conn.execute(
+                "SELECT value FROM _t1d_seed_manifest WHERE key = 'provenance' LIMIT 1"
+            ).fetchall():
+                if manifest_prov == "jaeb_authentic" or provenance != "jaeb_authentic":
+                    provenance = str(manifest_prov)
         primary_tables = [
             t
             for t in all_tables
@@ -496,7 +514,7 @@ def _inspect_db_tables_and_manifest(
         conn.close()
 
 
-def _classify_db_health_status(
+def _build_database_status_from_tables(
     target_path_str: str,
     tables: List[str],
     total_rows: int,
@@ -527,6 +545,7 @@ def _classify_db_health_status(
         DatabaseStatus: Populated diagnostic status object.
 
     """
+    recommended_jaeb = get_recommended_jaeb_db_path()
     table_count = len(tables)
     if table_count == 0:
         msg = translate_fn(
@@ -553,6 +572,7 @@ def _classify_db_health_status(
             integrity_ok=integrity_ok,
             disk_free_bytes=disk_free,
             status=HealthStatus.UNHEALTHY,
+            recommended_jaeb_db_path=recommended_jaeb,
         )
 
     found_expected = [
@@ -569,6 +589,7 @@ def _classify_db_health_status(
     db_health_status = (
         HealthStatus.HEALTHY if total_rows > 0 else HealthStatus.UNHEALTHY
     )
+    is_synthetic = provenance != "jaeb_authentic"
 
     if not found_expected:
         msg = translate_fn(
@@ -577,7 +598,8 @@ def _classify_db_health_status(
             table_count,
         )
         remediation = translate_fn(
-            "Download and load public clinical trial datasets using 't1d-analytics download' and 't1d-analytics load'."
+            "Download and load public clinical trial datasets using 't1d-analytics download' and 't1d-analytics load', or select '{}' for authentic Jaeb data.",
+            recommended_jaeb,
         )
         return DatabaseStatus(
             configured_path=target_path_str,
@@ -596,7 +618,8 @@ def _classify_db_health_status(
             disk_free_bytes=disk_free,
             status=db_health_status,
             data_provenance=provenance,
-            is_synthetic_faked_data=(provenance != "jaeb_authentic"),
+            is_synthetic_faked_data=is_synthetic,
+            recommended_jaeb_db_path=recommended_jaeb,
         )
 
     msg = translate_fn(
@@ -621,7 +644,8 @@ def _classify_db_health_status(
         disk_free_bytes=disk_free,
         status=db_health_status,
         data_provenance=provenance,
-        is_synthetic_faked_data=(provenance != "jaeb_authentic"),
+        is_synthetic_faked_data=is_synthetic,
+        recommended_jaeb_db_path=recommended_jaeb,
     )
 
 
@@ -677,9 +701,10 @@ def check_database_health(
             integrity_ok=False,
             disk_free_bytes=disk_free,
             status=HealthStatus.UNHEALTHY,
+            recommended_jaeb_db_path=get_recommended_jaeb_db_path(),
         )
 
-    return _classify_db_health_status(
+    return _build_database_status_from_tables(
         target_path_str=target_path_str,
         tables=tables,
         total_rows=total_rows,
@@ -690,9 +715,6 @@ def check_database_health(
         provenance=provenance,
         translate_fn=_,
     )
-
-
-check_duckdb_health = check_database_health
 
 
 def check_ollama_health(
@@ -776,9 +798,6 @@ def check_ollama_health(
             message=msg,
             remediation=remediation,
         )
-
-
-check_ollama_service = check_ollama_health
 
 
 def check_provider_health(
@@ -897,7 +916,7 @@ def get_system_health(
     )
 
 
-run_system_diagnostics = get_system_diagnostics = get_system_health
+run_system_diagnostics = get_system_health
 
 
 def log_startup_diagnostics(db_path: Optional[str] = None) -> None:
@@ -943,20 +962,24 @@ def log_startup_diagnostics(db_path: Optional[str] = None) -> None:
     logger.info("=" * 60)
 
 
-def verify_split_prompt_leakage(conn: duckdb.DuckDBPyConnection) -> bool:
+def verify_split_prompt_leakage(
+    conn: duckdb.DuckDBPyConnection,
+    report_fn: Callable[[str], None] = print,
+) -> bool:
     """
     Verify that train and validation SFT split tables have zero overlapping prompts.
 
     Args:
     ----
         conn: Active DuckDB connection.
+        report_fn: Injectable reporting callback (defaults to `print`).
 
     Returns:
     -------
         bool: True if zero overlap or split tables absent; False if prompt leakage is detected.
 
     """
-    print("Validating dataset splits for prompt leakage...")
+    report_fn("Validating dataset splits for prompt leakage...")
     tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
     train_tbl = (
         "sft_train"
@@ -977,11 +1000,11 @@ def verify_split_prompt_leakage(conn: duckdb.DuckDBPyConnection) -> bool:
         }
         overlap = train_prompts.intersection(val_prompts)
         if overlap:
-            print(
+            report_fn(
                 f"Warning: Found {len(overlap)} overlapping prompts between train and val splits."
             )
             return False
-        print("Split validation passed: 0 prompt overlap detected.")
+        report_fn("Split validation passed: 0 prompt overlap detected.")
         return True
-    print("Split validation skipped: split tables not found.")
+    report_fn("Split validation skipped: split tables not found.")
     return True

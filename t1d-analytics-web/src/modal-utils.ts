@@ -20,6 +20,21 @@ export function requireElementById<T extends HTMLElement>(id: string): T {
 }
 
 /**
+ * Looks up an optional typed element by ID using runtime `instanceof` type narrowing.
+ * @template T - Target HTML element subtype.
+ * @param {string} id - The DOM element ID.
+ * @param {new (...args: never[]) => T} ctor - Element constructor used for runtime narrowing.
+ * @returns {T | null} The matched typed element or null if absent or of a different element type.
+ */
+export function optionalElementById<T extends HTMLElement>(
+  id: string,
+  ctor: new (...args: never[]) => T,
+): T | null {
+  const el = document.getElementById(id);
+  return el instanceof ctor ? el : null;
+}
+
+/**
  * Traps keyboard focus within a modal dialog and handles the Escape key to close.
  * @param {KeyboardEvent} e - The keyboard event.
  * @param {HTMLElement} modal - The container element to trap focus within.

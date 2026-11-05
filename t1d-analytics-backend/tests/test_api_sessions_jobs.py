@@ -84,8 +84,12 @@ def test_sessions_malformed_json_and_default_conn(
         sanitize_legacy_error_sessions,
         seed_sessions_database,
     )
-    from t1d_analytics.session_store import open_sessions_db_conn
+    from t1d_analytics.session_store import (
+        clear_initialized_session_dbs,
+        open_sessions_db_conn,
+    )
 
+    clear_initialized_session_dbs()
     monkeypatch.delenv("T1D_SESSIONS_DB_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
     conn = open_sessions_db_conn()

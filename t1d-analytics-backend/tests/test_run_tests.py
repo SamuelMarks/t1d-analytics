@@ -2,17 +2,22 @@
 Tests for test orchestration script (scripts/run_tests.py).
 
 Verifies command execution, error handling, coverage gathering,
-merging, threshold evaluations, and README shield generation.
+merging, threshold evaluations, and README shield generation against real
+temporary workspace directories (`tmp_path`).
 """
 
 import collections
-import io
+import runpy
+import sys
 from pathlib import Path
-from typing import DefaultDict, Sequence, Union
-from unittest.mock import MagicMock, mock_open, patch
+from typing import DefaultDict, Sequence
+from unittest.mock import MagicMock, patch
 
 import pytest
 from scripts.run_tests import (
+    CommandResult,
+    CoverageMetrics,
+    TestSuiteConfig,
     build_test_commands,
     compute_combined_coverage,
     extract_interrogate_coverage_percent,
@@ -29,8 +34,7 @@ from scripts.run_tests import (
 
 from t1d_analytics.sql_utils import SqlValue
 
-FileTarget = Union[str, Path]
-OpenReturn = Union[MagicMock, io.StringIO]
+NL = chr(10)
 
 
 def test_pure_orchestration_helpers() -> None:
@@ -43,31 +47,48 @@ def test_pure_orchestration_helpers() -> None:
     total_found, total_hit, text = compute_combined_coverage(cov_map)
     assert total_found == 2
     assert total_hit == 1
-    assert text == "SF:src/a.py\nDA:1,2\nDA:2,0\nLF:2\nLH:1\nend_of_record\n"
+    assert text == NL.join(
+        ["SF:src/a.py", "DA:1,2", "DA:2,0", "LF:2", "LH:1", "end_of_record", ""]
+    )
 
-    raw_readme = "[![License](https://example.com/lic.svg)](#)\n# Title\n"
+    raw_readme = NL.join(
+        ["[![License](https://example.com/lic.svg)](#)", "# Title", ""]
+    )
     updated_green, found = update_readme_badges(raw_readme, 100, 100)
     assert found is True
     assert "Coverage-100%25-brightgreen.svg" in updated_green
     assert "Docs-100%25-brightgreen.svg" in updated_green
 
-    updated_yellow, found_y = update_readme_badges("# No license\n", 75, 80)
+    no_lic = f"# No license{NL}"
+    updated_yellow, found_y = update_readme_badges(no_lic, 75, 80)
     assert found_y is False
-    assert updated_yellow == "# No license\n"
+    assert updated_yellow == no_lic
 
     cmds = build_test_commands(npm_cmd="/usr/bin/npm", pytest_cmd="/usr/bin/pytest")
     assert cmds["web_install"] == ["/usr/bin/npm", "install"]
     assert cmds["web_build"] == ["/usr/bin/npm", "run", "build"]
     assert "--cov-report=json" in cmds["backend_pytest"]
 
-    lcov_raw = "SF:src/x.py\nDA:1,2\nDA:2,0\nDA:1,5\nend_of_record\nunrelated\n"
+    lcov_raw = NL.join(
+        ["SF:src/x.py", "DA:1,2", "DA:2,0", "DA:1,5", "end_of_record", "unrelated", ""]
+    )
     assert parse_lcov_totals(lcov_raw) == (2, 1)
     assert resolve_badge_color(95.0) == "brightgreen"
     assert resolve_badge_color(75.0) == "yellow"
     assert resolve_badge_color(50.0) == "red"
     assert "Coverage-95%25-brightgreen" in update_readme_shields(
-        "# Title\n[![License](http://lic)]\n", 95.0, 100.0
+        NL.join(["# Title", "[![License](http://lic)]", ""]), 95.0, 100.0
     )
+
+    empty_metrics = CoverageMetrics(total_found=0, total_hit=0, formatted_lcov="")
+    assert empty_metrics.percent == 0.0
+    full_metrics = CoverageMetrics(
+        total_found=10, total_hit=10, formatted_lcov=f"SF:x{NL}"
+    )
+    assert full_metrics.percent == 100.0
+    cfg = TestSuiteConfig(skip_readme_update=True)
+    assert cfg.skip_readme_update is True
+    assert cfg.coverage_threshold == 100.0
 
 
 def test_real_filesystem_lcov_merge_and_readme_update(tmp_path: Path) -> None:
@@ -75,10 +96,12 @@ def test_real_filesystem_lcov_merge_and_readme_update(tmp_path: Path) -> None:
     lcov_a = tmp_path / "backend.lcov"
     lcov_b = tmp_path / "frontend.lcov"
     lcov_a.write_text(
-        "SF:src/mod.py\nDA:1,1\nDA:2,0\nend_of_record\n", encoding="utf-8"
+        NL.join(["SF:src/mod.py", "DA:1,1", "DA:2,0", "end_of_record", ""]),
+        encoding="utf-8",
     )
     lcov_b.write_text(
-        "SF:src/mod.py\nDA:1,2\nDA:2,1\nend_of_record\n", encoding="utf-8"
+        NL.join(["SF:src/mod.py", "DA:1,2", "DA:2,1", "end_of_record", ""]),
+        encoding="utf-8",
     )
 
     cov_map = parse_lcov_files([lcov_a, lcov_b, tmp_path / "missing.lcov"])
@@ -87,7 +110,9 @@ def test_real_filesystem_lcov_merge_and_readme_update(tmp_path: Path) -> None:
     assert total_hit == 2
     merged_path = tmp_path / "combined-coverage.lcov"
     merged_path.write_text(merged_lcov, encoding="utf-8")
-    assert "DA:1,2\nDA:2,1\nLF:2\nLH:2" in merged_path.read_text(encoding="utf-8")
+    assert NL.join(["DA:1,2", "DA:2,1", "LF:2", "LH:2"]) in merged_path.read_text(
+        encoding="utf-8"
+    )
 
     cov_json = tmp_path / "coverage.json"
     cov_json.write_text('{"totals": {"percent_covered": 98.7}}', encoding="utf-8")
@@ -126,7 +151,13 @@ def test_real_filesystem_lcov_merge_and_readme_update(tmp_path: Path) -> None:
 
     readme_file = tmp_path / "README.md"
     readme_file.write_text(
-        "# T1D\n[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)\n",
+        NL.join(
+            [
+                "# T1D",
+                "[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)",
+                "",
+            ]
+        ),
         encoding="utf-8",
     )
     pct = int((total_hit / total_found) * 100)
@@ -144,8 +175,18 @@ def test_run_cmd_success() -> None:
     """Test run_cmd when the command returns exit code 0."""
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
-        run_cmd(["echo", "hello"], env={"VAR": "1"}, cwd=".")
+        res = run_cmd(["echo", "hello"], env={"VAR": "1"}, cwd=".")
+        assert isinstance(res, CommandResult)
+        assert res.returncode == 0
         mock_run.assert_called_once_with(["echo", "hello"], env={"VAR": "1"}, cwd=".")
+
+        res_timeout = run_cmd(
+            ["echo", "timed"], env={"VAR": "1"}, cwd=".", timeout=30.0
+        )
+        assert res_timeout.returncode == 0
+        mock_run.assert_called_with(
+            ["echo", "timed"], env={"VAR": "1"}, cwd=".", timeout=30.0
+        )
 
 
 def test_run_cmd_failure() -> None:
@@ -157,79 +198,70 @@ def test_run_cmd_failure() -> None:
         assert exc_info.value.code == 42
 
 
-def test_main_full_success() -> None:
-    """Test main execution through the happy path."""
+def test_main_full_success(tmp_path: Path) -> None:
+    """Test main execution through the happy path against real temporary files."""
+    (tmp_path / "ci_test.duckdb").write_text("stale", encoding="utf-8")
+    (tmp_path / "coverage.lcov").write_text(
+        NL.join(["DA:99,1", "SF:file1.py", "DA:1,2", "DA:2,3", "end_of_record", ""]),
+        encoding="utf-8",
+    )
+    (tmp_path / "coverage.json").write_text(
+        '{"totals": {"percent_covered": 100}}', encoding="utf-8"
+    )
+    (tmp_path / "README.md").write_text(
+        NL.join(
+            [
+                "[![License](https://img.shields.io/badge/license.svg)](#)",
+                "Some readme content",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
     with (
         patch(
             "shutil.which",
             side_effect=lambda name, *args, **kwargs: f"/usr/bin/{name}",
         ),
         patch("scripts.run_tests.run_cmd") as mock_rc,
-        patch.object(Path, "mkdir"),
-        patch.object(
-            Path,
-            "exists",
-            autospec=True,
-            side_effect=lambda self_p: str(self_p) == "ci_test.duckdb",
-        ),
-        patch.object(Path, "unlink") as mock_unlink,
         patch("subprocess.Popen") as mock_popen,
         patch("subprocess.run") as mock_run,
-        patch("urllib.request.urlopen") as mock_urlopen,
+        patch("urllib.request.urlopen", return_value=MagicMock()),
     ):
         mock_proc_backend = MagicMock()
         mock_proc_frontend = MagicMock()
-        mock_popen.side_effect = [mock_proc_backend, mock_proc_frontend]
-
-        mock_run.side_effect = [
-            MagicMock(returncode=0),
-            MagicMock(returncode=0),
-            MagicMock(stdout="actual: 100.0%"),
+        mock_popen.side_effect = [
+            mock_proc_backend,
+            mock_proc_frontend,
+            mock_proc_backend,
+            mock_proc_frontend,
         ]
-        mock_urlopen.return_value = MagicMock()
+        mock_run.return_value = MagicMock(returncode=0, stdout="actual: 100.0%")
 
-        lcov_content = "\n".join(["DA:99,1", "SF:file1.py", "DA:1,2", "DA:2,3", ""])
-        readme_data = "\n".join(
-            [
-                "[![License](https://img.shields.io/badge/license.svg)](#)",
-                "Some readme content",
-                "",
-            ]
-        )
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Dispatch mocked file opening operations for success testing."""
-            filename = str(file)
-            if "README.md" in filename:
-                return io.StringIO(readme_data)
-            elif "coverage.json" in filename:
-                return io.StringIO('{"totals": {"percent_covered": "100"}}')
-            elif "combined-coverage.lcov" in filename:
-                return io.StringIO()
-            elif "lcov" in filename:
-                return io.StringIO(lcov_content)
-            return io.StringIO()
-
-        with patch("builtins.open", side_effect=custom_open):
-            main()
+        main(workspace_root=tmp_path)
+        main(skip_readme_update=True, workspace_root=tmp_path)
 
         assert mock_rc.call_count >= 5
-        mock_unlink.assert_called_once()
+        assert not (tmp_path / "ci_test.duckdb").exists()
+        assert (
+            tmp_path / "t1d-analytics-backend" / "tests" / "test_data" / "patients.csv"
+        ).exists()
+        assert (tmp_path / "combined-coverage.lcov").exists()
+        assert "Coverage-100%25-brightgreen.svg" in (tmp_path / "README.md").read_text(
+            encoding="utf-8"
+        )
         assert mock_proc_backend.terminate.called
         assert mock_proc_frontend.terminate.called
 
 
-def test_main_backend_fail_to_start() -> None:
+def test_main_backend_fail_to_start(tmp_path: Path) -> None:
     """Test main exits if backend server fails healthcheck."""
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
-        patch("builtins.open", mock_open()),
         patch("subprocess.Popen") as mock_popen,
-        patch("urllib.request.urlopen", side_effect=Exception("Connection refused")),
+        patch("urllib.request.urlopen", side_effect=OSError("Connection refused")),
         patch("time.sleep"),
     ):
         mock_backend = MagicMock()
@@ -237,19 +269,17 @@ def test_main_backend_fail_to_start() -> None:
         mock_popen.side_effect = [mock_backend, mock_frontend]
 
         with pytest.raises(SystemExit) as exc:
-            main()
+            main(workspace_root=tmp_path)
         assert exc.value.code == 1
         assert mock_backend.terminate.called
         assert mock_frontend.terminate.called
 
 
-def test_main_frontend_fail_to_start() -> None:
+def test_main_frontend_fail_to_start(tmp_path: Path) -> None:
     """Test main exits if frontend server fails healthcheck."""
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
-        patch("builtins.open", mock_open()),
         patch("subprocess.Popen") as mock_popen,
         patch("urllib.request.urlopen") as mock_urlopen,
         patch("time.sleep"),
@@ -262,24 +292,22 @@ def test_main_frontend_fail_to_start() -> None:
             """Handle URL open requests returning success for backend and failure for frontend."""
             if "8000" in url:
                 return MagicMock()
-            raise Exception("Frontend down")
+            raise OSError("Frontend down")
 
         mock_urlopen.side_effect = urlopen_side_effect
 
         with pytest.raises(SystemExit) as exc:
-            main()
+            main(workspace_root=tmp_path)
         assert exc.value.code == 1
         assert mock_backend.terminate.called
         assert mock_frontend.terminate.called
 
 
-def test_main_playwright_fail() -> None:
+def test_main_playwright_fail(tmp_path: Path) -> None:
     """Test main exits if playwright test returns non-zero."""
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
-        patch("builtins.open", mock_open()),
         patch("subprocess.Popen") as mock_popen,
         patch("subprocess.run") as mock_run,
         patch("urllib.request.urlopen", return_value=MagicMock()),
@@ -293,19 +321,17 @@ def test_main_playwright_fail() -> None:
         ]
 
         with pytest.raises(SystemExit) as exc:
-            main()
+            main(workspace_root=tmp_path)
         assert exc.value.code == 2
         assert mock_backend.terminate.called
         assert mock_frontend.terminate.called
 
 
-def test_main_nyc_report_fail() -> None:
+def test_main_nyc_report_fail(tmp_path: Path) -> None:
     """Test main exits if nyc report returns non-zero."""
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
-        patch("builtins.open", mock_open()),
         patch("subprocess.Popen") as mock_popen,
         patch("subprocess.run") as mock_run,
         patch("urllib.request.urlopen", return_value=MagicMock()),
@@ -319,341 +345,217 @@ def test_main_nyc_report_fail() -> None:
         ]
 
         with pytest.raises(SystemExit) as exc:
-            main()
+            main(workspace_root=tmp_path)
         assert exc.value.code == 5
 
 
-def test_main_lcov_not_found_and_total_found_zero() -> None:
-    """Test main handles FileNotFoundError when reading lcov files and exits when total_found == 0."""
+def test_main_lcov_not_found_and_total_found_zero(tmp_path: Path) -> None:
+    """Test main handles missing lcov files on disk and exits when total_found == 0."""
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
         patch("subprocess.Popen") as mock_popen,
         patch("subprocess.run", return_value=MagicMock(returncode=0)),
         patch("urllib.request.urlopen", return_value=MagicMock()),
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Simulate missing lcov files by raising FileNotFoundError."""
-            filename = str(file)
-            if "combined-coverage.lcov" in filename:
-                return io.StringIO()
-            if "lcov" in filename:
-                raise FileNotFoundError()
-            return io.StringIO()
-
-        with patch("builtins.open", side_effect=custom_open):
-            with pytest.raises(SystemExit) as exc:
-                main()
-            assert exc.value.code == 1
+        with pytest.raises(SystemExit) as exc:
+            main(workspace_root=tmp_path)
+        assert exc.value.code == 1
 
 
-def test_main_lcov_lines_uncovered() -> None:
-    """Test parsing lcov file where line has zero hits to cover line with hits == 0."""
+def test_main_lcov_lines_uncovered_and_below_threshold(tmp_path: Path) -> None:
+    """Test main exits when combined coverage on disk has uncovered lines (< 100%)."""
+    (tmp_path / "coverage.lcov").write_text(
+        NL.join(["SF:some_file.py", "DA:1,1", "DA:2,0", "end_of_record", ""]),
+        encoding="utf-8",
+    )
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
         patch("subprocess.Popen") as mock_popen,
         patch("subprocess.run", return_value=MagicMock(returncode=0)),
         patch("urllib.request.urlopen", return_value=MagicMock()),
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
-
-        lcov_content = "\n".join(["SF:some_file.py", "DA:1,0", "DA:2,0", ""])
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Return lcov contents having zero line hits."""
-            filename = str(file)
-            if "combined-coverage.lcov" in filename:
-                return io.StringIO()
-            if "lcov" in filename:
-                return io.StringIO(lcov_content)
-            return io.StringIO()
-
-        with patch("builtins.open", side_effect=custom_open):
-            with pytest.raises(SystemExit) as exc:
-                main()
-            assert exc.value.code == 1
+        with pytest.raises(SystemExit) as exc:
+            main(workspace_root=tmp_path)
+        assert exc.value.code == 1
 
 
-def test_main_coverage_below_threshold() -> None:
-    """Test main exits when combined coverage is below 100%."""
+def test_main_coverage_json_failure(tmp_path: Path) -> None:
+    """Test main exits when coverage.json is missing or corrupted on disk."""
+    (tmp_path / "coverage.lcov").write_text(
+        NL.join(["SF:some_file.py", "DA:1,1", "end_of_record", ""]),
+        encoding="utf-8",
+    )
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
         patch("subprocess.Popen") as mock_popen,
         patch("subprocess.run", return_value=MagicMock(returncode=0)),
         patch("urllib.request.urlopen", return_value=MagicMock()),
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
-
-        lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", "DA:2,0", ""])
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Return lcov contents resulting in fifty percent coverage."""
-            filename = str(file)
-            if "combined-coverage.lcov" in filename:
-                return io.StringIO()
-            if "lcov" in filename:
-                return io.StringIO(lcov_content)
-            return io.StringIO()
-
-        with patch("builtins.open", side_effect=custom_open):
-            with pytest.raises(SystemExit) as exc:
-                main()
-            assert exc.value.code == 1
+        with pytest.raises(SystemExit) as exc:
+            main(workspace_root=tmp_path)
+        assert exc.value.code == 1
 
 
-def test_main_coverage_json_failure() -> None:
-    """Test main exits when reading coverage.json fails."""
-    with (
-        patch("shutil.which", return_value=None),
-        patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
-        patch("subprocess.Popen") as mock_popen,
-        patch("subprocess.run", return_value=MagicMock(returncode=0)),
-        patch("urllib.request.urlopen", return_value=MagicMock()),
-    ):
-        mock_popen.side_effect = [MagicMock(), MagicMock()]
-
-        lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", ""])
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Simulate corrupted coverage json by raising OSError."""
-            filename = str(file)
-            if "coverage.json" in filename:
-                raise OSError("Corrupt json")
-            if "combined-coverage.lcov" in filename:
-                return io.StringIO()
-            if "lcov" in filename:
-                return io.StringIO(lcov_content)
-            return io.StringIO()
-
-        with patch("builtins.open", side_effect=custom_open):
-            with pytest.raises(SystemExit) as exc:
-                main()
-            assert exc.value.code == 1
-
-
-def test_main_interrogate_failure() -> None:
+def test_main_interrogate_failure(tmp_path: Path) -> None:
     """Test main exits when running interrogate fails."""
+    (tmp_path / "coverage.lcov").write_text(
+        NL.join(["SF:some_file.py", "DA:1,1", "end_of_record", ""]),
+        encoding="utf-8",
+    )
+    (tmp_path / "coverage.json").write_text(
+        '{"totals": {"percent_covered": 85}}', encoding="utf-8"
+    )
+
+    def subprocess_run(
+        cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
+    ) -> MagicMock:
+        """Execute simulated command raising RuntimeError for interrogate."""
+        _ = (args, kwargs)
+        if "interrogate" in cmd:
+            raise RuntimeError("Interrogate not found")
+        return MagicMock(returncode=0)
+
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
         patch("subprocess.Popen") as mock_popen,
         patch("urllib.request.urlopen", return_value=MagicMock()),
+        patch("subprocess.run", side_effect=subprocess_run),
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
-
-        def subprocess_run(
-            cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
-        ) -> MagicMock:
-            """Execute simulated command raising RuntimeError for interrogate."""
-            if "interrogate" in cmd:
-                raise RuntimeError("Interrogate not found")
-            return MagicMock(returncode=0)
-
-        lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", ""])
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Provide mocked file handlers for interrogate failure tests."""
-            filename = str(file)
-            if "coverage.json" in filename:
-                return io.StringIO('{"totals": {"percent_covered": 85}}')
-            if "combined-coverage.lcov" in filename:
-                return io.StringIO()
-            if "lcov" in filename:
-                return io.StringIO(lcov_content)
-            return io.StringIO()
-
-        with (
-            patch("subprocess.run", side_effect=subprocess_run),
-            patch("builtins.open", side_effect=custom_open),
-        ):
-            with pytest.raises(SystemExit) as exc:
-                main()
-            assert exc.value.code == 1
+        with pytest.raises(SystemExit) as exc:
+            main(workspace_root=tmp_path)
+        assert exc.value.code == 1
 
 
 def test_main_badge_colors_and_no_license_shield(
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Test shield colors (yellow, red) and case where README has no license shield."""
+    """Test shield colors (yellow, red) and case where README.md on disk has no license shield."""
+    (tmp_path / "coverage.lcov").write_text(
+        NL.join(["SF:some_file.py", "DA:1,1", "end_of_record", ""]),
+        encoding="utf-8",
+    )
+    (tmp_path / "coverage.json").write_text(
+        '{"totals": {"percent_covered": 75}}', encoding="utf-8"
+    )
+    readme_path = tmp_path / "README.md"
+    readme_path.write_text(
+        NL.join(["# Readme", "No license shield here.", ""]), encoding="utf-8"
+    )
+
+    def subprocess_run(
+        cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
+    ) -> MagicMock:
+        """Execute simulated subprocess returning fifty percent documentation coverage."""
+        _ = (args, kwargs)
+        if "interrogate" in cmd:
+            return MagicMock(returncode=0, stdout="actual: 50.0%")
+        return MagicMock(returncode=0)
+
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
         patch("subprocess.Popen") as mock_popen,
         patch("urllib.request.urlopen", return_value=MagicMock()),
+        patch("subprocess.run", side_effect=subprocess_run),
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
+        main(workspace_root=tmp_path)
 
-        def subprocess_run(
-            cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
-        ) -> MagicMock:
-            """Execute simulated subprocess returning fifty percent documentation coverage."""
-            if "interrogate" in cmd:
-                return MagicMock(returncode=0, stdout="actual: 50.0%")
-            return MagicMock(returncode=0)
-
-        lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", ""])
-        readme_without_license = "\n".join(["# Readme", "No license shield here.", ""])
-        written_readme: list[str] = []
-
-        class CapturingStringIO(io.StringIO):
-            """StringIO subclass that records written content on close."""
-
-            def close(self) -> None:
-                """Store buffer value before closing."""
-                written_readme.append(self.getvalue())
-                super().close()
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Provide mocked open handles for badge color verification tests."""
-            filename = str(file)
-            if "coverage.json" in filename:
-                return io.StringIO('{"totals": {"percent_covered": 75}}')
-            if "README.md" in filename and mode == "r":
-                return io.StringIO(readme_without_license)
-            if "README.md" in filename and mode == "w":
-                return CapturingStringIO()
-            if filename.endswith(("lcov", "lcov.info")):
-                return io.StringIO(lcov_content)
-            return io.StringIO()
-
-        with (
-            patch("subprocess.run", side_effect=subprocess_run),
-            patch("builtins.open", side_effect=custom_open),
-        ):
-            main()
-        out = capsys.readouterr().out
-        assert "License shield not found in README.md" in out
-        assert "Pre-commit checks passed successfully!" in out
-        assert len(written_readme) == 1
-        assert "# Readme" in written_readme[0]
+    out = capsys.readouterr().out
+    assert "License shield not found in README.md" in out
+    assert "Pre-commit checks passed successfully!" in out
+    assert "# Readme" in readme_path.read_text(encoding="utf-8")
 
 
 def test_main_badge_colors_red_and_interrogate_no_match(
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Test test_cov < 70 (red) and interrogate output without matching regex."""
+    """Test test_cov < 70 (red) and interrogate output without matching regex on real disk README.md."""
+    (tmp_path / "coverage.lcov").write_text(
+        NL.join(["SF:some_file.py", "DA:1,1", "end_of_record", ""]),
+        encoding="utf-8",
+    )
+    (tmp_path / "coverage.json").write_text(
+        '{"totals": {"percent_covered": 60}}', encoding="utf-8"
+    )
+    readme_path = tmp_path / "README.md"
+    readme_path.write_text(
+        NL.join(["[![License](https://img.shields.io/badge/license.svg)](#)", ""]),
+        encoding="utf-8",
+    )
+
+    def subprocess_run(
+        cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
+    ) -> MagicMock:
+        """Execute simulated subprocess returning non-matching interrogate output."""
+        _ = (args, kwargs)
+        if "interrogate" in cmd:
+            return MagicMock(returncode=0, stdout="unknown format")
+        return MagicMock(returncode=0)
+
     with (
         patch("shutil.which", return_value=None),
         patch("scripts.run_tests.run_cmd"),
-        patch("os.makedirs"),
         patch("subprocess.Popen") as mock_popen,
         patch("urllib.request.urlopen", return_value=MagicMock()),
+        patch("subprocess.run", side_effect=subprocess_run),
     ):
         mock_popen.side_effect = [MagicMock(), MagicMock()]
+        main(workspace_root=tmp_path)
 
-        def subprocess_run(
-            cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
-        ) -> MagicMock:
-            """Execute simulated subprocess returning non-matching interrogate output."""
-            if "interrogate" in cmd:
-                return MagicMock(returncode=0, stdout="unknown format")
-            return MagicMock(returncode=0)
-
-        lcov_content = "\n".join(["SF:some_file.py", "DA:1,1", ""])
-        readme_data = "\n".join(
-            ["[![License](https://img.shields.io/badge/license.svg)](#)", ""]
-        )
-        written_red_readme: list[str] = []
-
-        class CapturingRedStringIO(io.StringIO):
-            """StringIO subclass that records written red badge content on close."""
-
-            def close(self) -> None:
-                """Store buffer value before closing."""
-                written_red_readme.append(self.getvalue())
-                super().close()
-
-        def custom_open(
-            file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-        ) -> OpenReturn:
-            """Provide mock file handler for red color badges and interrogate mismatch tests."""
-            filename = str(file)
-            if "coverage.json" in filename:
-                return io.StringIO('{"totals": {"percent_covered": 60}}')
-            if "README.md" in filename and mode == "r":
-                return io.StringIO(readme_data)
-            if "README.md" in filename and mode == "w":
-                return CapturingRedStringIO()
-            if filename.endswith(("lcov", "lcov.info")):
-                return io.StringIO(lcov_content)
-            return io.StringIO()
-
-        with (
-            patch("subprocess.run", side_effect=subprocess_run),
-            patch("builtins.open", side_effect=custom_open),
-        ):
-            main()
-        out = capsys.readouterr().out
-        assert "Pre-commit checks passed successfully!" in out
-        assert len(written_red_readme) == 1
-        assert "Coverage-60%25-red.svg" in written_red_readme[0]
-        assert "Docs-0%25-red.svg" in written_red_readme[0]
+    out = capsys.readouterr().out
+    assert "Pre-commit checks passed successfully!" in out
+    written = readme_path.read_text(encoding="utf-8")
+    assert "Coverage-60%25-red.svg" in written
+    assert "Docs-0%25-red.svg" in written
 
 
-def test_module_dunder_main(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test execution when scripts.run_tests is invoked as __main__ via runpy."""
-    import io
-    import runpy
-    import sys
-
-    readme_data = (
-        "![Test Coverage](https://img.shields.io/badge/coverage-50.0%25-red)\n"
-        "![Docstring Coverage](https://img.shields.io/badge/docs-100%25-brightgreen)\n"
+def test_module_dunder_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test execution when scripts.run_tests is invoked as __main__ via runpy in a temporary cwd."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "coverage.lcov").write_text(
+        NL.join(["SF:file1.py", "DA:1,1", "LF:1", "LH:1", "end_of_record", ""]),
+        encoding="utf-8",
     )
-    lcov_content = "SF:file1.py\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
+    (tmp_path / "coverage.json").write_text(
+        '{"totals": {"percent_covered": 100}}', encoding="utf-8"
+    )
+    (tmp_path / "README.md").write_text(
+        NL.join(["[![License](https://img.shields.io/badge/license.svg)](#)", ""]),
+        encoding="utf-8",
+    )
 
     def subprocess_run(
         cmd: Sequence[str], *args: SqlValue, **kwargs: SqlValue
     ) -> MagicMock:
         """Mock subprocess.run returning 100% coverage stdout."""
+        _ = (cmd, args, kwargs)
         res = MagicMock()
         res.returncode = 0
         res.stdout = "TOTAL: 100.0%"
         return res
 
-    def custom_open(
-        file: FileTarget, mode: str = "r", *args: SqlValue, **kwargs: SqlValue
-    ) -> OpenReturn:
-        """Mock file open returning fixture streams based on filename."""
-        filename = str(file)
-        if mode == "w":
-            return io.StringIO()
-        if "coverage.json" in filename:
-            return io.StringIO('{"totals": {"percent_covered": 100}}')
-        if "README.md" in filename:
-            return io.StringIO(readme_data)
-        return io.StringIO(lcov_content)
-
     sys.modules.pop("scripts.run_tests", None)
     with (
         patch("sys.argv", ["run_tests.py"]),
-        patch("os.makedirs"),
         patch("subprocess.Popen", return_value=MagicMock()),
         patch("urllib.request.urlopen", return_value=MagicMock()),
         patch("subprocess.run", side_effect=subprocess_run),
-        patch("builtins.open", side_effect=custom_open),
     ):
         runpy.run_module("scripts.run_tests", run_name="__main__")
     assert "Pre-commit checks passed successfully!" in capsys.readouterr().out
+    assert "Coverage-100%25-brightgreen.svg" in (tmp_path / "README.md").read_text(
+        encoding="utf-8"
+    )

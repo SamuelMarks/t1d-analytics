@@ -9,7 +9,6 @@ import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
 import { requireElementById } from "../modal-utils";
 import { type ChatState } from "../state";
-import { type ProviderSettingsModalController } from "./provider-modal-controller";
 
 /**
  * Default choice Ollama / Hugging Face model identifiers.
@@ -133,10 +132,12 @@ export interface ModelsApiResponse {
 export interface ModelSelectorHost {
   /** Global application state store. */
   state: ChatState;
-  /** Provider settings modal sub-controller. */
-  providerModalController: ProviderSettingsModalController;
   /** Synchronizes syntax highlighting in the chat input. */
   syncHighlight(): void;
+  /** Updates the provider badge status indicator for the active model. */
+  updateProviderBadgeStatus(): void;
+  /** Populates the multi-select model configuration list in the provider modal. */
+  populateMultiSelectModels(modelsList: ModelApiItem[]): void;
 }
 
 /**
@@ -165,7 +166,7 @@ export class ModelSelectorController {
   private bindEvents(): void {
     this.modelSelect.addEventListener("change", () => {
       this.ui.state.setActiveChatModel(this.modelSelect.value);
-      this.ui.providerModalController.updateProviderBadgeStatus();
+      this.ui.updateProviderBadgeStatus();
       this.ui.syncHighlight();
     });
   }
@@ -245,6 +246,8 @@ export class ModelSelectorController {
       option.value = model.name;
       option.setAttribute("data-provider", prov);
       option.setAttribute("data-configured", isConfigured ? "true" : "false");
+      option.setAttribute("data-reachable", isReachable ? "true" : "false");
+      option.setAttribute("data-available", isAvailable ? "true" : "false");
       option.textContent = `${model.name} ${badge}`;
       if (prov === "ollama" && (!isAvailable || !isReachable)) {
         option.disabled = true;
@@ -345,8 +348,8 @@ export class ModelSelectorController {
       });
       this.ui.state.setSystemStatus({ ollamaOnline: hasReachableOllama });
       this.resolveActiveChatModel(modelsList);
-      this.ui.providerModalController.populateMultiSelectModels(modelsList);
-      this.ui.providerModalController.updateProviderBadgeStatus();
+      this.ui.populateMultiSelectModels(modelsList);
+      this.ui.updateProviderBadgeStatus();
     } catch (error) {
       console.warn("Failed to fetch models from API:", error);
     }

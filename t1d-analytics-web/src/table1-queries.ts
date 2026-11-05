@@ -12,12 +12,7 @@ export interface Table1ExampleSpec {
   id: string;
   /** Complexity rating label ('Low', 'Low-Medium', 'Medium', 'Medium-High', 'High', 'Very High'). */
   complexity:
-    | "Low"
-    | "Low-Medium"
-    | "Medium"
-    | "Medium-High"
-    | "High"
-    | "Very High";
+    "Low" | "Low-Medium" | "Medium" | "Medium-High" | "High" | "Very High";
   /** i18n translation key for the button label. */
   i18nKey: string;
   /** Natural language clinical question corresponding to the Table 1 query. */

@@ -10,9 +10,7 @@ import { type SqlCellValue } from "./formatters";
  * Cell value or nested record permitted in exported clinical rows.
  */
 export type ExportableCellValue =
-  | SqlCellValue
-  | Record<string, SqlCellValue>
-  | undefined;
+  SqlCellValue | Record<string, SqlCellValue> | undefined;
 
 const TAB_CHAR = String.fromCharCode(9);
 const CR_CHAR = String.fromCharCode(13);

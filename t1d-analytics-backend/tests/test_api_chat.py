@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from t1d_analytics.api import app, execute_sql, generate_sql_from_nl
+from t1d_analytics.sql_fallback_synthesizer import TranslationResult
 from t1d_analytics.sql_utils import SqlValue
 
 client = TestClient(app)
@@ -215,7 +216,7 @@ def test_generate_sql_from_nl_llm_error(mock_create: MagicMock, mock_db: str) ->
     """Test handling of LLM completion error."""
     from t1d_analytics.errors import LlmTranslationError
 
-    mock_create.side_effect = Exception("API limit")
+    mock_create.side_effect = RuntimeError("API limit")
     with pytest.raises(LlmTranslationError, match=r"backend\.llmTranslationError.*"):
         generate_sql_from_nl(mock_db, "test")
 
@@ -237,14 +238,14 @@ def test_generate_sql_fallback_no_prefix(mocker: MagicMock) -> None:
     mock_llm_instance.completion.return_value = mocker.MagicMock(choices=[mock_choice])
 
     mock_conn = mocker.MagicMock()
-    _full, sql = generate_sql_from_nl(
+    res = generate_sql_from_nl(
         "dummy_db",
         "test query",
         connect_fn=lambda path, read_only=True: mock_conn,
         schema_fn=lambda conn: "dummy_schema",
         llm_factory=lambda provider, api_key=None: mock_llm_instance,
     )
-    assert sql == "SELECT * FROM test;"
+    assert res.sql_query == "SELECT * FROM test;"
 
 
 @patch("any_llm.AnyLLM.create")
@@ -268,8 +269,8 @@ def test_generate_sql_from_nl_multi_block(mock_create: MagicMock, mock_db: str) 
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
-    _full_resp, sql = generate_sql_from_nl(mock_db, "get users")
-    assert sql == "SELECT id, name FROM users WHERE id > 0;"
+    res = generate_sql_from_nl(mock_db, "get users")
+    assert res.sql_query == "SELECT id, name FROM users WHERE id > 0;"
 
 
 @patch("any_llm.AnyLLM.create")
@@ -290,8 +291,8 @@ def test_generate_sql_from_nl_non_query_block(
     mock_llm.completion.return_value = mock_response
     mock_create.return_value = mock_llm
 
-    _full_resp, sql = generate_sql_from_nl(mock_db, "get users")
-    assert sql == "random text block"
+    res = generate_sql_from_nl(mock_db, "get users")
+    assert res.sql_query == "random text block"
 
 
 def test_chat_endpoint_empty_message() -> None:
@@ -317,7 +318,9 @@ def test_chat_endpoint_sql_success(mock_db: str) -> None:
 @patch("t1d_analytics.api_dependencies.translate_nl_to_sql")
 def test_chat_endpoint_nl_success(mock_generate: MagicMock, mock_db: str) -> None:
     """Test API handles NLP queries successfully, passes expected arguments, and auto-executes the query."""
-    mock_generate.return_value = ("Generated Markdown", "SELECT * FROM users")
+    mock_generate.return_value = TranslationResult(
+        full_response="Generated Markdown", sql_query="SELECT * FROM users"
+    )
     response = client.post(
         "/api/chat",
         json={"message": "give me users", "model": "gemma4", "db_path": mock_db},
@@ -340,9 +343,9 @@ def test_chat_endpoint_nl_sql_execution_failure(
     mock_generate: MagicMock, mock_db: str
 ) -> None:
     """Test API handles NLP queries where generated SQL execution fails."""
-    mock_generate.return_value = (
-        "Generated Markdown",
-        "SELECT * FROM nonexistent_table",
+    mock_generate.return_value = TranslationResult(
+        full_response="Generated Markdown",
+        sql_query="SELECT * FROM nonexistent_table",
     )
     response = client.post(
         "/api/chat",
@@ -359,7 +362,9 @@ def test_chat_endpoint_nl_sql_execution_failure(
 @patch("t1d_analytics.api_dependencies.translate_nl_to_sql")
 def test_chat_endpoint_nl_no_sql_query(mock_generate: MagicMock, mock_db: str) -> None:
     """Test API handles NLP response that contains no SQL query."""
-    mock_generate.return_value = ("Just an explanation, no query.", "")
+    mock_generate.return_value = TranslationResult(
+        full_response="Just an explanation, no query.", sql_query=""
+    )
     response = client.post(
         "/api/chat",
         json={"message": "hello", "model": "gemma4", "db_path": mock_db},
@@ -386,7 +391,7 @@ def test_chat_endpoint_value_error(mock_db: str) -> None:
 @patch("any_llm.AnyLLM.create")
 def test_chat_endpoint_runtime_error(mock_create: MagicMock, mock_db: str) -> None:
     """Test API handles RuntimeError (LLM failure)."""
-    mock_create.side_effect = Exception("LLM offline")
+    mock_create.side_effect = RuntimeError("LLM offline")
     response = client.post(
         "/api/chat",
         json={"message": "give me users", "model": "gemma4", "db_path": mock_db},
@@ -402,7 +407,7 @@ def test_chat_endpoint_generic_exception(
     mock_generate: MagicMock, mock_db: str
 ) -> None:
     """Test API handles generic unexpected exceptions."""
-    mock_generate.side_effect = Exception("System failure")
+    mock_generate.side_effect = OSError("System failure")
     response = client.post(
         "/api/chat",
         json={"message": "give me users", "model": "gemma4", "db_path": mock_db},
@@ -452,7 +457,7 @@ def test_execute_sql_endpoint_value_error(mock_db: str) -> None:
 @patch("t1d_analytics.api_dependencies.execute_sql")
 def test_execute_sql_endpoint_exception(mock_execute: MagicMock, mock_db: str) -> None:
     """Test execute_sql_endpoint catching general Exception."""
-    mock_execute.side_effect = Exception("System crash")
+    mock_execute.side_effect = OSError("System crash")
     response = client.post(
         "/api/execute-sql",
         json={"query": "SELECT * FROM users", "db_path": mock_db},
@@ -617,7 +622,9 @@ def test_server_auth_header_not_leaked_to_llm_provider(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     with patch("t1d_analytics.api_dependencies.translate_nl_to_sql") as mock_gen:
-        mock_gen.return_value = ("Here is the query", "SELECT 1")
+        mock_gen.return_value = TranslationResult(
+            full_response="Here is the query", sql_query="SELECT 1"
+        )
         resp = client.post(
             "/api/chat",
             headers={"x-api-key": "server-auth-secret-token"},
@@ -787,7 +794,10 @@ def test_multi_turn_history_in_prompt_and_chat(mock_db: str, mocker: MagicMock) 
     )
     assert "Prior Conversation History:" not in prompt_empty
 
-    mock_llm_res = ("Explanation", "SELECT * FROM users WHERE age < 18")
+    mock_llm_res = TranslationResult(
+        full_response="Explanation",
+        sql_query="SELECT * FROM users WHERE age < 18",
+    )
     mocker.patch(
         "t1d_analytics.api_dependencies.translate_nl_to_sql", return_value=mock_llm_res
     )
@@ -854,10 +864,10 @@ SELECT count(*) FROM users;
     mock_resp = MagicMock(choices=[mock_choice])
     mock_llm2.completion.return_value = mock_resp
     with patch("any_llm.AnyLLM.create", return_value=mock_llm2):
-        _full, sql = generate_sql_from_nl(
+        res_mp = generate_sql_from_nl(
             mock_db, "Count users", model_name="openai/gpt-4o"
         )
-        assert "SELECT count(*) FROM users" in sql
+        assert "SELECT count(*) FROM users" in res_mp.sql_query
 
 
 def test_extract_stream_delta_various_providers() -> None:
@@ -996,7 +1006,7 @@ def test_chat_endpoints_with_provider_headers(mock_db: str) -> None:
     """Test /api/chat and /api/chat/stream forward x-provider and x-provider-api-key headers to LLM translation."""
     with patch(
         "t1d_analytics.api_dependencies.translate_nl_to_sql",
-        return_value=("answer", "SELECT 1"),
+        return_value=TranslationResult(full_response="answer", sql_query="SELECT 1"),
     ) as mock_gen:
         resp = client.post(
             "/api/chat",
@@ -1042,13 +1052,13 @@ SELECT 1;
     mock_llm.completion.return_value = MagicMock(choices=[mock_choice])
 
     with patch("any_llm.AnyLLM.create", return_value=mock_llm) as mock_create:
-        _full, sql = generate_sql_from_nl(
+        res_direct = generate_sql_from_nl(
             mock_db,
             "Count users",
             model_name="openai/gpt-4o",
             api_key="direct_secret_key_123",
         )
-        assert sql == "SELECT 1;"
+        assert res_direct.sql_query == "SELECT 1;"
         mock_create.assert_called_with("openai", api_key="direct_secret_key_123")
         assert os.environ.get("OPENAI_API_KEY") is None
 
@@ -1240,11 +1250,11 @@ GROUP BY TxGroup, Gender"""
 
     with patch(
         "t1d_analytics.api_dependencies.translate_nl_to_sql",
-        return_value=(
-            """```sql
+        return_value=TranslationResult(
+            full_response="""```sql
 SELECT * FROM tblaptsummary
 ```""",
-            "SELECT * FROM tblaptsummary",
+            sql_query="SELECT * FROM tblaptsummary",
         ),
     ):
         resp = client.post(
@@ -1311,7 +1321,7 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
     assert (
         _is_recoverable_local_ollama_crash(
             "ollama",
-            Exception(
+            RuntimeError(
                 "Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download"
             ),
         )
@@ -1323,59 +1333,55 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
     )
 
     # 1. Empty schema map + TranslationResult contract
-    from t1d_analytics.sql_fallback_synthesizer import (
-        TranslationResult,
-        coerce_translation_result,
-    )
-
     tr_res = synthesize_fallback_clinical_sql("", "How many patients?")
     assert isinstance(tr_res, TranslationResult)
     assert tr_res.used_fallback is True
     assert tr_res.is_rule_based_sql is True
     assert tr_res.generation_mode == "rule_based_fallback"
-    assert coerce_translation_result(tr_res) is tr_res
-    resp_empty, sql_empty = tr_res
-    assert 'SELECT COUNT(*) AS count FROM "patients";' in sql_empty
-    assert "```sql" in resp_empty
+    assert 'SELECT COUNT(*) AS count FROM "patients";' in tr_res.sql_query
+    assert "```sql" in tr_res.full_response
 
     # 2. Schema with matching table and column words + "first 5"
     schema_text = (
         "Table: demographics\nColumns: patient_id (BIGINT), age (DOUBLE), gender (VARCHAR)\n\n"
         "Table: cgm_readings\nColumns: subject_id (BIGINT), glucose_value (DOUBLE)\n"
     )
-    _, sql_match = synthesize_fallback_clinical_sql(
+    res_match = synthesize_fallback_clinical_sql(
         schema_text, "Show me the first 5 patients in the demographics table age"
     )
-    assert sql_match == 'SELECT * FROM "demographics" LIMIT 5;'
+    assert res_match.sql_query == 'SELECT * FROM "demographics" LIMIT 5;'
 
     # 3. Schema with zero matching words -> falls back to preferred table ("patients")
     schema_pref = (
         "Table: other_tbl\nColumns: x (INT)\n\nTable: patients\nColumns: id (INT)\n"
     )
-    _, sql_pref = synthesize_fallback_clinical_sql(schema_pref, "unrelated question")
-    assert sql_pref == 'SELECT * FROM "patients" LIMIT 10;'
+    res_pref = synthesize_fallback_clinical_sql(schema_pref, "unrelated question")
+    assert res_pref.sql_query == 'SELECT * FROM "patients" LIMIT 10;'
 
     # 4. Schema with no preferred table and zero matching words -> first table in schema
     schema_first = "Table: custom_alpha\nColumns: a (INT)\n\nTable: custom_beta\nColumns: b (INT)\n"
-    _, sql_first = synthesize_fallback_clinical_sql(schema_first, "unrelated question")
-    assert sql_first == 'SELECT * FROM "custom_alpha" LIMIT 10;'
+    res_first = synthesize_fallback_clinical_sql(schema_first, "unrelated question")
+    assert res_first.sql_query == 'SELECT * FROM "custom_alpha" LIMIT 10;'
 
     # 4b. Table 1 fallback SQL synthesis with and without grouping column
     schema_t1 = (
         "Table: patients\n"
         "Columns: subject_id (BIGINT), age (BIGINT), TxGroup (VARCHAR), hba1c (DOUBLE), tir (DOUBLE)\n"
     )
-    _, sql_t1_grouped = synthesize_fallback_clinical_sql(
+    res_t1_grouped = synthesize_fallback_clinical_sql(
         schema_t1, "Generate a Table 1 baseline characteristics summary"
     )
-    assert 'GROUP BY "TxGroup"' in sql_t1_grouped
-    assert "mean_age_yr" in sql_t1_grouped
-    assert "mean_hba1c_pct" in sql_t1_grouped
+    assert 'GROUP BY "TxGroup"' in res_t1_grouped.sql_query
+    assert "mean_age_yr" in res_t1_grouped.sql_query
+    assert "mean_hba1c_pct" in res_t1_grouped.sql_query
 
-    _, sql_t1_ungrouped = synthesize_fallback_clinical_sql(
+    res_t1_ungrouped = synthesize_fallback_clinical_sql(
         schema_first, "Create a cohort summary table"
     )
-    assert sql_t1_ungrouped == 'SELECT COUNT(*) AS n_participants FROM "custom_alpha";'
+    assert (
+        res_t1_ungrouped.sql_query
+        == 'SELECT COUNT(*) AS n_participants FROM "custom_alpha";'
+    )
 
     # 4c. _resolve_db_provenance_flags error fallback when duckdb connection fails
     from t1d_analytics.chat_service import _resolve_db_provenance_flags
@@ -1394,11 +1400,11 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
             "llama-server process has terminated: unable to allocate AMX buffer"
         ),
     ):
-        fb_full, fb_sql = translate_nl_to_sql(
+        fb_res = translate_nl_to_sql(
             mock_db, "Show me the first 5 users", model_name="gemma4:latest"
         )
-        assert fb_sql == 'SELECT * FROM "users" LIMIT 5;'
-        assert fb_sql in fb_full
+        assert fb_res.sql_query == 'SELECT * FROM "users" LIMIT 5;'
+        assert fb_res.sql_query in fb_res.full_response
 
     with patch(
         "t1d_analytics.chat_service.complete_llm_prompt",
@@ -1406,11 +1412,11 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
             "Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download"
         ),
     ):
-        fb_conn_full, fb_conn_sql = translate_nl_to_sql(
+        fb_conn_res = translate_nl_to_sql(
             mock_db, "Show me the first 5 users", model_name="custom-local:7b"
         )
-        assert fb_conn_sql == 'SELECT * FROM "users" LIMIT 5;'
-        assert fb_conn_sql in fb_conn_full
+        assert fb_conn_res.sql_query == 'SELECT * FROM "users" LIMIT 5;'
+        assert fb_conn_res.sql_query in fb_conn_res.full_response
 
     # 5b. _resolve_and_select_local_ollama_model and retry-once with lightweight fallback model
     from t1d_analytics.api_schemas import ModelInfo
@@ -1460,11 +1466,11 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
             ],
         ) as mock_comp_retry,
     ):
-        retry_full, retry_sql = translate_nl_to_sql(
+        retry_res = translate_nl_to_sql(
             mock_db, "Count users", model_name="ollama/gemma2:27b"
         )
-        assert retry_sql == "SELECT COUNT(*) FROM users;"
-        assert "SELECT COUNT(*)" in retry_full
+        assert retry_res.sql_query == "SELECT COUNT(*) FROM users;"
+        assert "SELECT COUNT(*)" in retry_res.full_response
         assert mock_comp_retry.call_count == 2
 
     mock_retry_transport = MagicMock()
@@ -1545,6 +1551,12 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
 
     # 7. is_likely_sql_statement and _resolve_sql_mode_query in batch /api/chat and /api/chat/stream
     from t1d_analytics.chat_service import is_likely_sql_statement
+    from t1d_analytics.sql_fallback_synthesizer import _lookup_table_1_curated_sql
+    from t1d_analytics.training_data import TABLE_1_BENCHMARK_SUITE
+
+    assert _lookup_table_1_curated_sql("unknown random query") is None
+    t1_q = TABLE_1_BENCHMARK_SUITE[0]["question"]
+    assert _lookup_table_1_curated_sql(t1_q) == TABLE_1_BENCHMARK_SUITE[0]["gold_sql"]
 
     assert is_likely_sql_statement("   ") is False
     assert is_likely_sql_statement("SELECT * FROM users") is True
@@ -1575,3 +1587,276 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
     )
     assert resp_nl_sql_stream.status_code == 200
     assert 'SELECT * FROM \\"users\\" LIMIT 5;' in resp_nl_sql_stream.text
+
+
+def test_eval_nl_to_sql_endpoint_and_chat_gold_comparison(mock_db: str) -> None:
+    """Test POST /api/eval/nl-to-sql and gold_comparison enrichment in /api/chat and /api/chat/stream."""
+    # 1. Empty question returns 400
+    empty_resp = client.post(
+        "/api/eval/nl-to-sql",
+        json={"question": "   ", "model": "gemma:2b", "db_path": mock_db},
+    )
+    assert empty_resp.status_code == 400
+
+    # 2. Successful eval with explicit gold_sql and header overrides
+    with patch(
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
+        return_value=TranslationResult(
+            full_response="```sql\nSELECT id, name FROM users;\n```",
+            sql_query="SELECT id, name FROM users;",
+        ),
+    ):
+        eval_resp = client.post(
+            "/api/eval/nl-to-sql",
+            headers={
+                "X-Provider": "ollama",
+                "X-Provider-Api-Key": "test-key",
+            },
+            json={
+                "question": "List all users",
+                "gold_sql": "SELECT id, name FROM users",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+        )
+        assert eval_resp.status_code == 200
+        eval_data = eval_resp.json()
+        assert eval_data["sqlQuery"] == "SELECT id, name FROM users;"
+        assert eval_data["gold_comparison"] is not None
+        assert eval_data["gold_comparison"]["exact_match"] is True
+        assert eval_data["gold_comparison"]["execution_accuracy"] is True
+        assert eval_data["gold_comparison"]["column_overlap_pct"] == 100.0
+
+    # 3. Eval when generated SQL fails execution on DuckDB read-only cursor
+    with patch(
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
+        return_value=TranslationResult(
+            full_response="```sql\nSELECT * FROM bad_table;\n```",
+            sql_query="SELECT * FROM bad_table;",
+        ),
+    ):
+        eval_bad_sql = client.post(
+            "/api/eval/nl-to-sql",
+            json={
+                "question": "List all users",
+                "gold_sql": "SELECT id, name FROM users",
+                "model": "gemma:2b",
+                "provider": "ollama",
+                "api_key": "explicit",
+                "db_path": mock_db,
+            },
+        )
+        assert eval_bad_sql.status_code == 200
+        bad_data = eval_bad_sql.json()
+        assert bad_data["error"] is not None
+        assert bad_data["gold_comparison"]["syntax_error"] is True
+
+    # 4. Eval when LLM returns empty SQL query (no SQL generated)
+    with patch(
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
+        return_value=TranslationResult(full_response="No SQL generated", sql_query=""),
+    ):
+        eval_no_sql = client.post(
+            "/api/eval/nl-to-sql",
+            json={
+                "question": "Hello",
+                "gold_sql": "SELECT id FROM users",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+        )
+        assert eval_no_sql.status_code == 200
+        assert eval_no_sql.json()["gold_comparison"]["syntax_error"] is True
+
+    # 5. Eval when translate_fn raises RuntimeError
+    with patch(
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
+        side_effect=RuntimeError("LLM transport failure"),
+    ):
+        eval_err = client.post(
+            "/api/eval/nl-to-sql",
+            json={
+                "question": "List users",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+        )
+        assert eval_err.status_code == 200
+        assert eval_err.json()["content"] == "backend.errorNlpTranslation"
+        assert eval_err.json()["error"] is not None
+
+    # 6. /api/chat and /api/chat/stream with gold_sql populate gold_comparison
+    with patch(
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
+        return_value=TranslationResult(
+            full_response="```sql\nSELECT * FROM users;\n```",
+            sql_query="SELECT * FROM users;",
+        ),
+    ):
+        chat_gold = client.post(
+            "/api/chat",
+            json={
+                "message": "Get all users",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+                "gold_sql": "SELECT * FROM users",
+            },
+        )
+        assert chat_gold.status_code == 200
+        assert chat_gold.json()["gold_comparison"]["execution_accuracy"] is True
+
+    with patch(
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
+        return_value=iter(["```sql\nSELECT * FROM users;\n```"]),
+    ):
+        stream_gold = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "Get all users",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+                "gold_sql": "SELECT * FROM users",
+            },
+        )
+        assert stream_gold.status_code == 200
+        assert '"gold_comparison":' in stream_gold.text
+        assert '"execution_accuracy": true' in stream_gold.text
+
+
+def test_format_llm_failure_reason_and_chat_response_to_dict() -> None:
+    """Test format_llm_failure_reason across all exception/string branches and ChatResponse.to_dict()."""
+    import email.message
+    import urllib.error
+
+    from t1d_analytics.api_schemas import ApiError, ChatResponse, SqlGoldComparisonModel
+    from t1d_analytics.errors import LlmProviderError
+    from t1d_analytics.sql_fallback_synthesizer import (
+        extract_fallback_error_from_text,
+        format_llm_failure_reason,
+        is_fallback_response_text,
+        synthesize_fallback_clinical_sql,
+    )
+
+    assert is_fallback_response_text("SELECT 1;") is False
+    assert (
+        is_fallback_response_text("Local LLM inference was unavailable; synthesized")
+        is True
+    )
+
+    assert format_llm_failure_reason(None) == (None, None)
+    assert format_llm_failure_reason("   ") == (None, None)
+    assert format_llm_failure_reason("Model returned empty response") == (
+        "Model returned empty response",
+        "backend.llmInvalidSqlOutput",
+    )
+
+    t1d_err = LlmProviderError(params={"error": "Missing API key for provider"})
+    msg_t1d, code_t1d = format_llm_failure_reason(
+        t1d_err, model_name="gpt-4o", provider="openai"
+    )
+    assert msg_t1d == "Missing API key for provider"
+    assert code_t1d == t1d_err.error_code
+
+    t1d_empty_param = LlmProviderError(params={})
+    msg_t1d_empty, _ = format_llm_failure_reason(t1d_empty_param)
+    assert msg_t1d_empty is not None
+
+    hdrs = email.message.Message()
+    http_err = urllib.error.HTTPError(
+        url="http://127.0.0.1:11434/api/chat",
+        code=404,
+        msg="Not Found",
+        hdrs=hdrs,
+        fp=None,
+    )
+    msg_http, code_http = format_llm_failure_reason(
+        http_err, model_name="gemma:2b", provider="ollama"
+    )
+    assert msg_http == "HTTP 404 Not Found (ollama) for model 'gemma:2b'"
+    assert code_http == "backend.llmHttpError"
+
+    url_err = urllib.error.URLError("Connection refused")
+    msg_url, code_url = format_llm_failure_reason(
+        url_err, model_name="gemma:2b", provider="ollama"
+    )
+    assert (
+        msg_url == "Connection failed (ollama) for model 'gemma:2b': Connection refused"
+    )
+    assert code_url == "backend.llmConnectionError"
+
+    timeout_err = TimeoutError("Read timed out after 45s")
+    msg_to, code_to = format_llm_failure_reason(
+        timeout_err, model_name="gemma:2b", provider="ollama"
+    )
+    assert "Inference timed out" in (msg_to or "")
+    assert code_to == "backend.llmTimeoutError"
+
+    generic_err = ValueError("Unexpected token sk-secret12345678 in response")
+    msg_gen, code_gen = format_llm_failure_reason(
+        generic_err, model_name="gemma:2b", provider="ollama"
+    )
+    assert "[REDACTED]" in (msg_gen or "")
+    assert code_gen == "backend.llmTranslationError"
+
+    # synthesize_fallback_clinical_sql with include_diagnostic_note=True and llm_error=None
+    fb_no_err = synthesize_fallback_clinical_sql(
+        "Table: users\nColumns: id (INT)\n",
+        "Show users",
+        include_diagnostic_note=True,
+        llm_error=None,
+    )
+    assert "Note: Local LLM inference was unavailable;" in fb_no_err.full_response
+    assert fb_no_err.llm_error is None
+    assert extract_fallback_error_from_text(fb_no_err.full_response) is None
+
+    fb_with_err = synthesize_fallback_clinical_sql(
+        "Table: users\nColumns: id (INT)\n",
+        "Show users",
+        include_diagnostic_note=True,
+        llm_error="Connection refused",
+        llm_error_code=None,
+    )
+    assert "(Connection refused)" in fb_with_err.full_response
+    assert fb_with_err.llm_error == "Connection refused"
+    assert fb_with_err.llm_error_code == "backend.llmTranslationError"
+    assert (
+        extract_fallback_error_from_text(fb_with_err.full_response)
+        == "Connection refused"
+    )
+
+    # ChatResponse.to_dict() with and without error/gold_comparison
+    resp_plain = ChatResponse(
+        content="ok",
+        sqlQuery="SELECT 1;",
+        sqlResult=[{"a": 1}],
+        is_rule_based_sql=True,
+        generation_mode="rule_based_fallback",
+        llm_error="Connection refused",
+        llm_error_code="backend.llmConnectionError",
+    )
+    d_plain = resp_plain.to_dict()
+    assert d_plain["llm_error"] == "Connection refused"
+    assert d_plain["error"] is None
+    assert d_plain["gold_comparison"] is None
+
+    resp_full = ChatResponse(
+        content="err",
+        error=ApiError(error_code="backend.sqlError", params={"error": "syntax"}),
+        gold_comparison=SqlGoldComparisonModel(
+            gold_sql="SELECT 1",
+            pred_sql="SELECT 2",
+            exact_match=False,
+            execution_accuracy=False,
+            syntax_error=True,
+            gold_row_count=1,
+            pred_row_count=0,
+            gold_columns=["a"],
+            pred_columns=[],
+            column_overlap_pct=0.0,
+            gold_rows_preview=[{"a": 1}],
+            error_message="syntax",
+        ),
+    )
+    d_full = resp_full.to_dict()
+    assert isinstance(d_full["error"], dict)
+    assert isinstance(d_full["gold_comparison"], dict)

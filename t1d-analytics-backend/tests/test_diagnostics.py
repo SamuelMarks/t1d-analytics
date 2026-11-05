@@ -556,12 +556,12 @@ def test_get_system_health_providers_dict(tmp_path: Path) -> None:
 
 
 def test_detect_database_provenance_and_jaeb_views(tmp_path: Path) -> None:
-    """Test detect_database_provenance and ensure_canonical_clinical_views across jaeb_authentic, synthetic_seed, and custom DBs."""
+    """Test detect_database_provenance, ensure_canonical_clinical_views, and seed_database across jaeb_authentic, synthetic_seed, and custom DBs."""
     from t1d_analytics.diagnostics import (
         check_database_health,
         detect_database_provenance,
     )
-    from t1d_analytics.seed import ensure_canonical_clinical_views
+    from t1d_analytics.seed import ensure_canonical_clinical_views, seed_database
 
     assert detect_database_provenance([]) == "custom"
     assert detect_database_provenance(["custom_only"]) == "custom"
@@ -581,23 +581,70 @@ def test_detect_database_provenance_and_jaeb_views(tmp_path: Path) -> None:
         == "synthetic_seed"
     )
 
-    # Test check_database_health on an authentic Jaeb DB with > 25 tables
+    # Test check_database_health on an authentic Jaeb DB that also had synthetic base tables and synthetic_seed manifest
     jaeb_db = tmp_path / "jaeb_large.duckdb"
     conn = duckdb.connect(str(jaeb_db))
     conn.execute(
         "CREATE TABLE tblaptsummary (RecID BIGINT, ptid BIGINT, gender VARCHAR, AgeAsOfRandDt BIGINT, InsulinModality VARCHAR)"
     )
     conn.execute("INSERT INTO tblaptsummary VALUES (1, 101, 'F', 28, 'Pump')")
+    conn.execute(
+        "CREATE TABLE patients (subject_id INT, age INT, gender VARCHAR, hba1c DOUBLE, tir DOUBLE, numhospdka INT)"
+    )
+    conn.execute("INSERT INTO patients VALUES (999, 40, 'M', 8.0, 55.0, 0)")
+    conn.execute(
+        "CREATE TABLE _t1d_seed_manifest (key VARCHAR PRIMARY KEY, value VARCHAR)"
+    )
+    conn.execute(
+        "INSERT INTO _t1d_seed_manifest VALUES ('provenance', 'synthetic_seed')"
+    )
     for idx in range(28):
         conn.execute(f"CREATE TABLE study_tbl_{idx} (id INT)")
     conn.close()
 
+    # Even before ensure_canonical_clinical_views, synthetic_seed manifest does NOT override jaeb_authentic
+    status_before = check_database_health(str(jaeb_db))
+    assert status_before.data_provenance == "jaeb_authentic"
+    assert status_before.is_synthetic_faked_data is False
+
+    # ensure_canonical_clinical_views drops synthetic 'patients' base table, replaces it with VIEW over tblaptsummary, and updates manifest
     ensure_canonical_clinical_views(str(jaeb_db))
     status_jaeb = check_database_health(str(jaeb_db))
     assert status_jaeb.data_provenance == "jaeb_authentic"
     assert status_jaeb.is_synthetic_faked_data is False
     assert status_jaeb.to_dict()["data_provenance"] == "jaeb_authentic"
     assert status_jaeb.to_dict()["is_synthetic_faked_data"] is False
+    assert "recommended_jaeb_db_path" in status_jaeb.to_dict()
+
+    conn_verify = duckdb.connect(str(jaeb_db), read_only=True)
+    assert conn_verify.execute("SELECT subject_id FROM patients").fetchone() == (101,)
+    assert conn_verify.execute(
+        "SELECT value FROM _t1d_seed_manifest WHERE key = 'provenance'"
+    ).fetchone() == ("jaeb_authentic",)
+    conn_verify.close()
+
+    # seed_database on an already-authentic Jaeb DB preserves jaeb_authentic provenance and does not overwrite with synthetic CSV rows
+    jaeb_seed_counts = seed_database(
+        data_dir=str(tmp_path / "seed_data"),
+        db_path=str(jaeb_db),
+        sessions_db_path=str(tmp_path / "seed_sessions.duckdb"),
+    )
+    assert "tblaptsummary" in jaeb_seed_counts
+    assert check_database_health(str(jaeb_db)).is_synthetic_faked_data is False
+
+    # Also test _t1d_seed_manifest upgrading a custom DB to jaeb_authentic or synthetic_seed
+    manifest_db = tmp_path / "manifest_only.duckdb"
+    conn_m = duckdb.connect(str(manifest_db))
+    conn_m.execute("CREATE TABLE custom_tbl (id INT)")
+    conn_m.execute("INSERT INTO custom_tbl VALUES (1)")
+    conn_m.execute(
+        "CREATE TABLE _t1d_seed_manifest (key VARCHAR PRIMARY KEY, value VARCHAR)"
+    )
+    conn_m.execute(
+        "INSERT INTO _t1d_seed_manifest VALUES ('provenance', 'jaeb_authentic')"
+    )
+    conn_m.close()
+    assert check_database_health(str(manifest_db)).data_provenance == "jaeb_authentic"
 
     empty_views_db = tmp_path / "empty_views.duckdb"
     conn_ev = duckdb.connect(str(empty_views_db))

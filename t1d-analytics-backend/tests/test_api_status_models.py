@@ -300,6 +300,7 @@ def test_validate_db_path_traversal(
         _split_search_dir_spec,
         get_configured_db_search_dirs,
         get_jaeb_external_root,
+        get_recommended_jaeb_db_path,
         get_t1d_db_search_dirs,
     )
 
@@ -323,13 +324,27 @@ def test_validate_db_path_traversal(
         Path("/Volumes/TOSHIBA_EXT/stanford/t1d"),
     ]
     assert _split_search_dir_spec("C:\\t1d") == [Path("C:\\t1d")]
-    assert get_jaeb_external_root() == db_security.DEFAULT_JAEB_EXTERNAL_ROOT
+
+    # When neither T1D_DB_SEARCH_DIR nor T1D_JAEB_DIR is set, both default roots and /jaeb subdirs are searched
+    monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
+    monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
+    default_cfg = get_configured_db_search_dirs()
+    assert Path("/mnt/data/t1d") in default_cfg
+    assert Path("/mnt/data/t1d/jaeb") in default_cfg
+    assert Path("/Volumes/TOSHIBA_EXT/stanford/t1d") in default_cfg
+    assert Path("/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb") in default_cfg
 
     jaeb_dir = tmp_path / "jaeb_ext"
     jaeb_dir.mkdir()
     monkeypatch.setenv("T1D_JAEB_DIR", str(jaeb_dir))
     assert get_jaeb_external_root() == jaeb_dir
     assert jaeb_dir.resolve() in get_allowed_db_roots()
+    assert get_recommended_jaeb_db_path() == str(jaeb_dir / "jaeb" / "t1d.duckdb")
+
+    jaeb_named = tmp_path / "jaeb"
+    jaeb_named.mkdir()
+    monkeypatch.setenv("T1D_JAEB_DIR", str(jaeb_named))
+    assert get_recommended_jaeb_db_path() == str(jaeb_named / "t1d.duckdb")
 
     monkeypatch.setenv("T1D_JAEB_DIR", str(tmp_path / "missing_jaeb_ext"))
     assert (tmp_path / "missing_jaeb_ext").resolve() not in get_allowed_db_roots()
@@ -353,22 +368,79 @@ def test_validate_db_path_traversal(
     assert local_sim in cfg_dirs
     assert local_sim in get_t1d_db_search_dirs()
 
+    # When T1D_DB_SEARCH_DIR points to a non-existent path from another host, falls back to existing host default
+    remote_existing = tmp_path / "remote_mnt_data_t1d"
+    remote_existing.mkdir()
+    (remote_existing / "jaeb").mkdir()
+    remote_jaeb_db = remote_existing / "jaeb" / "t1d.duckdb"
+    remote_jaeb_db.write_text("jaeb")
+    monkeypatch.setattr(
+        db_security,
+        "DEFAULT_DB_SEARCH_DIRS",
+        (remote_existing, remote_sim),
+    )
+    monkeypatch.setattr(
+        db_security,
+        "DEFAULT_T1D_DB_SEARCH_DIRS",
+        (
+            remote_existing,
+            remote_existing / "jaeb",
+            remote_sim,
+            remote_sim / "jaeb",
+        ),
+    )
     monkeypatch.setenv("T1D_DB_SEARCH_DIR", str(remote_sim))
+    fallback_cfg = get_configured_db_search_dirs()
+    assert remote_sim in fallback_cfg
+    assert remote_existing in fallback_cfg
+    assert (remote_existing / "jaeb") in fallback_cfg
+    assert get_jaeb_external_root() == remote_existing
+    assert get_recommended_jaeb_db_path() == str(remote_jaeb_db.resolve())
+    remote_jaeb_db.unlink()
+    assert get_recommended_jaeb_db_path() == str(
+        remote_existing / "jaeb" / "t1d.duckdb"
+    )
+
+    # When neither configured nor default roots exist on disk
+    missing_def = tmp_path / "missing_default_root"
+    monkeypatch.setattr(
+        db_security,
+        "DEFAULT_DB_SEARCH_DIRS",
+        (missing_def,),
+    )
+    monkeypatch.setattr(
+        db_security,
+        "DEFAULT_T1D_DB_SEARCH_DIRS",
+        (missing_def, missing_def / "jaeb"),
+    )
+    monkeypatch.setattr(db_security, "DEFAULT_JAEB_EXTERNAL_ROOT", missing_def)
     assert get_jaeb_external_root() == remote_sim
     monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
-
-    # Platform fallback when REMOTE_T1D_DB_SEARCH_ROOT exists and DEFAULT_JAEB_EXTERNAL_ROOT does not
-    monkeypatch.setattr(db_security, "REMOTE_T1D_DB_SEARCH_ROOT", local_sim)
-    monkeypatch.setattr(db_security, "DEFAULT_JAEB_EXTERNAL_ROOT", remote_sim / "jaeb")
-    assert get_jaeb_external_root() == local_sim
+    assert get_jaeb_external_root() == missing_def
+    assert get_recommended_jaeb_db_path() == str(missing_def / "jaeb" / "t1d.duckdb")
 
 
 def test_validate_db_path_env_var(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Test validate_db_path respects T1D_DB_PATH environment variable."""
+    """Test validate_db_path respects T1D_DB_PATH and prioritizes T1D_DB_SEARCH_DIR over synthetic data/t1d.duckdb."""
+    from t1d_analytics import db_security
     from t1d_analytics.api import validate_db_path
     from t1d_analytics.diagnostics import check_database_health
+
+    missing_root = tmp_path / "no_default_jaeb"
+    monkeypatch.setattr(
+        db_security,
+        "DEFAULT_DB_SEARCH_DIRS",
+        (missing_root,),
+    )
+    monkeypatch.setattr(
+        db_security,
+        "DEFAULT_T1D_DB_SEARCH_DIRS",
+        (missing_root, missing_root / "jaeb"),
+    )
+    monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
+    monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
 
     env_db = tmp_path / "env_test.duckdb"
     env_db.touch()
@@ -397,8 +469,7 @@ def test_validate_db_path_env_var(
         hlth = check_database_health(db_path=None)
         assert hlth.configured_path == "data/t1d.duckdb"
 
-    # When data/t1d.duckdb does not exist, resolve_default_db_path falls back to T1D_DB_SEARCH_DIR
-    (data_sub / "t1d.duckdb").unlink()
+    # When both data/t1d.duckdb and an authentic DB in T1D_DB_SEARCH_DIR exist, T1D_DB_SEARCH_DIR wins
     search_root = tmp_path / "ext_search"
     jaeb_sub = search_root / "jaeb"
     jaeb_sub.mkdir(parents=True)
@@ -412,6 +483,11 @@ def test_validate_db_path_env_var(
     alt_ext_db = jaeb_sub / "cohort_jaeb.duckdb"
     alt_ext_db.write_text("dummy_alt")
     assert validate_db_path("t1d.duckdb") == str(alt_ext_db.resolve())
+
+    # If no .duckdb files exist in search_root or data/t1d.duckdb, returns raw t1d.duckdb
+    alt_ext_db.unlink()
+    (data_sub / "t1d.duckdb").unlink()
+    assert validate_db_path("t1d.duckdb") == str(Path("t1d.duckdb").resolve())
     monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
 
 
@@ -610,10 +686,22 @@ def test_providers_status_and_models_with_any_llm_configured(
 
     from dataclasses import replace
 
+    from t1d_analytics.api import create_app
     from t1d_analytics.api_dependencies import (
+        _app_services_registry,
         create_default_app_services,
         get_app_services,
+        set_default_app_services,
     )
+
+    assert create_app() is app
+    orig_svc = app.state.services
+    set_default_app_services(None)
+    assert get_app_services() is orig_svc
+    app.state.services = None
+    assert isinstance(get_app_services(), type(orig_svc))
+    set_default_app_services(orig_svc, target_app=app)
+    assert _app_services_registry.get_default() is orig_svc
 
     custom_svc = replace(
         create_default_app_services(app),

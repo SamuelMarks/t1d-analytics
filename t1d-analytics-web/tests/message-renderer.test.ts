@@ -146,6 +146,8 @@ describe("MessageRenderer & SQL Action Controls", () => {
     const copyBtn = queryTestElement<HTMLButtonElement>(".copy-sql-btn");
     copyBtn.click();
     await flushPromises();
+    copyBtn.click();
+    await flushPromises();
     expect(writeTextMock).toHaveBeenCalledWith("SELECT 1;");
     expect(copyBtn.innerHTML).toContain("polyline points=");
     vi.runAllTimers();
@@ -454,5 +456,151 @@ describe("MessageRenderer & SQL Action Controls", () => {
     expect(img?.getAttribute("onerror")).toBeNull();
     expect(messagesContainer.innerHTML).toContain("<strong>bold</strong>");
     expect(chat.messages.length).toBe(1);
+  });
+
+  it("renders Gold-Standard SQL Evaluation Card (PASS, DIFF, syntax error, and fallback badges) and user message Edit/Retry button", () => {
+    state.createChat();
+    state.addMessageToActiveChat({
+      role: "user",
+      content: "Calculate mean age by treatment group",
+      model: "gemma:2b",
+      goldSql: "SELECT TxGroup, AVG(Age) FROM tblaptsummary GROUP BY TxGroup;",
+    });
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content:
+        "```sql\nSELECT TxGroup, AVG(Age) FROM tblaptsummary GROUP BY TxGroup;\n```",
+      sqlQuery: "SELECT TxGroup, AVG(Age) FROM tblaptsummary GROUP BY TxGroup;",
+      sqlResult: [{ TxGroup: "Experimental", avg_age: 14.2 }],
+      model: "gemma:2b",
+      isRuleBasedSql: false,
+      generationMode: "llm",
+      goldComparison: {
+        gold_sql:
+          "SELECT TxGroup, AVG(Age) FROM tblaptsummary GROUP BY TxGroup;",
+        pred_sql:
+          "SELECT TxGroup, AVG(Age) FROM tblaptsummary GROUP BY TxGroup;",
+        exact_match: true,
+        execution_accuracy: true,
+        syntax_error: false,
+        gold_row_count: 1,
+        pred_row_count: 1,
+        gold_columns: ["TxGroup", "avg_age"],
+        pred_columns: ["TxGroup", "avg_age"],
+        column_overlap_pct: 100.0,
+        gold_rows_preview: [{ TxGroup: "Experimental", avg_age: 14.2 }],
+      },
+    });
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: "Fallback attempt failed",
+      model: "gemma:2b",
+      isRuleBasedSql: true,
+      generationMode: "rule_based_fallback",
+      goldComparison: {
+        gold_sql: "SELECT 1;",
+        pred_sql: "",
+        exact_match: false,
+        execution_accuracy: false,
+        syntax_error: true,
+        gold_row_count: 0,
+        pred_row_count: 0,
+        gold_columns: [],
+        pred_columns: [],
+        column_overlap_pct: 0.0,
+        gold_rows_preview: [],
+        error_message: "Binder Error: column not found",
+      },
+    });
+
+    ui.render();
+
+    const cards = queryAllTestElements<HTMLElement>(
+      ".gold-sql-comparison-card",
+    );
+    expect(cards.length).toBe(2);
+    expect(cards[0]?.textContent).toContain("PASS");
+    expect(cards[0]?.textContent).toContain("100.0%");
+    expect(cards[1]?.textContent).toContain("DIFF");
+    expect(cards[1]?.textContent).toContain("Binder Error: column not found");
+
+    // Click the Edit/Retry button on the user message
+    const retryBtn = queryTestElement<HTMLButtonElement>(".edit-retry-msg-btn");
+    retryBtn.click();
+    expect(ui.chatInput.value).toBe("Calculate mean age by treatment group");
+    expect(state.activeGoldSql).toBe(
+      "SELECT TxGroup, AVG(Age) FROM tblaptsummary GROUP BY TxGroup;",
+    );
+
+    // Also test user message without goldSql
+    state.addMessageToActiveChat({
+      role: "user",
+      content: "Plain prompt without gold SQL",
+    });
+    ui.render();
+    const retryBtns = queryAllTestElements<HTMLButtonElement>(
+      ".edit-retry-msg-btn",
+    );
+    retryBtns[retryBtns.length - 1]?.click();
+    expect(ui.chatInput.value).toBe("Plain prompt without gold SQL");
+    expect(state.activeGoldSql).toBeNull();
+
+    // Test fallback SQL synthesis diagnostic banner (both explicit llmError and parenthetical note) and >40 char cell tooltip
+    const longText = "A".repeat(45);
+    ui.messageRenderer.finalizeAssistantResponse(
+      {
+        content:
+          "_Note: Local LLM inference was unavailable (Connection refused by local Ollama); synthesized schema-guided fallback SQL for `demographics`._\n\n```sql\nSELECT * FROM demographics LIMIT 10;\n```",
+        sqlQuery: "SELECT * FROM demographics LIMIT 10;",
+        sqlResult: [{ RecID: 1, ptid: 101, Notes: longText }],
+        is_rule_based_sql: true,
+        generation_mode: "rule_based_fallback",
+        llm_error: "Connection refused by local Ollama",
+        llm_error_code: "backend.llmConnectionError",
+      },
+      "gemma:2b",
+    );
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content:
+        "_Note: Local LLM inference was unavailable (Model not pulled); synthesized schema-guided fallback SQL for `patients`._",
+    });
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: "",
+      isRuleBasedSql: true,
+    });
+    ui.render();
+
+    const fallbackBanners = queryAllTestElements<HTMLElement>(
+      ".fallback-synthesis-banner",
+    );
+    expect(fallbackBanners.length).toBe(2);
+    expect(fallbackBanners[0]?.textContent).toContain(
+      "Connection refused by local Ollama",
+    );
+    expect(fallbackBanners[0]?.textContent).toContain(
+      "backend.llmConnectionError",
+    );
+    expect(fallbackBanners[1]?.textContent).toContain("Model not pulled");
+
+    const configBtn = fallbackBanners[0]?.querySelector<HTMLButtonElement>(
+      ".fallback-configure-btn",
+    );
+    expect(configBtn).not.toBeNull();
+    configBtn?.click();
+
+    const metaBadges = queryAllTestElements<HTMLElement>(
+      ".sql-table-meta-badge",
+    );
+    expect(metaBadges[metaBadges.length - 1]?.textContent).toContain(
+      "1 rows × 3 cols",
+    );
+
+    const cells = Array.from(
+      queryAllTestElements<HTMLTableCellElement>(".sql-table td"),
+    );
+    const longCell = cells.find((c) => c.textContent === longText);
+    expect(longCell?.title).toBe(longText);
   });
 });

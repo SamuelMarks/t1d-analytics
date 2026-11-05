@@ -129,6 +129,8 @@ export function mountChatUiTestDom(): void {
         <select id="db-select">
           <option value="t1d.duckdb">t1d.duckdb</option>
         </select>
+        <button id="template-picker-btn" type="button">📋</button>
+        <button id="auto-execute-toggle-btn" type="button" class="active" aria-pressed="true">▶️</button>
         <button id="streaming-toggle-btn">⚡</button>
         <button id="sync-sessions-btn">Sync</button>
         <button id="cohort-filter-btn">Cohort</button>
@@ -136,6 +138,13 @@ export function mountChatUiTestDom(): void {
           <option value="en">English</option>
           <option value="ja">Japanese</option>
         </select>
+        <div id="template-picker-modal" class="modal hidden" role="dialog" aria-modal="true" aria-hidden="true">
+          <button id="close-template-modal-btn" type="button">✕</button>
+          <button type="button" class="template-tab-btn active" data-template-tab="all">All</button>
+          <button type="button" class="template-tab-btn" data-template-tab="table1">Table 1</button>
+          <button type="button" class="template-tab-btn" data-template-tab="starter">Starter</button>
+          <div id="template-picker-list"></div>
+        </div>
         <div id="cohort-modal" class="modal-overlay hidden">
           <button id="close-cohort-modal-btn">✕</button>
           <select id="cohort-table-select"></select>
@@ -205,6 +214,7 @@ export function mountChatUiTestDom(): void {
             <textarea id="chat-input" aria-describedby="chat-input-help"></textarea>
           </div>
           <div id="chat-input-help" class="sr-only">Press Enter to send, Shift+Enter for a new line</div>
+          <button id="stop-btn" type="button" class="hidden">Stop</button>
           <button id="send-btn" type="submit">Send</button>
         </form>
       </main>

@@ -228,7 +228,7 @@ async def download_checkpoints_from_gcs(
             return output_dir
         except ChecksumMismatchError:
             raise
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, TimeoutError, ConnectionError) as e:
             last_err = e
             await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
 
@@ -289,7 +289,7 @@ def sync_dataset_to_gcs(
             blob.md5_hash = local_md5
             blob.upload_from_filename(str(local_path))
             return dest_uri
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, TimeoutError, ConnectionError) as e:
             last_err = e
             backoff_sleep(0.05 * (2 ** (attempt - 1)))
 

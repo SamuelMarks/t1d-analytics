@@ -445,9 +445,9 @@ def test_extract_zips_already_extracted(
     import tarfile
     import zipfile
 
+    from t1d_analytics.archive_extractor import _should_skip_archive_member_name
     from t1d_analytics.ingestion import (
         DEFAULT_MAX_DECOMPRESSED_BYTES,
-        _should_skip_archive_member_name,
         extract_zips,
         resolve_effective_decompressed_quota,
     )

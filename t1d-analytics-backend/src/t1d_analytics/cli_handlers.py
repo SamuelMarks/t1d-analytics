@@ -70,7 +70,7 @@ def load_auth_plugin(plugin_spec: str) -> Callable[[], str]:
     mod_name, func_name = plugin_spec.split(":", 1)
     try:
         mod = importlib.import_module(mod_name)
-    except Exception as e:
+    except (ImportError, OSError, RuntimeError, ValueError, SyntaxError) as e:
         raise AuthPluginError(
             f"Failed to import auth plugin module '{mod_name}': {e}"
         ) from e
@@ -545,7 +545,7 @@ def handle_watch(opts: CliOptionsModel) -> None:
                         f"Warning: Failed to update manifest after deletion: {e}",
                         file=sys.stderr,
                     )
-                except Exception as e:
+                except (OSError, RuntimeError, ValueError, TypeError) as e:
                     print(
                         f"Warning: Unexpected error updating manifest: {e}",
                         file=sys.stderr,

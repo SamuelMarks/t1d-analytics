@@ -13,7 +13,9 @@ from typing_extensions import TypedDict
 
 from t1d_analytics.api_schemas import ColumnInfo, TableSchemaModel
 from t1d_analytics.diagnostics import DatabaseStatusCode, check_database_health
+from t1d_analytics.duckdb_pool import connect_duckdb_read_only_pooled
 from t1d_analytics.errors import (
+    DatabaseNotFoundError,
     InvalidTableNameError,
     ReadOnlyViolationError,
     T1DError,
@@ -29,7 +31,6 @@ from t1d_analytics.sql_utils import (
     SqlRawInputValue,
     SqlValue,
     coerce_numeric_aggregates_in_sql,
-    connect_duckdb_read_only_pooled,
     escape_sql_identifier,
     extract_sql_from_response,
     extract_table_columns_map,
@@ -425,15 +426,18 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
 
     Raises:
     ------
-        ValueError: If table name is invalid or table does not exist.
-        FileNotFoundError: If database file does not exist.
+        InvalidTableNameError: If table name is invalid.
+        TableNotFoundError: If table does not exist.
+        DatabaseNotFoundError: If database file does not exist.
 
     """
     if not table_name.isidentifier():
         raise InvalidTableNameError(f"Invalid table identifier: {table_name}")
 
     if not Path(db_path).exists():
-        raise FileNotFoundError(f"Database file not found: {db_path}")
+        raise DatabaseNotFoundError(
+            f"Database file not found: {db_path}", params={"path": db_path}
+        )
 
     with connect_duckdb_read_only_pooled(
         db_path=db_path,

@@ -20,8 +20,6 @@ import {
   parseResponseJson,
 } from "./api-client";
 import { renderCgmCard } from "./chart";
-import { type ProviderSettingsModalController } from "./controllers/provider-modal-controller";
-import { type SchemaExplorerController } from "./controllers/schema-explorer-controller";
 import {
   type SchemaDiagnosticCardOptions,
   buildEmptyStateView,
@@ -35,6 +33,7 @@ import {
   type Chat,
   type ChatState,
   type Message,
+  type SqlGoldComparisonPayload,
 } from "./state";
 import {
   TABLE_1_EXAMPLE_QUERIES,
@@ -60,6 +59,56 @@ export interface ChatApiResponse {
   sqlResult?: Record<string, SqlCellValue>[];
   /** Structured or string API error payload. */
   error?: ApiErrorInput;
+  /** Optional gold-standard SQL evaluation metrics returned by the backend. */
+  gold_comparison?: SqlGoldComparisonPayload | null;
+  /** Whether deterministic rule-based SQL synthesis was used instead of an LLM. */
+  is_rule_based_sql?: boolean;
+  /** SQL generation mode ('llm', 'rule_based_fallback', or 'literal_sql'). */
+  generation_mode?: string;
+  /** Optional human-readable diagnostic reason why LLM inference failed prior to fallback synthesis. */
+  llm_error?: string | null;
+  /** Optional structured error code for the underlying LLM failure. */
+  llm_error_code?: string | null;
+}
+
+const FALLBACK_PARENTHETICAL_ERROR_RE =
+  /Local LLM inference was unavailable\s*\(([^)]+)\)/i;
+
+/**
+ * Extracts an underlying LLM failure reason from either explicit `msg.llmError` metadata
+ * or a parenthetical `Note: Local LLM inference was unavailable (<reason>);` in `msg.content`.
+ * @param {Message} msg - Assistant message record.
+ * @returns {string | null} Extracted human-readable error reason, or null if none.
+ */
+export function extractFallbackErrorDetail(msg: Message): string | null {
+  if (msg.llmError && msg.llmError.trim()) {
+    return msg.llmError.trim();
+  }
+  const match = FALLBACK_PARENTHETICAL_ERROR_RE.exec(msg.content);
+  if (match && match[1].trim()) {
+    return match[1].trim();
+  }
+  return null;
+}
+
+/**
+ * Checks whether an assistant message used rule-based fallback SQL synthesis.
+ * @param {Message} msg - Assistant message record.
+ * @returns {boolean} True if fallback SQL synthesis was used.
+ */
+export function isFallbackSynthesisMessage(msg: Message): boolean {
+  if (
+    Boolean(msg.isRuleBasedSql) ||
+    msg.generationMode === "rule_based_fallback" ||
+    Boolean(msg.llmError)
+  ) {
+    return true;
+  }
+  const text = msg.content;
+  return (
+    text.includes("Local LLM inference was unavailable") ||
+    text.includes("Local LLM inference encountered a memory error")
+  );
 }
 
 hljs.registerLanguage("sql", sql);
@@ -178,10 +227,10 @@ export interface MessageRendererHost {
   sendBtn: HTMLButtonElement;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   modelSelect: HTMLSelectElement;
-  /** Provider settings modal sub-controller. */
-  providerModalController: ProviderSettingsModalController;
-  /** Schema explorer sub-controller. */
-  schemaExplorerController: SchemaExplorerController;
+  /** Updates the provider badge status indicator for the active model. */
+  updateProviderBadgeStatus(): void;
+  /** Binds interaction events to action buttons inside diagnostic cards. */
+  bindSchemaDiagnosticButtons(container: HTMLElement): void;
   /** Synchronizes syntax highlighting in the chat input. */
   syncHighlight(): void;
   /** Announces a message to screen readers. */
@@ -260,16 +309,21 @@ export class MessageRenderer {
         },
       ]);
     btn.replaceChildren(renderCopyIcon());
+    let resetTimerId: ReturnType<typeof setTimeout> | null = null;
     btn.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(textToCopy);
         this.ui.announce(i18next.t("status.commandCopied"));
+        if (resetTimerId !== null) {
+          clearTimeout(resetTimerId);
+        }
         btn.replaceChildren(
           createSvgIcon(14, [
             { tag: "polyline", attrs: { points: "20 6 9 17 4 12" } },
           ]),
         );
-        setTimeout(() => {
+        resetTimerId = setTimeout(() => {
+          resetTimerId = null;
           btn.replaceChildren(renderCopyIcon());
         }, 2000);
       } catch (err) {
@@ -405,6 +459,27 @@ export class MessageRenderer {
       assistantMsg = outcome.content;
     }
 
+    const resolvedLlmError =
+      data.llm_error && data.llm_error.trim()
+        ? data.llm_error.trim()
+        : undefined;
+    const resolvedLlmErrorCode =
+      data.llm_error_code && data.llm_error_code.trim()
+        ? data.llm_error_code.trim()
+        : undefined;
+
+    if (
+      !data.error &&
+      (data.is_rule_based_sql ||
+        data.generation_mode === "rule_based_fallback") &&
+      resolvedLlmError
+    ) {
+      this.ui.announce(
+        `${i18next.t("ui.fallbackBannerTitle", "⚠️ Fallback SQL Synthesized")} — ${i18next.t("ui.fallbackErrorPrefix", "Underlying LLM Error:")} ${resolvedLlmError}`,
+        false,
+      );
+    }
+
     this.ui.state.addMessageToActiveChat({
       role: "assistant",
       content: assistantMsg,
@@ -412,7 +487,187 @@ export class MessageRenderer {
       sqlQuery: data.sqlQuery,
       isError: !!data.error,
       model,
+      goldComparison: data.gold_comparison ?? undefined,
+      isRuleBasedSql: data.is_rule_based_sql,
+      generationMode: data.generation_mode,
+      ...(resolvedLlmError ? { llmError: resolvedLlmError } : {}),
+      ...(resolvedLlmErrorCode ? { llmErrorCode: resolvedLlmErrorCode } : {}),
     });
+  }
+
+  /**
+   * Creates an accessible "Load / Re-run in Composer" button for a user message so users can
+   * re-test the same prompt with a different LLM model without copy-pasting.
+   * @param {Message} msg - User message to load into the composer.
+   * @returns {HTMLButtonElement} The constructed retry/edit button.
+   */
+  private createEditRetryBtn(msg: Message): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "edit-retry-msg-btn icon-btn";
+    const label = i18next.t(
+      "ui.loadPromptInComposer",
+      "Load prompt in composer",
+    );
+    btn.setAttribute("aria-label", label);
+    btn.title = label;
+    btn.textContent = "↻";
+    btn.addEventListener("click", () => {
+      this.ui.chatInput.value = msg.content;
+      this.ui.state.setActiveGoldSql(msg.goldSql ?? null);
+      this.ui.syncHighlight();
+      this.ui.chatInput.focus();
+    });
+    return btn;
+  }
+
+  /**
+   * Builds an interactive Gold-Standard SQL Evaluation Card comparing the LLM's generated SQL
+   * against the reference Gold SQL executed on the read-only DuckDB cursor.
+   * @param {SqlGoldComparisonPayload} comp - Gold-standard SQL comparison metrics.
+   * @param {Message} msg - Parent assistant message.
+   * @returns {HTMLDivElement} Constructed `.gold-sql-comparison-card` element.
+   */
+  private buildGoldComparisonCard(
+    comp: SqlGoldComparisonPayload,
+    msg: Message,
+  ): HTMLDivElement {
+    const card = document.createElement("div");
+    card.className = "gold-sql-comparison-card";
+    card.setAttribute("role", "region");
+    card.setAttribute(
+      "aria-label",
+      i18next.t("eval.cardTitle", "Gold-Standard SQL Evaluation"),
+    );
+
+    const header = document.createElement("div");
+    header.className = "gold-sql-card-header";
+
+    const titleEl = document.createElement("strong");
+    titleEl.className = "gold-sql-card-title";
+    titleEl.textContent = i18next.t(
+      "eval.cardTitle",
+      "⚖️ NL-to-SQL vs. Gold-Standard Evaluation (DuckDB Read-Only Cursor)",
+    );
+
+    const badgesRow = document.createElement("div");
+    badgesRow.className = "gold-sql-badges-row";
+
+    const exBadge = document.createElement("span");
+    exBadge.className = comp.execution_accuracy
+      ? "eval-badge eval-badge-pass"
+      : "eval-badge eval-badge-fail";
+    exBadge.textContent = comp.execution_accuracy
+      ? i18next.t("eval.exPass", "Execution Match (EX): PASS")
+      : i18next.t("eval.exFail", "Execution Match (EX): DIFF");
+
+    const emBadge = document.createElement("span");
+    emBadge.className = comp.exact_match
+      ? "eval-badge eval-badge-pass"
+      : "eval-badge eval-badge-neutral";
+    emBadge.textContent = comp.exact_match
+      ? i18next.t("eval.emPass", "Exact SQL Match: YES")
+      : i18next.t("eval.emFail", "Exact SQL Match: NO");
+
+    const approxBadge = document.createElement("span");
+    approxBadge.className = "eval-badge eval-badge-score";
+    approxBadge.textContent = i18next.t("eval.approxScore", {
+      pct: comp.column_overlap_pct.toFixed(1),
+      defaultValue: `Value Approximation: ${comp.column_overlap_pct.toFixed(1)}%`,
+    });
+
+    const modeBadge = document.createElement("span");
+    const isFallback =
+      Boolean(msg.isRuleBasedSql) ||
+      msg.generationMode === "rule_based_fallback";
+    modeBadge.className = isFallback
+      ? "eval-badge eval-badge-warn"
+      : "eval-badge eval-badge-info";
+    modeBadge.textContent = isFallback
+      ? i18next.t("eval.modeFallback", "Mode: Rule-Based Fallback")
+      : i18next.t("eval.modeLlm", "Mode: Neural LLM");
+
+    badgesRow.append(exBadge, emBadge, approxBadge, modeBadge);
+    header.append(titleEl, badgesRow);
+    card.appendChild(header);
+
+    const metaRow = document.createElement("div");
+    metaRow.className = "gold-sql-meta-row";
+    metaRow.textContent = `DuckDB Read-Only Cursor Rows — Predicted: ${comp.pred_row_count} (${comp.pred_columns.join(", ") || "none"}) | Gold Standard: ${comp.gold_row_count} (${comp.gold_columns.join(", ") || "none"})`;
+    card.appendChild(metaRow);
+
+    if (comp.syntax_error && comp.error_message) {
+      const errBanner = document.createElement("div");
+      errBanner.className = "gold-sql-error-banner";
+      errBanner.textContent = comp.error_message;
+      card.appendChild(errBanner);
+    }
+
+    const detailsEl = document.createElement("details");
+    detailsEl.className = "gold-sql-diff-details";
+    const summaryEl = document.createElement("summary");
+    summaryEl.textContent = i18next.t(
+      "eval.inspectDiff",
+      "Inspect Target LLM SQL vs. Gold-Standard SQL & DuckDB Rows",
+    );
+
+    const splitGrid = document.createElement("div");
+    splitGrid.className = "gold-sql-split-grid";
+
+    const buildPane = (heading: string, sqlText: string): HTMLDivElement => {
+      const pane = document.createElement("div");
+      pane.className = "gold-sql-pane";
+      const paneHeader = document.createElement("div");
+      paneHeader.className = "gold-sql-pane-header";
+      const label = document.createElement("span");
+      label.textContent = heading;
+      const actions = document.createElement("div");
+      actions.className = "gold-sql-pane-actions";
+      if (sqlText) {
+        actions.append(
+          this.createCopyBtn(sqlText),
+          this.createPlayBtn(sqlText),
+        );
+      }
+      paneHeader.append(label, actions);
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.className = "language-sql";
+      code.textContent = sqlText || "-- (none)";
+      hljs.highlightElement(code);
+      pre.appendChild(code);
+      pane.append(paneHeader, pre);
+      return pane;
+    };
+
+    splitGrid.append(
+      buildPane(
+        i18next.t("eval.predSqlHeading", "Target LLM Generated SQL"),
+        comp.pred_sql,
+      ),
+      buildPane(
+        i18next.t("eval.goldSqlHeading", "Gold-Standard Reference SQL"),
+        comp.gold_sql,
+      ),
+    );
+    detailsEl.append(summaryEl, splitGrid);
+
+    if (comp.gold_rows_preview && comp.gold_rows_preview.length > 0) {
+      const previewHeading = document.createElement("div");
+      previewHeading.className = "gold-sql-preview-heading";
+      previewHeading.textContent = i18next.t(
+        "eval.goldPreviewHeading",
+        "Gold-Standard Read-Only DuckDB Result Preview:",
+      );
+      const builtGoldTable = this.buildSqlTableContainer(
+        comp.gold_rows_preview,
+        9999,
+      );
+      detailsEl.append(previewHeading, builtGoldTable.container);
+    }
+
+    card.appendChild(detailsEl);
+    return card;
   }
 
   /**
@@ -533,6 +788,19 @@ export class MessageRenderer {
 
     const toolbar = document.createElement("div");
     toolbar.className = "sql-table-toolbar";
+
+    const columns = Object.keys(sqlRows[0]);
+    const metaBadge = document.createElement("span");
+    metaBadge.className = "sql-table-meta-badge";
+    metaBadge.textContent = i18next.t("table.rowColSummary", {
+      rows: sqlRows.length,
+      cols: columns.length,
+      defaultValue: `${sqlRows.length} rows × ${columns.length} cols`,
+    });
+
+    const actionsGroup = document.createElement("div");
+    actionsGroup.className = "sql-table-toolbar-actions";
+
     const csvBtn = document.createElement("button");
     csvBtn.className = "btn-secondary export-csv-btn";
     csvBtn.setAttribute("data-i18n", "table.exportCsvShort");
@@ -559,7 +827,8 @@ export class MessageRenderer {
       exportRowsToJson(sqlRows, "query_results.json"),
     );
 
-    toolbar.append(csvBtn, jsonBtn);
+    actionsGroup.append(csvBtn, jsonBtn);
+    toolbar.append(metaBadge, actionsGroup);
     tableContainer.appendChild(toolbar);
 
     const table = document.createElement("table");
@@ -572,11 +841,11 @@ export class MessageRenderer {
 
     const thead = document.createElement("thead");
     const headerRow = document.createElement("tr");
-    const columns = Object.keys(sqlRows[0]);
 
     columns.forEach((col) => {
       const th = document.createElement("th");
       th.textContent = col;
+      th.title = col;
       th.setAttribute("scope", "col");
       headerRow.appendChild(th);
     });
@@ -589,10 +858,14 @@ export class MessageRenderer {
       columns.forEach((col) => {
         const td = document.createElement("td");
         const cellValue = row[col];
-        td.textContent =
+        const cellText =
           cellValue === null || cellValue === undefined
             ? "NULL"
             : String(cellValue);
+        td.textContent = cellText;
+        if (cellText.length > 40) {
+          td.title = cellText;
+        }
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
@@ -605,8 +878,76 @@ export class MessageRenderer {
       tableContainer.appendChild(cgmCard);
     }
 
-    tableContainer.appendChild(table);
+    const scrollWrapper = document.createElement("div");
+    scrollWrapper.className = "sql-table-scroll-wrapper";
+    scrollWrapper.appendChild(table);
+    tableContainer.appendChild(scrollWrapper);
     return { container: tableContainer, hadCgmCard: Boolean(cgmCard) };
+  }
+
+  /**
+   * Builds a diagnostic banner for assistant messages that used rule-based fallback SQL synthesis,
+   * explicitly surfacing the underlying LLM failure reason and a quick provider configuration button.
+   * @param {Message} msg - Assistant message record.
+   * @returns {HTMLDivElement | null} Constructed `.fallback-synthesis-banner` element, or null if not applicable.
+   */
+  private buildFallbackDiagnosticBanner(msg: Message): HTMLDivElement | null {
+    if (msg.role !== "assistant" || !isFallbackSynthesisMessage(msg)) {
+      return null;
+    }
+    const errDetail = extractFallbackErrorDetail(msg);
+    if (!errDetail) {
+      return null;
+    }
+
+    const banner = document.createElement("div");
+    banner.className = "fallback-synthesis-banner";
+    banner.setAttribute("role", "status");
+    banner.setAttribute("aria-live", "polite");
+
+    const headerRow = document.createElement("div");
+    headerRow.className = "fallback-banner-header";
+
+    const titleSpan = document.createElement("strong");
+    titleSpan.className = "fallback-banner-title";
+    titleSpan.textContent = i18next.t(
+      "ui.fallbackBannerTitle",
+      "⚠️ Fallback SQL Synthesized",
+    );
+    headerRow.appendChild(titleSpan);
+
+    if (msg.llmErrorCode) {
+      const codeChip = document.createElement("code");
+      codeChip.className = "fallback-error-code";
+      codeChip.textContent = msg.llmErrorCode;
+      headerRow.appendChild(codeChip);
+    }
+
+    const detailBlock = document.createElement("div");
+    detailBlock.className = "fallback-error-detail";
+    const prefixStrong = document.createElement("strong");
+    prefixStrong.textContent = `${i18next.t("ui.fallbackErrorPrefix", "Underlying LLM Error:")} `;
+    const reasonSpan = document.createElement("span");
+    reasonSpan.className = "fallback-error-reason";
+    reasonSpan.textContent = errDetail;
+    detailBlock.append(prefixStrong, reasonSpan);
+
+    const actionsRow = document.createElement("div");
+    actionsRow.className = "fallback-banner-actions";
+    const configBtn = document.createElement("button");
+    configBtn.type = "button";
+    configBtn.className = "btn-secondary btn-xs fallback-configure-btn";
+    configBtn.textContent = i18next.t(
+      "ui.fallbackActionConfigure",
+      "Configure LLM / Keys",
+    );
+    configBtn.addEventListener("click", () => {
+      document.getElementById("provider-settings-btn")?.click();
+    });
+    actionsRow.appendChild(configBtn);
+
+    banner.append(headerRow, detailBlock, actionsRow);
+    return banner;
   }
 
   /**
@@ -624,23 +965,29 @@ export class MessageRenderer {
     const msgDiv = document.createElement("div");
     msgDiv.className = `message ${msg.role}`;
 
-    if (msg.model) {
+    if (msg.model || msg.role === "user") {
       const header = document.createElement("div");
       header.className = "message-header";
-      const badge = document.createElement("span");
-      badge.className = "model-badge";
-      badge.textContent =
-        msg.model === RAW_SQL_MODEL
-          ? i18next.t("ui.rawSql")
-          : i18next.t("ui.modelName", { name: msg.model });
+      if (msg.model) {
+        const badge = document.createElement("span");
+        badge.className = "model-badge";
+        badge.textContent =
+          msg.model === RAW_SQL_MODEL
+            ? i18next.t("ui.rawSql")
+            : i18next.t("ui.modelName", { name: msg.model });
+
+        if (msg.role === "user") {
+          badge.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
+          badge.style.color = "var(--user-msg-text)";
+        }
+        header.appendChild(badge);
+      }
 
       if (msg.role === "user") {
         header.style.justifyContent = "flex-end";
-        badge.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
-        badge.style.color = "var(--user-msg-text)";
+        header.appendChild(this.createEditRetryBtn(msg));
       }
 
-      header.appendChild(badge);
       msgDiv.appendChild(header);
     }
 
@@ -678,7 +1025,7 @@ export class MessageRenderer {
       preBlock.appendChild(codeBlock);
       contentDiv.append(headerDiv, preBlock);
     } else {
-      const rawHtml = String(marked.parse(msg.content ?? ""));
+      const rawHtml = String(marked.parse(msg.content));
       contentDiv.innerHTML = DOMPurify.sanitize(rawHtml, {
         ADD_ATTR: ["target"],
       });
@@ -703,9 +1050,16 @@ export class MessageRenderer {
     }
 
     if (msg.isError) {
-      contentDiv.className = "error-text";
+      contentDiv.classList.add("error-text");
       contentDiv.setAttribute("role", "alert");
       contentDiv.setAttribute("aria-live", "assertive");
+    } else if (!isSqlMessage) {
+      contentDiv.classList.add("message-content");
+    }
+
+    const fallbackBanner = this.buildFallbackDiagnosticBanner(msg);
+    if (fallbackBanner) {
+      msgDiv.appendChild(fallbackBanner);
     }
 
     msgDiv.appendChild(contentDiv);
@@ -753,6 +1107,10 @@ export class MessageRenderer {
       }
     }
 
+    if (msg.goldComparison) {
+      msgDiv.appendChild(this.buildGoldComparisonCard(msg.goldComparison, msg));
+    }
+
     return { element: msgDiv, hadCgmCard };
   }
 
@@ -776,7 +1134,10 @@ export class MessageRenderer {
     for (const msg of activeChat.messages) {
       const effectiveModel =
         msg.model ?? (msg.role === "user" ? activeChat.model : "");
-      const fingerprint = `${i18next.language}|${msg.role}|${effectiveModel}|${Boolean(msg.isError)}|${msg.content ?? ""}|${msg.sqlQuery ?? ""}|${msg.sqlResult ? msg.sqlResult.length : -1}|${cgmCardIndex}`;
+      const goldKey = msg.goldComparison
+        ? `${msg.goldComparison.execution_accuracy}|${msg.goldComparison.exact_match}|${msg.goldComparison.column_overlap_pct}`
+        : "";
+      const fingerprint = `${i18next.language}|${msg.role}|${effectiveModel}|${Boolean(msg.isError)}|${msg.content}|${msg.sqlQuery ?? ""}|${msg.sqlResult ? msg.sqlResult.length : -1}|${goldKey}|${msg.llmError ?? ""}|${msg.llmErrorCode ?? ""}|${cgmCardIndex}`;
       const cached = this.messageCache.get(msg);
 
       if (
@@ -856,7 +1217,7 @@ export class MessageRenderer {
     this.ui.modelSelect.value = hasActiveModelOption
       ? activeChat.model
       : RAW_SQL_MODEL;
-    this.ui.providerModalController.updateProviderBadgeStatus();
+    this.ui.updateProviderBadgeStatus();
     this.ui.syncHighlight();
     this.renderMessages();
   }

@@ -8,12 +8,7 @@
  * Primitive or Date cell value accepted in clinical CGM dataset rows.
  */
 export type ClinicalRowValue =
-  | string
-  | number
-  | boolean
-  | Date
-  | null
-  | undefined;
+  string | number | boolean | Date | null | undefined;
 
 /**
  * Input value accepted by clinical date/time parsers.

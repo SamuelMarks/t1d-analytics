@@ -1,6 +1,6 @@
 """Background model training job CRUD endpoints (`/api/training/jobs`)."""
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from fastapi import APIRouter, Depends, Request
 
@@ -39,7 +39,7 @@ def submit_training_job(
     job_req: TrainingJobRequest,
     req: Request,
     job_manager: TrainingJobManager = Depends(_resolve_job_manager_dependency),
-    svc: Optional[AppServices] = Depends(get_app_services),
+    svc: AppServices = Depends(get_app_services),
 ) -> TrainingJobDict:
     """
     Submit a background training job using the configured accelerator backend.
@@ -49,7 +49,7 @@ def submit_training_job(
         job_req: Training job specification.
         req: Incoming FastAPI request.
         job_manager: Injected TrainingJobManager dependency.
-        svc: Optional injected AppServices dependency bundle.
+        svc: Injected AppServices dependency bundle.
 
     Returns:
     -------
@@ -61,13 +61,8 @@ def submit_training_job(
 
     """
     _ = req
-    active_svc = svc if isinstance(svc, AppServices) else get_app_services()
-    validated_dataset_path = active_svc.validate_workspace_artifact_path(
-        job_req.dataset_path
-    )
-    validated_output_dir = active_svc.validate_workspace_artifact_path(
-        job_req.output_dir
-    )
+    validated_dataset_path = svc.validate_workspace_artifact_path(job_req.dataset_path)
+    validated_output_dir = svc.validate_workspace_artifact_path(job_req.output_dir)
 
     backend_val = job_req.backend.lower()
     if backend_val == "cpu":

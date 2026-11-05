@@ -448,6 +448,54 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(state.chats.length).toBe(1);
     expect(state.chats[0]?.title).toBe("Temporary chat");
 
+    // Inline rename via double-click on chat title button
+    let titleBtn = queryTestElement<HTMLButtonElement>(".chat-item-title");
+    titleBtn.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    let renameInput = queryTestElement<HTMLInputElement>(
+      ".chat-inline-rename-input",
+    );
+    renameInput.value = "Inline Renamed";
+    renameInput.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(state.chats[0]?.title).toBe("Inline Renamed");
+
+    // Escape cancels inline rename
+    titleBtn = queryTestElement<HTMLButtonElement>(".chat-item-title");
+    titleBtn.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    renameInput = queryTestElement<HTMLInputElement>(
+      ".chat-inline-rename-input",
+    );
+    renameInput.value = "Discarded Name";
+    renameInput.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(state.chats[0]?.title).toBe("Inline Renamed");
+
+    // Blur commits inline rename (and ignores non-Enter/Escape keys)
+    titleBtn = queryTestElement<HTMLButtonElement>(".chat-item-title");
+    titleBtn.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    renameInput = queryTestElement<HTMLInputElement>(
+      ".chat-inline-rename-input",
+    );
+    renameInput.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", bubbles: true }),
+    );
+    renameInput.value = "   ";
+    renameInput.dispatchEvent(new Event("blur"));
+    // Second blur after committed is a no-op
+    renameInput.dispatchEvent(new Event("blur"));
+    expect(state.chats[0]?.title).toBe("Inline Renamed");
+
+    titleBtn = queryTestElement<HTMLButtonElement>(".chat-item-title");
+    titleBtn.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    renameInput = queryTestElement<HTMLInputElement>(
+      ".chat-inline-rename-input",
+    );
+    renameInput.value = "Blur Renamed";
+    renameInput.dispatchEvent(new Event("blur"));
+    expect(state.chats[0]?.title).toBe("Blur Renamed");
+
     const orphanMenu = document.createElement("div");
     orphanMenu.className = "dropdown-menu show";
     document.body.appendChild(orphanMenu);
@@ -584,7 +632,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
 
-    // Render assistant message with CGM rows (renderCgmCard truthy) and undefined content
+    // Render assistant message with CGM rows (renderCgmCard truthy)
     const cgmRows = Array.from({ length: 12 }, (_, idx) => ({
       timestamp: `2026-01-01T0${idx % 9}:00:00Z`,
       glucose: 90 + idx * 8,
@@ -594,7 +642,6 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
       content: "",
       sqlResult: cgmRows,
     };
-    Reflect.deleteProperty(cgmMsg, "content");
     chat1.messages.push(cgmMsg);
     ui.messageRenderer.renderMessages();
     expect(document.querySelector(".cgm-analytics-card")).not.toBeNull();
@@ -961,5 +1008,40 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
 
     streamBtn.click();
     expect(ui.streamingEnabled).toBe(false);
+
+    // Auto-Run SQL toggle button and localStorage persistence
+    const autoExecBtn = getTestElement<HTMLButtonElement>(
+      "auto-execute-toggle-btn",
+    );
+    expect(state.autoExecuteSql).toBe(true);
+    autoExecBtn.click();
+    expect(state.autoExecuteSql).toBe(false);
+    expect(autoExecBtn.getAttribute("aria-pressed")).toBe("false");
+    const reloadedState = new ChatState();
+    expect(reloadedState.autoExecuteSql).toBe(false);
+    autoExecBtn.click();
+    expect(state.autoExecuteSql).toBe(true);
+
+    // Chat input scroll synchronization
+    ui.chatInput.scrollTop = 42;
+    ui.chatInput.dispatchEvent(new Event("scroll"));
+    expect(ui.chatInputHighlight.parentElement?.scrollTop).toBe(42);
+
+    // Stop generation button aborts in-flight SSE stream and rejects cleanly
+    ui.streamingEnabled = true;
+    const stopBtn = getTestElement<HTMLButtonElement>("stop-btn");
+    mockFetch.mockImplementationOnce(
+      (_url: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new Error("Request aborted by user"));
+          });
+        }),
+    );
+    const sendPromise = ui.handleSendMessage("Slow query", "gemma:2b");
+    expect(stopBtn.classList.contains("hidden")).toBe(false);
+    stopBtn.click();
+    await sendPromise;
+    expect(stopBtn.classList.contains("hidden")).toBe(true);
   });
 });

@@ -11,6 +11,7 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Literal,
     Optional,
     Tuple,
     Union,
@@ -26,8 +27,12 @@ from t1d_analytics.api_schemas import (
     ChatMessageModel,
     ChatRequest,
     ChatResponse,
+    NlToSqlEvalRequest,
+    NlToSqlEvalResponse,
+    SqlGoldComparisonModel,
 )
 from t1d_analytics.diagnostics import detect_database_provenance
+from t1d_analytics.duckdb_pool import connect_duckdb_read_only_pooled
 from t1d_analytics.errors import (
     DatabaseError,
     DatabaseNotFoundError,
@@ -60,25 +65,22 @@ from t1d_analytics.sql_fallback_synthesizer import (
     _TABLE_1_FALLBACK_KEYWORDS,
     GenerationModeLiteral,
     TranslationResult,
-    _build_fallback_table_1_sql,
-    _find_matching_column,
     _is_recoverable_local_ollama_crash,
-    _parse_schema_tables_and_columns,
-    _score_table_for_query,
-    _select_best_fallback_table,
-    coerce_translation_result,
+    _lookup_table_1_curated_sql,
+    extract_fallback_error_from_text,
+    format_llm_failure_reason,
     is_fallback_response_text,
     synthesize_fallback_clinical_sql,
 )
 from t1d_analytics.sql_utils import (
     ALL_SQL_KEYWORDS,
     SqlValue,
-    connect_duckdb_read_only_pooled,
     strip_sql_comments_and_parens,
 )
 from t1d_analytics.sql_utils import (
     extract_sql_from_response as _extract_sql_from_response,
 )
+from t1d_analytics.training_data import compare_predicted_and_gold_sql
 
 logger = logging.getLogger(__name__)
 _STREAM_DONE_SENTINEL = "_T1D_SSE_STREAM_EOF_"
@@ -193,6 +195,51 @@ def _resolve_and_select_local_ollama_model(
     return primary, fallback
 
 
+class SseTokenEvent(TypedDict):
+    """Typed dictionary representing an SSE token chunk event."""
+
+    event: Literal["token"]
+    token: str
+
+
+class SseProgressEvent(TypedDict):
+    """Typed dictionary representing an SSE execution progress event."""
+
+    event: Literal["execution_progress"]
+    status: str
+
+
+class SseSqlGeneratedEvent(TypedDict):
+    """Typed dictionary representing an SSE generated SQL notification event."""
+
+    event: Literal["sql_generated"]
+    sqlQuery: str
+
+
+class SseErrorEvent(TypedDict):
+    """Typed dictionary representing a top-level SSE validation error event."""
+
+    event: Literal["error"]
+    error: str
+
+
+class SqlGoldComparisonPayloadDict(TypedDict, total=False):
+    """Typed dictionary representing serialized gold-standard SQL evaluation metrics in SSE frames."""
+
+    gold_sql: str
+    pred_sql: str
+    exact_match: bool
+    execution_accuracy: bool
+    syntax_error: bool
+    gold_row_count: int
+    pred_row_count: int
+    gold_columns: List[str]
+    pred_columns: List[str]
+    column_overlap_pct: float
+    gold_rows_preview: List[Dict[str, SqlValue]]
+    error_message: Optional[str]
+
+
 class SseTerminalPayload(TypedDict, total=False):
     """Typed dictionary representing the terminal payload of a chat SSE stream."""
 
@@ -203,7 +250,42 @@ class SseTerminalPayload(TypedDict, total=False):
     is_synthetic_data: bool
     is_rule_based_sql: bool
     generation_mode: str
+    llm_error: Optional[str]
+    llm_error_code: Optional[str]
     data_provenance: str
+    gold_comparison: Optional[SqlGoldComparisonPayloadDict]
+
+
+class SseDoneEvent(SseTerminalPayload, total=False):
+    """Typed dictionary representing a terminal SSE 'done' or 'result' event."""
+
+    event: Literal["done", "result"]
+
+
+SseEventPayload = Union[
+    SseTokenEvent,
+    SseProgressEvent,
+    SseSqlGeneratedEvent,
+    SseErrorEvent,
+    SseDoneEvent,
+]
+
+
+def format_sse_frame(payload: SseEventPayload, sse_sep: str = "\n\n") -> str:
+    """
+    Serialize a strongly-typed `SseEventPayload` into a wire-format SSE `data: ...` frame.
+
+    Args:
+    ----
+        payload: Typed SSE event dictionary.
+        sse_sep: Double-newline SSE frame separator.
+
+    Returns:
+    -------
+        str: Formatted SSE `data: <json><sse_sep>` string.
+
+    """
+    return f"data: {json.dumps(payload)}{sse_sep}"
 
 
 def _resolve_db_provenance_flags(
@@ -254,8 +336,10 @@ def _emit_sse_terminal_payload(
         str: Formatted 'done' and 'result' SSE frames.
 
     """
-    yield f"data: {json.dumps({'event': 'done', **payload})}{sse_sep}"
-    yield f"data: {json.dumps({'event': 'result', **payload})}{sse_sep}"
+    done_event: SseDoneEvent = {"event": "done", **payload}
+    result_event: SseDoneEvent = {"event": "result", **payload}
+    yield format_sse_frame(done_event, sse_sep)
+    yield format_sse_frame(result_event, sse_sep)
 
 
 def build_sql_prompt_with_history(
@@ -625,13 +709,32 @@ def translate_nl_to_sql(
             used_fallback=False,
             generation_mode="llm",
         )
-    except Exception as e:
+    except (
+        T1DError,
+        urllib.error.URLError,
+        TimeoutError,
+        ConnectionError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as e:
         if _is_recoverable_local_ollama_crash(resolved_provider, e):
             logger.warning(
                 f"Local Ollama model '{actual_model}' failed with {type(e).__name__} ({e}); synthesizing schema-aware clinical SQL fallback."
             )
+            err_msg, err_code = format_llm_failure_reason(
+                e, model_name=actual_model, provider=resolved_provider
+            )
             return synthesize_fallback_clinical_sql(
-                schema, nl_query, include_diagnostic_note=True
+                schema,
+                nl_query,
+                include_diagnostic_note=True,
+                llm_error=err_msg,
+                llm_error_code=err_code,
+                model_name=actual_model,
+                provider=resolved_provider,
             )
         logger.error(f"LLM translation error ({type(e).__name__}): {e}")
         raise LlmTranslationError(params={"error": str(e)}) from e
@@ -670,11 +773,73 @@ def _resolve_sql_mode_query(
     return synthesized.sql_query
 
 
+def _resolve_effective_gold_sql(
+    message: str,
+    explicit_gold_sql: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Resolve an explicit `gold_sql` string or auto-detect a canonical Academic Table 1 gold SQL query.
+
+    Args:
+    ----
+        message: Natural language prompt string.
+        explicit_gold_sql: Optional explicit gold-standard SQL provided in the request.
+
+    Returns:
+    -------
+        Optional[str]: Non-empty gold SQL query string if present or matched, else None.
+
+    """
+    if explicit_gold_sql and explicit_gold_sql.strip():
+        return explicit_gold_sql.strip()
+    return _lookup_table_1_curated_sql(message)
+
+
+def _compute_optional_gold_comparison(
+    db_path: str,
+    message: str,
+    pred_sql: str,
+    explicit_gold_sql: Optional[str],
+    execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
+    precomputed_pred_rows: Optional[List[Dict[str, SqlValue]]] = None,
+    precomputed_pred_error: Optional[str] = None,
+) -> Optional[SqlGoldComparisonModel]:
+    """
+    Compute `SqlGoldComparisonModel` on the read-only DuckDB cursor when a gold SQL query is available.
+
+    Args:
+    ----
+        db_path: Validated path to the DuckDB file.
+        message: Natural language prompt string.
+        pred_sql: SQL query generated by the target LLM.
+        explicit_gold_sql: Optional explicit gold SQL from the request.
+        execute_fn: Read-only DuckDB query execution callable.
+        precomputed_pred_rows: Optional already-executed rows for `pred_sql`.
+        precomputed_pred_error: Optional error message if `pred_sql` already failed execution.
+
+    Returns:
+    -------
+        Optional[SqlGoldComparisonModel]: Comparison model if gold SQL exists, else None.
+
+    """
+    effective_gold = _resolve_effective_gold_sql(message, explicit_gold_sql)
+    if not effective_gold:
+        return None
+    return compare_predicted_and_gold_sql(
+        db_path=db_path,
+        pred_sql=pred_sql,
+        gold_sql=effective_gold,
+        execute_fn=execute_fn,
+        precomputed_pred_rows=precomputed_pred_rows,
+        precomputed_pred_error=precomputed_pred_error,
+    )
+
+
 def execute_chat_turn(
     request: ChatRequest,
     db_validator: Callable[[Optional[str]], str],
     execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
-    translate_fn: Callable[..., Union[TranslationResult, Tuple[str, str]]],
+    translate_fn: Callable[..., TranslationResult],
     error_parser: Callable[[Exception], ApiError],
 ) -> ChatResponse:
     """
@@ -685,7 +850,7 @@ def execute_chat_turn(
         request: Validated `ChatRequest` payload.
         db_validator: Callable resolving and sandboxing the target database path.
         execute_fn: Callable executing a read-only SQL query against the database.
-        translate_fn: Callable translating a natural-language question into a `TranslationResult` or `(full_response, sql_query)` tuple.
+        translate_fn: Callable translating a natural-language question into a `TranslationResult`.
         error_parser: Callable converting an `Exception` into a structured `ApiError`.
 
     Returns:
@@ -718,7 +883,7 @@ def execute_chat_turn(
                 data_provenance=provenance,
             )
 
-        raw_translation = translate_fn(
+        translation = translate_fn(
             db_path,
             request.message,
             model_name=request.model,
@@ -726,14 +891,25 @@ def execute_chat_turn(
             api_key=request.api_key,
             provider=request.provider,
         )
-        translation = coerce_translation_result(raw_translation)
         nl_results: Optional[List[Dict[str, SqlValue]]] = None
         sql_error: Optional[ApiError] = None
+        pred_err_str: Optional[str] = None
         if translation.sql_query and request.auto_execute:
             try:
                 nl_results = execute_fn(db_path, translation.sql_query)
             except (T1DError, ValueError, RuntimeError) as e:
+                pred_err_str = str(e)
                 sql_error = error_parser(e)
+
+        gold_comp = _compute_optional_gold_comparison(
+            db_path=db_path,
+            message=request.message,
+            pred_sql=translation.sql_query,
+            explicit_gold_sql=request.gold_sql,
+            execute_fn=execute_fn,
+            precomputed_pred_rows=nl_results,
+            precomputed_pred_error=pred_err_str,
+        )
 
         return ChatResponse(
             content=translation.full_response,
@@ -743,7 +919,10 @@ def execute_chat_turn(
             is_synthetic_data=is_synthetic,
             is_rule_based_sql=translation.used_fallback,
             generation_mode=translation.generation_mode,
+            llm_error=translation.llm_error,
+            llm_error_code=translation.llm_error_code,
             data_provenance=provenance,
+            gold_comparison=gold_comp,
         )
     except (HTTPException, InvalidDatabasePathError):
         raise
@@ -755,9 +934,98 @@ def execute_chat_turn(
         return ChatResponse(
             content="backend.errorNlpTranslation", error=error_parser(re_err)
         )
-    except Exception as e:
+    except (
+        duckdb.Error,
+        urllib.error.URLError,
+        TimeoutError,
+        ConnectionError,
+        OSError,
+        TypeError,
+        KeyError,
+    ) as e:
         logger.exception("Unexpected error during chat request.")
         return ChatResponse(content="backend.errorUnexpected", error=error_parser(e))
+
+
+def execute_nl_to_sql_eval_turn(
+    request: NlToSqlEvalRequest,
+    db_validator: Callable[[Optional[str]], str],
+    execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
+    translate_fn: Callable[..., TranslationResult],
+    error_parser: Callable[[Exception], ApiError],
+) -> NlToSqlEvalResponse:
+    """
+    Translate a natural-language question to SQL, execute on the read-only DuckDB cursor, and compare against Gold SQL.
+
+    Args:
+    ----
+        request: Validated `NlToSqlEvalRequest` payload.
+        db_validator: Callable resolving and sandboxing the target database path.
+        execute_fn: Read-only DuckDB query execution callable.
+        translate_fn: NL-to-SQL translation callable.
+        error_parser: Exception to `ApiError` converter callable.
+
+    Returns:
+    -------
+        NlToSqlEvalResponse: Evaluation payload with generated SQL, DuckDB rows, and gold comparison metrics.
+
+    Raises:
+    ------
+        HTTPException: If database path validation raises an HTTPException.
+        InvalidDatabasePathError: If the database path is outside the allowed workspace sandbox.
+
+    """
+    db_path = db_validator(request.db_path)
+    provenance, is_synthetic = _resolve_db_provenance_flags(db_path)
+    try:
+        translation = translate_fn(
+            db_path,
+            request.question,
+            model_name=request.model,
+            api_key=request.api_key,
+            provider=request.provider,
+        )
+        pred_rows: Optional[List[Dict[str, SqlValue]]] = None
+        sql_err: Optional[ApiError] = None
+        pred_err_str: Optional[str] = None
+        if translation.sql_query:
+            try:
+                pred_rows = execute_fn(db_path, translation.sql_query)
+            except (T1DError, ValueError, RuntimeError) as exc:
+                pred_err_str = str(exc)
+                sql_err = error_parser(exc)
+
+        gold_comp = _compute_optional_gold_comparison(
+            db_path=db_path,
+            message=request.question,
+            pred_sql=translation.sql_query,
+            explicit_gold_sql=request.gold_sql,
+            execute_fn=execute_fn,
+            precomputed_pred_rows=pred_rows,
+            precomputed_pred_error=pred_err_str,
+        )
+        return NlToSqlEvalResponse(
+            question=request.question,
+            model=request.model,
+            content=translation.full_response,
+            sqlQuery=translation.sql_query,
+            sqlResult=pred_rows,
+            gold_comparison=gold_comp,
+            is_rule_based_sql=translation.used_fallback,
+            generation_mode=translation.generation_mode,
+            is_synthetic_data=is_synthetic,
+            data_provenance=provenance,
+            error=sql_err,
+        )
+    except (T1DError, ValueError, RuntimeError) as exc:
+        return NlToSqlEvalResponse(
+            question=request.question,
+            model=request.model,
+            content="backend.errorNlpTranslation",
+            is_synthetic_data=is_synthetic,
+            data_provenance=provenance,
+            error=error_parser(exc),
+        )
 
 
 def _generate_sql_mode_sse_frames(
@@ -788,11 +1056,16 @@ def _generate_sql_mode_sse_frames(
 
     """
     nl = chr(10)
-    exec_payload = json.dumps(
-        {"event": "token", "token": f"Executing SQL query...{nl}"}
-    )
-    yield f"data: {exec_payload}{sse_sep}"
-    yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
+    tok_event: SseTokenEvent = {
+        "event": "token",
+        "token": f"Executing SQL query...{nl}",
+    }
+    prog_event: SseProgressEvent = {
+        "event": "execution_progress",
+        "status": "Executing SQL query...",
+    }
+    yield format_sse_frame(tok_event, sse_sep)
+    yield format_sse_frame(prog_event, sse_sep)
     sql_query = message
     provenance, is_synthetic = _resolve_db_provenance_flags(
         db_path, connect_fn=connect_fn
@@ -829,6 +1102,39 @@ def _generate_sql_mode_sse_frames(
         yield from _emit_sse_terminal_payload(err_dict_payload, sse_sep)
 
 
+def _serialize_gold_comparison(
+    model: Optional[SqlGoldComparisonModel],
+) -> Optional[SqlGoldComparisonPayloadDict]:
+    """
+    Convert an optional `SqlGoldComparisonModel` into a `SqlGoldComparisonPayloadDict`.
+
+    Args:
+    ----
+        model: Optional `SqlGoldComparisonModel` instance.
+
+    Returns:
+    -------
+        Optional[SqlGoldComparisonPayloadDict]: Typed dictionary representation or None.
+
+    """
+    if model is None:
+        return None
+    return {
+        "gold_sql": model.gold_sql,
+        "pred_sql": model.pred_sql,
+        "exact_match": model.exact_match,
+        "execution_accuracy": model.execution_accuracy,
+        "syntax_error": model.syntax_error,
+        "gold_row_count": model.gold_row_count,
+        "pred_row_count": model.pred_row_count,
+        "gold_columns": model.gold_columns,
+        "pred_columns": model.pred_columns,
+        "column_overlap_pct": model.column_overlap_pct,
+        "gold_rows_preview": model.gold_rows_preview,
+        "error_message": model.error_message,
+    }
+
+
 def _finalize_nl_sse_frames(
     db_path: str,
     full_response: str,
@@ -838,6 +1144,10 @@ def _finalize_nl_sse_frames(
     error_parser: Callable[[Exception], ApiError],
     connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
     used_fallback: Optional[bool] = None,
+    message: str = "",
+    gold_sql: Optional[str] = None,
+    llm_error: Optional[str] = None,
+    llm_error_code: Optional[str] = None,
 ) -> Iterator[str]:
     """
     Emit `sql_generated`, optional `execution_progress`, and terminal SSE frames for an NL response.
@@ -852,6 +1162,10 @@ def _finalize_nl_sse_frames(
         error_parser: Exception to ApiError converter callable.
         connect_fn: DuckDB connection factory callable.
         used_fallback: Optional explicit flag indicating whether rule-based fallback synthesis was used.
+        message: Original natural-language question for gold-standard lookup.
+        gold_sql: Optional explicit gold-standard SQL query from the request.
+        llm_error: Optional human-readable diagnostic reason why LLM inference failed.
+        llm_error_code: Optional structured error code for the LLM failure.
 
     Yields:
     ------
@@ -862,34 +1176,63 @@ def _finalize_nl_sse_frames(
         db_path, connect_fn=connect_fn
     )
     sql_query = _extract_sql_from_response(full_response)
+    effective_fallback = (
+        used_fallback
+        if used_fallback is not None
+        else is_fallback_response_text(full_response)
+    )
+    resolved_llm_error = (
+        llm_error
+        if llm_error is not None
+        else (
+            extract_fallback_error_from_text(full_response)
+            if effective_fallback
+            else None
+        )
+    )
+    resolved_llm_error_code = (
+        llm_error_code
+        if llm_error_code is not None
+        else ("backend.llmTranslationError" if resolved_llm_error else None)
+    )
     translation = TranslationResult(
         full_response=full_response,
         sql_query=sql_query,
-        used_fallback=(
-            used_fallback
-            if used_fallback is not None
-            else is_fallback_response_text(full_response)
-        ),
-        generation_mode=(
-            "rule_based_fallback"
-            if (
-                used_fallback
-                if used_fallback is not None
-                else is_fallback_response_text(full_response)
-            )
-            else "llm"
-        ),
+        used_fallback=effective_fallback,
+        generation_mode="rule_based_fallback" if effective_fallback else "llm",
+        llm_error=resolved_llm_error,
+        llm_error_code=resolved_llm_error_code,
     )
     sql_results: Optional[List[Dict[str, SqlValue]]] = None
     sql_err_dict: Optional[Dict[str, SqlValue]] = None
+    pred_err_str: Optional[str] = None
     if translation.sql_query:
-        yield f"data: {json.dumps({'event': 'sql_generated', 'sqlQuery': translation.sql_query})}{sse_sep}"
+        sql_gen_event: SseSqlGeneratedEvent = {
+            "event": "sql_generated",
+            "sqlQuery": translation.sql_query,
+        }
+        yield format_sse_frame(sql_gen_event, sse_sep)
         if auto_execute:
-            yield f"data: {json.dumps({'event': 'execution_progress', 'status': 'Executing SQL query...'})}{sse_sep}"
+            prog_event: SseProgressEvent = {
+                "event": "execution_progress",
+                "status": "Executing SQL query...",
+            }
+            yield format_sse_frame(prog_event, sse_sep)
             try:
                 sql_results = execute_fn(db_path, translation.sql_query)
             except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
+                pred_err_str = str(e)
                 sql_err_dict = error_parser(e).model_dump()
+
+    gold_comp = _compute_optional_gold_comparison(
+        db_path=db_path,
+        message=message,
+        pred_sql=translation.sql_query,
+        explicit_gold_sql=gold_sql,
+        execute_fn=execute_fn,
+        precomputed_pred_rows=sql_results,
+        precomputed_pred_error=pred_err_str,
+    )
 
     nl_res_dict: SseTerminalPayload = {
         "content": translation.full_response,
@@ -899,7 +1242,10 @@ def _finalize_nl_sse_frames(
         "is_synthetic_data": is_synthetic,
         "is_rule_based_sql": translation.used_fallback,
         "generation_mode": translation.generation_mode,
+        "llm_error": translation.llm_error,
+        "llm_error_code": translation.llm_error_code,
         "data_provenance": provenance,
+        "gold_comparison": _serialize_gold_comparison(gold_comp),
     }
     yield from _emit_sse_terminal_payload(nl_res_dict, sse_sep)
 
@@ -967,14 +1313,17 @@ def _validate_sse_request_or_error(
 
     """
     if not request.message.strip():
-        payload = json.dumps({"event": "error", "error": "backend.emptyMessage"})
-        return "", f"data: {payload}{sse_sep}"
+        empty_err: SseErrorEvent = {"event": "error", "error": "backend.emptyMessage"}
+        return "", format_sse_frame(empty_err, sse_sep)
 
     try:
         return db_validator(request.db_path), None
     except (HTTPException, InvalidDatabasePathError):
-        payload = json.dumps({"event": "error", "error": "backend.invalidDatabasePath"})
-        return "", f"data: {payload}{sse_sep}"
+        inv_err: SseErrorEvent = {
+            "event": "error",
+            "error": "backend.invalidDatabasePath",
+        }
+        return "", format_sse_frame(inv_err, sse_sep)
 
 
 def _recover_ollama_stream_fallback_token(
@@ -1011,11 +1360,20 @@ def _recover_ollama_stream_fallback_token(
     logger.warning(
         f"Local Ollama streaming for model '{model_name}' failed with {type(stream_exc).__name__} ({stream_exc}); using schema-aware clinical SQL fallback."
     )
-    synthesized = synthesize_fallback_clinical_sql(
-        schema, message, include_diagnostic_note=True
+    err_msg, err_code = format_llm_failure_reason(
+        stream_exc, model_name=model_name, provider=resolved_prov
     )
-    tok_payload = json.dumps({"event": "token", "token": synthesized.full_response})
-    return synthesized.full_response, f"data: {tok_payload}{sse_sep}"
+    synthesized = synthesize_fallback_clinical_sql(
+        schema,
+        message,
+        include_diagnostic_note=True,
+        llm_error=err_msg,
+        llm_error_code=err_code,
+        model_name=model_name,
+        provider=resolved_prov,
+    )
+    tok_event: SseTokenEvent = {"event": "token", "token": synthesized.full_response}
+    return synthesized.full_response, format_sse_frame(tok_event, sse_sep)
 
 
 async def generate_sse_chat_events(
@@ -1084,6 +1442,8 @@ async def generate_sse_chat_events(
         )
         full_parts: List[str] = []
         used_fallback = False
+        stream_llm_error: Optional[str] = None
+        stream_llm_error_code: Optional[str] = None
         try:
             token_iter = iter(
                 stream_fn(
@@ -1101,9 +1461,22 @@ async def generate_sse_chat_events(
                 if token == _STREAM_DONE_SENTINEL:
                     break
                 full_parts.append(token)
-                tok_payload = json.dumps({"event": "token", "token": token})
-                yield f"data: {tok_payload}{sse_sep}"
-        except Exception as stream_exc:
+                tok_event: SseTokenEvent = {"event": "token", "token": token}
+                yield format_sse_frame(tok_event, sse_sep)
+        except (
+            T1DError,
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ) as stream_exc:
+            stream_llm_error, stream_llm_error_code = format_llm_failure_reason(
+                stream_exc, model_name=request.model, provider=resolved_prov
+            )
             fb_resp, tok_frame = _recover_ollama_stream_fallback_token(
                 resolved_prov,
                 stream_exc,
@@ -1126,6 +1499,10 @@ async def generate_sse_chat_events(
             error_parser=error_parser,
             connect_fn=connect_fn,
             used_fallback=used_fallback,
+            message=request.message,
+            gold_sql=request.gold_sql,
+            llm_error=stream_llm_error,
+            llm_error_code=stream_llm_error_code,
         ):
             yield frame
     except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
@@ -1146,33 +1523,41 @@ __all__ = [
     "_TABLE_1_FALLBACK_KEYWORDS",
     "_VALID_SHOW_SECOND_TOKENS",
     "GenerationModeLiteral",
+    "SqlGoldComparisonPayloadDict",
+    "SseDoneEvent",
+    "SseErrorEvent",
+    "SseEventPayload",
+    "SseProgressEvent",
+    "SseSqlGeneratedEvent",
     "SseTerminalPayload",
+    "SseTokenEvent",
     "TranslationResult",
-    "_build_fallback_table_1_sql",
     "_complete_non_streaming_with_fallback",
+    "_compute_optional_gold_comparison",
     "_create_verified_llm_transport",
     "_emit_sse_terminal_payload",
     "_ensure_any_llm_installed_and_ready",
     "_extract_schema_for_translation",
     "_finalize_nl_sse_frames",
-    "_find_matching_column",
     "_generate_sql_mode_sse_frames",
     "_is_recoverable_local_ollama_crash",
     "_is_request_disconnected",
     "_next_stream_token_or_eof",
-    "_parse_schema_tables_and_columns",
     "_probe_installed_ollama_names",
     "_read_schema_from_db",
     "_recover_ollama_stream_fallback_token",
     "_resolve_and_select_local_ollama_model",
     "_resolve_db_provenance_flags",
+    "_resolve_effective_gold_sql",
     "_resolve_sql_mode_query",
-    "_score_table_for_query",
-    "_select_best_fallback_table",
+    "_serialize_gold_comparison",
     "_validate_sse_request_or_error",
     "build_sql_prompt_with_history",
-    "coerce_translation_result",
     "execute_chat_turn",
+    "execute_nl_to_sql_eval_turn",
+    "extract_fallback_error_from_text",
+    "format_llm_failure_reason",
+    "format_sse_frame",
     "generate_sse_chat_events",
     "is_fallback_response_text",
     "is_likely_sql_statement",

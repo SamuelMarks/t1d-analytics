@@ -1,6 +1,7 @@
 """DuckDB-backed persistent storage for chat conversation sessions."""
 
 import json
+import logging
 import os
 import threading
 import time
@@ -14,9 +15,11 @@ from typing import (
     Iterator,
     List,
     Optional,
+    Set,
 )
 
 import duckdb
+from pydantic import ValidationError
 
 from t1d_analytics.api_schemas import (
     ChatMessageModel,
@@ -24,8 +27,26 @@ from t1d_analytics.api_schemas import (
     SessionListResponse,
     SessionModel,
 )
+from t1d_analytics.duckdb_pool import global_read_only_duckdb_pool
 from t1d_analytics.errors import SessionNotFoundError
-from t1d_analytics.sql_utils import global_read_only_duckdb_pool
+
+logger = logging.getLogger(__name__)
+
+_INITIALIZED_SESSION_DBS: Set[str] = set()
+_INIT_LOCK = threading.Lock()
+
+
+def clear_initialized_session_dbs() -> None:
+    """
+    Clear the cache of initialized session database paths.
+
+    Returns
+    -------
+        None
+
+    """
+    with _INIT_LOCK:
+        _INITIALIZED_SESSION_DBS.clear()
 
 
 def open_sessions_db_conn(
@@ -55,6 +76,9 @@ def open_sessions_db_conn(
             sessions_dir = Path("./data")
             sessions_dir.mkdir(parents=True, exist_ok=True)
             db_path = str((sessions_dir / "sessions.duckdb").resolve())
+    resolved_path = Path(db_path).resolve()
+    resolved_key = str(resolved_path)
+    existed_before = resolved_path.exists()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     global_read_only_duckdb_pool.close_path(db_path)
     max_retries = 5
@@ -71,21 +95,29 @@ def open_sessions_db_conn(
     else:
         conn = duckdb.connect(db_path, read_only=False)
 
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_sessions (
-                session_id VARCHAR PRIMARY KEY,
-                title VARCHAR,
-                created_at TIMESTAMP,
-                updated_at TIMESTAMP,
-                messages_json VARCHAR
+    with _INIT_LOCK:
+        if not existed_before:
+            _INITIALIZED_SESSION_DBS.discard(resolved_key)
+        needs_ddl = resolved_key not in _INITIALIZED_SESSION_DBS
+
+    if needs_ddl:
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_sessions (
+                    session_id VARCHAR PRIMARY KEY,
+                    title VARCHAR,
+                    created_at TIMESTAMP,
+                    updated_at TIMESTAMP,
+                    messages_json VARCHAR
+                )
+                """
             )
-            """
-        )
-    except Exception:
-        conn.close()
-        raise
+        except (duckdb.Error, OSError, RuntimeError):
+            conn.close()
+            raise
+        with _INIT_LOCK:
+            _INITIALIZED_SESSION_DBS.add(resolved_key)
     return conn
 
 
@@ -176,7 +208,14 @@ class SessionStore:
         try:
             msgs_raw = json.loads(messages_json)
             return [ChatMessageModel(**m) for m in msgs_raw]
-        except Exception:
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            ValidationError,
+        ) as exc:
+            logger.warning(f"Failed to deserialize session messages JSON: {exc}")
             return []
 
     def list_sessions(self, db_path: Optional[str] = None) -> SessionListResponse:

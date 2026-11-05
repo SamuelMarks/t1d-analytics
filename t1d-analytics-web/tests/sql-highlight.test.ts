@@ -12,7 +12,7 @@ import {
   updateInputHighlight,
 } from "../src/sql-highlight";
 import { trapModalFocus } from "../src/modal-utils";
-import { ChatUI, requireElementById } from "../src/ui";
+import { ChatUI, optionalElementById, requireElementById } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 
 describe("SQL Highlight & Modal Focus Utilities", () => {
@@ -95,6 +95,21 @@ lines`;
     updateInputHighlight(input, highlight, "markdown");
     expect(highlight.textContent).toBe(`test
  `);
+    expect(highlight.className).toBe("language-plaintext");
+
+    // Test scrollHeight > MAX_CHAT_INPUT_HEIGHT_PX clamping
+    Object.defineProperty(input, "scrollHeight", {
+      value: 500,
+      configurable: true,
+    });
+    updateInputHighlight(input, highlight, "sql");
+    expect(input.style.height).toBe("220px");
+    expect(input.style.overflowY).toBe("auto");
+
+    // Test detached highlight element without parentElement
+    const detachedCode = document.createElement("code");
+    updateInputHighlight(input, detachedCode, "gemma:2b");
+    expect(detachedCode.className).toBe("language-plaintext");
   });
 
   it("highlights code blocks in assistant messages and handles empty/non-SQL blocks", () => {
@@ -264,9 +279,16 @@ ${fence}`,
     outsideBtn.remove();
   });
 
-  it("throws descriptive error when requireElementById cannot find a required element", () => {
+  it("throws descriptive error when requireElementById cannot find a required element and narrows optionalElementById", () => {
     expect(() => requireElementById("nonexistent-required-element")).toThrow(
       "Required DOM element #nonexistent-required-element not found",
     );
+    expect(optionalElementById("send-btn", HTMLButtonElement)).toBeInstanceOf(
+      HTMLButtonElement,
+    );
+    expect(optionalElementById("send-btn", HTMLTextAreaElement)).toBeNull();
+    expect(
+      optionalElementById("nonexistent-optional-element", HTMLButtonElement),
+    ).toBeNull();
   });
 });

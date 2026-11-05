@@ -328,7 +328,7 @@ app.state.services = create_default_app_services(
     session_store_getter=get_session_store,
     job_manager_getter=get_training_job_manager,
 )
-set_default_app_services(app.state.services)
+set_default_app_services(app.state.services, target_app=app)
 
 
 app.include_router(sessions_router)
@@ -336,6 +336,18 @@ app.include_router(chat_router)
 app.include_router(tables_router)
 app.include_router(status_router)
 app.include_router(training_router)
+
+
+def create_app() -> FastAPI:
+    """
+    Return the configured FastAPI application instance with mounted routers, lifespan, and middleware.
+
+    Returns
+    -------
+        FastAPI: Configured T1D Analytics FastAPI application.
+
+    """
+    return app
 
 
 def _setup_debug(target_app: FastAPI = app) -> None:
@@ -411,6 +423,7 @@ __all__ = [
     "chat_stream_endpoint",
     "check_rate_limit",
     "configure_api_logging",
+    "create_app",
     "create_default_app_services",
     "delete_session",
     "discover_workspace_databases",

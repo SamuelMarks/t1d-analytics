@@ -4,6 +4,8 @@ import os
 import sys
 from typing import Callable
 
+import duckdb
+
 from t1d_analytics.cli_handlers import (
     export_training_stages as export_training_stages,
 )
@@ -77,7 +79,12 @@ from t1d_analytics.cli_parser import (
     parse_cli_options as parse_cli_options,
 )
 from t1d_analytics.downloader import process_datasets as process_datasets
-from t1d_analytics.errors import TrainingExecutionError as TrainingExecutionError
+from t1d_analytics.errors import (
+    T1DError,
+)
+from t1d_analytics.errors import (
+    TrainingExecutionError as TrainingExecutionError,
+)
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.parser import (
     fetch_html as fetch_html,
@@ -138,7 +145,15 @@ def main() -> None:
         handler = command_handlers.get(opts.command or "")
         if handler is not None:
             handler(opts)
-    except Exception as e:
+    except (
+        T1DError,
+        duckdb.Error,
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        ImportError,
+    ) as e:
         print(_("An error occurred: {}", e), file=sys.stderr)
         sys.exit(1)
 

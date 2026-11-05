@@ -173,6 +173,10 @@ def test_local_cpu_runner_execution_and_dry_run(tmp_path: Path) -> None:
     assert isinstance(res["final_loss"], (int, float))
     assert res["final_loss"] > 0.0
     assert (out / "checkpoint-final" / "training_args.json").exists()
+    assert (out / "checkpoint-final" / "training_metrics.json").exists()
+    assert (out / "checkpoint-final" / "model.pt").exists()
+    saved_state = torch.load(out / "checkpoint-final" / "model.pt")
+    assert "embed.weight" in saved_state and "head.weight" in saved_state
 
     out_dry = tmp_path / "cpu_out_dry"
     config_dry = TrainingJobConfig(
@@ -430,7 +434,14 @@ def test_local_gpu_runner_real_datasets_and_telemetry(
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     with patch("torch.cuda.is_available", return_value=False):
         with patch("torch.backends.mps.is_available", return_value=True):
-            with patch("torch.device", MockTorchDevice):
+            with (
+                patch("torch.device", MockTorchDevice),
+                patch(
+                    "torch.optim.Optimizer._accelerator_graph_capture_health_check",
+                    lambda self: None,
+                    create=True,
+                ),
+            ):
                 config_mps = TrainingJobConfig(
                     model_name="gemma-7b",
                     backend=TrainingBackend.LOCAL_GPU,
@@ -1052,3 +1063,10 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
     assert job_pre is not None
     assert job_pre["status"] == "cancelled"
     assert mgr3.wait_for_job("missing-job-id") is None
+
+    dpo_obj = training_runner.DpoOptimizationResult(
+        losses=[0.5], margins=[0.1], checkpoint_path="/tmp/ckpt"
+    )
+    assert dpo_obj.losses == [0.5]
+    assert dpo_obj.margins == [0.1]
+    assert dpo_obj.checkpoint_path == "/tmp/ckpt"

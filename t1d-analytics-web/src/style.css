@@ -297,7 +297,7 @@ body {
 }
 
 .table-view-btn {
-  opacity: 0;
+  opacity: 0.65;
   transition: opacity 0.2s ease;
   padding: 0.4rem;
   margin-inline-end: 0.2rem;
@@ -335,10 +335,19 @@ body {
 }
 
 .schema-column {
-  padding: 0.2rem 0;
+  padding: 0.25rem 0.4rem;
   display: flex;
   justify-content: space-between;
   color: var(--text-light);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.schema-column:hover,
+.schema-column:focus-visible {
+  background-color: var(--border);
+  outline: none;
 }
 
 .schema-column-type {
@@ -624,6 +633,10 @@ input:focus-visible {
   border-radius: 8px;
   line-height: 1.5;
   box-sizing: border-box;
+}
+
+.message-content p,
+.message-content li {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -688,6 +701,7 @@ input:focus-visible {
   flex: 1;
   min-width: 0;
   max-width: 100%;
+  max-height: 220px;
   overflow: hidden;
   position: relative;
   border-radius: 6px;
@@ -725,6 +739,7 @@ input:focus-visible {
   overflow: hidden;
   background-color: transparent !important;
   height: 100%;
+  max-height: 220px;
 }
 
 .chat-input-wrapper code {
@@ -741,8 +756,9 @@ input:focus-visible {
   -webkit-text-fill-color: transparent;
   caret-color: var(--text-light);
   outline: none;
-  overflow: hidden;
+  overflow-y: auto;
   min-height: 44px;
+  max-height: 220px;
 }
 
 #chat-input::placeholder {
@@ -834,7 +850,7 @@ body.light-mode {
 /* SQL Results Table */
 .sql-table-container {
   margin-top: 0.75rem;
-  overflow-x: auto;
+  overflow: hidden;
   max-width: 100%;
   min-width: 0;
   width: 100%;
@@ -844,13 +860,34 @@ body.light-mode {
   background-color: var(--bg-dark);
 }
 
+.sql-table-scroll-wrapper {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .sql-table-toolbar {
   display: flex;
   gap: 0.5rem;
-  justify-content: flex-end;
-  padding: 0.5rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
   background-color: var(--bg-panel);
   border-bottom: 1px solid var(--border);
+}
+
+.sql-table-meta-badge {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sql-table-toolbar-actions {
+  display: inline-flex;
+  gap: 0.5rem;
+  margin-inline-start: auto;
 }
 
 .sql-table-toolbar button {
@@ -859,8 +896,10 @@ body.light-mode {
 }
 
 .sql-table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
+  table-layout: auto;
   font-size: 0.9rem;
   color: var(--text-light);
 }
@@ -870,6 +909,17 @@ body.light-mode {
   padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--border);
   text-align: start;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+  writing-mode: horizontal-tb;
+  text-orientation: mixed;
+}
+
+.sql-table td {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sql-table th {
@@ -879,6 +929,59 @@ body.light-mode {
 
 .sql-table tr:last-child td {
   border-bottom: none;
+}
+
+/* Fallback SQL Synthesis Diagnostic Banner */
+.fallback-synthesis-banner {
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background-color: rgba(245, 158, 11, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.86rem;
+}
+
+.fallback-banner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.fallback-banner-title {
+  color: var(--warning-accent, #f59e0b);
+  font-weight: 600;
+}
+
+.fallback-error-code {
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.25);
+  color: var(--text-light);
+}
+
+.fallback-error-detail {
+  color: var(--text-light);
+  line-height: 1.4;
+}
+
+.fallback-error-reason {
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.82rem;
+}
+
+.fallback-banner-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
 }
 
 .sql-empty {
@@ -1192,16 +1295,22 @@ body.light-mode {
 }
 
 #modal-table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
+  table-layout: auto;
 }
 
 #modal-table th,
 #modal-table td {
-  padding: 0.5rem;
+  padding: 0.5rem 0.75rem;
   border: 1px solid var(--border);
   text-align: start;
   font-size: 0.85rem;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+  writing-mode: horizontal-tb;
 }
 
 #modal-table th {
@@ -1787,6 +1896,265 @@ body.light-mode .hljs-deletion {
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--text-light);
+}
+
+/* Template Picker & Complexity Badges */
+.table1-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.template-mode-pill-group {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background-color: var(--bg-sidebar);
+}
+
+.template-mode-pill {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 0.25rem 0.65rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.template-mode-pill.active {
+  background-color: var(--accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.table1-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.complexity-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background-color: rgba(59, 130, 246, 0.18);
+  color: var(--text-light);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.template-picker-modal-content {
+  max-width: 760px;
+}
+
+.template-picker-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.template-tab-btn {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  color: var(--text-light);
+  padding: 0.4rem 0.85rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.template-tab-btn.active {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.template-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.template-picker-card {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.template-picker-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.template-picker-card-question {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.template-picker-sql-details summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.template-picker-sql-details pre {
+  margin-top: 0.4rem;
+  max-height: 160px;
+  overflow: auto;
+  padding: 0.5rem;
+  border-radius: 4px;
+  background: var(--bg-dark);
+}
+
+.template-picker-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+/* Gold-Standard SQL Evaluation Card */
+.gold-sql-comparison-card {
+  margin-top: 0.85rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background-color: var(--bg-sidebar);
+}
+
+.gold-sql-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.gold-sql-badges-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.eval-badge {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.eval-badge-pass {
+  background-color: rgba(46, 204, 113, 0.2);
+  color: #2ecc71;
+}
+
+.eval-badge-fail {
+  background-color: rgba(231, 76, 60, 0.2);
+  color: #e74c3c;
+}
+
+.eval-badge-neutral,
+.eval-badge-score,
+.eval-badge-info {
+  background-color: rgba(59, 130, 246, 0.2);
+  color: var(--text-light);
+}
+
+.eval-badge-warn {
+  background-color: rgba(241, 196, 15, 0.2);
+  color: #f1c40f;
+}
+
+.gold-sql-meta-row {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.gold-sql-error-banner {
+  font-size: 0.8rem;
+  color: #e74c3c;
+  margin-bottom: 0.5rem;
+}
+
+.gold-sql-diff-details summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-light);
+}
+
+.gold-sql-split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.gold-sql-pane {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  background-color: var(--bg-dark);
+  min-width: 0;
+}
+
+.gold-sql-pane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.gold-sql-pane-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.gold-sql-preview-heading {
+  margin-top: 0.75rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.edit-retry-msg-btn {
+  font-size: 0.9rem;
+  padding: 0.15rem 0.4rem;
+  margin-inline-start: 0.35rem;
+  color: var(--user-msg-text);
+}
+
+.chat-inline-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-dark);
+  color: var(--text-light);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  font: inherit;
 }
 
 @media (prefers-reduced-motion: reduce) {

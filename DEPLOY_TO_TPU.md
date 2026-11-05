@@ -174,6 +174,22 @@ You can dispatch native CLI commands using either the unified `libscript` ML orc
 "
 ```
 
+**Example 3: Native `t1d-analytics` TPU Orchestration & Bridge**
+
+```bash
+# Orchestrate remote TPU MaxText training or invoke the gemma-4-sql bridge directly via t1d-analytics
+t1d-analytics train \
+  --db t1d_analytics.duckdb \
+  --backend remote-tpu-maxtext \
+  --tpu-type "$TPU_ACCELERATOR_TYPE" \
+  --tpu-zone "$TPU_ZONE" \
+  --gcs-bucket "$BUCKET_NAME" \
+  --use-lora \
+  --execute-training
+
+t1d-analytics bridge-gemma-sql train --stage sft --db /mnt/ml_data/t1d_analytics.duckdb --table sft_data
+```
+
 ---
 
 ## 3. Approach B: Distributed Training (XPK + GKE)

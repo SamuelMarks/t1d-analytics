@@ -9,6 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from t1d_analytics.gcs_storage import (
+    GcsBlobProtocol,
+    GcsBucketProtocol,
+    GcsClientProtocol,
+    _compute_md5_base64,
+    sync_dataset_to_gcs,
+)
 from t1d_analytics.models import (
     MaxTextConfig,
     TpuAcceleratorType,
@@ -17,14 +24,7 @@ from t1d_analytics.models import (
     TrainingHyperparameters,
     TrainingJobConfig,
 )
-from t1d_analytics.tpu_orchestrator import (
-    GcsBlobProtocol,
-    GcsBucketProtocol,
-    GcsClientProtocol,
-    RemoteTpuMaxTextRunner,
-    _compute_md5_base64,
-    sync_dataset_to_gcs,
-)
+from t1d_analytics.tpu_orchestrator import RemoteTpuMaxTextRunner
 
 
 @pytest.fixture(autouse=True)
@@ -599,8 +599,7 @@ def test_tpu_workload_reclamation() -> None:
 
 
 def test_remote_tpu_run_training_preemption_and_retries(tmp_path: Path) -> None:
-    """Test RemoteTpuMaxTextRunner preemption retry and general failure handling."""
-    runner = RemoteTpuMaxTextRunner()
+    """Test RemoteTpuMaxTextRunner preemption retry and general failure handling via SubprocessExecutorProtocol."""
     ds = tmp_path / "tpu_ds.parquet"
     ds.write_text("ds")
     out = tmp_path / "tpu_out_preempt"
@@ -618,78 +617,93 @@ def test_remote_tpu_run_training_preemption_and_retries(tmp_path: Path) -> None:
         patch.dict(os.environ, {"T1D_EXECUTE_TPU_DISPATCH": "1"}),
         patch("shutil.which", return_value="/usr/bin/xpk"),
     ):
-        with patch(
-            "t1d_analytics.tpu_orchestrator.RemoteTpuMaxTextRunner.poll_workload_status",
-            side_effect=RuntimeError("was PREEMPTED"),
-        ):
-            with patch(
-                "t1d_analytics.tpu_orchestrator.RemoteTpuMaxTextRunner.reclaim_tpu_workload"
-            ) as mock_reclaim:
-                with pytest.raises(RuntimeError, match="was PREEMPTED"):
-                    runner.run_training(cfg)
-                mock_reclaim.assert_called_once()
+        preempt_cmds: list[list[str]] = []
 
-        with patch(
-            "t1d_analytics.tpu_orchestrator.RemoteTpuMaxTextRunner.poll_workload_status",
-            side_effect=RuntimeError("Generic cluster error"),
-        ):
-            with patch(
-                "t1d_analytics.tpu_orchestrator.RemoteTpuMaxTextRunner.reclaim_tpu_workload"
-            ) as mock_reclaim2:
-                with pytest.raises(RuntimeError, match="Generic cluster error"):
-                    runner.run_training(cfg)
-                mock_reclaim2.assert_called_once()
-
-        with patch.object(
-            runner,
-            "poll_workload_status",
-            new=MagicMock(side_effect=[RuntimeError("was PREEMPTED"), "SUCCESS"]),
-        ):
-            res_retry_succ = runner.run_training(cfg)
-            assert res_retry_succ["status"] == "SUCCESS"
-        with patch.object(
-            runner, "reclaim_tpu_workload", new=MagicMock(return_value=True)
-        ):
-            assert (
-                runner._invoke_reclaim_sync("wl-1", MaxTextConfig(project_id="p1"))
-                is True
+        def _always_preempt_exec(
+            cmd: Sequence[str],
+            capture_output: bool = True,
+            text: bool = True,
+            check: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            """Simulate XPK describe returning PREEMPTED and delete succeeding."""
+            _ = (capture_output, text, check)
+            preempt_cmds.append(list(cmd))
+            if "describe" in cmd:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout="Status: PREEMPTED", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="ok", stderr=""
             )
 
-        async def _fake_async_poll(
-            w_name: str, m_cfg: MaxTextConfig, timeout_seconds: float = 5.0
-        ) -> str:
-            """Delegate to real poll_workload_status."""
-            return await RemoteTpuMaxTextRunner.poll_workload_status(
-                runner,
-                w_name,
-                m_cfg,
-                timeout_seconds=timeout_seconds,
+        runner_preempt = RemoteTpuMaxTextRunner(
+            subprocess_executor=_always_preempt_exec
+        )
+        with pytest.raises(RuntimeError, match="PREEMPTED"):
+            runner_preempt.run_training(cfg)
+        assert any("delete" in c for c in preempt_cmds)
+
+        fail_cmds: list[list[str]] = []
+
+        def _fatal_fail_exec(
+            cmd: Sequence[str],
+            capture_output: bool = True,
+            text: bool = True,
+            check: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            """Simulate XPK describe returning fatal XLA compilation error and delete succeeding."""
+            _ = (capture_output, text, check)
+            fail_cmds.append(list(cmd))
+            if "describe" in cmd:
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout="Fatal XLA compilation ERROR",
+                    stderr="OOM",
+                )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="ok", stderr=""
             )
 
-        async def _fake_async_reclaim(w_name: str, m_cfg: MaxTextConfig) -> bool:
-            """Delegate to real reclaim_tpu_workload."""
-            return await RemoteTpuMaxTextRunner.reclaim_tpu_workload(
-                runner, w_name, m_cfg
-            )
+        runner_fail = RemoteTpuMaxTextRunner(subprocess_executor=_fatal_fail_exec)
+        with pytest.raises(RuntimeError, match="XLA compilation error"):
+            runner_fail.run_training(cfg)
+        assert any("delete" in c for c in fail_cmds)
 
-        with patch(
-            "subprocess.run",
-            return_value=subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="Status: SUCCESS", stderr=""
-            ),
-        ):
-            with patch.object(runner, "poll_workload_status", new=_fake_async_poll):
-                assert (
-                    runner._invoke_status_poll_sync(
-                        "wl-1", MaxTextConfig(project_id="p1"), timeout_seconds=1.0
+        describe_attempt = 0
+
+        def _recover_on_retry_exec(
+            cmd: Sequence[str],
+            capture_output: bool = True,
+            text: bool = True,
+            check: bool = False,
+        ) -> subprocess.CompletedProcess[str]:
+            """Simulate first XPK describe preempting, second returning non-zero, and third succeeding."""
+            nonlocal describe_attempt
+            _ = (capture_output, text, check)
+            if "describe" in cmd:
+                describe_attempt += 1
+                if describe_attempt == 1:
+                    return subprocess.CompletedProcess(
+                        args=cmd, returncode=0, stdout="Status: PREEMPTED", stderr=""
                     )
-                    == "SUCCESS"
+                if describe_attempt == 2:
+                    return subprocess.CompletedProcess(
+                        args=cmd, returncode=1, stdout="", stderr="transient"
+                    )
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout="Status: SUCCESS", stderr=""
                 )
-            with patch.object(runner, "reclaim_tpu_workload", new=_fake_async_reclaim):
-                assert (
-                    runner._invoke_reclaim_sync("wl-1", MaxTextConfig(project_id="p1"))
-                    is True
-                )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="ok", stderr=""
+            )
+
+        runner_recover = RemoteTpuMaxTextRunner(
+            subprocess_executor=_recover_on_retry_exec
+        )
+        res_retry_succ = runner_recover.run_training(cfg)
+        assert res_retry_succ["status"] == "SUCCESS"
+        assert describe_attempt == 3
 
 
 def test_poll_gcloud_tpu_status_terminal_states() -> None:
@@ -993,7 +1007,6 @@ def test_reclaim_gcloud_tpu_workload_retries() -> None:
             "--workload=wl-sync",
             "--cluster=tpu-cluster-v4-8",
         ]
-        assert runner._invoke_reclaim_sync("wl-sync", max_cfg_sync) is True
         with patch(
             "subprocess.run",
             return_value=subprocess.CompletedProcess(
@@ -1002,12 +1015,6 @@ def test_reclaim_gcloud_tpu_workload_retries() -> None:
         ):
             assert (
                 runner_default._poll_workload_status_sync(
-                    "wl-sync", max_cfg_sync, timeout_seconds=1.0
-                )
-                == "SUCCESS"
-            )
-            assert (
-                runner_default._invoke_status_poll_sync(
                     "wl-sync", max_cfg_sync, timeout_seconds=1.0
                 )
                 == "SUCCESS"
@@ -1064,8 +1071,6 @@ def test_reclaim_gcloud_tpu_workload_retries() -> None:
             runner_default._reclaim_gcloud_tpu_workload_sync("wl-sync", "us-central2-b")
         with pytest.raises(RuntimeError):
             runner_default._reclaim_tpu_workload_sync("wl-sync", max_cfg_sync)
-        with pytest.raises(RuntimeError):
-            runner_default._invoke_reclaim_sync("wl-sync", max_cfg_sync)
 
 
 def test_tpu_orchestrator_protocol_stubs(tmp_path: Path) -> None:
@@ -1074,12 +1079,12 @@ def test_tpu_orchestrator_protocol_stubs(tmp_path: Path) -> None:
     import hashlib
     from typing import Iterable, Sequence, Union
 
-    from t1d_analytics.tpu_orchestrator import (
+    from t1d_analytics.gcs_storage import (
         GcsBlobProtocol,
         GcsBucketProtocol,
         Md5BlobProtocol,
-        SubprocessExecutorProtocol,
     )
+    from t1d_analytics.tpu_orchestrator import SubprocessExecutorProtocol
 
     uploaded_files: dict[str, bytes] = {}
 

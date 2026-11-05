@@ -87,6 +87,9 @@ gemma-4-sql etl posttrain \
     --duckdb-path t1d_analytics.duckdb \
     --duckdb-table dpo_data \
     --backend maxtext
+
+# Alternative: Run ETL via the t1d-analytics Gemma-4-SQL bridge
+t1d-analytics bridge-gemma-sql etl --stage sft --db t1d_analytics.duckdb --table sft_data
 ```
 
 ---
@@ -151,6 +154,13 @@ gemma-4-sql evaluate \
     --db-path t1d_analytics.duckdb \
     --dataset t1d_analytics.duckdb \
     --backend maxtext
+
+# Or generate a holdout benchmark accuracy report directly via t1d-analytics:
+t1d-analytics evaluate \
+    --db t1d_analytics.duckdb \
+    --test-set test_benchmarks.json \
+    --model gemma4 \
+    --output evaluation_report.md
 ```
 
 ### 5.2 Export Artifacts to Google Cloud Storage

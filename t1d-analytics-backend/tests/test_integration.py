@@ -262,9 +262,13 @@ def test_cli_evaluate_integration(temp_workspace: Path, mocker: MagicMock) -> No
     with open(test_set_path, "w") as f:
         json.dump([{"prompt": "Get count", "gold_sql": "SELECT count(*) FROM tbl"}], f)
 
+    from t1d_analytics.sql_fallback_synthesizer import TranslationResult
+
     mocker.patch(
         "t1d_analytics.chat_service.translate_nl_to_sql",
-        return_value=("ok", "SELECT count(*) FROM tbl"),
+        return_value=TranslationResult(
+            full_response="ok", sql_query="SELECT count(*) FROM tbl"
+        ),
     )
 
     report_out = temp_workspace / "report.md"

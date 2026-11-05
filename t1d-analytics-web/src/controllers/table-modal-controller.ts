@@ -10,7 +10,7 @@ import { fetchWithBackendError, parseResponseJson } from "../api-client";
 import { exportRowsToCsv, exportRowsToJson } from "../exporters";
 import { formatNumber, type SqlCellValue } from "../formatters";
 import { requireElementById, trapModalFocus } from "../modal-utils";
-import { type ChatState } from "../state";
+import { DEFAULT_DB_NAME, type ChatState } from "../state";
 
 /**
  * Response payload returned by `/api/table/{table_name}`.
@@ -90,6 +90,8 @@ export class TablePreviewModalController {
   public currentSearchTerm: string = "";
   /** Element that held focus before the modal opened. */
   private previousFocus: Element | null = null;
+  /** Monotonic sequence counter used to discard stale out-of-order fetchTableData responses. */
+  private requestSequence: number = 0;
 
   /**
    * Creates a new `TablePreviewModalController`.
@@ -178,7 +180,7 @@ export class TablePreviewModalController {
    */
   private triggerBackendExport(format: "csv" | "excel" | "parquet"): void {
     const dbParam =
-      this.ui.state.currentDb !== "t1d.duckdb"
+      this.ui.state.currentDb !== DEFAULT_DB_NAME
         ? `&db_path=${encodeURIComponent(this.ui.state.currentDb)}`
         : "";
     window.open(
@@ -432,6 +434,7 @@ export class TablePreviewModalController {
    * @returns {Promise<void>}
    */
   public async fetchTableData(): Promise<void> {
+    const requestId = ++this.requestSequence;
     this.loadingEl.style.display = "block";
     this.prevBtn.disabled = true;
     this.nextBtn.disabled = true;
@@ -450,6 +453,10 @@ export class TablePreviewModalController {
 
       const response = await fetchWithBackendError(url);
       const data = await parseResponseJson<TableDataPayload>(response);
+
+      if (requestId !== this.requestSequence) {
+        return;
+      }
 
       this.loadingEl.style.display = "none";
       const formattedPage = formatNumber(this.currentPage);
@@ -490,6 +497,9 @@ export class TablePreviewModalController {
         this.nextBtn.disabled = true;
       }
     } catch (error) {
+      if (requestId !== this.requestSequence) {
+        return;
+      }
       console.error("Failed to fetch table data:", error);
       this.loadingEl.style.display = "none";
       const errMsg = i18next.t("ui.failedData", {

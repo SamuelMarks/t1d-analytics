@@ -79,7 +79,7 @@ scp -r ./data/jaeb_raw/ t1d_analytics.duckdb $USER@$TPU_IP:~/t1d-analytics/
 
 ### Automated Stack Provisioning (`provision`)
 
-To provision the cloud infrastructure, mount the persistent data disk (`$DATA_DISK_MOUNT`), install dependencies (`python 3.12`, `nodejs 20.x`, `duckdb`, `nginx`, `ollama`, `uv`), initialize the DuckDB analytics database via `provision_db`, build the frontend, configure Nginx SPA and API reverse-proxy ingress via `netctl`, and start the `t1d-api` and `t1d-web` services:
+To provision the cloud infrastructure, mount the persistent data disk (`$DATA_DISK_MOUNT`), install dependencies (`python 3.12`, `nodejs 20.x`, `postgres 18`, `valkey`, `duckdb`, `nginx`, `ollama`, `uv`), initialize the PostgreSQL and DuckDB analytics/session databases via `provision_db`, build the frontend, configure Nginx SPA and API reverse-proxy ingress via `netctl`, and start the `t1d-api` and `t1d-web` services:
 
 **Default Cloud Provider (`$CLOUD_PROVIDER` from `.env`):**
 
@@ -246,26 +246,26 @@ test.cmd --run-remote-tests
 
 ### Reference: CLI Flags
 
-| Flag                                       | Description                                                                                                                                       |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--unit-mock`, `--mock-cloud`, `--dry-run` | Executes the full verification workflow in mock mode, validating signal handlers and smoke assertions without spending cloud resources.           |
+| Flag                                       | Description                                                                                                                                                            |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--unit-mock`, `--mock-cloud`, `--dry-run` | Executes the full verification workflow in mock mode, validating signal handlers and smoke assertions without spending cloud resources.                                |
 | `--live-cloud`                             | Enforces live cloud provisioning; performs mandatory pre-flight CLI checks for `$PRIMARY_CLOUD_CLI_NAME`, `gcloud`, or `aws` and exits immediately if unauthenticated. |
-| `--local`, `-l`                            | Runs the test suite locally on the current workstation using `pytest` and `npm test`.                                                             |
-| `--run-remote-tests`, `-t`                 | Runs `pytest` remotely on the provisioned compute node after health checks pass.                                                                  |
+| `--local`, `-l`                            | Runs the test suite locally on the current workstation using `pytest` and `npm test`.                                                                                  |
+| `--run-remote-tests`, `-t`                 | Runs `pytest` remotely on the provisioned compute node after health checks pass.                                                                                       |
 
 ### Reference: Environment Variables
 
-| Variable             | Default (from `.env`)              | Description                                                   |
-| -------------------- | ---------------------------------- | ------------------------------------------------------------- |
+| Variable             | Default (from `.env`)              | Description                                                         |
+| -------------------- | ---------------------------------- | ------------------------------------------------------------------- |
 | `CLOUD_PROVIDER`     | `$DEFAULT_CLOUD_PROVIDER`          | Target cloud provider (`$DEFAULT_CLOUD_PROVIDER`, `gcp`, or `aws`). |
-| `LIBSCRIPT_ROOT_DIR` | `$HOME/repos/libscript`            | Path to the Libscript root repository.                        |
-| `LIBSCRIPT_CLI`      | `$LIBSCRIPT_ROOT_DIR/libscript.sh` | Path to Libscript executable wrapper.                         |
-| `NODE_NAME`          | `test-t1d-analytics-node`          | Name of compute node to allocate.                             |
-| `RG_NAME`            | `$RG_NAME`                         | Resource group or GCP project ID.                             |
-| `LOCATION`           | `$LOCATION`                        | Cloud region / datacenter zone.                               |
-| `REMOTE_DEST`        | `t1d-analytics-test`               | Target remote destination directory.                          |
-| `T1D_MOCK_TPU`       | `0`                                | When `1`, simulates TPU workload creation and status polling. |
-| `T1D_MOCK_GCS`       | `0`                                | When `1`, simulates GCS upload and checkpoint downloads.      |
+| `LIBSCRIPT_ROOT_DIR` | `$HOME/repos/libscript`            | Path to the Libscript root repository.                              |
+| `LIBSCRIPT_CLI`      | `$LIBSCRIPT_ROOT_DIR/libscript.sh` | Path to Libscript executable wrapper.                               |
+| `NODE_NAME`          | `test-t1d-analytics-node`          | Name of compute node to allocate.                                   |
+| `RG_NAME`            | `$RG_NAME`                         | Resource group or GCP project ID.                                   |
+| `LOCATION`           | `$LOCATION`                        | Cloud region / datacenter zone.                                     |
+| `REMOTE_DEST`        | `t1d-analytics-test`               | Target remote destination directory.                                |
+| `T1D_MOCK_TPU`       | `0`                                | When `1`, simulates TPU workload creation and status polling.       |
+| `T1D_MOCK_GCS`       | `0`                                | When `1`, simulates GCS upload and checkpoint downloads.            |
 
 ### Reference: Exit Codes
 

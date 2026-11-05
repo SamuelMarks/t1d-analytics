@@ -360,6 +360,15 @@ FROM "patients";`);
     expect(document.activeElement).toBe(trigger);
 
     ui.cohortModalController.open();
+    expect(modal.classList.contains("hidden")).toBe(false);
     ui.cohortModalController.dispose();
+    modal.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(modal.classList.contains("hidden")).toBe(false);
   });
 });

@@ -38,8 +38,14 @@ export function isReadOnlySqlStatement(text: string): boolean {
   );
 }
 
+/** Maximum pixel height for the auto-resizing chat composer textarea. */
+export const MAX_CHAT_INPUT_HEIGHT_PX = 220;
+
 /**
  * Synchronizes the live syntax-highlighted code backdrop and auto-resizes the chat textarea.
+ * Only applies `language-sql` highlighting when `selectedModel === "sql"` or `isReadOnlySqlStatement(value)` is true;
+ * otherwise renders clean plaintext so English words (`from`, `in`, `select`, `as`) in natural-language prompts
+ * are not miscolored as SQL keywords.
  * @param {HTMLTextAreaElement} chatInput - The user textarea element.
  * @param {HTMLElement} chatInputHighlight - The backdrop code element for highlight.js.
  * @param {string} selectedModel - Currently selected model or 'sql' mode.
@@ -58,15 +64,26 @@ export function updateInputHighlight(
 
   chatInputHighlight.textContent = value;
 
-  if (selectedModel === "sql" || isReadOnlySqlStatement(value)) {
-    chatInputHighlight.className = "language-sql";
-  } else {
-    chatInputHighlight.className = "language-markdown";
-  }
+  const shouldHighlightSql =
+    selectedModel === "sql" || isReadOnlySqlStatement(value);
   delete chatInputHighlight.dataset.highlighted;
-  hljs.highlightElement(chatInputHighlight);
+  if (shouldHighlightSql) {
+    chatInputHighlight.className = "language-sql";
+    hljs.highlightElement(chatInputHighlight);
+  } else {
+    chatInputHighlight.className = "language-plaintext";
+  }
 
   chatInput.style.height = "auto";
   const scrollHeight = chatInput.scrollHeight;
-  chatInput.style.height = `${scrollHeight}px`;
+  const clampedHeight =
+    scrollHeight > MAX_CHAT_INPUT_HEIGHT_PX
+      ? MAX_CHAT_INPUT_HEIGHT_PX
+      : scrollHeight;
+  chatInput.style.height = `${clampedHeight}px`;
+  chatInput.style.overflowY =
+    scrollHeight > MAX_CHAT_INPUT_HEIGHT_PX ? "auto" : "hidden";
+  if (chatInputHighlight.parentElement) {
+    chatInputHighlight.parentElement.scrollTop = chatInput.scrollTop;
+  }
 }

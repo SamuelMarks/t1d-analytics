@@ -328,6 +328,9 @@ def score_sql_completion_logprob(
     return min(-0.01, -0.15 - token_penalty - structural_penalty + alignment_bonus)
 
 
+score_sql_completion_heuristic = score_sql_completion_logprob
+
+
 def validate_sql_tokens(
     sql: str,
     repo_resolver: Optional[Callable[[], Optional[Path]]] = None,
@@ -496,6 +499,3 @@ def execute_agentic_nl_to_sql(
         "rows": [],
         "error": last_error,
     }
-
-
-execute_sql_with_self_correction = execute_agentic_nl_to_sql

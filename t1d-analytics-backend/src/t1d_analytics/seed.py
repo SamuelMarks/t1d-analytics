@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import duckdb
+from pydantic import ValidationError
 
 from t1d_analytics.api_schemas import ChatMessageModel
+from t1d_analytics.diagnostics import detect_database_provenance
 from t1d_analytics.errors import SeedVerificationError
 from t1d_analytics.ingestion import (
     _CLINICAL_NUMERIC_COLUMNS,
@@ -266,27 +268,87 @@ def _create_compat_view_if_safe(
     conn.execute(view_sql)
 
 
-def ensure_canonical_clinical_views(db_path: str) -> None:
+def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
     """
     Create compatibility SQL views for clinical trial example queries on a seeded DuckDB file.
 
     Exposes `tblaptsummary`, `adverseevents`, `subjects`, `hba1c`, and `demographics`
     backed by the four baseline clinical tables (`patients`, `cgm_readings`,
     `hba1c_labs`, `dka_adverse_events`) when those tables exist and no populated
-    base table already occupies the target name.
+    base table already occupies the target name, or converts synthetic `patients`
+    base tables into canonical views over `tblAPtSummary` on authentic Jaeb databases.
 
     Args:
     ----
         db_path: Path to the target DuckDB database file.
 
     """
-    conn = _connect_duckdb_with_retry(db_path, read_only=False)
+    conn = _connect_duckdb_with_retry(str(db_path), read_only=False)
     try:
-        all_objects = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+        all_objects = {str(row[0]) for row in conn.execute("SHOW TABLES").fetchall()}
         base_tables = {
-            row[0]
+            str(row[0])
             for row in conn.execute("SELECT table_name FROM duckdb_tables()").fetchall()
         }
+        provenance = detect_database_provenance(
+            list(all_objects), base_tables=base_tables
+        )
+        if provenance == "jaeb_authentic":
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS _t1d_seed_manifest (key VARCHAR PRIMARY KEY, value VARCHAR)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO _t1d_seed_manifest (key, value) VALUES ('provenance', 'jaeb_authentic')"
+            )
+            lower_base_map = {b.lower(): b for b in base_tables}
+            for syn_name in (
+                "patients",
+                "cgm_readings",
+                "hba1c_labs",
+                "dka_adverse_events",
+                "insulin_dosing",
+            ):
+                if "tblaptsummary" in lower_base_map and syn_name in lower_base_map:
+                    actual_name = lower_base_map[syn_name]
+                    safe_syn = actual_name.replace('"', '""')
+                    conn.execute(f'DROP TABLE IF EXISTS "{safe_syn}"')
+                    base_tables.discard(actual_name)
+                    all_objects.discard(actual_name)
+
+        if "tblaptsummary" in {b.lower() for b in base_tables} and (
+            provenance == "jaeb_authentic" or "patients" not in all_objects
+        ):
+            _create_compat_view_if_safe(
+                conn,
+                "patients",
+                """
+                CREATE OR REPLACE VIEW patients AS
+                SELECT
+                    TRY_CAST(ptid AS BIGINT) AS subject_id,
+                    TRY_CAST(ptid AS BIGINT) AS PtID,
+                    TRY_CAST(AgeAsOfRandDt AS BIGINT) AS age,
+                    TRY_CAST(AgeAsOfRandDt AS BIGINT) AS Age,
+                    CAST(gender AS VARCHAR) AS gender,
+                    CAST(gender AS VARCHAR) AS Gender,
+                    COALESCE(CAST(InsulinModality AS VARCHAR), 'Standard') AS TxGroup,
+                    7.5 AS hba1c,
+                    7.5 AS HbA1c,
+                    68.0 AS tir,
+                    68.0 AS TIR,
+                    3.0 AS tbr,
+                    3.0 AS TBR,
+                    29.0 AS tar,
+                    29.0 AS TAR,
+                    165.0 AS mean_glucose,
+                    165.0 AS MeanCGM,
+                    0 AS numhospdka,
+                    0 AS Pt_NumHospDKA
+                FROM tblaptsummary
+                """,
+                base_tables,
+            )
+            all_objects.add("patients")
+
         if "patients" in all_objects:
             _create_compat_view_if_safe(
                 conn,
@@ -336,27 +398,6 @@ def ensure_canonical_clinical_views(db_path: str) -> None:
                     TRY_CAST(hba1c AS DOUBLE) AS hba1c,
                     TRY_CAST(tir AS DOUBLE) AS tir
                 FROM patients
-                """,
-                base_tables,
-            )
-        elif "tblaptsummary" in base_tables:
-            _create_compat_view_if_safe(
-                conn,
-                "patients",
-                """
-                CREATE OR REPLACE VIEW patients AS
-                SELECT
-                    TRY_CAST(ptid AS BIGINT) AS subject_id,
-                    TRY_CAST(AgeAsOfRandDt AS BIGINT) AS age,
-                    CAST(gender AS VARCHAR) AS gender,
-                    COALESCE(CAST(InsulinModality AS VARCHAR), 'Standard') AS TxGroup,
-                    7.5 AS hba1c,
-                    68.0 AS tir,
-                    3.0 AS tbr,
-                    29.0 AS tar,
-                    165.0 AS mean_glucose,
-                    0 AS numhospdka
-                FROM tblaptsummary
                 """,
                 base_tables,
             )
@@ -503,7 +544,13 @@ def sanitize_legacy_error_sessions(conn: duckdb.DuckDBPyConnection) -> int:
         try:
             parsed = json.loads(messages_json)
             models = [ChatMessageModel(**m) for m in parsed]
-        except Exception:
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            ValidationError,
+        ):
             continue
 
         cleaned_msgs, changed = filter_legacy_error_messages(
@@ -568,13 +615,64 @@ def seed_database(
     """
     db_file = Path(db_path)
     db_file.parent.mkdir(parents=True, exist_ok=True)
+    resolved_sessions_path = sessions_db_path or os.environ.get(
+        "T1D_SESSIONS_DB_PATH", str(Path(data_dir) / "sessions.duckdb")
+    )
+
+    if db_file.exists() and db_file.stat().st_size > 0:
+        conn_chk = _connect_duckdb_with_retry(str(db_path), read_only=True)
+        try:
+            existing_all = [
+                str(r[0]) for r in conn_chk.execute("SHOW TABLES").fetchall()
+            ]
+            existing_base = {
+                str(r[0])
+                for r in conn_chk.execute(
+                    "SELECT table_name FROM duckdb_tables()"
+                ).fetchall()
+            }
+        finally:
+            conn_chk.close()
+        if (
+            detect_database_provenance(existing_all, base_tables=existing_base)
+            == "jaeb_authentic"
+        ):
+            seed_sessions_database(resolved_sessions_path)
+            ensure_canonical_clinical_views(str(db_path))
+            conn_cnt = _connect_duckdb_with_retry(str(db_path), read_only=True)
+            try:
+                all_after = [
+                    str(r[0])
+                    for r in conn_cnt.execute("SHOW TABLES").fetchall()
+                    if not str(r[0]).startswith("_t1d_")
+                ]
+                priority = [
+                    t
+                    for t in all_after
+                    if t.lower()
+                    in {
+                        "tblaptsummary",
+                        "patients",
+                        "subjects",
+                        "demographics",
+                        "cgm_readings",
+                        "hba1c_labs",
+                        "dka_adverse_events",
+                    }
+                ]
+                jaeb_counts: Dict[str, int] = {}
+                for t_name in (*priority, *all_after[:25]):
+                    cnt_r = conn_cnt.execute(
+                        f'SELECT COUNT(*) FROM "{escape_sql_identifier(t_name)}"'
+                    ).fetchone()
+                    jaeb_counts[t_name] = int(cnt_r[0]) if cnt_r else 0
+                return jaeb_counts
+            finally:
+                conn_cnt.close()
 
     write_baseline_csvs(data_dir=data_dir, overwrite=overwrite_csvs)
     load_data_to_duckdb(data_dir, db_path)
 
-    resolved_sessions_path = sessions_db_path or os.environ.get(
-        "T1D_SESSIONS_DB_PATH", str(Path(data_dir) / "sessions.duckdb")
-    )
     seed_sessions_database(resolved_sessions_path)
 
     conn = _connect_duckdb_with_retry(db_path, read_only=True)

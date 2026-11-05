@@ -10,6 +10,7 @@ import {
   fetchWithBackendError,
   parseResponseJson,
 } from "./api-client";
+import { type SqlGoldComparisonPayload } from "./state";
 
 /**
  * Structured payload emitted by the `/api/chat/stream` `done` or `result` event.
@@ -33,8 +34,14 @@ export interface SseFinalChatData {
   is_rule_based_sql?: boolean;
   /** SQL generation mode ('llm', 'rule_based_fallback', 'literal_sql'). */
   generation_mode?: string;
+  /** Optional human-readable diagnostic reason why LLM inference failed prior to fallback synthesis. */
+  llm_error?: string | null;
+  /** Optional structured error code for the underlying LLM failure. */
+  llm_error_code?: string | null;
   /** Database provenance classification ('jaeb_authentic', 'synthetic_seed', 'custom'). */
   data_provenance?: string;
+  /** Optional gold-standard SQL comparison metrics returned by the backend. */
+  gold_comparison?: SqlGoldComparisonPayload | null;
 }
 
 /**
@@ -129,6 +136,8 @@ export interface DispatchChatRequestOptions {
   loadingDiv: HTMLDivElement;
   /** Callback invoked on each streamed token to scroll the message pane. */
   onTokenScroll: () => void;
+  /** Optional AbortSignal to cancel in-flight SSE or batch requests. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -156,6 +165,7 @@ export async function dispatchChatRequest(
         method: "POST",
         headers: options.headers,
         body: options.bodyJson,
+        signal: options.signal,
       });
 
       if (
@@ -181,7 +191,10 @@ export async function dispatchChatRequest(
           };
         }
       }
-    } catch {
+    } catch (err) {
+      if (options.signal?.aborted) {
+        throw err;
+      }
       // Fall back to batch /api/chat below
     }
   }
@@ -190,6 +203,7 @@ export async function dispatchChatRequest(
     method: "POST",
     headers: options.headers,
     body: options.bodyJson,
+    signal: options.signal,
   });
   const data = await parseResponseJson<SseFinalChatData>(response);
   return { data, fallbackText: "" };

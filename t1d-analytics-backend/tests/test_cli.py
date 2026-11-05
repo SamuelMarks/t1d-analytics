@@ -110,7 +110,7 @@ def test_main_no_datasets(
 @patch("t1d_analytics.cli.fetch_html")
 def test_main_exception(mock_fetch: MagicMock, capsys: CaptureFixture[str]) -> None:
     """Test CLI error handling."""
-    mock_fetch.side_effect = Exception("Test Error")
+    mock_fetch.side_effect = RuntimeError("Test Error")
 
     with patch("sys.argv", ["t1d-analytics", "download"]):
         with pytest.raises(SystemExit) as e:
@@ -829,7 +829,7 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
 
     sample_file3 = data_dir / "sample3.csv"
     sample_file3.write_text("id\n1\n")
-    with patch("duckdb.connect", side_effect=Exception("Generic Error")):
+    with patch("duckdb.connect", side_effect=OSError("Generic Error")):
         with patch(
             "sys.argv",
             [

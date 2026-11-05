@@ -15,31 +15,22 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from t1d_analytics.archive_extractor import (
-    _ARCHIVE_GLOB_PATTERNS,
-    _TABULAR_AND_ARCHIVE_SUFFIXES,
     DEFAULT_MAX_DECOMPRESSED_BYTES,
     MAX_MEMBER_COMPRESSION_RATIO,
     MIN_RATIO_CHECK_BYTES,
-    _discover_unprocessed_archives,
-    _extract_single_archive_file,
-    _extract_single_zip,
-    _extract_tar_archive,
-    _extract_zip_archive,
-    _is_already_extracted,
-    _is_safe_member_target,
-    _resolve_archive_extract_dir,
-    _should_skip_archive_member_name,
     resolve_effective_decompressed_quota,
 )
 from t1d_analytics.archive_extractor import (
     extract_zips as _archive_extract_zips,
+)
+from t1d_analytics.duckdb_pool import (
+    global_read_only_duckdb_pool,
 )
 from t1d_analytics.errors import DatabaseError
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.sql_utils import (
     escape_sql_identifier,
     escape_sql_literal,
-    global_read_only_duckdb_pool,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,18 +181,16 @@ def get_ingestion_manifest(db_path: str) -> list[IngestionManifestRecord]:
     if not Path(db_path).exists():
         return []
 
-    conn = duckdb.connect(db_path, read_only=True)
-    has_manifest = conn.execute(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = '_t1d_ingestion_manifest'"
-    ).fetchone()
-    if not has_manifest:
-        conn.close()
-        return []
+    with duckdb.connect(db_path, read_only=True) as conn:
+        has_manifest = conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = '_t1d_ingestion_manifest'"
+        ).fetchone()
+        if not has_manifest:
+            return []
 
-    rows = conn.execute(
-        "SELECT source_file, table_name, file_hash, row_count, loaded_at, file_size FROM _t1d_ingestion_manifest ORDER BY loaded_at"
-    ).fetchall()
-    conn.close()
+        rows = conn.execute(
+            "SELECT source_file, table_name, file_hash, row_count, loaded_at, file_size FROM _t1d_ingestion_manifest ORDER BY loaded_at"
+        ).fetchall()
 
     return [
         {
@@ -920,31 +909,20 @@ __all__ = [
     "DEFAULT_MAX_DECOMPRESSED_BYTES",
     "MAX_MEMBER_COMPRESSION_RATIO",
     "MIN_RATIO_CHECK_BYTES",
-    "_ARCHIVE_GLOB_PATTERNS",
     "_CLINICAL_NUMERIC_COLUMNS",
     "_NUMERIC_CLINICAL_CONCEPTS",
-    "_TABULAR_AND_ARCHIVE_SUFFIXES",
     "IngestionManifestRecord",
     "_build_column_select_expressions",
     "_detect_csv_encoding_and_delimiter",
     "_discover_tabular_files",
-    "_discover_unprocessed_archives",
     "_ensure_manifest_table",
-    "_extract_single_archive_file",
-    "_extract_single_zip",
-    "_extract_tar_archive",
-    "_extract_zip_archive",
     "_ingest_single_file",
     "_ingest_single_tabular_file",
-    "_is_already_extracted",
-    "_is_safe_member_target",
     "_load_csv_or_parquet",
     "_materialize_temp_view_into_table",
     "_read_clinical_dataframe",
-    "_resolve_archive_extract_dir",
     "_resolve_target_table_stem",
     "_resolve_unique_table_name_or_skip",
-    "_should_skip_archive_member_name",
     "coerce_known_clinical_numeric_columns",
     "compute_file_hash",
     "extract_zips",

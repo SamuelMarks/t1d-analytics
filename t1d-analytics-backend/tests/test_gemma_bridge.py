@@ -11,7 +11,6 @@ import pytest
 from t1d_analytics.gemma_bridge import (
     EtlPayloadDict,
     EvalAccuracyDict,
-    GemmaSqlBridge,
     GemmaSqlPipelineEngine,
     InProcessDuckDbGemmaFallback,
     SubprocessGemmaToolchain,
@@ -124,21 +123,27 @@ def test_get_gemma_sql_binary() -> None:
         with patch("importlib.util.find_spec", return_value=MagicMock()):
             assert get_gemma_sql_binary() == "python3 -m gemma_4_sql"
 
-    # 3. Not installed raises RuntimeError
+    # 3. Not installed raises GemmaToolchainError
+    from t1d_analytics.errors import GemmaToolchainError
+
     with patch("shutil.which", return_value=None):
         with patch("importlib.util.find_spec", return_value=None):
-            with pytest.raises(RuntimeError, match="gemma-4-sql is not installed"):
+            with pytest.raises(
+                GemmaToolchainError, match="gemma-4-sql is not installed"
+            ):
                 get_gemma_sql_binary()
 
 
 def test_run_gemma_sql_etl_validations(tmp_path: Path) -> None:
     """Test validation errors for run_gemma_sql_etl."""
+    from t1d_analytics.errors import DatabaseNotFoundError, InvalidStageError
+
     # Invalid stage
-    with pytest.raises(ValueError, match="Invalid ETL stage"):
+    with pytest.raises(InvalidStageError, match="Invalid ETL stage"):
         run_gemma_sql_etl("invalid_stage", tmp_path / "test.duckdb", "sft_data")
 
     # Missing DuckDB file
-    with pytest.raises(FileNotFoundError, match="DuckDB database file not found"):
+    with pytest.raises(DatabaseNotFoundError, match="DuckDB database file not found"):
         run_gemma_sql_etl("sft", tmp_path / "missing.duckdb", "sft_data")
 
 
@@ -183,13 +188,15 @@ def test_run_gemma_sql_etl_subprocess(tmp_path: Path) -> None:
 
 def test_run_gemma_sql_train_validations(tmp_path: Path) -> None:
     """Test validation errors for run_gemma_sql_train."""
+    from t1d_analytics.errors import ConfigFileNotFoundError, InvalidStageError
+
     # Invalid stage
-    with pytest.raises(ValueError, match="Invalid training stage"):
+    with pytest.raises(InvalidStageError, match="Invalid training stage"):
         run_gemma_sql_train("bad_stage", tmp_path / "cfg.yml")
 
     # Missing config file
     with pytest.raises(
-        FileNotFoundError, match="Training configuration file not found"
+        ConfigFileNotFoundError, match="Training configuration file not found"
     ):
         run_gemma_sql_train("sft", tmp_path / "nonexistent.yml")
 
@@ -244,7 +251,9 @@ def test_parse_gemma_sql_metrics() -> None:
 
 
 def test_run_gemma_sql_timeouts(tmp_path: Path) -> None:
-    """Test TimeoutError handling in run_gemma_sql_etl and run_gemma_sql_train."""
+    """Test SubprocessTimeoutError handling in run_gemma_sql_etl and run_gemma_sql_train."""
+    from t1d_analytics.errors import SubprocessTimeoutError
+
     db_file = tmp_path / "data.duckdb"
     db_file.write_text("mock")
     cfg_file = tmp_path / "cfg.yml"
@@ -255,10 +264,10 @@ def test_run_gemma_sql_timeouts(tmp_path: Path) -> None:
             "subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="gemma-4-sql", timeout=1.0),
         ):
-            with pytest.raises(TimeoutError, match="ETL command timed out"):
+            with pytest.raises(SubprocessTimeoutError, match="ETL command timed out"):
                 run_gemma_sql_etl("sft", db_file, "table", timeout=1.0)
 
-            with pytest.raises(TimeoutError, match="training timed out"):
+            with pytest.raises(SubprocessTimeoutError, match="training timed out"):
                 run_gemma_sql_train("sft", cfg_file, timeout=1.0)
 
 
@@ -273,9 +282,18 @@ def test_gemma_sql_pipeline_engine_library_mode(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
 
     fake_gemma_pkg = _FakeGemmaLibraryModule()
-    assert GemmaSqlBridge is GemmaSqlPipelineEngine
-    assert isinstance(SubprocessGemmaToolchain(), SubprocessGemmaToolchain)
-    assert isinstance(InProcessDuckDbGemmaFallback(), InProcessDuckDbGemmaFallback)
+    toolchain = SubprocessGemmaToolchain(binary_resolver=lambda: "/custom/gemma-4-sql")
+    with patch(
+        "subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["/custom/gemma-4-sql"], returncode=0, stdout="ok", stderr=""
+        ),
+    ) as mock_tc_run:
+        tc_res = toolchain.run_etl("sft", db_file, "my_table", out_dir)
+        assert tc_res.stdout == "ok"
+        assert mock_tc_run.call_args[0][0][0] == "/custom/gemma-4-sql"
+    fallback_inst = InProcessDuckDbGemmaFallback()
+    assert hasattr(fallback_inst, "run_etl") and hasattr(fallback_inst, "evaluate_sql")
 
     with patch("importlib.import_module", return_value=fake_gemma_pkg):
         engine = GemmaSqlPipelineEngine()
@@ -293,6 +311,7 @@ def test_gemma_sql_pipeline_engine_library_mode(tmp_path: Path) -> None:
         res_dpo = engine.run_dpo("gemma-7b", ds_file, out_dir, beta=0.05)
         assert res_dpo["execution_mode"] == "library"
         assert res_dpo["result"]["loss"] == 0.08
+        assert res_dpo["result"]["beta"] == 0.05
 
         res_eval = engine.evaluate_sql("gemma-7b", tc_file, db_file)
         assert res_eval["execution_mode"] == "library"
@@ -612,7 +631,7 @@ def _run_native_fallbacks_assertions(tmp_path: Path, duckdb: types.ModuleType) -
 
     # 7. Native evaluate_sql - unexpected exception during execution
     with patch(
-        "duckdb.DuckDBPyConnection.execute", side_effect=Exception("Test mock error")
+        "duckdb.DuckDBPyConnection.execute", side_effect=RuntimeError("Test mock error")
     ):
         eval_err = engine.evaluate_sql("gemma-2b", valid_tc, db_file)
         assert eval_err["status"] == "completed"

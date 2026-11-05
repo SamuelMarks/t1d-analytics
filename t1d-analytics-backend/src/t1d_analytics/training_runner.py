@@ -8,7 +8,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from t1d_analytics.dataset_loader import (
     _tokenize_pair_with_masking,
@@ -31,6 +39,7 @@ from t1d_analytics.hf_models import (
     PretrainedSavableProtocol,
     TensorLike,
     TinyCausalLMFactory,
+    TokenizerProtocol,
     TorchCausalLMProtocol,
     TorchDeviceFactoryProtocol,
     TrainableModelProtocol,
@@ -615,7 +624,7 @@ class BaseTorchCausalLMRunner(BaseTrainingRunner):
                 self._save_training_checkpoint(
                     model, out_path / profile.checkpoint_subdir
                 )
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as e:
             raise TrainingExecutionError(f"{profile.error_prefix}: {e}") from e
 
         loss_vals: List[SqlValue] = list(loss_history)
@@ -795,7 +804,7 @@ class LocalGpuRunner(BaseTorchCausalLMRunner):
                 device = "mps"
                 mixed_precision = "fp32"
             device_name, peak_memory_mb = resolve_device_telemetry(device)
-        except Exception as e:
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError) as e:
             raise TrainingExecutionError(f"GPU training execution failed: {e}") from e
 
         return self._run_local_torch_training(
@@ -894,11 +903,33 @@ class HuggingFaceCausalLMRunner(BaseTorchCausalLMRunner):
         )
 
 
+@dataclass(frozen=True)
+class DpoOptimizationResult:
+    """
+    Structured result from a Bradley-Terry DPO preference optimization run.
+
+    Attributes
+    ----------
+        losses: Per-step Bradley-Terry DPO loss trajectory.
+        margins: Per-step reward margin trajectory `beta * (logp_chosen - logp_rejected)`.
+        checkpoint_path: Optional path to the saved checkpoint directory if `checkpoint_dir` was provided.
+
+    """
+
+    losses: List[float]
+    margins: List[float]
+    checkpoint_path: Optional[str] = None
+
+
 def optimize_dpo_preference_pairs(
     pairs: Sequence[Dict[str, str]],
     beta: float,
     num_steps: int = 1,
-) -> Tuple[List[float], List[float]]:
+    seed: int = 42,
+    model: Optional[TorchCausalLMProtocol] = None,
+    tokenizer: Optional[TokenizerProtocol] = None,
+    checkpoint_dir: Optional[Union[str, Path]] = None,
+) -> DpoOptimizationResult:
     """
     Execute a PyTorch Bradley-Terry preference optimization pass over `(prompt, chosen_sql, rejected_sql)`.
 
@@ -910,15 +941,17 @@ def optimize_dpo_preference_pairs(
         pairs: Preference dataset triplets with `'prompt'`, `'chosen_sql'`, and `'rejected_sql'`.
         beta: DPO temperature hyperparameter.
         num_steps: Number of optimization epochs over the preference pairs.
+        seed: Deterministic random seed for PyTorch parameter initialization.
+        model: Optional pre-instantiated causal language model implementing `TorchCausalLMProtocol`.
+        tokenizer: Optional pre-instantiated tokenizer implementing `TokenizerProtocol`.
+        checkpoint_dir: Optional output directory where `model.pt` and `training_metrics.json` are written.
 
     Returns:
     -------
-        Tuple[List[float], List[float]]: `(dpo_losses, reward_margins)` per preference pair step.
+        DpoOptimizationResult: Structured DPO result containing losses, margins, and checkpoint path.
 
     """
     import torch
-
-    from t1d_analytics.hf_models import TokenizerProtocol
 
     class _ByteTokenizer(TokenizerProtocol):
         """Lightweight byte-level tokenizer for in-process DPO optimization."""
@@ -940,11 +973,19 @@ def optimize_dpo_preference_pairs(
             _ = add_special_tokens
             return [min(999, max(1, b)) for b in text.encode("utf-8")]
 
-    tokenizer = _ByteTokenizer()
-    factory = TinyCausalLMFactory()
-    model = factory.create_model("tiny-dpo", vocab_size=1000, embed_dim=32)
-    model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    torch.manual_seed(seed)
+    active_tokenizer: TokenizerProtocol = (
+        tokenizer if tokenizer is not None else _ByteTokenizer()
+    )
+    active_model: TorchCausalLMProtocol = (
+        model
+        if model is not None
+        else TinyCausalLMFactory().create_model(
+            "tiny-dpo", vocab_size=1000, embed_dim=32
+        )
+    )
+    active_model.train()
+    optimizer = torch.optim.AdamW(active_model.parameters(), lr=1e-2)
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
 
     losses: List[float] = []
@@ -952,36 +993,66 @@ def optimize_dpo_preference_pairs(
     for _ in range(max(1, num_steps)):
         for pair in pairs:
             c_in, c_lbl = _tokenize_pair_with_masking(
-                pair["prompt"], pair["chosen_sql"], tokenizer, max_seq_length=256
+                pair["prompt"],
+                pair["chosen_sql"],
+                active_tokenizer,
+                max_seq_length=256,
             )
             r_in, r_lbl = _tokenize_pair_with_masking(
                 pair["prompt"],
                 pair["rejected_sql"] or "SELECT 0",
-                tokenizer,
+                active_tokenizer,
                 max_seq_length=256,
             )
 
             optimizer.zero_grad()
-            c_logits = _extract_output_logits(model(c_in.unsqueeze(0))).view(-1, 1000)
-            r_logits = _extract_output_logits(model(r_in.unsqueeze(0))).view(-1, 1000)
+            c_logits = _extract_output_logits(active_model(c_in.unsqueeze(0))).view(
+                -1, 1000
+            )
+            r_logits = _extract_output_logits(active_model(r_in.unsqueeze(0))).view(
+                -1, 1000
+            )
 
             c_token_nll = loss_fn(c_logits, c_lbl.view(-1))
             r_token_nll = loss_fn(r_logits, r_lbl.view(-1))
-            logp_chosen = -float(c_token_nll.item())
-            logp_rejected = -float(r_token_nll.item())
-            margin_val = beta * (logp_chosen - logp_rejected)
-            sigmoid_neg_margin = 1.0 / (1.0 + math.exp(margin_val))
-            dpo_grad_scale = max(1e-6, beta * sigmoid_neg_margin)
-            (c_token_nll / (1.0 / dpo_grad_scale)).backward()
-            ((-r_token_nll) / (1.0 / dpo_grad_scale)).backward()
+            margin_tensor = beta * (-c_token_nll - (-r_token_nll))
+            dpo_loss = -torch.nn.functional.logsigmoid(margin_tensor)
+            backward_fn: Callable[[], None] = dpo_loss.backward
+            backward_fn()
             optimizer.step()
 
-            dpo_loss_val = -math.log(1.0 / (1.0 + math.exp(-margin_val)))
+            dpo_loss_val = float(dpo_loss.item())
+            margin_val = float(margin_tensor.item())
 
             losses.append(round(dpo_loss_val, 4))
             margins.append(round(margin_val, 4))
 
-    return losses, margins
+    saved_ckpt: Optional[str] = None
+    if checkpoint_dir is not None:
+        ckpt_p = Path(checkpoint_dir)
+        ckpt_p.mkdir(parents=True, exist_ok=True)
+        torch.save(active_model.state_dict(), ckpt_p / "model.pt")
+        avg_loss = round(sum(losses) / len(losses), 4) if losses else 0.0
+        avg_margin = round(sum(margins) / len(margins), 4) if margins else 0.0
+        with open(ckpt_p / "training_metrics.json", "w", encoding="utf-8") as mf:
+            json.dump(
+                {
+                    "dpo_losses": losses,
+                    "reward_margins": margins,
+                    "dpo_loss": avg_loss,
+                    "reward_margin": avg_margin,
+                    "beta": beta,
+                },
+                mf,
+                indent=2,
+            )
+        saved_ckpt = str(ckpt_p.resolve())
+
+    return DpoOptimizationResult(
+        losses=losses,
+        margins=margins,
+        checkpoint_path=saved_ckpt,
+    )
 
 
 def get_training_runner(backend: TrainingBackend) -> BaseTrainingRunner:
@@ -1133,6 +1204,7 @@ __all__ = [
     "BaseTorchCausalLMRunner",
     "BaseTrainingRunner",
     "DeviceLike",
+    "DpoOptimizationResult",
     "Gemma4SqlRunner",
     "HuggingFaceCausalLMFactory",
     "HuggingFaceCausalLMRunner",
@@ -1146,6 +1218,7 @@ __all__ = [
     "TrainingJobManager",
     "get_training_runner",
     "global_training_job_manager",
+    "optimize_dpo_preference_pairs",
     "prepare_torch_dataset",
     "resolve_causal_lm_factory",
     "resolve_device_telemetry",

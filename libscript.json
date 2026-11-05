@@ -14,9 +14,19 @@
     ".env.libscript"
   ],
   "vars": {
+    "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
+    "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
     "OLLAMA_HOST": "${OLLAMA_HOST:-http://127.0.0.1:11434}",
     "OLLAMA_MODEL_LIST": "gemma:2b,llama3.2:1b,phi4-mini",
     "DEFAULT_OLLAMA_MODEL": "gemma:2b"
+  },
+  "env": {
+    "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
+    "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}"
+  },
+  "remote_env": {
+    "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
+    "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}"
   },
   "deps": {
     "python": "3.12",
@@ -162,7 +172,7 @@
         "hba1c_labs": 150,
         "dka_adverse_events": 25
       },
-      "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --sessions-db \"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"",
+      "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" && _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -f \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ] && [ ! -f \"$_db\" ]; then cp -f \"$_cand\" \"$_db\" && break; fi; done && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('$_db')\"",
       "health_command": "if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
     },
     {
@@ -278,8 +288,8 @@
       {
         "name": "upsert-and-confirm-t1d-duckdb",
         "condition": "unless_env LIBSCRIPT_DB_DUCKDB_POPULATED=1",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; [ -f .env.libscript ] && . ./.env.libscript; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\"; _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"; _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\"; _tcnt=0; if [ -f \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); fi; if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then printf '[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into \"%s\"...\\n' \"$_db\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; fi; if command -v duckdb >/dev/null 2>&1 && [ -f \"$_db\" ]; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); _sz=$(du -sh \"$_db\" 2>/dev/null | awk '{print $1}'); printf '[UPSERT:DUCKDB] [CONFIRM] T1D DuckDB \"%s\" verified (%s, %s tables); sessions DB \"%s\" verified.\\n' \"$_db\" \"${_sz:-0B}\" \"${_tcnt:-0}\" \"$_sdb\"; fi",
-        "cmd_windows": "echo [UPSERT:DUCKDB] Verifying and upserting T1D DuckDB datasets... && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe doctor --db \"%T1D_DB_PATH%\" --min-tables 4 --min-rows 400 || (t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe seed --data-dir data --db \"%T1D_DB_PATH%\" --sessions-db \"%T1D_SESSIONS_DB_PATH%\" && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe load --data-dir data --db \"%T1D_DB_PATH%\")"
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; [ -f .env.libscript ] && . ./.env.libscript; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\"; _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"; _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\"; _tcnt=0; if [ -f \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); fi; if [ \"${_tcnt:-0}\" -lt 25 ] 2>/dev/null; then for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -f \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ]; then cp -f \"$_cand\" \"$_db\" && _tcnt=30 && break; fi; done; fi; if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then printf '[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into \"%s\"...\\n' \"$_db\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; else t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('$_db')\"; fi; if command -v duckdb >/dev/null 2>&1 && [ -f \"$_db\" ]; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); _sz=$(du -sh \"$_db\" 2>/dev/null | awk '{print $1}'); printf '[UPSERT:DUCKDB] [CONFIRM] T1D DuckDB \"%s\" verified (%s, %s tables); sessions DB \"%s\" verified.\\n' \"$_db\" \"${_sz:-0B}\" \"${_tcnt:-0}\" \"$_sdb\"; fi",
+        "cmd_windows": "echo [UPSERT:DUCKDB] Verifying and upserting T1D DuckDB datasets... && (if not exist \"%T1D_DB_PATH%\" if exist \"\\mnt\\data\\t1d\\jaeb\\t1d.duckdb\" copy /Y \"\\mnt\\data\\t1d\\jaeb\\t1d.duckdb\" \"%T1D_DB_PATH%\" >nul) && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe seed --data-dir data --db \"%T1D_DB_PATH%\" --sessions-db \"%T1D_SESSIONS_DB_PATH%\" && t1d-analytics-backend\\.venv\\Scripts\\python.exe -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views(r'%T1D_DB_PATH%')\" && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe doctor --db \"%T1D_DB_PATH%\" --min-tables 4 --min-rows 400"
       },
       {
         "name": "ensure-duckdb-permissions",
@@ -316,8 +326,12 @@
         "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
       },
       {
+        "name": "verify-t1d-api-deep-health",
+        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '(.status == \"healthy\" or .status == \"ready\") and .database.connected == true and (if (.database.table_count // 0) > 25 then .database.is_synthetic_faked_data == false else true end)'"
+      },
+      {
         "name": "api-status-check",
-        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '.status == \"ready\" and .tables_count >= 4 and .total_rows > 0'"
+        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '(.status == \"ready\" or .status == \"healthy\") and .tables_count >= 4 and .total_rows > 0'"
       },
       {
         "name": "api-models-check",
@@ -462,7 +476,7 @@
           "hba1c_labs": 150,
           "dka_adverse_events": 25
         },
-        "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --sessions-db \"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"",
+        "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" && _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -f \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ] && [ ! -f \"$_db\" ]; then cp -f \"$_cand\" \"$_db\" && break; fi; done && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('$_db')\"",
         "health_command": "if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
       }
     ],

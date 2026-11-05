@@ -238,6 +238,7 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
           table_count: 3,
           is_synthetic_faked_data: true,
           data_provenance: "synthetic_seed",
+          recommended_jaeb_db_path: "/mnt/data/t1d/jaeb/t1d.duckdb",
         },
         ollama: { accessible: true },
       }),
@@ -251,6 +252,39 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
         "hidden",
       ),
     ).toBe(false);
+    expect(
+      ui.systemStatusController.jaebProvenanceAlertDesc.textContent,
+    ).toContain("/mnt/data/t1d/jaeb/t1d.duckdb");
+    expect(state.systemStatus.recommendedJaebDbPath).toBe(
+      "/mnt/data/t1d/jaeb/t1d.duckdb",
+    );
+
+    await i18next.changeLanguage("ja");
+    expect(
+      ui.systemStatusController.jaebProvenanceAlertDesc.textContent,
+    ).toContain("/mnt/data/t1d/jaeb/t1d.duckdb");
+    await i18next.changeLanguage("en");
+
+    ui.systemStatusController.applyHealthPayload({
+      status: "healthy",
+      database: {
+        exists: true,
+        connected: true,
+        status_code: "healthy",
+        is_synthetic_faked_data: true,
+      },
+      ollama: { accessible: true },
+    });
+    expect(
+      ui.systemStatusController.jaebProvenanceAlertDesc.textContent,
+    ).toContain("/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb");
+
+    state.systemStatus.recommendedJaebDbPath = "";
+    await i18next.changeLanguage("en");
+    ui.systemStatusController.showSyntheticDataAlert();
+    expect(
+      ui.systemStatusController.jaebProvenanceAlertDesc.textContent,
+    ).toContain("/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb");
 
     // 5b. authentic Jaeb database with LLM selected hides both alerts
     ui.modelSelect.value = "gemma4";
@@ -433,7 +467,10 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
             columns: [{ name: "PtID", type: "INTEGER" }],
           },
         ],
-        database: { status_code: "custom_unknown" },
+        database: {
+          status_code: "custom_unknown",
+          recommended_jaeb_db_path: "/mnt/data/t1d/jaeb/t1d.duckdb",
+        },
       }),
     });
     await ui.schemaExplorerController.loadSchema();

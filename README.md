@@ -28,13 +28,13 @@ This project provides a robust CLI for data retrieval, a highly optimized DuckDB
 
 ## 🚀 Features
 
-- **Automated Data Retrieval**: Robust CLI tools to safely download, extract, and catalog complex clinical trial datasets.
-- **Local DuckDB Analytics**: Automatically parses raw `.csv` and `.txt` trial files (with robust encoding and delimiter detection) into a highly optimized, local DuckDB database.
-- **Natural Language to SQL**: Integrated with [Ollama](https://ollama.com/) and Mozilla's [any-llm](https://github.com/mozilla-ai/any-llm) to translate plain English clinical questions into valid DuckDB SQL queries using the `gemma4` model.
-- **Gemma-4-SQL Training Pipeline**: Provides tools to procedurally generate training datasets (`pretrain`, `sft`, and `dpo`) and a comprehensive integration guide for executing end-to-end training and deployment of specialized T1D models on Google Cloud TPUs via `gemma-4-sql`.
-- **FastAPI Backend**: A lightweight, highly documented REST API serving as the bridge between the DuckDB engine, the local LLM, and the frontend clients.
-- **Vanilla TypeScript Web UI**: A clean, responsive, dark-mode web application built without heavy frameworks (No React/Angular/Vue). Features full chat session management, dropdown context menus, model selection, and dynamic HTML table rendering for SQL results.
-- **Uncompromising Quality**: Enforces strict 100% code coverage across all layers (Python backend and TypeScript frontend) and maintains comprehensive documentation.
+- **Automated Data Retrieval & Seeding**: Robust CLI tools to safely download, extract, seed baseline cohorts, and catalog complex clinical trial datasets (including CSV, TXT, SAS `.sas7bdat`/`.xpt`, and SPSS `.sav`).
+- **Local DuckDB Analytics**: Automatically parses raw clinical trial files (with encoding and delimiter detection) into a pooled, read-only validated local DuckDB database with data quality profiling and export to Excel (`.xlsx`), Parquet, CSV, and JSON.
+- **Multi-Provider Natural Language to SQL & Rule-Based Fallback**: Integrated with [Ollama](https://ollama.com/) (`gemma:2b`, `llama3.2:1b`, `phi4-mini`, `gemma4`) and Mozilla's [any-llm](https://github.com/mozilla-ai/any-llm) (`huggingface`, `openai`, `anthropic`, `google`), with automatic schema-guided rule-based SQL fallback and diagnostic reporting when LLM inference is unavailable.
+- **Gemma-4-SQL Training Pipeline**: Provides CLI and API tools to procedurally generate stratified training datasets (`pretrain`, `sft`, and `dpo`), bridge directly to `gemma-4-sql`, and orchestrate local CPU/GPU or Google Cloud TPU (`remote-tpu-maxtext`) training jobs.
+- **FastAPI Backend**: A modular, localized REST and Server-Sent Events (SSE) streaming API serving chat sessions, SQL execution, table profiling, background training jobs, and deep health diagnostics.
+- **Vanilla TypeScript Web UI**: A responsive dark-mode web application built without heavy frameworks (No React/Angular/Vue). Includes composable controllers for chat sessions (`#chat-<id>` deep-linking), a Visual Cohort Builder, a Clinical Prompt & SQL Template Library, a Schema Explorer & Database Switcher, CGM Ambulatory Glucose Profile (AGP) metrics/charts, multi-provider LLM configuration, and 8-locale internationalization (`en`, `es`, `fr`, `de`, `zh`, `ja`, `ar`, `he` with RTL support).
+- **Uncompromising Quality**: Enforces strict 100% test coverage (lines, branches, functions, statements) and 100% documentation coverage across both the Python backend and TypeScript frontend.
 
 ## 🏗️ Architecture & Tech Stack
 
@@ -42,39 +42,60 @@ The repository is structured into distinct, decoupled functional layers:
 
 ```text
 t1d-analytics/
-├── t1d-analytics-backend/    # Python Backend Package
-│   ├── pyproject.toml        # Python package metadata and tool configuration
-│   ├── src/t1d_analytics/    # Python Backend Core
-│   │   ├── cli.py            # Command-line interface entry points
-│   │   ├── downloader.py     # Handles dataset scraping and downloading
-│   │   ├── parser.py         # Parses complex dataset metadata
-│   │   ├── analytics.py      # DuckDB loading and analytics engine
-│   │   ├── api.py            # FastAPI application endpoints
-│   │   ├── models.py         # Pydantic data models
-│   │   ├── training_data.py  # Utilities for Gemma-4-SQL training generation
-│   │   └── i18n.py           # Internationalization support
-│   └── tests/                # Python backend test suite (100% Coverage)
-└── t1d-analytics-web/        # Vanilla TS Web Interface
-    ├── package.json          # Frontend package manifest
-    ├── src/                  # Core UI, state management, and CSS
-    ├── tests/                # Vitest DOM and state tests (100% Coverage)
-    └── tests-e2e/            # Playwright end-to-end tests
+├── scripts/                      # Full-stack test & LCOV coverage runner (run_tests.py)
+├── t1d-analytics-backend/        # Python Backend Package
+│   ├── pyproject.toml            # Python package metadata and strict tool configuration
+│   ├── docs_src/                 # Sphinx documentation sources
+│   ├── src/t1d_analytics/        # Python Backend Core
+│   │   ├── api.py                # FastAPI application factory, middleware, and lifespan
+│   │   ├── routers/              # Modular API routers (chat, sessions, status, tables, training)
+│   │   ├── cli.py                # Command-line interface entry point
+│   │   ├── cli_parser.py         # Strongly-typed CLI argument parser (15 subcommands)
+│   │   ├── cli_handlers.py       # CLI subcommand handlers
+│   │   ├── downloader.py         # Authenticated dataset scraping and concurrent downloading
+│   │   ├── archive_extractor.py  # Safe zip extraction with decompression limits
+│   │   ├── parser.py             # HTML dataset metadata parser
+│   │   ├── ingestion.py          # DuckDB CSV/TXT/SAS/SPSS loader and directory watcher
+│   │   ├── seed.py               # Baseline T1D clinical cohort seeding and canonical views
+│   │   ├── analytics.py          # DuckDB schema inspection, table profiling, and REPL
+│   │   ├── chat_service.py       # NL-to-SQL translation, SSE streaming, and evaluation
+│   │   ├── sql_fallback_synthesizer.py # Deterministic schema-guided fallback SQL synthesis
+│   │   ├── llm_client.py         # Ollama and any-llm multi-provider client
+│   │   ├── gemma_bridge.py       # Bridge to external gemma-4-sql ETL and training toolchains
+│   │   ├── training_data.py      # Synthetic Pretrain/SFT/DPO pair generation and export
+│   │   ├── training_runner.py    # Local CPU/GPU, HuggingFace, and TPU training execution
+│   │   ├── tpu_orchestrator.py   # Google Cloud TPU VM and XPK workload orchestration
+│   │   ├── job_manager.py        # Background training job lifecycle manager
+│   │   ├── session_store.py      # Persistent DuckDB chat session storage
+│   │   ├── diagnostics.py        # System, database, and LLM readiness diagnostics
+│   │   ├── models.py             # Pydantic domain and training models
+│   │   └── i18n.py               # Backend gettext internationalization (en, ja, ar, he)
+│   └── tests/                    # Pytest unit and integration test suite (100% Coverage)
+└── t1d-analytics-web/            # Vanilla TypeScript Web Interface
+    ├── package.json              # Frontend package manifest and scripts
+    ├── src/                      # Core UI coordinator, state, CGM metrics, charts, and CSS
+    │   └── controllers/          # Composable modal, sidebar, schema, model, and status controllers
+    ├── tests/                    # Vitest DOM and state unit tests (100% Coverage)
+    ├── tests-e2e/                # Playwright mocked E2E and accessibility tests
+    └── tests-e2e-full/           # Playwright full-stack E2E tests against live FastAPI + DuckDB
 ```
 
-- **Database**: DuckDB
+- **Database**: DuckDB (with optional PostgreSQL and Valkey in declarative LibScript deployments)
 - **Backend API**: Python 3.12+, FastAPI, Uvicorn, Pydantic
-- **LLM Engine**: Ollama (gemma4)
-- **Frontend**: HTML5, Vanilla CSS, TypeScript, Vite
-- **Testing**: Pytest, Vitest, Playwright
+- **LLM Engine**: Ollama (`gemma:2b`, `llama3.2:1b`, `phi4-mini`, `gemma4`) & `any-llm` (`huggingface`, `openai`, `anthropic`, `google`)
+- **Frontend**: HTML5, Vanilla CSS, TypeScript, Vite, Marked, Highlight.js, DOMPurify, i18next
+- **Testing**: Pytest, Vitest, Playwright (`@axe-core/playwright`)
 
 ## 🛠️ Prerequisites
 
 Before you begin, ensure you have the following installed:
 
 1. **Python 3.12+** (Tested and optimized for Python 3.12)
-2. **Node.js** (v18+ recommended) and `npm`
-3. **Ollama**: Installed and running locally with the `gemma4` model pulled.
+2. **Node.js** (v20+ recommended) and `npm`
+3. **Ollama**: Installed and running locally with a supported model pulled (e.g., `gemma:2b` for lightweight local execution or `gemma4` for full-scale generation):
    ```bash
+   ollama pull gemma:2b
+   # Or for larger hardware:
    ollama pull gemma4
    ```
 
@@ -137,16 +158,16 @@ make run_docker
 
 You can override the default paths and binaries either via environment variables or inline `make` arguments:
 
-| Variable             | Default                           | Description                                                     |
-| :------------------- | :-------------------------------- | :-------------------------------------------------------------- |
-| `DOCS_DIR`           | `docs`                            | Output directory for generated Sphinx and TypeDoc documentation |
-| `DATA_DIR`           | `data`                            | Directory containing clinical trial datasets to ingest          |
-| `T1D_DB_PATH`        | `$(DATA_DIR)/t1d.duckdb`          | Path to the target DuckDB database file                         |
-| `T1D_DB_SEARCH_DIR`  | `/Volumes/TOSHIBA_EXT/stanford/t1d:/mnt/data/t1d` | Search directories for discovering T1D DuckDB databases |
-| `COMPOSE_FILE`       | `docker-compose.yml`              | Docker Compose manifest file                                    |
-| `DOCKER_COMPOSE`     | `docker-compose`                  | Docker Compose binary or command                                |
-| `LIBSCRIPT_ROOT_DIR` | `~/repos/libscript`               | Path to local LibScript installation (used by `install_base`)   |
-| `LIBSCRIPT_CLI`      | `$(LIBSCRIPT_ROOT_DIR)/libscript.sh` | Path to local LibScript CLI binary                              |
+| Variable             | Default                                           | Description                                                     |
+| :------------------- | :------------------------------------------------ | :-------------------------------------------------------------- |
+| `DOCS_DIR`           | `docs`                                            | Output directory for generated Sphinx and TypeDoc documentation |
+| `DATA_DIR`           | `data`                                            | Directory containing clinical trial datasets to ingest          |
+| `T1D_DB_PATH`        | `$(DATA_DIR)/t1d.duckdb`                          | Path to the target DuckDB database file                         |
+| `T1D_DB_SEARCH_DIR`  | `/Volumes/TOSHIBA_EXT/stanford/t1d:/mnt/data/t1d` | Search directories for discovering T1D DuckDB databases         |
+| `COMPOSE_FILE`       | `docker-compose.yml`                              | Docker Compose manifest file                                    |
+| `DOCKER_COMPOSE`     | `docker-compose`                                  | Docker Compose binary or command                                |
+| `LIBSCRIPT_ROOT_DIR` | `~/repos/libscript`                               | Path to local LibScript installation (used by `install_base`)   |
+| `LIBSCRIPT_CLI`      | `$(LIBSCRIPT_ROOT_DIR)/libscript.sh`              | Path to local LibScript CLI binary                              |
 
 ### Target Reference
 
@@ -199,7 +220,13 @@ You can override the default paths and binaries either via environment variables
 
 ## 🧪 Testing
 
-The project enforces a strict 100% test coverage requirement to ensure absolute reliability in clinical data handling.
+The project enforces a strict 100% test coverage and 100% documentation coverage requirement across all modules.
+
+**Unified Full-Stack Test & 100% Combined LCOV Runner:**
+
+```bash
+python scripts/run_tests.py
+```
 
 **Backend (Python):**
 
@@ -207,18 +234,19 @@ The project enforces a strict 100% test coverage requirement to ensure absolute 
 pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests/ --cov=t1d_analytics --cov-report=term-missing --cov-fail-under=100
 ```
 
-**Frontend (TypeScript):**
+**Frontend Unit Tests (TypeScript / Vitest):**
 
 ```bash
 cd t1d-analytics-web
 npm run coverage
 ```
 
-**End-to-End Tests (Playwright):**
+**End-to-End Tests (Playwright Mocked & Full-Stack):**
 
 ```bash
 cd t1d-analytics-web
 npx playwright test
+npm run test:e2e:full
 ```
 
 ## ⚙️ Deployment

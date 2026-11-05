@@ -330,6 +330,55 @@ describe("TablePreviewModalController & Data Exports", () => {
     expect(ui.tableModalController.modal.getAttribute("aria-hidden")).toBe(
       "true",
     );
+
+    // Out-of-order stale response and error in fetchTableData are discarded when a newer request is in flight
+    let resolveStale!: (value: unknown) => void;
+    let rejectStaleErr!: (reason?: unknown) => void;
+    mockFetch
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveStale = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectStaleErr = reject;
+          }),
+      )
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          columns: ["id"],
+          rows: [{ id: 999 }],
+          total_rows: 1,
+          page: 1,
+          total_pages: 1,
+        }),
+      });
+
+    const staleSuccessPromise = ui.tableModalController.fetchTableData();
+    const staleErrorPromise = ui.tableModalController.fetchTableData();
+    const freshPromise = ui.tableModalController.fetchTableData();
+
+    await freshPromise;
+    expect(ui.tableModalController.currentModalRows).toEqual([{ id: 999 }]);
+
+    resolveStale({
+      ok: true,
+      json: async () => ({
+        columns: ["id"],
+        rows: [{ id: 111 }],
+        total_rows: 1,
+        page: 1,
+        total_pages: 1,
+      }),
+    });
+    rejectStaleErr(new Error("Stale network error"));
+    await staleSuccessPromise;
+    await staleErrorPromise;
+    expect(ui.tableModalController.currentModalRows).toEqual([{ id: 999 }]);
   });
 
   it("exports rows to CSV and JSON and triggers export from modal and chat buttons", async () => {
@@ -456,8 +505,17 @@ describe("TablePreviewModalController & Data Exports", () => {
       "/api/export/csv?table_name=patients",
     );
     ui.tableModalController.excelBtn.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      "/api/export/excel?table_name=patients",
+    );
     ui.tableModalController.parquetBtn.click();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      "/api/export/parquet?table_name=patients",
+    );
     ui.tableModalController.closeBtn.click();
+    expect(ui.tableModalController.modal.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
     windowOpenSpy.mockRestore();
   });
 });

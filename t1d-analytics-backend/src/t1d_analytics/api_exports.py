@@ -18,6 +18,10 @@ from t1d_analytics.analytics import (
 )
 from t1d_analytics.api_schemas import TableDataResponse
 from t1d_analytics.db_security import validate_db_path
+from t1d_analytics.duckdb_pool import (
+    connect_duckdb_read_only_pooled,
+    global_read_only_duckdb_pool,
+)
 from t1d_analytics.errors import (
     DatabaseNotFoundError,
     ExportError,
@@ -32,9 +36,7 @@ from t1d_analytics.errors import (
 from t1d_analytics.sql_utils import (
     SqlRawInputValue,
     SqlValue,
-    connect_duckdb_read_only_pooled,
     escape_sql_identifier,
-    global_read_only_duckdb_pool,
     sanitize_spreadsheet_cell,
     sanitize_sql_value,
 )

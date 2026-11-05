@@ -215,6 +215,10 @@ export class SidebarController {
     };
 
     titleBtn.addEventListener("click", activateChat);
+    titleBtn.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      this.startInlineRename(li, titleBtn, chat);
+    });
     titleBtn.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
@@ -364,6 +368,56 @@ export class SidebarController {
     dropdownContainer.append(dropdownBtn, dropdownMenu);
     li.append(titleBtn, dropdownContainer);
     return li;
+  }
+
+  /**
+   * Starts an accessible non-blocking inline rename input inside a chat list item.
+   * @param {HTMLLIElement} li - Chat list item element.
+   * @param {HTMLButtonElement} titleBtn - Chat title button element.
+   * @param {Chat} chat - Chat model to rename.
+   * @returns {void}
+   */
+  public startInlineRename(
+    li: HTMLLIElement,
+    titleBtn: HTMLButtonElement,
+    chat: Chat,
+  ): void {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "chat-inline-rename-input";
+    input.value = chat.title;
+    input.setAttribute(
+      "aria-label",
+      i18next.t("aria.editChatTitle", "Edit chat title"),
+    );
+
+    let committed = false;
+    const commitRename = (save: boolean): void => {
+      if (committed) return;
+      committed = true;
+      if (save && input.value.trim()) {
+        this.ui.state.renameChat(chat.id, input.value.trim());
+      }
+      this.ui.render();
+    };
+
+    input.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitRename(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        commitRename(false);
+      }
+    });
+    input.addEventListener("blur", () => {
+      commitRename(true);
+    });
+
+    titleBtn.replaceWith(input);
+    input.focus();
+    input.select();
+    void li;
   }
 
   /**

@@ -214,13 +214,17 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
     expect(unreachableOpt?.title).toBe("custom_unreachable (CONN_ERR)");
     expect(unreachableOpt?.disabled).toBe(true);
 
-    modelSelect.innerHTML = `<option value="openai/custom-gpt">custom-gpt</option><option value="local_plain">local_plain</option>`;
+    modelSelect.innerHTML = `<option value="openai/custom-gpt">custom-gpt</option><option value="local_plain">local_plain</option><option value="offline_ollama" data-provider="ollama" data-reachable="false">offline_ollama</option>`;
     modelSelect.value = "openai/custom-gpt";
     ui.providerModalController.updateProviderBadgeStatus();
     expect(dot.classList.contains("unconfigured")).toBe(true);
     modelSelect.value = "local_plain";
     ui.providerModalController.updateProviderBadgeStatus();
     expect(dot.classList.contains("active")).toBe(true);
+    modelSelect.value = "offline_ollama";
+    ui.providerModalController.updateProviderBadgeStatus();
+    expect(dot.classList.contains("warning")).toBe(true);
+    expect(dot.title).toContain("Offline");
 
     // Custom configured any-llm models and activeChat fallback resolution
     state.setConfiguredModels(
@@ -404,6 +408,15 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
     expect(document.activeElement).toBe(trigger);
 
     await ui.providerModalController.open();
+    expect(modal.classList.contains("hidden")).toBe(false);
     ui.providerModalController.dispose();
+    modal.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(modal.classList.contains("hidden")).toBe(false);
   });
 });

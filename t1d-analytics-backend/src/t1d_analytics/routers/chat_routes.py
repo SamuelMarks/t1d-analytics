@@ -3,6 +3,7 @@
 import logging
 from typing import AsyncIterator, Optional
 
+import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -13,12 +14,15 @@ from t1d_analytics.api_schemas import (
     ChatResponse,
     ExecuteSqlRequest,
     ExecuteSqlResponse,
+    NlToSqlEvalRequest,
+    NlToSqlEvalResponse,
 )
 from t1d_analytics.chat_service import (
     execute_chat_turn,
+    execute_nl_to_sql_eval_turn,
     generate_sse_chat_events,
 )
-from t1d_analytics.errors import InvalidDatabasePathError
+from t1d_analytics.errors import InvalidDatabasePathError, T1DError
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +182,52 @@ def execute_sql_endpoint(
     except ValueError as ve:
         logger.error(f"Database error during sql execution request: {ve}")
         return ExecuteSqlResponse(error=svc.parse_error(ve))
-    except Exception as e:
+    except (T1DError, duckdb.Error, OSError, RuntimeError, TypeError, KeyError) as e:
         logger.exception("Unexpected error during sql execution request.")
         return ExecuteSqlResponse(error=svc.parse_error(e))
+
+
+@chat_router.post("/api/eval/nl-to-sql", response_model=NlToSqlEvalResponse)
+def eval_nl_to_sql_endpoint(
+    request: NlToSqlEvalRequest,
+    req: Request,
+    svc: AppServices = Depends(get_app_services),
+) -> NlToSqlEvalResponse:
+    """
+    Evaluate a natural-language question against a gold-standard SQL query on the read-only DuckDB cursor.
+
+    Args:
+    ----
+        request: Incoming `NlToSqlEvalRequest` payload.
+        req: Incoming FastAPI HTTP request.
+        svc: Injected `AppServices` dependency bundle.
+
+    Returns:
+    -------
+        NlToSqlEvalResponse: Evaluation metrics, generated SQL, and read-only DuckDB result rows.
+
+    Raises:
+    ------
+        HTTPException: If `request.question` is empty.
+
+    """
+    svc.enforce_rate_limit(req)
+    provider_hdr = req.headers.get("x-provider")
+    api_key_hdr = req.headers.get("x-provider-api-key")
+    if provider_hdr and not request.provider:
+        request.provider = provider_hdr
+    if api_key_hdr and not request.api_key:
+        request.api_key = api_key_hdr
+
+    if not request.question.strip():
+        raise HTTPException(
+            status_code=400, detail={"error_code": "backend.emptyMessage", "params": {}}
+        )
+
+    return execute_nl_to_sql_eval_turn(
+        request=request,
+        db_validator=svc.validate_db_path,
+        execute_fn=svc.execute_sql,
+        translate_fn=svc.generate_sql_from_nl,
+        error_parser=svc.parse_error,
+    )

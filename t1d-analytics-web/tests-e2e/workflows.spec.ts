@@ -444,4 +444,57 @@ test.describe("App Workflows E2E", () => {
     await expect(providerModal).toHaveAttribute("aria-hidden", "true");
     await expect(page.locator("#provider-settings-btn")).toBeFocused();
   });
+
+  /**
+   * Tests mid-conversation Template Picker modal switching and Gold-Standard NL-to-SQL Evaluation Card.
+   */
+  test("Workflows: Mid-conversation Template Picker and NL-to-SQL Gold-Standard Evaluation Card", async ({
+    page,
+  }) => {
+    await page.route("**/api/chat", async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          content:
+            "```sql\nSELECT TxGroup, COUNT(*) FROM tblaptsummary GROUP BY TxGroup;\n```",
+          sqlQuery:
+            "SELECT TxGroup, COUNT(*) FROM tblaptsummary GROUP BY TxGroup;",
+          sqlResult: [{ TxGroup: "Experimental", count: 42 }],
+          gold_comparison: {
+            gold_sql:
+              "SELECT TxGroup, COUNT(*) FROM tblaptsummary GROUP BY TxGroup;",
+            pred_sql:
+              "SELECT TxGroup, COUNT(*) FROM tblaptsummary GROUP BY TxGroup;",
+            exact_match: true,
+            execution_accuracy: true,
+            syntax_error: false,
+            gold_row_count: 1,
+            pred_row_count: 1,
+            gold_columns: ["TxGroup", "count"],
+            pred_columns: ["TxGroup", "count"],
+            column_overlap_pct: 100.0,
+            gold_rows_preview: [{ TxGroup: "Experimental", count: 42 }],
+          },
+        },
+      });
+    });
+
+    // Send first turn so empty-state templates disappear
+    await page.fill("#chat-input", "Initial turn");
+    await page.click("#send-btn");
+    await expect(page.locator(".message.assistant").first()).toBeVisible();
+    await expect(page.locator(".empty-state")).toHaveCount(0);
+
+    // Open persistent Template Picker mid-conversation
+    await page.click("#template-picker-btn");
+    const templateModal = page.locator("#template-picker-modal");
+    await expect(templateModal).toBeVisible();
+
+    // Click "Benchmark LLM vs Gold" on the first template card
+    await templateModal.locator(".template-benchmark-btn").first().click();
+    await expect(templateModal).toBeHidden();
+    await expect(
+      page.locator(".gold-sql-comparison-card").last(),
+    ).toBeVisible();
+  });
 });

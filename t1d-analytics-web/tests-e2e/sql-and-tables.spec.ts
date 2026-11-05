@@ -254,4 +254,87 @@ test.describe("SQL Detection, Result Rendering, Exports & Sanitization", () => {
       assistantMsg.locator(".sql-query-container .play-sql-btn"),
     ).toBeVisible();
   });
+
+  /**
+   * Tests that wide clinical tables (25+ columns including RecID, ptid, AgeAsOfRandDt)
+   * render horizontal single-line headers and scroll horizontally inside .sql-table-scroll-wrapper.
+   */
+  test("Renders wide 28-column demographics result table with horizontal headers and horizontal scroll", async ({
+    page,
+  }) => {
+    const wideRow: Record<string, string | number> = {
+      RecID: 1,
+      ptid: 101,
+      AgeAsOfRandDt: 14.2,
+      DiagAge: 8.5,
+      Gender: "F",
+      Race: "White",
+      Ethnicity: "Not Hispanic or Latino",
+      TxGroup: "Experimental",
+      SiteID: 12,
+      WeightKg: 54.3,
+      HeightCm: 161.0,
+      BMIPct: 62.1,
+      HbA1cBaseline: 7.8,
+      HbA1cWeek26: 6.9,
+      TIRBaseline: 58.4,
+      TIRWeek26: 73.2,
+      TBRBaseline: 3.1,
+      TBRWeek26: 1.8,
+      TARBaseline: 38.5,
+      TARWeek26: 25.0,
+      MeanGlucoseMgDl: 148.2,
+      SDGlucoseMgDl: 49.1,
+      CVPct: 33.1,
+      GMIPct: 6.8,
+      TotalDailyInsulinUnits: 42.5,
+      PumpModel: "t:slim X2 Control-IQ",
+      SensorModel: "Dexcom G6",
+      StudyCompletionStatus: "Completed",
+    };
+
+    await page.route("**/api/chat", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        json: {
+          content:
+            '_Note: Local LLM inference was unavailable (Connection refused by local Ollama); synthesized schema-guided fallback SQL for `demographics`._\n\n```sql\nSELECT * FROM "demographics" LIMIT 10;\n```',
+          sqlQuery: 'SELECT * FROM "demographics" LIMIT 10;',
+          sqlResult: [wideRow],
+          is_rule_based_sql: true,
+          generation_mode: "rule_based_fallback",
+          llm_error: "Connection refused by local Ollama",
+          llm_error_code: "backend.llmConnectionError",
+        },
+      });
+    });
+
+    await page.goto("/");
+    await page.selectOption("#model-select", "gemma:2b");
+    await page.fill("#chat-input", "Show me demographics");
+    await page.click("#send-btn");
+
+    const banner = page.locator(".fallback-synthesis-banner").first();
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("Connection refused by local Ollama");
+    await expect(banner).toContainText("backend.llmConnectionError");
+
+    const firstTh = page.locator(".sql-table th").first();
+    await expect(firstTh).toHaveText("RecID");
+
+    const thStyles = await firstTh.evaluate((el) => {
+      const cs = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return {
+        whiteSpace: cs.whiteSpace,
+        wordBreak: cs.wordBreak,
+        height: rect.height,
+        width: rect.width,
+      };
+    });
+    expect(thStyles.whiteSpace).toBe("nowrap");
+    expect(thStyles.height).toBeLessThan(48);
+    expect(thStyles.width).toBeGreaterThan(30);
+  });
 });

@@ -13,7 +13,6 @@ import {
   DEFAULT_CHOICE_OLLAMA_MODELS,
   resolveModelProvider,
   type ModelApiItem,
-  type ModelSelectorController,
 } from "./model-selector-controller";
 
 /**
@@ -46,8 +45,8 @@ export interface ProviderSettingsHost {
   state: ChatState;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   modelSelect: HTMLSelectElement;
-  /** Model selector sub-controller. */
-  modelSelectorController: ModelSelectorController;
+  /** Reloads available models in the model selector. */
+  reloadModels(): Promise<void>;
   /** Announces a message to screen readers. */
   announce(message: string, isAssertive?: boolean): void;
 }
@@ -181,11 +180,29 @@ export class ProviderSettingsModalController {
       Boolean(this.ui.state.getApiKey(prov));
 
     if (prov === "ollama") {
-      this.providerStatusDot.className = "provider-status-dot active";
-      this.providerStatusDot.title = i18next.t(
-        "provider.localActive",
-        "Local Ollama Active",
-      );
+      const hasExplicitReachableAttr =
+        selectedOpt?.hasAttribute("data-reachable") === true;
+      const optionExplicitlyOffline =
+        selectedOpt?.getAttribute("data-reachable") === "false" ||
+        Boolean(selectedOpt?.disabled);
+      const isOllamaHealthy =
+        !optionExplicitlyOffline &&
+        (!hasExplicitReachableAttr ||
+          this.ui.state.systemStatus.ollamaOnline !== false);
+      if (isOllamaHealthy) {
+        this.providerStatusDot.className = "provider-status-dot active";
+        this.providerStatusDot.title = i18next.t(
+          "provider.localActive",
+          "Local Ollama Active",
+        );
+      } else {
+        this.providerStatusDot.className =
+          "provider-status-dot warning unconfigured";
+        this.providerStatusDot.title = i18next.t(
+          "provider.localOffline",
+          "Local Ollama Offline (Fallback SQL will be used)",
+        );
+      }
       this.providerStatusDot.setAttribute(
         "aria-label",
         this.providerStatusDot.title,
@@ -380,7 +397,7 @@ export class ProviderSettingsModalController {
     }
 
     this.updateModalBadgesFromLocal();
-    await this.ui.modelSelectorController.loadModels();
+    await this.ui.reloadModels();
     this.updateProviderBadgeStatus();
     this.close();
     this.ui.announce(i18next.t("provider.saved", "Provider settings saved"));
@@ -399,7 +416,7 @@ export class ProviderSettingsModalController {
     this.providerKeyAnthropic.value = "";
     this.providerKeyGoogle.value = "";
     this.updateModalBadgesFromLocal();
-    await this.ui.modelSelectorController.loadModels();
+    await this.ui.reloadModels();
     this.updateProviderBadgeStatus();
     this.ui.announce(i18next.t("provider.cleared", "Stored API keys cleared"));
   }

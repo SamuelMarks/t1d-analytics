@@ -9,6 +9,7 @@ from typing import Callable, Dict, List, Optional, Protocol, Union
 from pydantic.dataclasses import dataclass
 from typing_extensions import TypedDict
 
+from t1d_analytics.errors import T1DError
 from t1d_analytics.models import TrainingBackend, TrainingJobConfig
 from t1d_analytics.sql_utils import SqlValue
 
@@ -173,7 +174,14 @@ class TrainingJobManager:
                     else:
                         self._jobs[job_id].status = "completed"
                         self._jobs[job_id].metrics = res
-            except Exception as e:
+            except (
+                T1DError,
+                OSError,
+                RuntimeError,
+                ValueError,
+                TypeError,
+                KeyError,
+            ) as e:
                 with self._lock:
                     self._jobs[job_id].status = "failed"
                     self._jobs[job_id].error = str(e)

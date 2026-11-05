@@ -386,19 +386,22 @@ class BaseTrainingRunner(ABC):
             try:
                 with open(dataset_path, encoding="utf-8") as f:
                     return sum(1 for line in f if line.strip())
-            except Exception as e:
+            except (OSError, UnicodeDecodeError, ValueError) as e:
                 logger.debug(f"Failed to count jsonl samples: {e}")
                 return 0
         elif dataset_path.suffix == ".parquet":
             try:
                 import duckdb
 
-                escaped = str(dataset_path.resolve()).replace("'", "''")
-                cnt = duckdb.execute(
-                    f"SELECT COUNT(*) FROM read_parquet('{escaped}')"
-                ).fetchone()
+                from t1d_analytics.sql_utils import escape_sql_literal
+
+                escaped = escape_sql_literal(str(dataset_path.resolve()))
+                with duckdb.connect(":memory:") as conn:
+                    cnt = conn.execute(
+                        f"SELECT COUNT(*) FROM read_parquet('{escaped}')"
+                    ).fetchone()
                 return int(cnt[0]) if cnt else 0
-            except Exception as e:
+            except (ImportError, duckdb.Error, OSError, RuntimeError, ValueError) as e:
                 logger.debug(f"Failed to count parquet samples: {e}")
                 return 0
         return 0
@@ -529,7 +532,7 @@ class TinyCausalLMFactory(BaseCausalLMFactory):
         tiny_instance = _TinyCausalLM(vocab_size, embed_dim)
         try:
             tiny_instance.to(torch.device(device))
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError) as e:
             logger.debug(f"Could not move tiny model to {device}: {e}")
         result_model: TorchCausalLMProtocol = tiny_instance
         return result_model
@@ -592,7 +595,13 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
                     )
                 else:
                     bnb_config = bnb_cls(load_in_8bit=True)
-            except (ImportError, AttributeError, Exception) as e:
+            except (
+                ImportError,
+                AttributeError,
+                RuntimeError,
+                ValueError,
+                TypeError,
+            ) as e:
                 logger.warning(
                     f"BitsAndBytesConfig failed ({e}); falling back to standard precision."
                 )
@@ -611,7 +620,7 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
                     model_name,
                     torch_dtype=torch_dtype,
                 )
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
             raise TrainingExecutionError(
                 f"Failed to load Hugging Face model '{model_name}': {e}"
             ) from e
@@ -619,7 +628,7 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
         if bnb_config is None:
             try:
                 model.to(torch.device(device))
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError) as e:
                 logger.debug(f"Failed to move model to {device}: {e}")
 
         if use_lora:
@@ -639,7 +648,7 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
                     "The 'peft' library is required for LoRA fine-tuning. "
                     "Install via 'pip install peft'."
                 ) from e
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError, KeyError, AttributeError) as e:
                 raise TrainingExecutionError(
                     f"Failed to apply LoRA configuration to model '{model_name}': {e}"
                 ) from e
@@ -688,7 +697,7 @@ def resolve_device_telemetry(device: str) -> Tuple[str, float]:
                 dev_name = str(torch.cuda.get_device_name(idx))
                 _, total_vram = torch.cuda.mem_get_info(idx)
                 return dev_name, round(total_vram / (1024 * 1024), 2)
-        except Exception as e:
+        except (ImportError, OSError, RuntimeError, ValueError, IndexError) as e:
             logger.debug(f"Failed to gather CUDA telemetry: {e}")
         return "NVIDIA CUDA Device", 0.0
 
@@ -703,7 +712,7 @@ def resolve_device_telemetry(device: str) -> Tuple[str, float]:
             )
             if res.returncode == 0 and res.stdout.strip():
                 dev_name = f"Apple Silicon ({res.stdout.strip()})"
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as e:
             logger.debug(f"Failed to gather MPS telemetry: {e}")
         return dev_name, 0.0
 
@@ -718,7 +727,7 @@ def resolve_device_telemetry(device: str) -> Tuple[str, float]:
                 if "model name" in line:
                     cpu_name = line.split(":", 1)[1].strip()
                     break
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, IndexError) as e:
         logger.debug(f"Failed to gather CPU telemetry: {e}")
 
     return cpu_name, 0.0

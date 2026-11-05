@@ -9,9 +9,7 @@ import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
 import { formatNumber } from "../formatters";
 import { requireElementById } from "../modal-utils";
-import { type ChatState } from "../state";
-import { type ModelSelectorController } from "./model-selector-controller";
-import { type SchemaExplorerController } from "./schema-explorer-controller";
+import { DEFAULT_RECOMMENDED_JAEB_DB_PATH, type ChatState } from "../state";
 
 /**
  * Known database diagnostic status codes returned by the backend.
@@ -74,7 +72,14 @@ export interface SystemStatusDbPayload {
   data_provenance?: string;
   /** Whether the database is using synthetic/faked seed data instead of authentic Jaeb datasets. */
   is_synthetic_faked_data?: boolean;
+  /** Recommended authentic Jaeb DuckDB path for the current host. */
+  recommended_jaeb_db_path?: string;
 }
+
+/**
+ * Alias for `SystemStatusApiResponse` representing the `/api/status` health payload.
+ */
+export type SystemStatusResponsePayload = SystemStatusApiResponse;
 
 /**
  * Response payload returned by `/api/status`.
@@ -105,10 +110,10 @@ export interface SystemStatusHost {
   state: ChatState;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   modelSelect: HTMLSelectElement;
-  /** Model selector sub-controller. */
-  modelSelectorController: ModelSelectorController;
-  /** Schema explorer sub-controller. */
-  schemaExplorerController: SchemaExplorerController;
+  /** Reloads available models in the model selector. */
+  reloadModels(): Promise<void>;
+  /** Reloads the database schema in the schema explorer. */
+  reloadSchema(dbPath?: string): Promise<void>;
   /** Re-renders the host UI. */
   render(): void;
 }
@@ -141,6 +146,8 @@ export class SystemStatusController {
   public readonly bannerDismissBtn: HTMLButtonElement;
   /** Alert row below navbar warning when synthetic/faked non-Jaeb data is active. */
   public readonly jaebProvenanceAlert: HTMLElement;
+  /** Description span inside the synthetic data alert row. */
+  public readonly jaebProvenanceAlertDesc: HTMLElement;
   /** Dismiss ✖ button for the synthetic data alert row. */
   public readonly jaebProvenanceAlertDismissBtn: HTMLButtonElement;
   /** Alert row below navbar warning when deterministic rule-based SQL generation is active instead of an LLM. */
@@ -178,6 +185,9 @@ export class SystemStatusController {
     this.jaebProvenanceAlert = requireElementById<HTMLElement>(
       "jaeb-provenance-alert",
     );
+    this.jaebProvenanceAlertDesc = requireElementById<HTMLElement>(
+      "jaeb-provenance-alert-desc",
+    );
     this.jaebProvenanceAlertDismissBtn = requireElementById<HTMLButtonElement>(
       "jaeb-provenance-alert-dismiss",
     );
@@ -198,8 +208,8 @@ export class SystemStatusController {
   private bindEvents(): void {
     this.bannerRetryBtn.addEventListener("click", () => {
       void this.check(true);
-      void this.ui.modelSelectorController.loadModels();
-      void this.ui.schemaExplorerController.loadSchema();
+      void this.ui.reloadModels();
+      void this.ui.reloadSchema();
     });
 
     this.bannerInstructionsBtn.addEventListener("click", () => {
@@ -237,13 +247,32 @@ export class SystemStatusController {
     this.systemStatusChip.addEventListener("click", () => {
       void this.check(true);
     });
+
+    i18next.on("languageChanged", () => {
+      const jaebPath =
+        this.ui.state.systemStatus.recommendedJaebDbPath ||
+        DEFAULT_RECOMMENDED_JAEB_DB_PATH;
+      this.jaebProvenanceAlertDesc.textContent = i18next.t(
+        "status.syntheticDataAlertDesc",
+        { jaebPath },
+      );
+    });
   }
 
   /**
    * Shows the visual alert row below the navbar indicating synthetic/faked non-Jaeb data is active.
+   * @param {string} [recommendedPath] - Optional recommended Jaeb database path to display.
    * @returns {void}
    */
-  public showSyntheticDataAlert(): void {
+  public showSyntheticDataAlert(recommendedPath?: string): void {
+    const jaebPath =
+      recommendedPath ||
+      this.ui.state.systemStatus.recommendedJaebDbPath ||
+      DEFAULT_RECOMMENDED_JAEB_DB_PATH;
+    this.jaebProvenanceAlertDesc.textContent = i18next.t(
+      "status.syntheticDataAlertDesc",
+      { jaebPath },
+    );
     this.jaebProvenanceAlert.classList.remove("hidden");
     this.jaebProvenanceAlert.removeAttribute("aria-hidden");
   }
@@ -379,14 +408,17 @@ export class SystemStatusController {
    * @param {SystemStatusApiResponse} health - Parsed `/api/status` response.
    * @returns {void}
    */
-  private applyStatusBannerAndChip(health: SystemStatusApiResponse): void {
+  public applyHealthPayload(health: SystemStatusApiResponse): void {
     if (
       health.database?.is_synthetic_faked_data === false ||
       health.database?.data_provenance === "jaeb_authentic"
     ) {
       this.hideSyntheticDataAlert();
     } else if (health.database?.is_synthetic_faked_data === true) {
-      this.showSyntheticDataAlert();
+      const jaebPath =
+        health.database?.recommended_jaeb_db_path ||
+        DEFAULT_RECOMMENDED_JAEB_DB_PATH;
+      this.showSyntheticDataAlert(jaebPath);
     }
 
     if (!health.ollama?.accessible || this.ui.modelSelect.value === "sql") {
@@ -490,9 +522,12 @@ export class SystemStatusController {
         dbIntegrityOk: health.database?.integrity_ok !== false,
         diskFreeBytes: Number(health.database?.disk_free_bytes) || 0,
         ollamaVersion: health.ollama?.version || null,
+        recommendedJaebDbPath:
+          health.database?.recommended_jaeb_db_path ||
+          DEFAULT_RECOMMENDED_JAEB_DB_PATH,
       });
 
-      this.applyStatusBannerAndChip(health);
+      this.applyHealthPayload(health);
       this.ui.render();
     } catch {
       this.ui.state.setSystemStatus({

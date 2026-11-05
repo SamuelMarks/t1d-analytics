@@ -13,8 +13,7 @@ from typing import (
     Iterator,
     List,
     Optional,
-    Tuple,
-    Union,
+    Protocol,
 )
 
 import duckdb
@@ -348,6 +347,81 @@ def _default_stream_chat_events(
     )
 
 
+class RateLimitEnforcerCallable(Protocol):
+    """Structural protocol for rate-limit enforcement callables."""
+
+    def __call__(
+        self,
+        request: Request,
+        limit: int = 120,
+        window_seconds: float = 60.0,
+    ) -> None:
+        """Enforce sliding-window rate limiting on an incoming HTTP request."""
+
+
+class SqlExecutorCallable(Protocol):
+    """Structural protocol for read-only DuckDB query execution callables."""
+
+    def __call__(
+        self,
+        db_path: str,
+        query: str,
+        max_rows: int = 10000,
+        timeout_seconds: float = 30.0,
+    ) -> List[Dict[str, SqlValue]]:
+        """Execute a read-only SQL query and return sanitized row dictionaries."""
+
+
+class NlToSqlTranslatorCallable(Protocol):
+    """Structural protocol for natural-language-to-SQL translation callables."""
+
+    def __call__(
+        self,
+        db_path: str,
+        user_query: str,
+        model_name: str = "gemma4",
+        history: Optional[List[ChatMessageModel]] = None,
+        api_key: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> TranslationResult:
+        """Translate a natural-language clinical question into a `TranslationResult`."""
+
+
+class LlmTokenStreamerCallable(Protocol):
+    """Structural protocol for streaming LLM token generators."""
+
+    def __call__(
+        self,
+        prompt: str,
+        model_name: str = "gemma4",
+        api_key: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Iterator[str]:
+        """Yield streamed token strings from the configured LLM provider."""
+
+
+class ChatEventStreamerCallable(Protocol):
+    """Structural protocol for SSE chat event stream generators."""
+
+    def __call__(
+        self,
+        request: ChatRequest,
+        req: Optional[Request] = None,
+    ) -> AsyncIterator[str]:
+        """Yield Server-Sent Event frames for a streaming chat request."""
+
+
+class DuckDbConnectCallable(Protocol):
+    """Structural protocol for DuckDB connection factories."""
+
+    def __call__(
+        self,
+        database: str = ":memory:",
+        read_only: bool = False,
+    ) -> duckdb.DuckDBPyConnection:
+        """Open and return a DuckDB connection."""
+
+
 @dataclass(frozen=True)
 class AppServices:
     """
@@ -360,268 +434,80 @@ class AppServices:
     validate_db_path: Callable[[Optional[str]], str]
     validate_workspace_artifact_path: Callable[[str], str]
     discover_workspace_databases: Callable[[], DatabaseListResponse]
-    enforce_rate_limit: Callable[..., None]
-    execute_sql: Callable[..., List[Dict[str, SqlValue]]]
-    generate_sql_from_nl: Callable[..., Union[TranslationResult, Tuple[str, str]]]
-    stream_llm_tokens: Callable[..., Iterator[str]]
-    stream_chat_events: Callable[..., AsyncIterator[str]]
+    enforce_rate_limit: RateLimitEnforcerCallable
+    execute_sql: SqlExecutorCallable
+    generate_sql_from_nl: NlToSqlTranslatorCallable
+    stream_llm_tokens: LlmTokenStreamerCallable
+    stream_chat_events: ChatEventStreamerCallable
     parse_error: Callable[[Exception], ApiError]
     get_database_schema: Callable[[duckdb.DuckDBPyConnection], str]
     profile_table: Callable[[str, str], TableProfileResult]
-    duckdb_connect: Callable[..., duckdb.DuckDBPyConnection]
+    duckdb_connect: DuckDbConnectCallable
     get_request_locale: Callable[[Request], str]
     cloud_provider_models: Dict[str, List[str]]
     get_session_store: Callable[[], SessionStore]
     get_training_job_manager: Callable[[], TrainingJobManager]
 
 
-_active_app_services: Optional[AppServices] = None
-
-
-def _invoke_validate_db_path(db_path: Optional[str]) -> str:
+class AppServicesRegistry:
     """
-    Delegate to active `validate_db_path` callable.
+    Thread-safe registry resolving `AppServices` from a bound FastAPI `app.state.services` or explicit override.
 
-    Args:
-    ----
-        db_path: Optional path to the DuckDB database file.
-
-    Returns:
-    -------
-        str: Validated absolute database path.
+    Attributes
+    ----------
+        _lock: Mutex guarding reads and writes to `_bound_app` and `_default_services`.
+        _bound_app: Optional bound FastAPI application whose `state.services` is inspected.
+        _default_services: Optional explicit `AppServices` instance override.
 
     """
-    return validate_db_path(db_path)
+
+    def __init__(self) -> None:
+        """Initialize an empty thread-safe `AppServicesRegistry`."""
+        self._lock = threading.Lock()
+        self._bound_app: Optional[FastAPI] = None
+        self._default_services: Optional[AppServices] = None
+
+    def set_default(
+        self,
+        services: Optional[AppServices],
+        target_app: Optional[FastAPI] = None,
+    ) -> None:
+        """
+        Store or clear the default `AppServices` instance and optional bound FastAPI application.
+
+        Args:
+        ----
+            services: Optional `AppServices` instance.
+            target_app: Optional FastAPI application instance.
+
+        """
+        with self._lock:
+            if target_app is not None:
+                self._bound_app = target_app
+                target_app.state.services = services
+            self._default_services = services
+
+    def get_default(self) -> Optional[AppServices]:
+        """
+        Return the active `AppServices` from `_default_services` or `bound_app.state.services`.
+
+        Returns
+        -------
+            Optional[AppServices]: Registered `AppServices` bundle or None.
+
+        """
+        with self._lock:
+            if self._default_services is not None:
+                return self._default_services
+            app_svc = (
+                getattr(self._bound_app.state, "services", None)
+                if self._bound_app is not None
+                else None
+            )
+            return app_svc if isinstance(app_svc, AppServices) else None
 
 
-def _invoke_validate_workspace_artifact_path(target_path: str) -> str:
-    """
-    Delegate to active `validate_workspace_artifact_path` callable.
-
-    Args:
-    ----
-        target_path: Requested workspace artifact path.
-
-    Returns:
-    -------
-        str: Validated absolute artifact path.
-
-    """
-    return validate_workspace_artifact_path(target_path)
-
-
-def _invoke_discover_workspace_databases() -> DatabaseListResponse:
-    """
-    Delegate to active `discover_workspace_databases` callable.
-
-    Returns
-    -------
-        DatabaseListResponse: Discovered workspace databases and default DB.
-
-    """
-    return discover_workspace_databases()
-
-
-def _invoke_enforce_rate_limit(
-    request: Request,
-    limit: int = 120,
-    window_seconds: float = 60.0,
-) -> None:
-    """
-    Delegate to active `enforce_rate_limit` callable with `check_rate_limit`.
-
-    Args:
-    ----
-        request: Incoming FastAPI HTTP request.
-        limit: Maximum requests allowed in the window.
-        window_seconds: Sliding window duration in seconds.
-
-    """
-    enforce_rate_limit(
-        request,
-        limit=limit,
-        window_seconds=window_seconds,
-        limiter_check_fn=check_rate_limit,
-    )
-
-
-def _invoke_execute_sql(
-    db_path: str,
-    query: str,
-    max_rows: int = 10000,
-    timeout_seconds: float = 30.0,
-) -> List[Dict[str, SqlValue]]:
-    """
-    Delegate to active `execute_sql` callable with `duckdb.connect`.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        query: SQL query to execute.
-        max_rows: Maximum rows to return.
-        timeout_seconds: Execution timeout in seconds.
-
-    Returns:
-    -------
-        List[Dict[str, SqlValue]]: Executed query result rows.
-
-    """
-    return execute_sql(
-        db_path=db_path,
-        query=query,
-        max_rows=max_rows,
-        timeout_seconds=timeout_seconds,
-        connect_fn=duckdb.connect,
-    )
-
-
-def _invoke_generate_sql_from_nl(
-    db_path: str,
-    user_query: str,
-    model_name: str = "gemma4",
-    history: Optional[List[ChatMessageModel]] = None,
-    api_key: Optional[str] = None,
-    provider: Optional[str] = None,
-) -> Union[TranslationResult, Tuple[str, str]]:
-    """
-    Delegate to active `translate_nl_to_sql` callable.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        user_query: Natural language query from the user.
-        model_name: Target LLM model name.
-        history: Optional conversation message history.
-        api_key: Optional cloud provider API key.
-        provider: Optional LLM provider override.
-
-    Returns:
-    -------
-        Union[TranslationResult, Tuple[str, str]]: Translation result containing response and SQL.
-
-    """
-    return translate_nl_to_sql(
-        db_path,
-        user_query,
-        model_name=model_name,
-        history=history,
-        api_key=api_key,
-        provider=provider,
-    )
-
-
-def _invoke_stream_llm_tokens(
-    prompt: str,
-    model_name: str = "gemma4",
-    api_key: Optional[str] = None,
-    provider: Optional[str] = None,
-) -> Iterator[str]:
-    """
-    Delegate to active `stream_llm_completion_tokens` callable.
-
-    Args:
-    ----
-        prompt: Prompt string to send to the LLM.
-        model_name: Target LLM model name.
-        api_key: Optional cloud provider API key.
-        provider: Optional LLM provider override.
-
-    Returns:
-    -------
-        Iterator[str]: Streamed token strings.
-
-    """
-    return stream_llm_completion_tokens(
-        prompt,
-        model_name=model_name,
-        api_key=api_key,
-        provider=provider,
-    )
-
-
-def _invoke_parse_error(e: Exception) -> ApiError:
-    """
-    Delegate to active `parse_error` callable.
-
-    Args:
-    ----
-        e: Exception instance to convert.
-
-    Returns:
-    -------
-        ApiError: Structured API error model.
-
-    """
-    return parse_error(e)
-
-
-def _invoke_get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
-    """
-    Delegate to active `get_database_schema` callable.
-
-    Args:
-    ----
-        conn: Active DuckDB connection.
-
-    Returns:
-    -------
-        str: Formatted database schema string.
-
-    """
-    return get_database_schema(conn)
-
-
-def _invoke_profile_table(db_path: str, table_name: str) -> TableProfileResult:
-    """
-    Delegate to active `profile_table` callable.
-
-    Args:
-    ----
-        db_path: Path to the DuckDB database file.
-        table_name: Target table name to profile.
-
-    Returns:
-    -------
-        TableProfileResult: Table profiling statistics.
-
-    """
-    return profile_table(db_path, table_name)
-
-
-def _invoke_duckdb_connect(
-    database: str = ":memory:",
-    read_only: bool = False,
-) -> duckdb.DuckDBPyConnection:
-    """
-    Delegate to active `duckdb.connect` callable.
-
-    Args:
-    ----
-        database: Database file path or `:memory:`.
-        read_only: Whether to open the connection in read-only mode.
-
-    Returns:
-    -------
-        duckdb.DuckDBPyConnection: Opened DuckDB connection.
-
-    """
-    return duckdb.connect(database, read_only=read_only)
-
-
-def _invoke_get_request_locale(request: Request) -> str:
-    """
-    Delegate to active `get_request_locale` callable.
-
-    Args:
-    ----
-        request: Incoming FastAPI HTTP request.
-
-    Returns:
-    -------
-        str: Resolved locale code.
-
-    """
-    return get_request_locale(request)
+_app_services_registry = AppServicesRegistry()
 
 
 def create_default_app_services(
@@ -647,19 +533,52 @@ def create_default_app_services(
 
     _ = target_app
     return AppServices(
-        validate_db_path=_invoke_validate_db_path,
-        validate_workspace_artifact_path=_invoke_validate_workspace_artifact_path,
-        discover_workspace_databases=_invoke_discover_workspace_databases,
-        enforce_rate_limit=_invoke_enforce_rate_limit,
-        execute_sql=_invoke_execute_sql,
-        generate_sql_from_nl=_invoke_generate_sql_from_nl,
-        stream_llm_tokens=_invoke_stream_llm_tokens,
+        validate_db_path=validate_db_path,
+        validate_workspace_artifact_path=validate_workspace_artifact_path,
+        discover_workspace_databases=discover_workspace_databases,
+        enforce_rate_limit=lambda request, limit=120, window_seconds=60.0: (
+            enforce_rate_limit(
+                request,
+                limit=limit,
+                window_seconds=window_seconds,
+                limiter_check_fn=check_rate_limit,
+            )
+        ),
+        execute_sql=lambda db_path, query, max_rows=10000, timeout_seconds=30.0: (
+            execute_sql(
+                db_path=db_path,
+                query=query,
+                max_rows=max_rows,
+                timeout_seconds=timeout_seconds,
+                connect_fn=duckdb.connect,
+            )
+        ),
+        generate_sql_from_nl=lambda db_path, user_query, model_name="gemma4", history=None, api_key=None, provider=None: (
+            translate_nl_to_sql(
+                db_path,
+                user_query,
+                model_name=model_name,
+                history=history,
+                api_key=api_key,
+                provider=provider,
+            )
+        ),
+        stream_llm_tokens=lambda prompt, model_name="gemma4", api_key=None, provider=None: (
+            stream_llm_completion_tokens(
+                prompt,
+                model_name=model_name,
+                api_key=api_key,
+                provider=provider,
+            )
+        ),
         stream_chat_events=_default_stream_chat_events,
-        parse_error=_invoke_parse_error,
-        get_database_schema=_invoke_get_database_schema,
-        profile_table=_invoke_profile_table,
-        duckdb_connect=_invoke_duckdb_connect,
-        get_request_locale=_invoke_get_request_locale,
+        parse_error=parse_error,
+        get_database_schema=get_database_schema,
+        profile_table=lambda db_path, table_name: profile_table(db_path, table_name),
+        duckdb_connect=lambda database=":memory:", read_only=False: duckdb.connect(
+            database, read_only=read_only
+        ),
+        get_request_locale=get_request_locale,
         cloud_provider_models=CLOUD_MODEL_CATALOG,
         get_session_store=session_store_getter or (lambda: _default_session_store),
         get_training_job_manager=job_manager_getter
@@ -667,26 +586,29 @@ def create_default_app_services(
     )
 
 
-def set_default_app_services(services: Optional[AppServices]) -> None:
+def set_default_app_services(
+    services: Optional[AppServices],
+    target_app: Optional[FastAPI] = None,
+) -> None:
     """
-    Register or clear the active `AppServices` container used by `get_app_services()`.
+    Register or clear the active `AppServices` container on `target_app.state.services` and the registry.
 
     Args:
     ----
         services: Optional `AppServices` instance to set as the active default.
+        target_app: Optional FastAPI application instance whose `state.services` should be updated.
 
     """
-    global _active_app_services
-    _active_app_services = services
+    _app_services_registry.set_default(services, target_app=target_app)
 
 
 def get_app_services() -> AppServices:
     """
-    Resolve the active `AppServices` bundle without circular module imports or `sys.modules` reflection.
+    Resolve the active `AppServices` bundle from `app.state.services` without circular module imports.
 
     Returns
     -------
         AppServices: Resolved service bundle.
 
     """
-    return _active_app_services or create_default_app_services()
+    return _app_services_registry.get_default() or create_default_app_services()

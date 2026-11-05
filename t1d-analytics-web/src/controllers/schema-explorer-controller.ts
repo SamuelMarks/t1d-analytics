@@ -10,13 +10,11 @@ import { fetchWithBackendError, parseResponseJson } from "../api-client";
 import { formatNumber } from "../formatters";
 import { createSchemaDiagnosticCard, createSvgIcon } from "../message-renderer";
 import { requireElementById } from "../modal-utils";
-import { type ChatState } from "../state";
+import { DEFAULT_DB_NAME, type ChatState } from "../state";
 import {
   isDbStatusCode,
-  type SystemStatusController,
   type SystemStatusDbPayload,
 } from "./system-status-controller";
-import { type TablePreviewModalController } from "./table-modal-controller";
 
 /**
  * Table definition entry in `SchemaExplorerApiResponse`.
@@ -66,10 +64,29 @@ export interface DatabasesListApiResponse {
 export interface SchemaExplorerHost {
   /** Global application state store. */
   state: ChatState;
-  /** System status sub-controller. */
-  systemStatusController: SystemStatusController;
-  /** Table preview modal sub-controller. */
-  tableModalController: TablePreviewModalController;
+  /** Chat composer textarea element for click-to-insert column/table identifiers. */
+  chatInput: HTMLTextAreaElement;
+  /** Syntax highlight synchronization callback. */
+  syncHighlight(): void;
+  /** Checks system health and updates UI indicators accordingly. */
+  checkSystemStatus(isManualRetry?: boolean, dbPath?: string): Promise<void>;
+  /** Opens the Table Preview modal for the specified table name. */
+  openTablePreview(tableName: string): Promise<void>;
+  /** Shows the system status alert banner with the specified severity and messaging. */
+  showStatusBanner(
+    severity: "danger" | "warning" | "info",
+    title: string,
+    desc: string,
+    icon?: string,
+    showRetry?: boolean,
+  ): void;
+  /** Hides the system status alert banner. */
+  hideStatusBanner(): void;
+  /** Updates the status chip in the top header. */
+  updateStatusChip(
+    level: "healthy" | "degraded" | "error" | "offline",
+    text: string,
+  ): void;
   /** Announces a message to screen readers. */
   announce(message: string, isAssertive?: boolean): void;
 }
@@ -114,7 +131,7 @@ export class SchemaExplorerController {
       if (selectedDb) {
         this.ui.state.setCurrentDb(selectedDb);
         void this.loadSchema(selectedDb);
-        void this.ui.systemStatusController.check(true, selectedDb);
+        void this.ui.checkSystemStatus(true, selectedDb);
         this.ui.announce(i18next.t("ui.databaseSwitched", { db: selectedDb }));
       }
     });
@@ -178,7 +195,7 @@ export class SchemaExplorerController {
     container.querySelectorAll(".reload-schema-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         void this.loadSchema();
-        void this.ui.systemStatusController.check(true);
+        void this.ui.checkSystemStatus(true);
       });
     });
   }
@@ -208,7 +225,7 @@ export class SchemaExplorerController {
     this.dbSelect.replaceChildren();
     if (this.ui.state.availableDbs.length === 0) {
       const opt = document.createElement("option");
-      opt.value = this.ui.state.currentDb || "t1d.duckdb";
+      opt.value = this.ui.state.currentDb || DEFAULT_DB_NAME;
       opt.textContent = opt.value;
       this.dbSelect.appendChild(opt);
       return;
@@ -251,50 +268,44 @@ export class SchemaExplorerController {
       dbMessage: dbStatus.message || null,
       tableCount: Number(dbStatus.table_count) || 0,
       hasInitialData: Boolean(dbStatus.has_initial_data),
+      recommendedJaebDbPath:
+        dbStatus.recommended_jaeb_db_path ||
+        this.ui.state.systemStatus.recommendedJaebDbPath,
     });
 
     if (dbStatus.status_code === "missing_file") {
-      this.ui.systemStatusController.showBanner(
+      this.ui.showStatusBanner(
         "warning",
         i18next.t("status.dbMissingTitle"),
         i18next.t("status.dbMissingDesc", { path: dbStatus.configured_path }),
         "📁",
         true,
       );
-      this.ui.systemStatusController.updateStatusChip(
-        "error",
-        i18next.t("status.dbMissingTitle"),
-      );
+      this.ui.updateStatusChip("error", i18next.t("status.dbMissingTitle"));
     } else if (dbStatus.status_code === "empty_db") {
-      this.ui.systemStatusController.showBanner(
+      this.ui.showStatusBanner(
         "warning",
         i18next.t("status.dbEmptyTitle"),
         i18next.t("status.dbEmptyDesc"),
         "🗄️",
         true,
       );
-      this.ui.systemStatusController.updateStatusChip(
-        "degraded",
-        i18next.t("status.dbEmptyTitle"),
-      );
+      this.ui.updateStatusChip("degraded", i18next.t("status.dbEmptyTitle"));
     } else if (dbStatus.status_code === "missing_initial_data") {
-      this.ui.systemStatusController.showBanner(
+      this.ui.showStatusBanner(
         "warning",
         i18next.t("status.dbMissingDataTitle"),
         i18next.t("status.dbMissingDataDesc"),
         "📊",
         true,
       );
-      this.ui.systemStatusController.updateStatusChip(
+      this.ui.updateStatusChip(
         "degraded",
         i18next.t("status.dbMissingDataTitle"),
       );
     } else {
-      this.ui.systemStatusController.hideBanner();
-      this.ui.systemStatusController.updateStatusChip(
-        "healthy",
-        i18next.t("status.systemHealthy"),
-      );
+      this.ui.hideStatusBanner();
+      this.ui.updateStatusChip("healthy", i18next.t("status.systemHealthy"));
     }
   }
 
@@ -411,7 +422,7 @@ export class SchemaExplorerController {
 
     viewBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      void this.ui.tableModalController.open(table.name);
+      void this.ui.openTablePreview(table.name);
     });
 
     const columnsList = document.createElement("ul");
@@ -421,6 +432,14 @@ export class SchemaExplorerController {
     table.columns.forEach((col) => {
       const colLi = document.createElement("li");
       colLi.className = "schema-column";
+      colLi.tabIndex = 0;
+      colLi.setAttribute("role", "button");
+      colLi.setAttribute("data-column", col.name);
+      colLi.setAttribute("data-table", table.name);
+      colLi.title = i18next.t("ui.insertColumnIntoPrompt", {
+        column: `${table.name}.${col.name}`,
+        defaultValue: `Click to insert ${col.name} into prompt`,
+      });
       const colNameSpan = document.createElement("span");
       colNameSpan.className = "col-name";
       colNameSpan.textContent = col.name;
@@ -428,11 +447,41 @@ export class SchemaExplorerController {
       colTypeSpan.className = "schema-column-type";
       colTypeSpan.textContent = col.type;
       colLi.append(colNameSpan, colTypeSpan);
+      colLi.addEventListener("click", () => {
+        this.insertIdentifierIntoComposer(col.name);
+      });
+      colLi.addEventListener("keydown", (e: KeyboardEvent) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          this.insertIdentifierIntoComposer(col.name);
+        }
+      });
       columnsList.appendChild(colLi);
     });
 
     tableDiv.append(headerDiv, columnsList);
     return tableDiv;
+  }
+
+  /**
+   * Inserts a column or table identifier at the current cursor position in `#chat-input`.
+   * @param {string} identifier - Column or table identifier to insert.
+   * @returns {void}
+   */
+  public insertIdentifierIntoComposer(identifier: string): void {
+    const input = this.ui.chatInput;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    const needsLeadingSpace =
+      before.length > 0 && !/\s$/.test(before) && !/[.(]$/.test(before);
+    const inserted = `${needsLeadingSpace ? " " : ""}${identifier}`;
+    input.value = `${before}${inserted}${after}`;
+    const newCursor = before.length + inserted.length;
+    input.focus();
+    input.setSelectionRange(newCursor, newCursor);
+    this.ui.syncHighlight();
   }
 
   /**
@@ -444,7 +493,7 @@ export class SchemaExplorerController {
     try {
       const targetDb = dbPath || this.ui.state.currentDb;
       const url =
-        targetDb !== "t1d.duckdb"
+        targetDb !== DEFAULT_DB_NAME
           ? `/api/schema?db_path=${encodeURIComponent(targetDb)}`
           : "/api/schema";
       const response = await fetchWithBackendError(url);
@@ -483,17 +532,14 @@ export class SchemaExplorerController {
         backendOnline: false,
         status: "offline",
       });
-      this.ui.systemStatusController.showBanner(
+      this.ui.showStatusBanner(
         "danger",
         i18next.t("status.offlineTitle"),
         i18next.t("status.offlineDesc", { url: backendUrl }),
         "⚠️",
         true,
       );
-      this.ui.systemStatusController.updateStatusChip(
-        "offline",
-        i18next.t("status.systemOffline"),
-      );
+      this.ui.updateStatusChip("offline", i18next.t("status.systemOffline"));
     }
   }
 }
