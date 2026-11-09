@@ -6,6 +6,7 @@
 
 import i18next from "./i18n";
 import { type SqlCellValue } from "./formatters";
+import { type SqlGoldComparisonPayload } from "./state";
 
 /**
  * Structured API error detail object returned by the backend.
@@ -30,22 +31,41 @@ export type ApiErrorInput =
   | Record<string, never>;
 
 /**
+ * Collapses repeated `"Internal server error: "` prefixes in formatted error messages.
+ * @param {string} message - Raw formatted error message.
+ * @returns {string} Error message with duplicate `"Internal server error: "` prefixes collapsed.
+ */
+export function deduplicateErrorPrefix(message: string): string {
+  const prefix = "Internal server error: ";
+  const doublePrefix = `${prefix}${prefix}`;
+  let cleaned = message;
+  while (cleaned.toLowerCase().startsWith(doublePrefix.toLowerCase())) {
+    cleaned = `${prefix}${cleaned.slice(doublePrefix.length).trimStart()}`;
+  }
+  return cleaned;
+}
+
+/**
  * Parses a backend error string or detail object into a translated string.
  * @param {ApiErrorInput} errorObj - The raw backend error string or structured detail object.
  * @returns {string} Localized or formatted error message string.
  */
 export function parseApiError(errorObj: ApiErrorInput): string {
   if (typeof errorObj === "string") {
-    return i18next.exists(errorObj) ? String(i18next.t(errorObj)) : errorObj;
+    const resolved = i18next.exists(errorObj)
+      ? String(i18next.t(errorObj))
+      : errorObj;
+    return deduplicateErrorPrefix(resolved);
   }
   if (errorObj && typeof errorObj === "object" && "error_code" in errorObj) {
     const key = errorObj.error_code;
     const params = errorObj.params;
-    return i18next.exists(key)
+    const resolved = i18next.exists(key)
       ? String(i18next.t(key, params))
       : `${key}: ${JSON.stringify(params)}`;
+    return deduplicateErrorPrefix(resolved);
   }
-  return String(errorObj);
+  return deduplicateErrorPrefix(String(errorObj));
 }
 
 /**
@@ -105,6 +125,23 @@ export async function fetchRemoteSessions<TMsg>(): Promise<
     : Array.isArray(rawData?.sessions)
       ? rawData.sessions
       : [];
+}
+
+/**
+ * Fetches a single persisted chat session by ID from `GET /api/sessions/{sessionId}`.
+ * @template TMsg - Message item type.
+ * @param {string} sessionId - Chat session identifier to retrieve.
+ * @returns {Promise<RemoteSessionPayload<TMsg> | null>} Remote session payload, or null if not found.
+ */
+export async function fetchRemoteSessionById<TMsg>(
+  sessionId: string,
+): Promise<RemoteSessionPayload<TMsg> | null> {
+  const resp = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+  if (!resp.ok) {
+    return null;
+  }
+  const data: RemoteSessionPayload<TMsg> = await resp.json();
+  return data;
 }
 
 /**
@@ -168,4 +205,139 @@ export async function deleteRemoteSession(
   return fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
     method: "DELETE",
   });
+}
+
+/**
+ * Payload returned by `POST /api/chat/jobs` or `GET /api/chat/jobs/{jobId}`.
+ */
+export interface PollableChatJobData {
+  /** Optional SSE event discriminator. */
+  event?: string;
+  /** Optional streamed token delta. */
+  token?: string;
+  /** Async job identifier (`chatjob-...`). */
+  job_id?: string | null;
+  /** Lifecycle status (`"pending"`, `"complete"`, `"failed"`). */
+  status?: "pending" | "complete" | "failed" | string;
+  /** Live accumulated partial text while `"pending"`. */
+  partial_content?: string;
+  /** Final assistant text or i18n key. */
+  content?: string;
+  /** Executed SQL result rows. */
+  sqlResult?: Record<string, SqlCellValue>[];
+  /** Generated or executed SQL query string. */
+  sqlQuery?: string;
+  /** Structured API error detail when execution or translation fails. */
+  error?: ApiErrorInput;
+  /** Whether the queried DuckDB database uses synthetic seed data rather than authentic Jaeb trial data. */
+  is_synthetic_data?: boolean;
+  /** Whether the SQL was generated via deterministic rule-based templates instead of an LLM. */
+  is_rule_based_sql?: boolean;
+  /** SQL generation mode ('llm', 'rule_based_fallback', 'literal_sql'). */
+  generation_mode?: string;
+  /** Optional human-readable diagnostic reason why LLM inference failed prior to fallback synthesis. */
+  llm_error?: string | null;
+  /** Optional structured error code for the underlying LLM failure. */
+  llm_error_code?: string | null;
+  /** Database provenance classification ('jaeb_authentic', 'synthetic_seed', 'custom'). */
+  data_provenance?: string;
+  /** Optional gold-standard SQL comparison metrics returned by the backend. */
+  gold_comparison?: SqlGoldComparisonPayload | null;
+}
+
+/**
+ * Options for polling an asynchronous chat job via `pollChatJobUntilComplete`.
+ */
+export interface PollChatJobOptions {
+  /** Polling interval in milliseconds (defaults to `800`). */
+  intervalMs?: number;
+  /** Maximum total polling duration in milliseconds (defaults to `120000`). */
+  timeoutMs?: number;
+  /** Optional callback invoked with live `partial_content` while job is `"pending"`. */
+  onProgress?: (partialText: string) => void;
+  /** Optional `AbortSignal` to cancel polling. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Waits for `ms` milliseconds or rejects immediately if `signal` is aborted.
+ * @param {number} ms - Delay duration in milliseconds.
+ * @param {AbortSignal} [signal] - Optional abort signal.
+ * @returns {Promise<void>} Promise resolving after `ms` milliseconds.
+ */
+function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error("Request aborted by user"));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new Error("Request aborted by user"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Submits an asynchronous chat job via `POST /api/chat/jobs`.
+ * @param {string} bodyJson - Serialized JSON request payload.
+ * @param {Record<string, string>} headers - Request headers.
+ * @param {AbortSignal} [signal] - Optional abort signal.
+ * @returns {Promise<PollableChatJobData>} Initial job ticket or immediate response.
+ */
+export async function submitChatJob(
+  bodyJson: string,
+  headers: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<PollableChatJobData> {
+  const response = await fetchWithBackendError("/api/chat/jobs", {
+    method: "POST",
+    headers,
+    body: bodyJson,
+    signal,
+  });
+  return parseResponseJson<PollableChatJobData>(response);
+}
+
+/**
+ * Polls `GET /api/chat/jobs/{jobId}` until `status !== "pending"` and returns the completed record.
+ * @param {string} jobId - Job identifier returned by `submitChatJob` or `POST /api/chat`.
+ * @param {PollChatJobOptions} [options] - Polling interval, timeout, progress callback, and abort signal.
+ * @returns {Promise<PollableChatJobData>} Completed chat response record.
+ */
+export async function pollChatJobUntilComplete(
+  jobId: string,
+  options: PollChatJobOptions = {},
+): Promise<PollableChatJobData> {
+  const intervalMs = options.intervalMs ?? 800;
+  const timeoutMs = options.timeoutMs ?? 120000;
+  const startMs = Date.now();
+  const encodedId = encodeURIComponent(jobId);
+
+  while (true) {
+    if (options.signal?.aborted) {
+      throw new Error("Request aborted by user");
+    }
+    const resp = await fetchWithBackendError(`/api/chat/jobs/${encodedId}`, {
+      method: "GET",
+      signal: options.signal,
+    });
+    const record = await parseResponseJson<PollableChatJobData>(resp);
+    if (record.status === "pending") {
+      const partial = record.partial_content || record.content || "";
+      if (partial && options.onProgress) {
+        options.onProgress(partial);
+      }
+      if (Date.now() - startMs >= timeoutMs) {
+        throw new Error("Chat job polling timed out");
+      }
+      await delayWithAbort(intervalMs, options.signal);
+      continue;
+    }
+    return record;
+  }
 }

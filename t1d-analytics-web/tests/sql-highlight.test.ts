@@ -48,8 +48,36 @@ describe("SQL Highlight & Modal Focus Utilities", () => {
    `),
     ).toBe(false);
     expect(isReadOnlySqlStatement("((SELECT * FROM patients))")).toBe(true);
+    expect(isReadOnlySqlStatement("SELECT patients FROM cohort")).toBe(true);
+    expect(
+      isReadOnlySqlStatement("WITH cte AS (SELECT 1) SELECT * FROM cte"),
+    ).toBe(true);
     expect(isReadOnlySqlStatement("SHOW TABLES;")).toBe(true);
-    expect(isReadOnlySqlStatement("SHOW")).toBe(true);
+    expect(isReadOnlySqlStatement("SHOW ALL TABLES;")).toBe(true);
+    expect(isReadOnlySqlStatement("DESCRIBE patients")).toBe(true);
+    expect(isReadOnlySqlStatement("DESCRIBE TABLE patients")).toBe(true);
+    expect(isReadOnlySqlStatement("SUMMARIZE patients")).toBe(true);
+    expect(isReadOnlySqlStatement("EXPLAIN SELECT * FROM patients")).toBe(true);
+    expect(isReadOnlySqlStatement("PRAGMA version")).toBe(true);
+    expect(isReadOnlySqlStatement("VALUES (1, 2)")).toBe(true);
+    expect(isReadOnlySqlStatement("SHOW")).toBe(false);
+    expect(
+      isReadOnlySqlStatement(
+        "Create a Table 1 comparing Closed-Loop vs Control treatment arms in patients with N, Age (Mean ± SD), Female n (%), Baseline HbA1c (Mean ± SD), TIR, TBR, TAR, and total DKA events.",
+      ),
+    ).toBe(false);
+    expect(
+      isReadOnlySqlStatement("Summarize the baseline HbA1c across arms"),
+    ).toBe(false);
+    expect(
+      isReadOnlySqlStatement(
+        "With Closed-Loop vs Control patients, what is TIR",
+      ),
+    ).toBe(false);
+    expect(isReadOnlySqlStatement("Select patients with DKA events")).toBe(
+      false,
+    );
+    expect(isReadOnlySqlStatement("Values of TIR across arms")).toBe(false);
     expect(isReadOnlySqlStatement("Show me the first 5 patients")).toBe(false);
     expect(isReadOnlySqlStatement("Explain how insulin works")).toBe(false);
     expect(isReadOnlySqlStatement("Describe the study cohort")).toBe(false);

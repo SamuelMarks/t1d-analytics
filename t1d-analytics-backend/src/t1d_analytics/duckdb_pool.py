@@ -7,9 +7,25 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Union,
+    runtime_checkable,
+)
 
 import duckdb
+
+JAEB_ATTACH_CANDIDATES: Tuple[Path, ...] = (
+    Path("/mnt/data/t1d/jaeb/t1d.duckdb"),
+    Path("/mnt/data/t1d/t1d.duckdb"),
+)
 
 PoolSqlValue = Union[str, int, float, bool, None]
 PoolSqlRawInputValue = Union[
@@ -26,6 +42,287 @@ PoolSqlRawInputValue = Union[
     bytes,
     Sequence[PoolSqlValue],
 ]
+
+
+def _resolve_jaeb_attach_path(
+    db_path: Union[str, Path],
+    jaeb_candidates: Optional[Sequence[Path]] = None,
+) -> Optional[Path]:
+    """
+    Resolve an existing `/mnt/data/t1d` Jaeb DuckDB file when it exists on disk and is distinct from `db_path`.
+
+    Args:
+    ----
+        db_path: Primary database path being opened.
+        jaeb_candidates: Optional candidate filesystem paths for the Jaeb DuckDB file.
+
+    Returns:
+    -------
+        Optional[Path]: Resolved Jaeb DuckDB path to attach in read-only mode, or `None`.
+
+    """
+    candidates = (
+        jaeb_candidates if jaeb_candidates is not None else JAEB_ATTACH_CANDIDATES
+    )
+    try:
+        primary_resolved = Path(db_path).resolve()
+    except OSError:
+        primary_resolved = Path(db_path)
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                cand_resolved = candidate.resolve()
+                if cand_resolved != primary_resolved:
+                    return cand_resolved
+        except OSError:
+            continue
+    return None
+
+
+def _attach_jaeb_read_only_if_present(
+    conn: duckdb.DuckDBPyConnection,
+    db_path: Union[str, Path],
+    jaeb_candidates: Optional[Sequence[Path]] = None,
+) -> None:
+    """
+    Attach `/mnt/data/t1d/jaeb/t1d.duckdb` (or `/mnt/data/t1d/t1d.duckdb`) in `READ_ONLY` mode if present and distinct.
+
+    Executes `ATTACH IF NOT EXISTS '<jaeb_path>' AS jaeb (READ_ONLY)` and `SET search_path = 'main,jaeb'`
+    prior to locking `enable_external_access = false`.
+
+    Args:
+    ----
+        conn: Open read-only DuckDB connection.
+        db_path: Primary database path opened on `conn`.
+        jaeb_candidates: Optional candidate filesystem paths for the Jaeb DuckDB file.
+
+    """
+    jaeb_path = _resolve_jaeb_attach_path(db_path, jaeb_candidates=jaeb_candidates)
+    if jaeb_path is None:
+        return
+    escaped_jaeb = str(jaeb_path).replace("'", "''")
+    try:
+        conn.execute(f"ATTACH IF NOT EXISTS '{escaped_jaeb}' AS jaeb (READ_ONLY)")
+        conn.execute("SET search_path = 'main,jaeb'")
+    except (duckdb.Error, OSError, RuntimeError, ValueError):
+        pass
+
+
+@runtime_checkable
+class _DuckDbCursorCapableProtocol(Protocol):
+    """Protocol for DuckDB connections that expose a `.cursor()` factory method."""
+
+    def cursor(self) -> duckdb.DuckDBPyConnection:  # pragma: no cover
+        """Create an isolated DuckDB cursor bound to the underlying connection."""
+
+
+def _noop_interrupt() -> None:
+    """Perform a no-op interrupt when a test double connection does not implement `.interrupt()`."""
+
+
+class ReadOnlyDuckDbCursorProxy:
+    """
+    Read-only DuckDB cursor wrapper delegating query execution to a dedicated cursor and interrupts to the parent connection.
+
+    Ensures concurrent analytical queries execute on isolated cursors without thread-safety contention
+    while `cursor.close()` closes only the cursor rather than the pooled parent connection.
+    """
+
+    def __init__(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        cursor: duckdb.DuckDBPyConnection,
+        has_dedicated_cursor: bool,
+    ) -> None:
+        """
+        Initialize the read-only DuckDB cursor proxy.
+
+        Args:
+        ----
+            conn: Parent pooled read-only DuckDB connection.
+            cursor: Dedicated DuckDB cursor (or `conn` fallback for minimal test doubles).
+            has_dedicated_cursor: Whether `cursor` is a distinct cursor object that should be closed on exit.
+
+        """
+        self._conn = conn
+        self._cursor = cursor
+        self._has_dedicated_cursor = has_dedicated_cursor
+        self._closed = False
+
+    def execute(
+        self,
+        query: str,
+        parameters: Optional[Sequence[PoolSqlRawInputValue]] = None,
+    ) -> duckdb.DuckDBPyConnection:
+        """
+        Execute a read-only SQL query on the underlying DuckDB cursor.
+
+        Args:
+        ----
+            query: SQL statement to execute.
+            parameters: Optional positional bind parameters.
+
+        Returns:
+        -------
+            duckdb.DuckDBPyConnection: Executed DuckDB cursor relation.
+
+        """
+        if parameters is not None:
+            return self._cursor.execute(query, list(parameters))
+        return self._cursor.execute(query)
+
+    def fetchone(
+        self,
+    ) -> Optional[Tuple[PoolSqlRawInputValue, ...]]:
+        """
+        Fetch the next row from the current query result set.
+
+        Returns
+        -------
+            Optional[Tuple[PoolSqlRawInputValue, ...]]: Single result tuple or `None`.
+
+        """
+        return self._cursor.fetchone()
+
+    def fetchall(
+        self,
+    ) -> List[Tuple[PoolSqlRawInputValue, ...]]:
+        """
+        Fetch all remaining rows from the current query result set.
+
+        Returns
+        -------
+            List[Tuple[PoolSqlRawInputValue, ...]]: All result tuples.
+
+        """
+        return self._cursor.fetchall()
+
+    def fetchmany(
+        self,
+        size: int = 1,
+    ) -> List[Tuple[PoolSqlRawInputValue, ...]]:
+        """
+        Fetch up to `size` rows from the current query result set.
+
+        Args:
+        ----
+            size: Maximum number of rows to fetch.
+
+        Returns:
+        -------
+            List[Tuple[PoolSqlRawInputValue, ...]]: Fetched result tuples.
+
+        """
+        return self._cursor.fetchmany(size)
+
+    @property
+    def description(
+        self,
+    ) -> Optional[Sequence[Tuple[str, ...]]]:
+        """
+        Return the cursor column description metadata for the most recent query.
+
+        Returns
+        -------
+            Optional[Sequence[Tuple[str, ...]]]: Sequence of column descriptor tuples or `None`.
+
+        """
+        raw_desc = self._cursor.description
+        if raw_desc is None:
+            return None
+        return [(str(col[0]),) for col in raw_desc]
+
+    def interrupt(self) -> None:
+        """Interrupt an in-flight query on the active DuckDB cursor and parent connection."""
+        cursor_interrupt = getattr(self._cursor, "interrupt", None)
+        if callable(cursor_interrupt):
+            cursor_interrupt()
+        if self._cursor is not self._conn:
+            conn_interrupt = getattr(self._conn, "interrupt", _noop_interrupt)
+            if callable(conn_interrupt):
+                conn_interrupt()
+
+    def close(self) -> None:
+        """Close the dedicated DuckDB cursor idempotently without closing the pooled parent connection."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._has_dedicated_cursor:
+            close_attr = getattr(self._cursor, "close", None)
+            if callable(close_attr):
+                close_attr()
+
+    @property
+    def connection(self) -> duckdb.DuckDBPyConnection:
+        """
+        Return the underlying parent DuckDB connection.
+
+        Returns
+        -------
+            duckdb.DuckDBPyConnection: Parent DuckDB connection.
+
+        """
+        return self._conn
+
+    @property
+    def raw_cursor(self) -> duckdb.DuckDBPyConnection:
+        """
+        Return the underlying raw DuckDB cursor object.
+
+        Returns
+        -------
+            duckdb.DuckDBPyConnection: Underlying DuckDB cursor (or fallback connection).
+
+        """
+        return self._cursor
+
+
+def _create_read_only_cursor_proxy(
+    conn: duckdb.DuckDBPyConnection,
+) -> ReadOnlyDuckDbCursorProxy:
+    """
+    Create a `ReadOnlyDuckDbCursorProxy` from `conn`, using `conn.cursor()` when supported by a real DuckDB connection.
+
+    Falls back cleanly to `conn` for minimal test doubles or mock connections where `.execute()` is stubbed directly on `conn`.
+
+    Args:
+    ----
+        conn: Open read-only DuckDB connection or test double.
+
+    Returns:
+    -------
+        ReadOnlyDuckDbCursorProxy: Initialized read-only cursor proxy.
+
+    """
+    if isinstance(conn, duckdb.DuckDBPyConnection):
+        dedicated_cursor = conn.cursor()
+        dbs = conn.execute(
+            "SELECT database_name FROM duckdb_databases() WHERE database_name = 'jaeb'"
+        ).fetchall()
+        if dbs:
+            dedicated_cursor.execute("SET search_path = 'main,jaeb'")
+        return ReadOnlyDuckDbCursorProxy(
+            conn=conn,
+            cursor=dedicated_cursor,
+            has_dedicated_cursor=True,
+        )
+    if (
+        isinstance(conn, _DuckDbCursorCapableProtocol)
+        and type(conn).__module__ != "unittest.mock"
+    ):
+        cursor_obj = conn.cursor()
+        if cursor_obj is not None and cursor_obj is not conn:
+            return ReadOnlyDuckDbCursorProxy(
+                conn=conn,
+                cursor=cursor_obj,
+                has_dedicated_cursor=True,
+            )
+    return ReadOnlyDuckDbCursorProxy(
+        conn=conn,
+        cursor=conn,
+        has_dedicated_cursor=False,
+    )
 
 
 def _is_duckdb_lock_error(exc: duckdb.IOException) -> bool:
@@ -201,6 +498,7 @@ class ReadOnlyDuckDBPool:
             return conn
 
         new_conn = connect_fn(str(db_path), read_only=True)
+        _attach_jaeb_read_only_if_present(new_conn, db_path)
         if disable_external_access:
             new_conn.execute("SET enable_external_access = false")
         return new_conn
@@ -304,6 +602,7 @@ def connect_duckdb_read_only_pooled(
     if not use_pool:
         conn = connect_fn(str(db_path), read_only=True)
         try:
+            _attach_jaeb_read_only_if_present(conn, db_path)
             if disable_external_access:
                 conn.execute("SET enable_external_access = false")
             yield conn
@@ -324,6 +623,46 @@ def connect_duckdb_read_only_pooled(
         raise
     finally:
         active_pool.release(db_path=db_path, conn=conn, discard=discard)
+
+
+@contextmanager
+def connect_duckdb_read_only_cursor(
+    db_path: Union[str, Path],
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
+    disable_external_access: bool = True,
+    pool: Optional[ReadOnlyDuckDBPool] = None,
+) -> Iterator[ReadOnlyDuckDbCursorProxy]:
+    """
+    Context manager checking out a pooled read-only DuckDB connection and yielding an isolated read-only cursor.
+
+    Checks out a read-only connection via `connect_duckdb_read_only_pooled`, attaches
+    `/mnt/data/t1d/jaeb/t1d.duckdb` (or `/mnt/data/t1d/t1d.duckdb`) in `READ_ONLY` mode
+    if present and distinct from `db_path`, creates a dedicated DuckDB cursor, and closes
+    the cursor deterministically before returning the connection to the read-only pool.
+
+    Args:
+    ----
+        db_path: Path to the DuckDB database file.
+        connect_fn: DuckDB connection factory callable.
+        disable_external_access: Whether to disable external filesystem access on new connections.
+        pool: Optional custom `ReadOnlyDuckDBPool` instance.
+
+    Yields:
+    ------
+        ReadOnlyDuckDbCursorProxy: Isolated read-only DuckDB cursor proxy.
+
+    """
+    with connect_duckdb_read_only_pooled(
+        db_path=db_path,
+        connect_fn=connect_fn,
+        disable_external_access=disable_external_access,
+        pool=pool,
+    ) as conn:
+        cursor_proxy = _create_read_only_cursor_proxy(conn)
+        try:
+            yield cursor_proxy
+        finally:
+            cursor_proxy.close()
 
 
 def close_read_only_duckdb_pool() -> None:
@@ -417,11 +756,17 @@ def execute_duckdb_write_with_retry(
 
 
 __all__ = [
+    "JAEB_ATTACH_CANDIDATES",
     "PoolSqlRawInputValue",
     "PoolSqlValue",
     "ReadOnlyDuckDBPool",
+    "ReadOnlyDuckDbCursorProxy",
+    "_attach_jaeb_read_only_if_present",
+    "_create_read_only_cursor_proxy",
     "_is_duckdb_lock_error",
+    "_resolve_jaeb_attach_path",
     "close_read_only_duckdb_pool",
+    "connect_duckdb_read_only_cursor",
     "connect_duckdb_read_only_pooled",
     "connect_duckdb_with_retry",
     "execute_duckdb_batch_write_with_retry",

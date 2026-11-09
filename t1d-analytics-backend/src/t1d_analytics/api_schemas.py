@@ -1,10 +1,12 @@
 """Pydantic request and response schemas for the T1D Analytics REST API."""
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel
 
 from t1d_analytics.sql_utils import SqlValue
+
+ChatJobStatus = Literal["pending", "complete", "failed"]
 
 JsonScalar = SqlValue
 JsonLevel1 = Union[SqlValue, List[SqlValue]]
@@ -87,6 +89,7 @@ class ChatRequest(BaseModel):
         history: Optional list of prior conversation messages.
         auto_execute: Whether to automatically execute generated SQL for natural language queries.
         gold_sql: Optional gold-standard SQL query to benchmark the target LLM against on the read-only DuckDB cursor.
+        async_poll: Whether to dispatch the chat turn asynchronously and immediately return a pending job ticket.
 
     """
 
@@ -99,12 +102,13 @@ class ChatRequest(BaseModel):
     history: Optional[List[ChatMessageModel]] = None
     auto_execute: bool = True
     gold_sql: Optional[str] = None
+    async_poll: bool = False
 
 
 class ChatResponse(BaseModel):
     """Response model for the chat endpoint."""
 
-    content: str
+    content: str = ""
     sqlResult: Optional[List[Dict[str, SqlValue]]] = None
     sqlQuery: Optional[str] = None
     error: Optional[ApiError] = None
@@ -115,6 +119,9 @@ class ChatResponse(BaseModel):
     llm_error_code: Optional[str] = None
     data_provenance: str = "synthetic_seed"
     gold_comparison: Optional[SqlGoldComparisonModel] = None
+    status: ChatJobStatus = "complete"
+    job_id: Optional[str] = None
+    partial_content: str = ""
 
     def to_dict(
         self,
@@ -156,6 +163,9 @@ class ChatResponse(BaseModel):
                 ],
             ],
         ] = {
+            "status": self.status,
+            "job_id": self.job_id,
+            "partial_content": self.partial_content,
             "content": self.content,
             "sqlResult": self.sqlResult,
             "sqlQuery": self.sqlQuery,
@@ -205,6 +215,7 @@ class NlToSqlEvalRequest(BaseModel):
         provider: Optional explicit LLM provider identifier.
         api_key: Optional client-supplied API key for cloud providers.
         db_path: Optional path to the DuckDB database file.
+        async_poll: Whether to dispatch the evaluation turn asynchronously and immediately return a pending job ticket.
 
     """
 
@@ -214,6 +225,7 @@ class NlToSqlEvalRequest(BaseModel):
     provider: Optional[str] = None
     api_key: Optional[str] = None
     db_path: Optional[str] = None
+    async_poll: bool = False
 
 
 class NlToSqlEvalResponse(BaseModel):
@@ -233,6 +245,9 @@ class NlToSqlEvalResponse(BaseModel):
         is_synthetic_data: Whether the target database contains synthetic seed data.
         data_provenance: Provenance classification of the target DuckDB database.
         error: Optional structured API error if translation or execution failed.
+        status: Async job lifecycle status ('pending', 'complete', 'failed').
+        job_id: Optional job identifier when executed via async polling.
+        partial_content: Live accumulated token buffer while 'pending'.
 
     """
 
@@ -247,6 +262,9 @@ class NlToSqlEvalResponse(BaseModel):
     is_synthetic_data: bool = True
     data_provenance: str = "synthetic_seed"
     error: Optional[ApiError] = None
+    status: ChatJobStatus = "complete"
+    job_id: Optional[str] = None
+    partial_content: str = ""
 
 
 class SessionModel(BaseModel):

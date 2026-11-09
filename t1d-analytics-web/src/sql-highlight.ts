@@ -26,16 +26,47 @@ export function isReadOnlySqlStatement(text: string): boolean {
     cleaned = cleaned.slice(1, -1).trim();
   }
   if (!cleaned) return false;
-  if (
-    /^(?:show\s+(?:me|us|all|the|a|an)|(?:explain|describe)\s+(?:how|why|what|to|the|this|that|me|us|in|briefly|clearly))\b/i.test(
-      cleaned,
-    )
-  ) {
+  if (cleaned.endsWith("?") || cleaned.endsWith(".")) {
     return false;
   }
-  return /^(select|with|pragma|describe|show|explain|summarize|values)\b/i.test(
-    cleaned,
-  );
+  if (/^select\b/i.test(cleaned)) {
+    if (
+      /^select\s+(?:the|a|an|all\s+patients|patients\b|subjects\b|participants\b|which\b|who\b)/i.test(
+        cleaned,
+      ) &&
+      !/\bfrom\b/i.test(cleaned)
+    ) {
+      return false;
+    }
+    return /^select\s+.+/i.test(cleaned);
+  }
+  if (/^with\b/i.test(cleaned)) {
+    return /^with\s+(?:recursive\s+)?["a-zA-Z_]["a-zA-Z0-9_]*\s+as\s*\(/i.test(
+      cleaned,
+    );
+  }
+  if (/^show\b/i.test(cleaned)) {
+    return /^show\s+(?:all\s+)?(?:tables|databases|schemas|variables)\b/i.test(
+      cleaned,
+    );
+  }
+  if (/^(?:describe|summarize)\b/i.test(cleaned)) {
+    return /^(?:describe|summarize)\s+(?:table\s+|select\b|["a-zA-Z_]["a-zA-Z0-9_.]*\s*;?$)/i.test(
+      cleaned,
+    );
+  }
+  if (/^explain\b/i.test(cleaned)) {
+    return /^explain\s+(?:analyze\s+)?(?:select|with|from|show|describe|summarize|values|table)\b/i.test(
+      cleaned,
+    );
+  }
+  if (/^pragma\b/i.test(cleaned)) {
+    return /^pragma\s+[a-zA-Z_]/i.test(cleaned);
+  }
+  if (/^values\b/i.test(cleaned)) {
+    return /^values\s*\(/i.test(cleaned);
+  }
+  return false;
 }
 
 /** Maximum pixel height for the auto-resizing chat composer textarea. */

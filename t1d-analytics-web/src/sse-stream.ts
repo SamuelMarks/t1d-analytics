@@ -9,17 +9,25 @@ import {
   type ApiErrorInput,
   fetchWithBackendError,
   parseResponseJson,
+  pollChatJobUntilComplete,
+  submitChatJob,
 } from "./api-client";
 import { type SqlGoldComparisonPayload } from "./state";
 
 /**
- * Structured payload emitted by the `/api/chat/stream` `done` or `result` event.
+ * Structured payload emitted by the `/api/chat/stream` `done` or `result` event or `/api/chat/jobs/{jobId}` poll.
  */
 export interface SseFinalChatData {
   /** Event discriminator (`token`, `done`, `result`, `sql_generated`, `execution_progress`, `error`). */
   event?: string;
   /** Streamed token delta string when `event === "token"`. */
   token?: string;
+  /** Async job identifier (`chatjob-...`) when dispatched via `/api/chat/jobs` or `async_poll`. */
+  job_id?: string | null;
+  /** Lifecycle status (`"pending"`, `"complete"`, `"failed"`). */
+  status?: "pending" | "complete" | "failed" | string;
+  /** Live accumulated partial text while `"pending"`. */
+  partial_content?: string;
   /** Final assistant text or i18n key. */
   content?: string;
   /** Executed SQL result rows. */
@@ -93,7 +101,11 @@ export async function consumeSseChatStream(
       if (eventData.event === "token" && eventData.token) {
         streamText += eventData.token;
         onToken(streamText);
-      } else if (eventData.event === "result" || eventData.event === "done") {
+      } else if (
+        eventData.event === "result" ||
+        eventData.event === "done" ||
+        eventData.event === "error"
+      ) {
         finalData = eventData;
         streamUsed = true;
       }
@@ -123,7 +135,12 @@ export async function consumeSseChatStream(
 }
 
 /**
- * Options for dispatching a chat request via SSE (`/api/chat/stream`) with batch (`/api/chat`) fallback.
+ * Alias for `consumeSseChatStream` reading `/api/chat/stream` SSE frames and accumulating token deltas.
+ */
+export const consumeChatSseStream = consumeSseChatStream;
+
+/**
+ * Options for dispatching a chat request via SSE (`/api/chat/stream`), async polling (`/api/chat/jobs`), or batch (`/api/chat`).
  */
 export interface DispatchChatRequestOptions {
   /** Serialized JSON request body string. */
@@ -132,27 +149,66 @@ export interface DispatchChatRequestOptions {
   headers: Record<string, string>;
   /** Whether SSE token streaming is enabled. */
   streamingEnabled: boolean;
-  /** Loading indicator DOM node updated with live tokens during SSE streaming. */
+  /** Loading indicator DOM node updated with live tokens during SSE streaming or job polling. */
   loadingDiv: HTMLDivElement;
   /** Callback invoked on each streamed token to scroll the message pane. */
   onTokenScroll: () => void;
-  /** Optional AbortSignal to cancel in-flight SSE or batch requests. */
+  /** Optional AbortSignal to cancel in-flight SSE, polling, or batch requests. */
   signal?: AbortSignal;
+  /** Optional polling interval in milliseconds (defaults to `800`). */
+  pollIntervalMs?: number;
+  /** Optional maximum polling timeout in milliseconds (defaults to `120000`). */
+  pollTimeoutMs?: number;
+  /** Whether to dispatch via `POST /api/chat/jobs` before `/api/chat`. */
+  useAsyncJobEndpoint?: boolean;
 }
 
 /**
  * Outcome returned by `dispatchChatRequest`.
  */
 export interface DispatchChatOutcome {
-  /** Terminal chat response payload from SSE or batch `/api/chat`. */
+  /** Terminal chat response payload from SSE, async polling, or batch `/api/chat`. */
   data: SseFinalChatData;
   /** Accumulated token text fallback when `data.content` is empty. */
   fallbackText: string;
 }
 
 /**
+ * Polls a pending chat job ticket until completion while updating `loadingDiv` with live `partial_content`.
+ * @param {string} jobId - Pending job ID (`chatjob-...`).
+ * @param {DispatchChatRequestOptions} options - Dispatch options with `loadingDiv` and `signal`.
+ * @returns {Promise<DispatchChatOutcome>} Completed chat response outcome.
+ */
+async function resolvePendingChatJob(
+  jobId: string,
+  options: DispatchChatRequestOptions,
+): Promise<DispatchChatOutcome> {
+  let latestPartial = "";
+  let contentEl: HTMLDivElement | null = null;
+  const completed = await pollChatJobUntilComplete(jobId, {
+    intervalMs: options.pollIntervalMs,
+    timeoutMs: options.pollTimeoutMs,
+    signal: options.signal,
+    onProgress: (partialText) => {
+      latestPartial = partialText;
+      if (!contentEl) {
+        contentEl = document.createElement("div");
+        contentEl.className = "message-content streaming-content";
+        options.loadingDiv.replaceChildren(contentEl);
+      }
+      contentEl.textContent = partialText;
+      options.onTokenScroll();
+    },
+  });
+  return {
+    data: completed,
+    fallbackText: completed.partial_content || latestPartial,
+  };
+}
+
+/**
  * Dispatches a chat message via `/api/chat/stream` when `streamingEnabled` is true,
- * automatically falling back to `/api/chat` when streaming is disabled or unsupported.
+ * or via `/api/chat/jobs` / `/api/chat` with automatic async job polling when `status === "pending"`.
  * @param {DispatchChatRequestOptions} options - Dispatch configuration.
  * @returns {Promise<DispatchChatOutcome>} Resolved chat response payload and fallback text.
  */
@@ -195,7 +251,26 @@ export async function dispatchChatRequest(
       if (options.signal?.aborted) {
         throw err;
       }
-      // Fall back to batch /api/chat below
+      // Fall back to async job or batch /api/chat below
+    }
+  }
+
+  if (options.useAsyncJobEndpoint) {
+    try {
+      const ticket = await submitChatJob(
+        options.bodyJson,
+        options.headers,
+        options.signal,
+      );
+      if (ticket.status === "pending" && ticket.job_id) {
+        return resolvePendingChatJob(ticket.job_id, options);
+      }
+      return { data: ticket, fallbackText: ticket.partial_content || "" };
+    } catch (err) {
+      if (options.signal?.aborted) {
+        throw err;
+      }
+      // Fall back to /api/chat if /api/chat/jobs is unmocked or returns 404
     }
   }
 
@@ -206,5 +281,8 @@ export async function dispatchChatRequest(
     signal: options.signal,
   });
   const data = await parseResponseJson<SseFinalChatData>(response);
-  return { data, fallbackText: "" };
+  if (data.status === "pending" && data.job_id) {
+    return resolvePendingChatJob(data.job_id, options);
+  }
+  return { data, fallbackText: data.partial_content || "" };
 }

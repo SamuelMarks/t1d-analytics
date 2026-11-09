@@ -91,6 +91,82 @@ class Table1BenchmarkSpecDict(TypedDict):
     gold_sql: str
 
 
+STARTER_TEMPLATE_SUITE: Tuple[Table1BenchmarkSpecDict, ...] = (
+    {
+        "id": "starter-1",
+        "complexity": "Low",
+        "question": (
+            "Show patient count, average age, and total severe hypoglycemia events grouped by treatment group."
+        ),
+        "gold_sql": (
+            "SELECT \n"
+            "    TxGroup, \n"
+            "    COUNT(*) as total_patients, \n"
+            "    ROUND(AVG(AgeAsOfRandDt), 1) as avg_age,\n"
+            "    SUM(NumSevHypo) as total_severe_hypo_events\n"
+            "FROM tblaptsummary \n"
+            "GROUP BY TxGroup;"
+        ),
+    },
+    {
+        "id": "starter-2",
+        "complexity": "Low",
+        "question": (
+            "Show the frequency of each adverse event type ordered from highest to lowest occurrence count."
+        ),
+        "gold_sql": (
+            "SELECT \n"
+            "    event as adverse_event_type, \n"
+            "    COUNT(*) as occurrence_count \n"
+            "FROM adverseevents \n"
+            "GROUP BY event \n"
+            "ORDER BY occurrence_count DESC;"
+        ),
+    },
+    {
+        "id": "starter-3",
+        "complexity": "Low",
+        "question": (
+            "Count the number of subjects using each insulin pump manufacturer."
+        ),
+        "gold_sql": (
+            "SELECT \n"
+            "    Pt_PumpManuf as pump_manufacturer, \n"
+            "    COUNT(*) as user_count \n"
+            "FROM subjects \n"
+            "WHERE Pt_PumpManuf IS NOT NULL \n"
+            "GROUP BY Pt_PumpManuf \n"
+            "ORDER BY user_count DESC;"
+        ),
+    },
+    {
+        "id": "starter-4",
+        "complexity": "Low-Medium",
+        "question": (
+            "Join subject summaries with HbA1c lab results and show average HbA1c and total tests by treatment group and gender."
+        ),
+        "gold_sql": (
+            "SELECT \n"
+            "    t.TxGroup, \n"
+            "    t.Gender,\n"
+            "    ROUND(AVG(h.HbA1c), 2) as average_hba1c,\n"
+            "    COUNT(h.HbA1c) as total_tests_run\n"
+            "FROM tblaptsummary t\n"
+            "JOIN hba1c h ON t.PtID = h.PtID\n"
+            "WHERE h.HbA1c IS NOT NULL\n"
+            "GROUP BY t.TxGroup, t.Gender\n"
+            "ORDER BY t.TxGroup, average_hba1c DESC;"
+        ),
+    },
+    {
+        "id": "starter-5",
+        "complexity": "Low",
+        "question": "Show me the first 5 patients in the demographics table.",
+        "gold_sql": "SELECT * FROM demographics LIMIT 5;",
+    },
+)
+
+
 TABLE_1_BENCHMARK_SUITE: Tuple[Table1BenchmarkSpecDict, ...] = (
     {
         "id": "table1-overall",
@@ -254,6 +330,11 @@ TABLE_1_BENCHMARK_SUITE: Tuple[Table1BenchmarkSpecDict, ...] = (
 )
 
 
+ALL_GOLD_TEMPLATE_SUITE: Tuple[Table1BenchmarkSpecDict, ...] = (
+    STARTER_TEMPLATE_SUITE + TABLE_1_BENCHMARK_SUITE
+)
+
+
 def get_table_1_benchmark_suite() -> List[Dict[str, str]]:
     """
     Return the 7-tier Academic Table 1 Text-to-SQL benchmark dataset for `evaluate_text_to_sql`.
@@ -271,6 +352,26 @@ def get_table_1_benchmark_suite() -> List[Dict[str, str]]:
             "gold_sql": item["gold_sql"],
         }
         for item in TABLE_1_BENCHMARK_SUITE
+    ]
+
+
+def get_all_gold_templates() -> List[Dict[str, str]]:
+    """
+    Return all 12 Gold Templates (5 Starter Clinical Templates + 7 Academic Table 1 Templates).
+
+    Returns
+    -------
+        List[Dict[str, str]]: List of template dicts with `id`, `complexity`, `question`, and `gold_sql`.
+
+    """
+    return [
+        {
+            "id": item["id"],
+            "complexity": item["complexity"],
+            "question": item["question"],
+            "gold_sql": item["gold_sql"],
+        }
+        for item in ALL_GOLD_TEMPLATE_SUITE
     ]
 
 

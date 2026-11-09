@@ -14,9 +14,9 @@ from typing import (
 )
 
 import duckdb as duckdb
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from t1d_analytics.analytics import get_database_schema, profile_table
@@ -38,6 +38,7 @@ from t1d_analytics.api_dependencies import (
     get_request_locale,
     get_sessions_conn,
     parse_error,
+    resolve_chat_job_manager,
     resolve_session_store,
     resolve_training_job_manager,
     set_default_app_services,
@@ -81,7 +82,7 @@ from t1d_analytics.diagnostics import (
 from t1d_analytics.errors import T1DError
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.ingestion import load_data_to_duckdb
-from t1d_analytics.job_manager import TrainingJobManager
+from t1d_analytics.job_manager import ChatJobManager, TrainingJobManager
 from t1d_analytics.llm_client import (
     CLOUD_MODEL_CATALOG,
     extract_stream_delta,
@@ -323,10 +324,23 @@ def get_training_job_manager() -> TrainingJobManager:
     return resolve_training_job_manager(app)
 
 
+def get_chat_job_manager() -> ChatJobManager:
+    """
+    FastAPI dependency provider returning the active ChatJobManager instance from `app.state`.
+
+    Returns
+    -------
+        ChatJobManager: Active background chat job manager.
+
+    """
+    return resolve_chat_job_manager(app)
+
+
 app.state.services = create_default_app_services(
     target_app=app,
     session_store_getter=get_session_store,
     job_manager_getter=get_training_job_manager,
+    chat_job_manager_getter=get_chat_job_manager,
 )
 set_default_app_services(app.state.services, target_app=app)
 
@@ -336,6 +350,38 @@ app.include_router(chat_router)
 app.include_router(tables_router)
 app.include_router(status_router)
 app.include_router(training_router)
+
+
+_FRONTEND_DIST: Path = (
+    Path(__file__).resolve().parents[3] / "t1d-analytics-web" / "dist"
+)
+
+
+@app.get("/chats/{chat_id}", include_in_schema=False, response_model=None)
+async def serve_chat_spa_entrypoint(chat_id: str) -> Response:
+    """
+    Serve the compiled SPA `index.html` entrypoint for shareable `/chats/{chat_id}` deep-links.
+
+    Args:
+    ----
+        chat_id: Target chat session identifier from the URL path.
+
+    Returns:
+    -------
+        Response: `FileResponse` containing the frontend `index.html`.
+
+    Raises:
+    ------
+        HTTPException: Status 404 when the compiled frontend `index.html` is not present on disk.
+
+    """
+    _ = chat_id
+    env_dist = os.environ.get("T1D_WEB_DIST_DIR")
+    dist_dir = Path(env_dist) if env_dist else _FRONTEND_DIST
+    index_file = dist_dir / "index.html"
+    if index_file.is_file():
+        return FileResponse(str(index_file), media_type="text/html")
+    raise HTTPException(status_code=404, detail="Frontend index.html not found")
 
 
 def create_app() -> FastAPI:
@@ -369,11 +415,7 @@ def _setup_debug(target_app: FastAPI = app) -> None:
     """
     if os.environ.get("DEBUG"):
         env_dist = os.environ.get("T1D_WEB_DIST_DIR")
-        dist_path = (
-            Path(env_dist)
-            if env_dist
-            else Path(__file__).resolve().parents[3] / "t1d-analytics-web" / "dist"
-        )
+        dist_path = Path(env_dist) if env_dist else _FRONTEND_DIST
         if dist_path.exists():
             logger.info(f"DEBUG mode enabled. Serving static frontend from {dist_path}")
             target_app.mount(
@@ -387,9 +429,11 @@ def _setup_debug(target_app: FastAPI = app) -> None:
 
 __all__ = [
     "CLOUD_PROVIDER_MODELS",
+    "_FRONTEND_DIST",
     "ApiError",
     "AppServices",
     "BaseRateLimiter",
+    "ChatJobManager",
     "ChatMessageModel",
     "ChatRequest",
     "ChatResponse",
@@ -439,6 +483,7 @@ __all__ = [
     "generate_sql_from_nl",
     "get_allowed_db_dirs",
     "get_app_services",
+    "get_chat_job_manager",
     "get_cors_origins",
     "get_database_schema",
     "get_health",
@@ -470,6 +515,7 @@ __all__ = [
     "sanitize_spreadsheet_cell",
     "sanitize_sql_value",
     "save_session",
+    "serve_chat_spa_entrypoint",
     "sessions_router",
     "set_default_app_services",
     "sort_ollama_models",

@@ -14,7 +14,7 @@ from t1d_analytics.errors import (
 from t1d_analytics.sql_utils import (
     SqlValue,
     coerce_numeric_aggregates_in_sql,
-    connect_duckdb_read_only_pooled,
+    connect_duckdb_read_only_cursor,
     sanitize_sql_value,
 )
 
@@ -33,7 +33,7 @@ def execute_duckdb_query(
     connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
 ) -> List[Dict[str, SqlValue]]:
     """
-    Execute a read-only SQL query against connection-pooled DuckDB with timeout protection and numeric aggregate coercion.
+    Execute a read-only SQL query against connection-pooled DuckDB via an isolated cursor with timeout protection and numeric aggregate coercion.
 
     Args:
     ----
@@ -64,19 +64,19 @@ def execute_duckdb_query(
             interrupt_fn()
 
     try:
-        with connect_duckdb_read_only_pooled(
+        with connect_duckdb_read_only_cursor(
             db_path=db_path,
             connect_fn=connect_fn,
             disable_external_access=True,
-        ) as conn:
+        ) as cursor:
             with lock:
-                interrupt_fn = conn.interrupt
+                interrupt_fn = cursor.interrupt
             coerced_query = coerce_numeric_aggregates_in_sql(query)
             timer = threading.Timer(timeout_seconds, safe_interrupt)
             timer.daemon = True
             timer.start()
             try:
-                result = conn.execute(coerced_query)
+                result = cursor.execute(coerced_query)
                 columns = (
                     [desc[0] for desc in result.description]
                     if result.description

@@ -88,6 +88,7 @@ SYNTHETIC_SEED_BASE_TABLES = {
 _COMPAT_VIEW_NAMES = {
     "tblaptsummary",
     "adverseevents",
+    "adverse_events",
     "subjects",
     "hba1c",
     "demographics",
@@ -471,12 +472,20 @@ def _inspect_db_tables_and_manifest(
     """
     integrity_ok = True
     total_rows = 0
+    estimated_total = 0
     conn = duckdb.connect(target_path_str, read_only=True)
     try:
         base_table_names: Optional[set[str]] = None
         try:
-            bt_rows = conn.execute("SELECT table_name FROM duckdb_tables()").fetchall()
+            bt_rows = conn.execute(
+                "SELECT table_name, COALESCE(estimated_size, 0) FROM duckdb_tables()"
+            ).fetchall()
             base_table_names = {str(r[0]) for r in bt_rows}
+            estimated_total = sum(
+                int(r[1])
+                for r in bt_rows
+                if not str(r[0]).startswith("_t1d_") and len(r) > 1 and r[1] is not None
+            )
         except (duckdb.Error, RuntimeError, ValueError):
             integrity_ok = False
         raw_tables = conn.execute("SHOW TABLES").fetchall()
@@ -509,6 +518,7 @@ def _inspect_db_tables_and_manifest(
             safe_tbl = tbl_name.replace('"', '""')
             cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
             total_rows += int(cnt_res[0]) if cnt_res else 0
+        total_rows = max(total_rows, estimated_total)
         return tables, total_rows, integrity_ok, provenance
     finally:
         conn.close()

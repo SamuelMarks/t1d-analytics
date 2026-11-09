@@ -1,14 +1,13 @@
 @echo off
+:: # make.bat
 :: ## Overview
 :: Cross-platform build, database provisioning, dependency installation, stack orchestration,
 :: and test runner for Windows (supporting both Docker and Native non-Docker workflows).
-::
 :: ## Usage
 :: make.bat [help|setup|setup_native|run_native|test_native|clean_native|setup_docker|build_docker|run_docker|test_docker|clean_docker|db_docker|seed_docker|setup_db_docker|backend_docker|frontend_docker|setup_backend_docker|setup_frontend_docker|install_base|install_deps|install_db|init_db|seed_db|setup_db|setup_backend|build_backend|dev_backend|serve_backend|setup_frontend|build_frontend|dev_frontend|serve_frontend|build_docs|build|serve|start_stack|stop_stack|status_stack|health_stack|logs_stack|train_ml|infer_ml|test|fmt]
 
 setlocal EnableDelayedExpansion
 set "THIS_FILE=%~f0"
-
 if defined STACK (
     echo "!STACK!" | findstr /I /C:":!THIS_FILE!:" >nul 2>&1
     if not errorlevel 1 (
@@ -17,10 +16,8 @@ if defined STACK (
     )
 )
 set "STACK=%STACK%:!THIS_FILE!:"
-
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-
 if not defined LIBSCRIPT_ROOT_DIR (
     set "d=%SCRIPT_DIR%"
     call :find_root

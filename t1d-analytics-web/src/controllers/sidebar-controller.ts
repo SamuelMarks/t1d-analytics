@@ -59,6 +59,8 @@ export interface SidebarHost {
   state: ChatState;
   /** Textarea element where the user types queries or SQL. */
   chatInput: HTMLTextAreaElement;
+  /** Cancels any active in-flight chat request or polling loop. */
+  cancelActiveRequest?(): void;
   /** Re-renders the entire UI. */
   render(): void;
 }
@@ -116,6 +118,7 @@ export class SidebarController {
    */
   private bindEvents(signal: AbortSignal): void {
     this.newChatBtn.addEventListener("click", () => {
+      this.ui.cancelActiveRequest?.();
       this.ui.state.createChat();
       const hasCloudKeys = Boolean(
         this.ui.state.getApiKey("openai") ||
@@ -208,6 +211,7 @@ export class SidebarController {
     }
 
     const activateChat = (): void => {
+      this.ui.cancelActiveRequest?.();
       this.ui.state.setActiveChat(chat.id);
       this.ui.render();
       this.closeMobileSidebar();

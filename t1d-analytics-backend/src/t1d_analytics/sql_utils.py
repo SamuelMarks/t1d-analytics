@@ -11,11 +11,17 @@ from typing import Optional, Protocol, Sequence, Union, runtime_checkable
 import duckdb
 
 from t1d_analytics.duckdb_pool import (
+    JAEB_ATTACH_CANDIDATES,
     PoolSqlRawInputValue,
     PoolSqlValue,
+    ReadOnlyDuckDbCursorProxy,
     ReadOnlyDuckDBPool,
+    _attach_jaeb_read_only_if_present,
+    _create_read_only_cursor_proxy,
     _is_duckdb_lock_error,
+    _resolve_jaeb_attach_path,
     close_read_only_duckdb_pool,
+    connect_duckdb_read_only_cursor,
     connect_duckdb_read_only_pooled,
     connect_duckdb_with_retry,
     execute_duckdb_batch_write_with_retry,
@@ -478,6 +484,153 @@ _SHOW_NL_INDICATORS = {
     "datasets",
 }
 
+_VALID_SHOW_SECOND_TOKENS = {
+    "tables",
+    "databases",
+    "schemas",
+    "variables",
+    "all",
+    "columns",
+}
+
+_VALID_EXPLAIN_SECOND_TOKENS = {
+    "select",
+    "with",
+    "analyze",
+    "from",
+    "show",
+    "summarize",
+    "describe",
+    "values",
+    "table",
+}
+
+_FROM_NL_DETERMINERS = {
+    "the",
+    "a",
+    "an",
+    "our",
+    "all",
+    "each",
+    "patients",
+    "subjects",
+}
+
+_WITH_CTE_PREFIX_RE = re.compile(
+    r'^with\s+(?:recursive\s+)?[a-zA-Z_"][a-zA-Z0-9_"]*\s+as\s*\(',
+    re.IGNORECASE,
+)
+
+_SELECT_NL_IMPERATIVE_RE = re.compile(
+    r"^select\s+(?:patients|subjects|participants|all\s+patients|the\s+|a\s+|an\s+|which\s+|who\s+)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_disqualified_describe_or_summarize(
+    first_word: str,
+    second_word: str,
+    tokens: Sequence[str],
+) -> bool:
+    """
+    Determine whether a `DESCRIBE` or `SUMMARIZE` candidate is natural-language prose.
+
+    Args:
+    ----
+        first_word: Lowercased first token (`"describe"` or `"summarize"`).
+        second_word: Lowercased second token without trailing semicolons.
+        tokens: Whitespace-split tokens of the input query.
+
+    Returns:
+    -------
+        bool: True if the input is natural language rather than a valid `DESCRIBE` or `SUMMARIZE` query.
+
+    """
+    if len(tokens) == 2 and second_word:
+        return False
+    if first_word == "summarize" and second_word == "select":
+        return False
+    return not (first_word == "describe" and second_word in ("select", "table"))
+
+
+def _is_disqualified_from_clause(
+    unwrapped: str,
+    second_word: str,
+    tokens: Sequence[str],
+) -> bool:
+    """
+    Determine whether a `FROM` candidate is natural-language prose rather than DuckDB `FROM` shorthand.
+
+    Args:
+    ----
+        unwrapped: Comment-stripped input query string.
+        second_word: Lowercased second token without trailing semicolons.
+        tokens: Whitespace-split tokens of `unwrapped`.
+
+    Returns:
+    -------
+        bool: True if the input is natural language rather than a valid DuckDB `FROM` query.
+
+    """
+    if not second_word:
+        return True
+    if second_word in _FROM_NL_DETERMINERS and (
+        len(tokens) > 2 or second_word not in ("patients", "subjects")
+    ):
+        has_trailing_select = any(
+            tok.lower().rstrip(";") == "select" for tok in tokens[2:]
+        )
+        return not (has_trailing_select or ";" in unwrapped)
+    return False
+
+
+def _has_natural_language_sql_disqualifier(
+    unwrapped: str,
+    first_word: str,
+    tokens: Sequence[str],
+) -> bool:
+    """
+    Check if a string starting with a SQL keyword exhibits natural-language English prose patterns.
+
+    Args:
+    ----
+        unwrapped: Comment-stripped input query string.
+        first_word: Lowercased first token without trailing semicolons.
+        tokens: Whitespace-split tokens of `unwrapped`.
+
+    Returns:
+    -------
+        bool: True if the input matches a natural-language disqualifier and cannot be literal SQL.
+
+    """
+    second_word = tokens[1].lower().rstrip(";").strip() if len(tokens) > 1 else ""
+    third_word = tokens[2].lower().rstrip(";").strip() if len(tokens) > 2 else ""
+
+    if first_word == "show":
+        if not second_word or second_word not in _VALID_SHOW_SECOND_TOKENS:
+            return True
+        return second_word == "all" and third_word != "tables"
+
+    if first_word == "table":
+        return len(tokens) != 2 or not second_word or second_word[0].isdigit()
+
+    if first_word == "with":
+        return _WITH_CTE_PREFIX_RE.match(unwrapped) is None
+
+    if first_word in ("summarize", "describe"):
+        return _is_disqualified_describe_or_summarize(first_word, second_word, tokens)
+
+    if first_word == "explain":
+        return not second_word or second_word not in _VALID_EXPLAIN_SECOND_TOKENS
+
+    if first_word == "from":
+        return _is_disqualified_from_clause(unwrapped, second_word, tokens)
+
+    if first_word == "select" and _SELECT_NL_IMPERATIVE_RE.match(unwrapped):
+        return not any(tok.lower().rstrip(";") == "from" for tok in tokens[1:])
+
+    return False
+
 
 @runtime_checkable
 class SqlSyntaxValidatorProtocol(Protocol):
@@ -558,10 +711,47 @@ def is_sql_query(query: str, conn: Optional[SqlSyntaxValidatorProtocol] = None) 
     if first_word not in ALL_SQL_KEYWORDS:
         return False
 
-    if first_word == "show" and len(words) > 1 and words[1] in _SHOW_NL_INDICATORS:
+    if _has_natural_language_sql_disqualifier(unwrapped, first_word, words):
         return False
 
     return _check_sql_syntax_with_conn(unwrapped, first_word, conn)
+
+
+def _clean_extracted_sql_candidate(raw_sql: str) -> str:
+    """
+    Strip leading markdown language markers (`sql`, `duckdb`, `sql ...`, `...`) and DDL preambles when followed by SELECT/WITH.
+
+    Args:
+    ----
+        raw_sql: Candidate SQL block text.
+
+    Returns:
+    -------
+        str: Cleaned SQL query string.
+
+    """
+    cleaned = raw_sql.strip()
+    if cleaned.startswith("-- Synthesized schema-guided fallback SQL"):
+        non_comment_lines = [
+            line
+            for line in cleaned.splitlines()
+            if not line.strip().startswith("-- Synthesized schema-guided fallback SQL")
+        ]
+        cleaned = chr(10).join(non_comment_lines).strip()
+    cleaned = re.sub(
+        r"^(?:(?:sql|duckdb)(?:[ \t]+\.{2,})?|\.{2,})(?:[ \t]*[\r\n]+|[ \t]+)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    ddl_with_select = re.search(
+        r"^(?:--[^\r\n]*[\r\n]+\s*)*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?TABLE\b[\s\S]*?;+\s*(?:--[^\r\n]*[\r\n]+\s*)*)+((?:WITH|SELECT)\b[\s\S]*)$",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if ddl_with_select:
+        return ddl_with_select.group(1).strip()
+    return cleaned
 
 
 def extract_sql_from_response(full_response: SqlValue) -> str:
@@ -586,10 +776,11 @@ def extract_sql_from_response(full_response: SqlValue) -> str:
         re.DOTALL | re.IGNORECASE,
     )
     if blocks:
-        sql_candidate = blocks[-1].strip()
+        sql_candidate = _clean_extracted_sql_candidate(blocks[-1])
         for block in reversed(blocks):
-            clean = block.strip()
-            if clean.lower().startswith(
+            cleaned_block = _clean_extracted_sql_candidate(block)
+            uncommented = strip_sql_comments_and_parens(cleaned_block)
+            if uncommented.lower().startswith(
                 (
                     "select",
                     "with",
@@ -600,15 +791,22 @@ def extract_sql_from_response(full_response: SqlValue) -> str:
                     "explain",
                 )
             ):
-                sql_candidate = clean
+                sql_candidate = cleaned_block
                 break
         return str(sql_candidate)
 
-    sql_query = full_response
-    lines = sql_query.splitlines()
-    if lines and lines[0].strip().lower() in ("sql", "duckdb"):
-        sql_query = chr(10).join(lines[1:])
-    return sql_query.replace("```", "").strip()
+    unclosed_fence = re.search(
+        r"```(?:sql|duckdb)?[ \t]*[\r\n]+([\s\S]+)$",
+        full_response,
+        flags=re.IGNORECASE,
+    )
+    if unclosed_fence:
+        return _clean_extracted_sql_candidate(
+            unclosed_fence.group(1).replace("```", "")
+        )
+
+    sql_query = full_response.replace("```", "").strip()
+    return _clean_extracted_sql_candidate(sql_query)
 
 
 def sanitize_sql_value(val: SqlRawInputValue) -> SqlValue:
@@ -717,16 +915,16 @@ def is_internal_table(table_name: str, exclude_training_tables: bool = True) -> 
 
 
 def extract_table_columns_map(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
     exclude_internal: bool = False,
     exclude_training_tables: bool = False,
 ) -> dict[str, list[tuple[str, str]]]:
     """
-    Extract ordered `(column_name, column_type)` tuples per table from an active DuckDB connection.
+    Extract ordered `(column_name, column_type)` tuples per table from an active DuckDB connection or cursor.
 
     Args:
     ----
-        conn: Active DuckDB connection.
+        conn: Active DuckDB connection or read-only cursor proxy.
         exclude_internal: Whether to exclude `_t1d_` internal tables.
         exclude_training_tables: Whether to also exclude `chat_sessions` and training tables.
 
@@ -735,30 +933,40 @@ def extract_table_columns_map(
         dict[str, list[tuple[str, str]]]: Mapping from table name to list of `(column_name, column_type)` pairs.
 
     """
-    result: dict[str, list[tuple[str, str]]] = {}
-    tables = conn.execute("SHOW TABLES").fetchall()
-    for row in tables:
-        table_name = str(row[0])
-        if (exclude_internal or exclude_training_tables) and is_internal_table(
-            table_name, exclude_training_tables=exclude_training_tables
-        ):
-            continue
-        escaped_name = escape_sql_identifier(table_name)
-        columns = conn.execute(f'DESCRIBE "{escaped_name}"').fetchall()
-        result[table_name] = [(str(col[0]), str(col[1])) for col in columns]
-    return result
+    cursor_proxy = (
+        conn
+        if isinstance(conn, ReadOnlyDuckDbCursorProxy)
+        else _create_read_only_cursor_proxy(conn)
+    )
+    should_close_proxy = not isinstance(conn, ReadOnlyDuckDbCursorProxy)
+    try:
+        result: dict[str, list[tuple[str, str]]] = {}
+        tables = cursor_proxy.execute("SHOW TABLES").fetchall()
+        for row in tables:
+            table_name = str(row[0])
+            if (exclude_internal or exclude_training_tables) and is_internal_table(
+                table_name, exclude_training_tables=exclude_training_tables
+            ):
+                continue
+            escaped_name = escape_sql_identifier(table_name)
+            columns = cursor_proxy.execute(f'DESCRIBE "{escaped_name}"').fetchall()
+            result[table_name] = [(str(col[0]), str(col[1])) for col in columns]
+        return result
+    finally:
+        if should_close_proxy:
+            cursor_proxy.close()
 
 
 def extract_table_schemas(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
     exclude_training_tables: bool = True,
 ) -> dict[str, str]:
     """
-    Extract per-table textual schema descriptions from an active DuckDB connection.
+    Extract per-table textual schema descriptions from an active DuckDB connection or cursor.
 
     Args:
     ----
-        conn: Active DuckDB connection.
+        conn: Active DuckDB connection or read-only cursor proxy.
         exclude_training_tables: Whether to exclude internal chat_sessions and training tables.
 
     Returns:
@@ -941,18 +1149,28 @@ __all__ = [
     "ALL_SQL_KEYWORDS",
     "INTERNAL_TABLE_NAMES",
     "INTERNAL_TABLE_PREFIXES",
+    "JAEB_ATTACH_CANDIDATES",
     "READ_ONLY_SQL_PREFIXES",
+    "_VALID_SHOW_SECOND_TOKENS",
     "PoolSqlRawInputValue",
     "PoolSqlValue",
     "ReadOnlyDuckDBPool",
+    "ReadOnlyDuckDbCursorProxy",
     "SqlRawInputValue",
     "SqlValue",
     "_append_parsed_column_specs",
+    "_attach_jaeb_read_only_if_present",
     "_check_sql_syntax_with_conn",
+    "_create_read_only_cursor_proxy",
     "_get_cached_parser_conn",
+    "_has_natural_language_sql_disqualifier",
+    "_is_disqualified_describe_or_summarize",
+    "_is_disqualified_from_clause",
     "_is_duckdb_lock_error",
+    "_resolve_jaeb_attach_path",
     "close_read_only_duckdb_pool",
     "coerce_numeric_aggregates_in_sql",
+    "connect_duckdb_read_only_cursor",
     "connect_duckdb_read_only_pooled",
     "connect_duckdb_with_retry",
     "escape_sql_identifier",

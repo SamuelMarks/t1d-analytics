@@ -6,6 +6,7 @@
 import i18next from "./i18n";
 import {
   deleteRemoteSession,
+  fetchRemoteSessionById,
   fetchRemoteSessions,
   pushRemoteSession,
   type RemoteSessionPayload,
@@ -17,6 +18,50 @@ import {
 } from "./cohort-sql";
 
 export { type TableRelationship, CLINICAL_RELATIONSHIPS, resolveTableJoin };
+
+/**
+ * Safely decodes a URI component, returning the raw string if percent-encoding is malformed.
+ * @param {string} raw - Raw URI component string.
+ * @returns {string} Decoded URI component string.
+ */
+export function safeDecodeUriComponent(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Extracts a chat session identifier from a browser Location object.
+ * Supports canonical `/chats/${ID}` paths as well as legacy `#${ID}` URL hashes.
+ * @param {Pick<Location, "pathname" | "hash">} loc - Location object containing pathname and hash.
+ * @returns {string | null} Extracted chat ID, or null when on the root route with no chat ID.
+ */
+export function extractChatIdFromLocation(
+  loc: Pick<Location, "pathname" | "hash">,
+): string | null {
+  if (loc.hash && loc.hash.length > 1) {
+    return safeDecodeUriComponent(loc.hash.slice(1));
+  }
+  const pathMatch = /^\/chats\/([^/?#]+)\/?$/.exec(loc.pathname);
+  if (pathMatch) {
+    return safeDecodeUriComponent(pathMatch[1]);
+  }
+  return null;
+}
+
+/**
+ * Builds the canonical URL path for a given chat session ID.
+ * @param {string | null} chatId - Active chat session identifier, or null.
+ * @returns {string} Canonical `/chats/${ID}` path or `/` when no chat is active.
+ */
+export function buildChatPath(chatId: string | null): string {
+  if (chatId) {
+    return `/chats/${encodeURIComponent(chatId)}`;
+  }
+  return "/";
+}
 
 /** Default DuckDB database filename. */
 export const DEFAULT_DB_NAME = "t1d.duckdb";
@@ -731,12 +776,12 @@ export class ChatState {
         this.deletedChatIds,
       );
 
-      const hashId =
-        typeof window !== "undefined" && window.location.hash
-          ? window.location.hash.slice(1)
-          : "";
-      if (hashId && this.chats.some((c) => c.id === hashId)) {
-        this.activeChatId = hashId;
+      const routeChatId =
+        typeof window !== "undefined"
+          ? extractChatIdFromLocation(window.location)
+          : null;
+      if (routeChatId && this.chats.some((c) => c.id === routeChatId)) {
+        this.activeChatId = routeChatId;
       } else if (!this.activeChatId && this.chats.length > 0) {
         this.activeChatId = this.chats[0].id;
       }
@@ -752,6 +797,34 @@ export class ChatState {
       this.loadFromLocalStorage();
       this.saveToLocalStorage();
       return false;
+    }
+  }
+
+  /**
+   * Loads and activates a shared chat session by ID, fetching from `/api/sessions/{sessionId}`
+   * when the session is not yet present in local state.
+   * @param {string} sessionId - Unique chat session identifier from a `/chats/${ID}` URL.
+   * @returns {Promise<Chat | null>} The activated Chat instance, or null if not found.
+   */
+  public async loadSharedSession(sessionId: string): Promise<Chat | null> {
+    const existing = this.chats.find((c) => c.id === sessionId);
+    if (existing) {
+      this.activeChatId = existing.id;
+      this.saveToLocalStorage();
+      return existing;
+    }
+    try {
+      const remote = await fetchRemoteSessionById<Message>(sessionId);
+      if (!remote || !remote.session_id) {
+        return null;
+      }
+      this.deletedChatIds.delete(remote.session_id);
+      mergeRemoteSessionIntoLocalChats(this.chats, remote);
+      this.activeChatId = remote.session_id;
+      this.saveToLocalStorage();
+      return this.chats.find((c) => c.id === remote.session_id)!;
+    } catch {
+      return null;
     }
   }
 

@@ -79,7 +79,13 @@ scp -r ./data/jaeb_raw/ t1d_analytics.duckdb $USER@$TPU_IP:~/t1d-analytics/
 
 ### Automated Stack Provisioning (`provision`)
 
-To provision the cloud infrastructure, mount the persistent data disk (`$DATA_DISK_MOUNT`), install dependencies (`python 3.12`, `nodejs 20.x`, `postgres 18`, `valkey`, `duckdb`, `nginx`, `ollama`, `uv`), initialize the PostgreSQL and DuckDB analytics/session databases via `provision_db`, build the frontend, configure Nginx SPA and API reverse-proxy ingress via `netctl`, and start the `t1d-api` and `t1d-web` services:
+To provision the cloud infrastructure (`Standard_D8s_v7` default), mount the persistent data disk (`$DATA_DISK_MOUNT`, 100 GB managed disk with `--delete-option Detach` / `retain_on_deprovision: true`), install dependencies (`python 3.12`, `nodejs 20.x`, `postgres 18`, `valkey`, `duckdb`, `nginx`, `ollama`, `uv`), initialize the PostgreSQL and DuckDB analytics/session databases via `provision_db`, build the frontend, configure Nginx SPA and API reverse-proxy ingress via `netctl`, and start the `t1d-api` and `t1d-web` services:
+
+> **Persistent `/mnt/data` Layout:** The 100 GB persistent managed disk mounted at `/mnt/data` (configured with `--delete-option Detach`, `delete_on_termination: false`, and `retain_on_deprovision: true`) stores all durable state across VM deprovisioning:
+> - `t1d_analytics.duckdb` (`/mnt/data/t1d_analytics.duckdb`) and `t1d_sessions.duckdb` (`/mnt/data/t1d_sessions.duckdb`)
+> - PostgreSQL relational data (`POSTGRES_DATA_DIR=/mnt/data/postgres`, `PGDATA=/mnt/data/postgres`, `0700` `postgres:postgres`)
+> - Valkey/Redis cache data (`VALKEY_DATA_DIR=/mnt/data/valkey`, `REDIS_DATA_DIR=/mnt/data/valkey`, `0750` `valkey:valkey` / `redis:redis`)
+> - Ollama model weights (`/mnt/data/ollama_models`, `02775` `ollama:ollama`)
 
 **Default Cloud Provider (`$CLOUD_PROVIDER` from `.env`):**
 

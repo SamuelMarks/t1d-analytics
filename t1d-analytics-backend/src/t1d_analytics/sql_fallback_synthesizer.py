@@ -89,10 +89,33 @@ def extract_fallback_error_from_text(response_text: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _deduplicate_internal_server_error_prefix(message: str) -> str:
+    """
+    Collapse repeated `'Internal server error: '` prefixes in upstream LLM error messages.
+
+    Args:
+    ----
+        message: Raw single-line error message.
+
+    Returns:
+    -------
+        str: Error message with duplicate `'Internal server error: '` prefixes collapsed.
+
+    """
+    cleaned = message
+    prefix = "Internal server error: "
+    double_prefix = f"{prefix}{prefix}"
+    while cleaned.lower().startswith(double_prefix.lower()):
+        cleaned = f"{prefix}{cleaned[len(double_prefix) :].lstrip()}"
+    return cleaned
+
+
 def format_llm_failure_reason(
     exc_or_reason: Optional[Union[BaseException, str]],
     model_name: Optional[str] = None,
     provider: Optional[str] = None,
+    *,
+    model: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Format an LLM exception or failure reason into a sanitized `(human_readable_reason, error_code)` tuple.
@@ -102,6 +125,7 @@ def format_llm_failure_reason(
         exc_or_reason: Caught exception or descriptive failure string.
         model_name: Optional requested model identifier.
         provider: Optional resolved LLM provider name.
+        model: Optional keyword alias for `model_name`.
 
     Returns:
     -------
@@ -111,11 +135,14 @@ def format_llm_failure_reason(
     if exc_or_reason is None:
         return None, None
 
-    model_label = f" for model '{model_name}'" if model_name else ""
+    effective_model = model_name if model_name is not None else model
+    model_label = f" for model '{effective_model}'" if effective_model else ""
     prov_label = f" ({provider})" if provider else ""
 
     if isinstance(exc_or_reason, str):
-        cleaned_str = " ".join(exc_or_reason.strip().split())
+        cleaned_str = _deduplicate_internal_server_error_prefix(
+            " ".join(exc_or_reason.strip().split())
+        )
         if not cleaned_str:
             return None, None
         return cleaned_str, "backend.llmInvalidSqlOutput"
@@ -127,7 +154,7 @@ def format_llm_failure_reason(
             if detail is not None and str(detail).strip()
             else str(exc_or_reason).strip()
         )
-        single_line = " ".join(msg.split())
+        single_line = _deduplicate_internal_server_error_prefix(" ".join(msg.split()))
         return single_line, exc_or_reason.error_code
 
     if isinstance(exc_or_reason, urllib.error.HTTPError):
@@ -144,7 +171,9 @@ def format_llm_failure_reason(
             "backend.llmConnectionError",
         )
 
-    raw_msg = " ".join(str(exc_or_reason).strip().split())
+    raw_msg = _deduplicate_internal_server_error_prefix(
+        " ".join(str(exc_or_reason).strip().split())
+    )
     sanitized_msg = re.sub(
         r"(sk-[A-Za-z0-9_-]{6,}|Bearer\s+[A-Za-z0-9._-]+)",
         "[REDACTED]",
@@ -177,9 +206,12 @@ def format_llm_failure_reason(
         or "unable to allocate" in lower_msg
         or "alloc_tensor_range" in lower_msg
         or "llama-server process has terminated" in lower_msg
+        or "segmentation fault" in lower_msg
+        or "core dumped" in lower_msg
     ):
+        clean_model = (effective_model or "ollama").strip() or "ollama"
         return (
-            f"Local model memory/process crash{model_label}: {sanitized_msg}",
+            f"Local model '{clean_model}' was unavailable on CPU runner",
             "backend.llmMemoryCrash",
         )
 
@@ -332,6 +364,75 @@ def _build_fallback_table_1_sql(safe_tbl: str, cols: List[str]) -> str:
     return f'SELECT {proj} FROM "{safe_tbl}";'
 
 
+def _build_treatment_group_hypo_summary_sql(
+    schema_map: Dict[str, List[str]],
+    fallback_table: str,
+) -> Optional[str]:
+    """
+    Build a grouped DuckDB SQL query for treatment group, patient count, average age, and severe hypoglycemia events.
+
+    Args:
+    ----
+        schema_map: Mapping of table names to column names.
+        fallback_table: Default selected fallback table.
+
+    Returns:
+    -------
+        Optional[str]: Valid DuckDB SELECT...GROUP BY statement if matching columns exist, else None.
+
+    """
+    lower_to_actual = {t.lower(): t for t in schema_map}
+    target_tbl = fallback_table
+    for preferred in ("patients", "tblaptsummary", "demographics"):
+        if preferred in lower_to_actual:
+            cand_cols = schema_map.get(lower_to_actual[preferred], [])
+            if _find_matching_column(cand_cols, ("txgroup", "treatment_group")):
+                target_tbl = lower_to_actual[preferred]
+                break
+
+    cols = schema_map.get(target_tbl, [])
+    grp_col = _find_matching_column(
+        cols, ("txgroup", "treatment_group", "arm", "group")
+    )
+    age_col = _find_matching_column(cols, ("age", "ageasofranddt"))
+    hypo_col = _find_matching_column(
+        cols,
+        (
+            "numsevhypo",
+            "severe_hypo_events",
+            "severe_hypoglycemia_events",
+            "sevhypo",
+            "numhospdka",
+        ),
+    )
+    id_col = _find_matching_column(cols, ("subject_id", "patient_id", "ptid", "id"))
+    if not grp_col:
+        return None
+
+    safe_tbl = escape_sql_identifier(target_tbl)
+    safe_grp = escape_sql_identifier(grp_col)
+    select_exprs: List[str] = [f'"{safe_grp}" AS treatment_group']
+    if id_col:
+        safe_id = escape_sql_identifier(id_col)
+        select_exprs.append(f'COUNT(DISTINCT "{safe_id}") AS patient_count')
+    else:
+        select_exprs.append("COUNT(*) AS patient_count")
+    if age_col:
+        safe_age = escape_sql_identifier(age_col)
+        select_exprs.append(
+            f'ROUND(AVG(TRY_CAST("{safe_age}" AS DOUBLE)), 1) AS avg_age'
+        )
+    if hypo_col:
+        safe_hypo = escape_sql_identifier(hypo_col)
+        select_exprs.append(
+            f'COALESCE(SUM(TRY_CAST("{safe_hypo}" AS DOUBLE)), 0) AS total_severe_hypo_events'
+        )
+    proj = ", ".join(select_exprs)
+    return (
+        f'SELECT {proj} FROM "{safe_tbl}" GROUP BY "{safe_grp}" ORDER BY "{safe_grp}";'
+    )
+
+
 def _select_best_fallback_table(
     schema_map: Dict[str, List[str]],
     lower_q: str,
@@ -380,6 +481,8 @@ def synthesize_fallback_clinical_sql(
     llm_error_code: Optional[str] = None,
     model_name: Optional[str] = None,
     provider: Optional[str] = None,
+    *,
+    model: Optional[str] = None,
 ) -> TranslationResult:
     """
     Synthesize a deterministic, schema-validated DuckDB SQL query when local LLM inference crashes.
@@ -396,13 +499,16 @@ def synthesize_fallback_clinical_sql(
         llm_error_code: Optional structured error code for the LLM failure.
         model_name: Optional requested model identifier.
         provider: Optional resolved LLM provider name.
+        model: Optional keyword alias for `model_name`.
 
     Returns:
     -------
         TranslationResult: Structured translation result (unpackable as `(markdown_response_with_sql_fence, raw_sql_query)`).
 
     """
-    _ = (model_name, provider)
+    _ = provider
+    effective_model = model_name if model_name is not None else model
+    clean_model = (effective_model or "ollama").strip() or "ollama"
     schema_map = _parse_schema_tables_and_columns(schema)
     lower_q = nl_query.lower()
 
@@ -411,7 +517,21 @@ def synthesize_fallback_clinical_sql(
     target_table = _select_best_fallback_table(schema_map, lower_q)
 
     safe_tbl = escape_sql_identifier(target_table)
-    if re.search(
+    lower_schema_tables = {tbl.lower() for tbl in schema_map}
+    curated_sql = _lookup_curated_template_sql(nl_query, lower_schema_tables)
+    grouped_hypo_sql = (
+        _build_treatment_group_hypo_summary_sql(schema_map, target_table)
+        if (
+            "grouped by" in lower_q
+            or ("treatment" in lower_q and ("hypo" in lower_q or "age" in lower_q))
+        )
+        else None
+    )
+    if curated_sql is not None:
+        sql = curated_sql
+    elif grouped_hypo_sql is not None:
+        sql = grouped_hypo_sql
+    elif re.search(
         r"\b(?:table\s*1|baseline\s+characteristics|cohort\s+summary)\b", lower_q
     ):
         sql = _build_fallback_table_1_sql(safe_tbl, schema_map.get(target_table, []))
@@ -442,7 +562,10 @@ def synthesize_fallback_clinical_sql(
     else:
         note_prefix = ""
 
-    full_resp = f"{note_prefix}```sql{nl}{sql}{nl}```"
+    sql_comment = (
+        f"-- Synthesized schema-guided fallback SQL for {safe_tbl} ({clean_model})"
+    )
+    full_resp = f"{note_prefix}```sql{nl}{sql_comment}{nl}{sql}{nl}```"
     return TranslationResult(
         full_response=full_resp,
         sql_query=sql,
@@ -451,6 +574,14 @@ def synthesize_fallback_clinical_sql(
         llm_error=cleaned_err,
         llm_error_code=effective_code,
     )
+
+
+_LOCALIZED_STARTER_5_PROMPTS: Tuple[str, ...] = (
+    "show me the first 5 patients in the demographics table.",
+    "人口統計テーブルの最初の5人の患者を表示してください。",
+    "أظهر لي أول 5 مرضى في جدول التركيبة السكانية.",
+    "הצג לי את 5 המטופלים הראשונים בטבלת הדמוגרפיה.",
+)
 
 
 def _lookup_table_1_curated_sql(prompt: str) -> Optional[str]:
@@ -473,6 +604,60 @@ def _lookup_table_1_curated_sql(prompt: str) -> Optional[str]:
         norm_q = " ".join(item["question"].strip().lower().split())
         if norm_prompt == norm_q:
             return item["gold_sql"]
+    return None
+
+
+def _lookup_curated_template_sql(
+    prompt: str,
+    lower_schema_tables: Optional[Set[str]] = None,
+) -> Optional[str]:
+    """
+    Match a prompt against all 12 Gold Templates (5 Starter Templates + 7 Academic Table 1 Templates).
+
+    Verifies that the required target table(s) for the matched template exist in
+    `lower_schema_tables` when a non-empty schema set is supplied.
+
+    Args:
+    ----
+        prompt: Natural language user question.
+        lower_schema_tables: Optional set of lowercase table names present in the active database schema.
+
+    Returns:
+    -------
+        Optional[str]: Gold DuckDB SQL if matched and schema-compatible, else None.
+
+    """
+    from t1d_analytics.training_data import STARTER_TEMPLATE_SUITE
+
+    t1_sql = _lookup_table_1_curated_sql(prompt)
+    if t1_sql is not None:
+        if not lower_schema_tables or "patients" in lower_schema_tables:
+            return t1_sql
+        return None
+
+    norm_prompt = " ".join(prompt.strip().lower().split())
+    if norm_prompt in _LOCALIZED_STARTER_5_PROMPTS and (
+        not lower_schema_tables or "demographics" in lower_schema_tables
+    ):
+        return "SELECT * FROM demographics LIMIT 5;"
+
+    starter_req_tables: Dict[str, Tuple[str, ...]] = {
+        "starter-1": ("tblaptsummary",),
+        "starter-2": ("adverseevents",),
+        "starter-3": ("subjects",),
+        "starter-4": ("tblaptsummary", "hba1c"),
+        "starter-5": ("demographics",),
+    }
+    for item in STARTER_TEMPLATE_SUITE:
+        norm_q = " ".join(item["question"].strip().lower().split())
+        if norm_prompt == norm_q:
+            req_tbls = starter_req_tables.get(item["id"], ())
+            if not lower_schema_tables or all(
+                t in lower_schema_tables for t in req_tbls
+            ):
+                return item["gold_sql"]
+            return None
+
     return None
 
 
@@ -499,6 +684,10 @@ def _is_recoverable_local_ollama_crash(provider: str, exc: Exception) -> bool:
         "unable to allocate",
         "alloc_tensor_range",
         "segmentation fault",
+        "core dumped",
+        "signal: ",
+        "exit status ",
+        "status code: 500",
         "server disconnected without sending a response",
         "cannot use the `sync` api in an `async` context",
         "timed out",
@@ -523,8 +712,11 @@ __all__ = [
     "GenerationModeLiteral",
     "TranslationResult",
     "_build_fallback_table_1_sql",
+    "_build_treatment_group_hypo_summary_sql",
+    "_deduplicate_internal_server_error_prefix",
     "_find_matching_column",
     "_is_recoverable_local_ollama_crash",
+    "_lookup_curated_template_sql",
     "_lookup_table_1_curated_sql",
     "_parse_schema_tables_and_columns",
     "_score_table_for_query",

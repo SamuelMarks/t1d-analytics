@@ -246,6 +246,20 @@ def test_list_databases_endpoint(
     resp5 = client.get("/api/databases")
     assert resp5.status_code == 200
 
+    from t1d_analytics import db_security
+
+    remote_cand_db = tmp_path / "mnt_data_t1d_analytics.duckdb"
+    remote_cand_db.write_text("remote-db")
+    monkeypatch.setattr(
+        db_security, "REMOTE_DISCOVERY_DB_CANDIDATES", (remote_cand_db,)
+    )
+    resp6 = client.get("/api/databases")
+    assert resp6.status_code == 200
+    assert any(
+        Path(d["path"]).resolve() == remote_cand_db.resolve()
+        for d in resp6.json()["databases"]
+    )
+
 
 def test_validate_db_path_null_byte() -> None:
     """Test validate_db_path rejects null byte injection."""
@@ -349,6 +363,21 @@ def test_validate_db_path_traversal(
     monkeypatch.setenv("T1D_JAEB_DIR", str(tmp_path / "missing_jaeb_ext"))
     assert (tmp_path / "missing_jaeb_ext").resolve() not in get_allowed_db_roots()
     monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
+
+    # REMOTE_MNT_DATA_ROOT when present on disk and T1D_DB_PATH inside an already-allowed dir
+    mnt_sim = tmp_path / "mnt_data_root"
+    mnt_sim.mkdir()
+    monkeypatch.setattr(db_security, "REMOTE_MNT_DATA_ROOT", mnt_sim)
+    monkeypatch.setenv("T1D_DB_PATH", str(Path.cwd() / "in_cwd.duckdb"))
+    roots_with_mnt = get_allowed_db_roots()
+    assert mnt_sim.resolve() in roots_with_mnt
+    assert Path("/mnt/data/t1d").resolve() in roots_with_mnt
+    assert Path("/mnt/data/t1d/jaeb").resolve() in roots_with_mnt
+    monkeypatch.setattr(db_security, "REMOTE_MNT_DATA_ROOT", mnt_sim)
+    monkeypatch.setattr(db_security, "REMOTE_T1D_DB_SEARCH_ROOT", mnt_sim)
+    assert mnt_sim.resolve() in get_allowed_db_roots()
+    monkeypatch.setattr(db_security, "REMOTE_T1D_DB_SEARCH_ROOT", Path("/mnt/data/t1d"))
+    monkeypatch.delenv("T1D_DB_PATH", raising=False)
 
     # T1D_DB_SEARCH_DIR with multiple colon-separated paths (remote + local host) and duplicates
     remote_sim = tmp_path / "mnt_data_t1d"
@@ -483,6 +512,26 @@ def test_validate_db_path_env_var(
     alt_ext_db = jaeb_sub / "cohort_jaeb.duckdb"
     alt_ext_db.write_text("dummy_alt")
     assert validate_db_path("t1d.duckdb") == str(alt_ext_db.resolve())
+
+    # Bare filename resolution against T1D_DB_PATH and T1D_DB_SEARCH_DIR
+    assert validate_db_path("cohort_jaeb.duckdb") == str(alt_ext_db.resolve())
+    mnt_sub = tmp_path / "mnt_data"
+    mnt_sub.mkdir(exist_ok=True)
+    mnt_db = mnt_sub / "t1d_analytics.duckdb"
+    mnt_db.write_text("dummy_mnt")
+    monkeypatch.setenv("T1D_DB_PATH", str(mnt_db))
+    assert validate_db_path("t1d_analytics.duckdb") == str(mnt_db.resolve())
+    assert validate_db_path("unmatched_bare.duckdb") == str(
+        (tmp_path / "unmatched_bare.duckdb").resolve()
+    )
+
+    # When default_db > 50 MB, discover_workspace_databases filters out <10 MB synthetic data/t1d.duckdb
+    with open(mnt_db, "wb") as f_sparse:
+        f_sparse.truncate(55_000_000)
+    disc_large = db_security.discover_workspace_databases()
+    assert not any(d.path.endswith("data/t1d.duckdb") for d in disc_large.databases)
+    mnt_db.unlink()
+    monkeypatch.delenv("T1D_DB_PATH", raising=False)
 
     # If no .duckdb files exist in search_root or data/t1d.duckdb, returns raw t1d.duckdb
     alt_ext_db.unlink()
@@ -627,6 +676,30 @@ def test_debug_static_mount(tmp_path: Path) -> None:
         mock_warn.assert_called_once()
 
 
+def test_serve_chat_spa_entrypoint_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test GET /chats/{chat_id} SPA fallback route when dist/index.html exists and when missing."""
+    dist_with_index = tmp_path / "dist_ok"
+    dist_with_index.mkdir()
+    index_html = dist_with_index / "index.html"
+    index_html.write_text("<!doctype html><html><body>t1d-spa</body></html>")
+
+    monkeypatch.setenv("T1D_WEB_DIST_DIR", str(dist_with_index))
+    resp_ok = client.get("/chats/chat-1793964989501-1-476")
+    assert resp_ok.status_code == 200
+    assert "text/html" in resp_ok.headers["content-type"]
+    assert "t1d-spa" in resp_ok.text
+
+    empty_dist = tmp_path / "dist_empty"
+    empty_dist.mkdir()
+    monkeypatch.delenv("T1D_WEB_DIST_DIR", raising=False)
+    monkeypatch.setattr("t1d_analytics.api._FRONTEND_DIST", empty_dist)
+    resp_404 = client.get("/chats/chat-1793964989501-1-476")
+    assert resp_404.status_code == 404
+    assert resp_404.json()["detail"] == "Frontend index.html not found"
+
+
 def test_lifespan_auto_ingestion_branches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -715,3 +788,152 @@ def test_providers_status_and_models_with_any_llm_configured(
         assert "groq/custom-llama" in override_names
     finally:
         app.dependency_overrides.pop(get_app_services, None)
+
+
+def test_libscript_manifest_caching_and_build_hooks() -> None:
+    """
+    Verify libscript.json caching and build hooks for backend and frontend.
+
+    Ensures:
+    - install-t1d-backend-deps reads .venv/.libscript_lock_hash before invoking
+      libscript_python_venv, hashes uv.lock, pyproject.toml, and requirements.txt,
+      and supports pip install -r requirements.txt.
+    - install-t1d-frontend-deps hashes both package.json and package-lock.json
+      and writes both node_modules/.libscript_pkg_hash and .libscript_deps.sha256.
+    - build-vite-web, frontends.web, and infrastructure.frontends.web compute
+      _src_hash using the canonical 16-file + src/public loop and stamp both
+      dist/.libscript_src_hash and .libscript_build.sha256.
+    """
+
+    class HookSpec(typing.TypedDict, total=False):
+        """Schema for a lifecycle hook entry in libscript.json."""
+
+        name: str
+        command: str
+        cmd_windows: str
+        working_dir: str
+
+    class HooksGroup(typing.TypedDict, total=False):
+        """Schema for the hooks section in libscript.json."""
+
+        install: list[HookSpec]
+        build: list[HookSpec]
+        post_start: list[HookSpec]
+
+    class FrontendSpec(typing.TypedDict):
+        """Schema for a frontend target in libscript.json."""
+
+        framework: str
+        working_dir: str
+        source_dir: str
+        output_dir: str
+        artifact_check: str
+        build_command: str
+
+    class InfrastructureSpec(typing.TypedDict):
+        """Schema for the infrastructure section in libscript.json."""
+
+        frontends: dict[str, FrontendSpec]
+        hooks: HooksGroup
+        service_overrides: dict[str, dict[str, str]]
+
+    class ManifestSpec(typing.TypedDict):
+        """Schema for relevant sections of libscript.json."""
+
+        hooks: HooksGroup
+        frontends: dict[str, FrontendSpec]
+        infrastructure: InfrastructureSpec
+        service_overrides: dict[str, dict[str, str]]
+
+    manifest_path = Path(__file__).resolve().parent.parent.parent / "libscript.json"
+    manifest: ManifestSpec = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    for ollama_ovr in (
+        manifest["service_overrides"]["ollama"],
+        manifest["infrastructure"]["service_overrides"]["ollama"],
+    ):
+        assert ollama_ovr["OLLAMA_LLM_LIBRARY"] == "cpu_avx2"
+        assert ollama_ovr["OLLAMA_NUM_GPU"] == "0"
+        assert ollama_ovr["OLLAMA_FLASH_ATTENTION"] == "0"
+        assert ollama_ovr["OLLAMA_KV_CACHE_TYPE"] == "f16"
+        assert ollama_ovr["OLLAMA_CONTEXT_LENGTH"] == "2048"
+        assert ollama_ovr["OLLAMA_MAX_QUEUE"] == "16"
+
+    for post_hooks in (
+        manifest["hooks"]["post_start"],
+        manifest["infrastructure"]["hooks"]["post_start"],
+    ):
+        smoke_hook = next(
+            h for h in post_hooks if h["name"] == "verify-ollama-gemma-2b"
+        )
+        assert "http://127.0.0.1:11434/api/generate" in smoke_hook["command"]
+        assert "ollama pull gemma:2b" in smoke_hook["command"]
+        assert "if id ollama >/dev/null 2>&1; then" in smoke_hook["command"]
+        assert "${SERVICE_USER:-$(id -un)}" in smoke_hook["command"]
+        assert "http://127.0.0.1:11434/api/generate" in smoke_hook["cmd_windows"]
+
+    install_hooks = manifest["hooks"]["install"]
+    backend_hook = next(
+        h for h in install_hooks if h["name"] == "install-t1d-backend-deps"
+    )
+    backend_cmd = backend_hook["command"]
+    backend_win = backend_hook["cmd_windows"]
+
+    assert "_lock_hash=$(cksum uv.lock pyproject.toml requirements.txt" in backend_cmd
+    assert "_old_lock_hash=$(cat .venv/.libscript_lock_hash" in backend_cmd
+    assert backend_cmd.index("_old_lock_hash=") < backend_cmd.index(
+        "libscript_python_venv"
+    )
+    assert "pip install -r requirements.txt" in backend_cmd
+    assert ".venv\\.libscript_lock_hash" in backend_win
+    assert backend_win.index(".venv\\.libscript_lock_hash") < backend_win.index(
+        ":libscript_python_venv"
+    )
+    assert "pip.exe install -r requirements.txt" in backend_win
+
+    frontend_hook = next(
+        h for h in install_hooks if h["name"] == "install-t1d-frontend-deps"
+    )
+    frontend_cmd = frontend_hook["command"]
+    frontend_win = frontend_hook["cmd_windows"]
+
+    assert "_pkg_hash=$(cksum package.json package-lock.json" in frontend_cmd
+    assert "node_modules/.libscript_pkg_hash" in frontend_cmd
+    assert ".libscript_deps.sha256" in frontend_cmd
+    assert "npm i --no-audit --no-fund" in frontend_cmd
+    assert "package.json package-lock.json" in frontend_win
+    assert "node_modules\\.libscript_pkg_hash" in frontend_win
+    assert ".libscript_deps.sha256" in frontend_win
+    assert "npm i --no-audit --no-fund" in frontend_win
+
+    canonical_16_files = (
+        "for _cff_f in package.json package-lock.json pnpm-lock.yaml yarn.lock "
+        "angular.json vite.config.ts vite.config.js vite.config.mts tsconfig.json "
+        "tsconfig.app.json tsconfig.spec.json index.html postcss.config.js "
+        "postcss.config.cjs tailwind.config.js tailwind.config.ts .env .env.production"
+    )
+    canonical_dir_loop = "for _cff_sub in src public; do"
+
+    build_hook = manifest["hooks"]["build"][0]
+    assert build_hook["name"] == "build-vite-web"
+    build_cmd = build_hook["command"]
+    build_win = build_hook["cmd_windows"]
+
+    assert canonical_16_files in build_cmd
+    assert canonical_dir_loop in build_cmd
+    assert "dist/.libscript_src_hash" in build_cmd
+    assert ".libscript_build.sha256" in build_cmd
+    assert ".libscript_build.sha256" in build_win
+    assert "dist\\.libscript_src_hash" in build_win
+
+    for fe_cfg in (
+        manifest["frontends"]["web"],
+        manifest["infrastructure"]["frontends"]["web"],
+    ):
+        assert fe_cfg["output_dir"] == "dist"
+        assert fe_cfg["artifact_check"] == "dist/index.html"
+        fe_build_cmd = fe_cfg["build_command"]
+        assert canonical_16_files in fe_build_cmd
+        assert canonical_dir_loop in fe_build_cmd
+        assert "dist/.libscript_src_hash" in fe_build_cmd
+        assert ".libscript_build.sha256" in fe_build_cmd

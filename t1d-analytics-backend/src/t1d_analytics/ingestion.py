@@ -699,6 +699,19 @@ def _ingest_single_tabular_file(
     base_tbl = _resolve_target_table_stem(
         data_file, data_dir, prefix_subdirs, stem_counts
     )
+    if len(existing_tables) > 25 and base_tbl in {
+        "patients",
+        "cgm_readings",
+        "hba1c_labs",
+        "dka_adverse_events",
+    }:
+        skip_syn_msg = _(
+            "Table {} already exists, skipping...",
+            base_tbl,
+        )
+        logger.info(skip_syn_msg)
+        report_fn(skip_syn_msg)
+        return
 
     try:
         current_hash = compute_file_hash(data_file)

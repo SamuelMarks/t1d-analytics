@@ -4,6 +4,7 @@ import datetime
 import decimal
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 import pytest
@@ -101,8 +102,34 @@ def test_is_sql_query_branches() -> None:
     assert is_sql_query("()") is False
     assert is_sql_query("What is the average glucose?") is False
     assert is_sql_query("Show me the patients") is False
+    assert is_sql_query("SHOW") is False
+    assert is_sql_query("SHOW ALL") is False
+    assert is_sql_query("SHOW ALL TABLES") is True
     assert is_sql_query("SHOW TABLES") is True
+    assert is_sql_query("TABLE patients;") is True
+    assert is_sql_query("Table 1 comparing Closed-Loop vs Control") is False
+    assert is_sql_query("TABLE") is False
+    assert is_sql_query("WITH cte AS (SELECT 1) SELECT * FROM cte") is True
+    assert is_sql_query("With Closed-Loop vs Control patients, what is TIR?") is False
+    assert is_sql_query("SUMMARIZE patients;") is True
+    assert is_sql_query("SUMMARIZE SELECT * FROM patients;") is True
+    assert is_sql_query("Summarize baseline HbA1c by arm") is False
+    assert is_sql_query("DESCRIBE patients;") is True
+    assert is_sql_query("DESCRIBE TABLE patients;") is True
+    assert is_sql_query("DESCRIBE SELECT * FROM patients;") is True
+    assert is_sql_query("Describe the cohort demographics") is False
+    assert is_sql_query("EXPLAIN SELECT 1") is True
+    assert is_sql_query("Explain the relationship between HbA1c and TIR") is False
+    assert is_sql_query("FROM") is False
+    assert is_sql_query("FROM patients") is True
+    assert is_sql_query("FROM patients in cohort") is False
+    assert is_sql_query("From the patients in our cohort") is False
+    assert is_sql_query("FROM patients SELECT *") is True
+    assert is_sql_query("FROM patients;") is True
     assert is_sql_query("SELECT 1") is True
+    assert is_sql_query("SELECT * FROM patients") is True
+    assert is_sql_query("Select patients who had DKA events.") is False
+    assert is_sql_query("SELECT patients FROM cohort") is True
     assert is_sql_query("SELECT FROM WHERE INVALID") is False
 
     real_conn = duckdb.connect(":memory:")
@@ -459,3 +486,160 @@ def test_coerce_numeric_aggregates_masks_literals_and_comments() -> None:
     ddl_text = 'CREATE TABLE "patients" (id INT, PRIMARY KEY (id), flag)'
     ddl_map = parse_schema_text_to_map(ddl_text)
     assert ddl_map == {"patients": ["id", "flag"]}
+
+
+def test_read_only_duckdb_cursor_and_jaeb_attachment(tmp_path: Path) -> None:
+    """Test ReadOnlyDuckDbCursorProxy, connect_duckdb_read_only_cursor, and read-only Jaeb DuckDB attachment."""
+    from t1d_analytics.analytics import get_database_schema
+    from t1d_analytics.duckdb_pool import (
+        ReadOnlyDuckDbCursorProxy,
+        ReadOnlyDuckDBPool,
+        _attach_jaeb_read_only_if_present,
+        _create_read_only_cursor_proxy,
+        _noop_interrupt,
+        _resolve_jaeb_attach_path,
+        connect_duckdb_read_only_cursor,
+    )
+    from t1d_analytics.sql_executor import execute_duckdb_query
+    from t1d_analytics.sql_utils import extract_table_columns_map, extract_table_schemas
+
+    _noop_interrupt()
+
+    primary_db = tmp_path / "t1d_analytics.duckdb"
+    jaeb_dir = tmp_path / "mnt_data_t1d" / "jaeb"
+    jaeb_dir.mkdir(parents=True)
+    jaeb_db = jaeb_dir / "t1d.duckdb"
+
+    w_primary = duckdb.connect(str(primary_db))
+    w_primary.execute("CREATE TABLE main_patients (id INT, label VARCHAR)")
+    w_primary.execute("INSERT INTO main_patients VALUES (1, 'primary')")
+    w_primary.close()
+
+    w_jaeb = duckdb.connect(str(jaeb_db))
+    w_jaeb.execute("CREATE TABLE jaeb_cohort (pt_id INT, hba1c DOUBLE)")
+    w_jaeb.execute("INSERT INTO jaeb_cohort VALUES (101, 6.8), (102, 7.4)")
+    w_jaeb.close()
+
+    # _resolve_jaeb_attach_path returns resolved jaeb_db when distinct, None when same or missing
+    assert (
+        _resolve_jaeb_attach_path(primary_db, jaeb_candidates=(jaeb_db,))
+        == jaeb_db.resolve()
+    )
+    assert _resolve_jaeb_attach_path(jaeb_db, jaeb_candidates=(jaeb_db,)) is None
+    assert (
+        _resolve_jaeb_attach_path(
+            primary_db, jaeb_candidates=(tmp_path / "nonexistent.duckdb",)
+        )
+        is None
+    )
+
+    with (
+        patch.object(Path, "resolve", side_effect=OSError("resolve failed")),
+        patch.object(Path, "is_file", side_effect=OSError("is_file failed")),
+    ):
+        assert _resolve_jaeb_attach_path(primary_db, jaeb_candidates=(jaeb_db,)) is None
+
+    # Test _attach_jaeb_read_only_if_present attaches jaeb in READ_ONLY mode and sets search_path
+    with patch("t1d_analytics.duckdb_pool.JAEB_ATTACH_CANDIDATES", (jaeb_db,)):
+        pool = ReadOnlyDuckDBPool(max_pool_size_per_db=2)
+        with connect_duckdb_read_only_cursor(primary_db, pool=pool) as cur:
+            assert isinstance(cur, ReadOnlyDuckDbCursorProxy)
+            assert isinstance(cur.connection, duckdb.DuckDBPyConnection)
+            assert isinstance(cur.raw_cursor, duckdb.DuckDBPyConnection)
+            assert cur.raw_cursor is not cur.connection
+
+            # Query attached jaeb table via search_path ('main,jaeb') and parameterized query
+            res = cur.execute(
+                "SELECT pt_id, hba1c FROM jaeb_cohort WHERE pt_id = ?", [101]
+            )
+            assert res is not None
+            assert cur.description == [("pt_id",), ("hba1c",)]
+            assert cur.fetchone() == (101, 6.8)
+
+            cur.execute("SELECT pt_id FROM jaeb_cohort ORDER BY pt_id")
+            assert cur.fetchmany(1) == [(101,)]
+            assert cur.fetchall() == [(102,)]
+
+            # Verify jaeb attachment is strictly READ_ONLY
+            with pytest.raises(duckdb.Error):
+                cur.execute("INSERT INTO jaeb.jaeb_cohort VALUES (103, 8.0)")
+
+            # Schema helpers accept ReadOnlyDuckDbCursorProxy directly
+            cols_from_cur = extract_table_columns_map(cur)
+            assert "main_patients" in cols_from_cur
+            schemas_from_cur = extract_table_schemas(cur)
+            assert "main_patients" in schemas_from_cur
+            schema_str = get_database_schema(cur)
+            assert "main_patients" in schema_str
+
+            # Interrupt and idempotent close
+            cur.interrupt()
+            cur.close()
+            cur.close()
+
+        # Execute query via execute_duckdb_query against attached Jaeb data
+        rows = execute_duckdb_query(
+            str(primary_db),
+            "SELECT pt_id, hba1c FROM jaeb.jaeb_cohort ORDER BY pt_id",
+        )
+        assert rows == [
+            {"pt_id": 101, "hba1c": 6.8},
+            {"pt_id": 102, "hba1c": 7.4},
+        ]
+        pool.close_all()
+
+    # _attach_jaeb_read_only_if_present swallows duckdb/RuntimeError gracefully on broken connection
+    class _FailingAttachConn:
+        """Minimal connection stub raising RuntimeError on ATTACH."""
+
+        def execute(self, _sql: str) -> "_FailingAttachConn":
+            """Raise RuntimeError."""
+            raise RuntimeError("attach unsupported")
+
+    _attach_jaeb_read_only_if_present(
+        _FailingAttachConn(),  # type: ignore[arg-type]
+        primary_db,
+        jaeb_candidates=(jaeb_db,),
+    )
+
+    # _create_read_only_cursor_proxy with custom cursor-capable protocol object and fallback object
+    class _CustomCursorObj:
+        """Custom cursor double without close method."""
+
+        description = None
+
+    class _CustomConnWithCursor:
+        """Custom connection double implementing .cursor()."""
+
+        def __init__(self) -> None:
+            """Initialize with a dedicated cursor instance."""
+            self.cur = _CustomCursorObj()
+            self.interrupt = "not-callable"
+
+        def cursor(self) -> _CustomCursorObj:
+            """Return dedicated cursor double."""
+            return self.cur
+
+    custom_conn = _CustomConnWithCursor()
+    proxy_custom = _create_read_only_cursor_proxy(
+        custom_conn  # type: ignore[arg-type]
+    )
+    assert id(proxy_custom.raw_cursor) == id(custom_conn.cur)
+    assert proxy_custom.description is None
+    proxy_custom.interrupt()
+    proxy_custom.close()
+
+    class _SelfCursorConn:
+        """Connection double whose .cursor() returns self."""
+
+        def cursor(self) -> "_SelfCursorConn":
+            """Return self."""
+            return self
+
+    self_conn = _SelfCursorConn()
+    proxy_self = _create_read_only_cursor_proxy(
+        self_conn  # type: ignore[arg-type]
+    )
+    assert id(proxy_self.raw_cursor) == id(self_conn)
+    proxy_self.interrupt()
+    proxy_self.close()

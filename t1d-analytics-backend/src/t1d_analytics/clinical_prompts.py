@@ -1,6 +1,66 @@
 """Clinical Text-to-SQL prompt templates and database schema compaction utilities."""
 
-from typing import List
+import re
+from typing import List, Optional, Set, Tuple
+
+_COMPACT_LOCAL_MODEL_MARKERS: Tuple[str, ...] = (
+    "ollama",
+    "gemma:2b",
+    "gemma2:2b",
+    "gemma3:1b",
+    "gemma3:4b",
+    "gemma4",
+    "llama3.2:1b",
+    "llama3.2:3b",
+    "qwen2.5-coder:1.5b",
+    "qwen2.5-coder:3b",
+    "phi4-mini",
+    "phi3:mini",
+)
+
+_CANONICAL_CLINICAL_VIEW_NAMES: Set[str] = {
+    "patients",
+    "demographics",
+    "tblaptsummary",
+    "subjects",
+    "cgm_readings",
+    "hba1c",
+    "hba1c_labs",
+    "adverseevents",
+    "dka_adverse_events",
+}
+
+_PRIORITY_CLINICAL_COLUMNS: Set[str] = {
+    "ptid",
+    "subject_id",
+    "patient_id",
+    "txgroup",
+    "treatment_group",
+    "gender",
+    "sex",
+    "ageasofranddt",
+    "age",
+    "numsevhypo",
+    "severe_hypo_events",
+    "severe_hypoglycemia_events",
+    "pt_pumpmanuf",
+    "hba1c",
+    "c_peptide",
+    "visitdate",
+    "visit",
+    "tir",
+    "tbr",
+    "tar",
+    "mean_glucose",
+    "glucose_value",
+    "numhospdka",
+    "dka_events",
+    "event",
+    "eventtype",
+    "severity",
+    "hospitalized",
+    "onset_date",
+}
 
 TERMINOLOGY_RULES_SECTION: str = """1. Terminology & Aliases:
    - "Lows" / "Hypoglycemia": Look for Time Below Range (TBR, <70 or <54 mg/dL), `pct_time_under_70`, `hypo`.
@@ -142,6 +202,222 @@ Context & Rules for T1D Analytics:
 {history_context}User request: {nl_query}"""
 
 
+def is_compact_local_model(
+    model_name: Optional[str],
+    provider: Optional[str] = None,
+) -> bool:
+    """
+    Detect whether the target model or provider is a lightweight local CPU model.
+
+    Args:
+    ----
+        model_name: Optional model identifier string (e.g. `'gemma:2b'`, `'ollama:gemma:2b'`).
+        provider: Optional explicit provider name (e.g. `'ollama'`).
+
+    Returns:
+    -------
+        bool: True if the model or provider targets local CPU Ollama or a small (<4B) local model.
+
+    """
+    prov_lower = (provider or "").strip().lower()
+    if prov_lower == "ollama":
+        return True
+    if not model_name:
+        return False
+    norm = model_name.strip().lower()
+    if norm in ("sql", ""):
+        return False
+    if norm.startswith(("ollama:", "ollama/")):
+        return True
+    if any(
+        norm.startswith((f"{cloud_prov}/", f"{cloud_prov}:"))
+        for cloud_prov in (
+            "openai",
+            "anthropic",
+            "google",
+            "gemini",
+            "groq",
+            "mistral",
+            "deepseek",
+            "cohere",
+            "together",
+            "fireworks",
+            "openrouter",
+        )
+    ):
+        return False
+    return any(marker in norm for marker in _COMPACT_LOCAL_MODEL_MARKERS)
+
+
+def _prune_table_columns_line(
+    line: str,
+    max_cols_per_table: int,
+    query_words: Optional[Set[str]] = None,
+) -> str:
+    """
+    Limit the number of columns in a `'Columns: ...'` schema line to `max_cols_per_table`.
+
+    Prioritizes canonical T1D clinical columns (`PtID`, `Pt_PumpManuf`, `TxGroup`, `NumSevHypo`,
+    `HbA1c`, `tir`, `severity`, `hospitalized`, etc.) and columns matching `query_words` so wide
+    Jaeb tables (such as the 334-column `subjects` table) retain their key analytical columns.
+
+    Args:
+    ----
+        line: Schema line beginning with `'Columns:'`.
+        max_cols_per_table: Maximum number of column definitions to retain.
+        query_words: Optional set of lowercase query keywords to boost column retention.
+
+    Returns:
+    -------
+        str: Pruned `'Columns: ...'` line.
+
+    """
+    prefix = "Columns:"
+    stripped = line.strip()
+    if not stripped.startswith(prefix) or max_cols_per_table <= 0:
+        return line
+    raw_cols = [c.strip() for c in stripped[len(prefix) :].split(",") if c.strip()]
+    if len(raw_cols) <= max_cols_per_table:
+        return line
+    ranked_indices: List[Tuple[int, int]] = []
+    for idx, col_spec in enumerate(raw_cols):
+        col_ident = col_spec.split("(", 1)[0].strip().lower()
+        is_prio = col_ident in _PRIORITY_CLINICAL_COLUMNS or bool(
+            query_words and any(w in col_ident for w in query_words)
+        )
+        ranked_indices.append((0 if is_prio else 1, idx))
+    ranked_indices.sort()
+    chosen_indices = sorted(idx for _, idx in ranked_indices[:max_cols_per_table])
+    kept = ", ".join(raw_cols[i] for i in chosen_indices)
+    return f"Columns: {kept}"
+
+
+def _score_canonical_domain_boost(tbl_name: str, q_lower: str) -> int:
+    """
+    Compute domain-specific relevance boost for canonical T1D tables given `q_lower`.
+
+    Args:
+    ----
+        tbl_name: Lowercase table or view name.
+        q_lower: Lowercase user question.
+
+    Returns:
+    -------
+        int: Additional relevance score boost.
+
+    """
+    boost = 0
+    if ("pump" in q_lower or "manufacturer" in q_lower) and tbl_name == "subjects":
+        boost += 60
+    if (
+        "adverse" in q_lower or "occurrence" in q_lower or "severity" in q_lower
+    ) and tbl_name in ("adverseevents", "dka_adverse_events"):
+        boost += 60
+    if (
+        "hypo" in q_lower
+        or "treatment group" in q_lower
+        or "subject summaries" in q_lower
+    ) and tbl_name in ("tblaptsummary", "patients", "demographics"):
+        boost += 60
+    if (
+        "hba1c" in q_lower or "lab" in q_lower or "c-peptide" in q_lower
+    ) and tbl_name in ("hba1c", "hba1c_labs"):
+        boost += 60
+    if "demographics" in q_lower and tbl_name == "demographics":
+        boost += 80
+    return boost
+
+
+def build_compact_clinical_sql_prompt(
+    schema_context: str,
+    user_query: str,
+    history_context: str = "",
+    max_tables: int = 6,
+    max_cols_per_table: int = 14,
+) -> str:
+    """
+    Build a concise clinical Text-to-SQL prompt optimized for fast local CPU Ollama prefill (<5s).
+
+    Prunes `schema_context` to canonical clinical views (`patients`, `demographics`,
+    `tblaptsummary`, `subjects`, `cgm_readings`, `hba1c`, `hba1c_labs`, `adverseevents`,
+    `dka_adverse_events`) plus top query-matched tables (`max_tables=6`,
+    `max_cols_per_table=14`) and uses a compact DuckDB SQL instruction block.
+
+    Args:
+    ----
+        schema_context: Raw or RAG-enriched database schema string.
+        user_query: Natural language clinical question.
+        history_context: Optional formatted prior conversation history block.
+        max_tables: Maximum number of table blocks to include.
+        max_cols_per_table: Maximum number of columns to keep per table block.
+
+    Returns:
+    -------
+        str: Compact clinical SQL prompt string.
+
+    """
+    nl = chr(10)
+    q_lower = user_query.lower()
+    query_words = {w for w in re.findall(r"[a-z0-9_]+", q_lower) if len(w) >= 3}
+    raw_blocks = [b.strip() for b in schema_context.split(f"{nl}{nl}") if b.strip()]
+    header_blocks: List[str] = []
+    scored_tables: List[Tuple[int, int, str]] = []
+
+    for idx, block in enumerate(raw_blocks):
+        if not block.startswith("Table:"):
+            header_blocks.append(block)
+            continue
+        first_line = block.splitlines()[0]
+        tbl_name = first_line[len("Table:") :].strip().lower()
+        score = 0
+        if tbl_name in _CANONICAL_CLINICAL_VIEW_NAMES:
+            score += 50
+        if tbl_name in q_lower:
+            score += 40
+        score += _score_canonical_domain_boost(tbl_name, q_lower)
+        block_lower = block.lower()
+        score += sum(5 for w in query_words if w in block_lower)
+        scored_tables.append((-score, idx, block))
+
+    scored_tables.sort()
+    selected_blocks = [b for _, _, b in scored_tables[: max(1, max_tables)]]
+    compacted_blocks: List[str] = list(header_blocks)
+    for block in selected_blocks:
+        lines: List[str] = []
+        for line in block.splitlines():
+            s_line = line.strip()
+            if s_line.startswith("Columns:"):
+                lines.append(
+                    _prune_table_columns_line(
+                        s_line, max_cols_per_table, query_words=query_words
+                    )
+                )
+            elif s_line.startswith("Sample row:") and len(s_line) > 90:
+                lines.append(s_line[:90] + "...")
+            else:
+                lines.append(line)
+        compacted_blocks.append(nl.join(lines))
+
+    pruned_schema = (
+        f"{nl}{nl}".join(compacted_blocks)
+        if compacted_blocks
+        else compact_schema_for_prompt(schema_context, max_tables=max_tables)
+    )
+
+    return (
+        f"You are a DuckDB SQL expert for Type 1 Diabetes (T1D) clinical data.{nl}{nl}"
+        f"Schema:{nl}{pruned_schema}{nl}{nl}"
+        f"Rules:{nl}"
+        f"- Output ONLY a single valid read-only DuckDB SELECT (or WITH ... SELECT) statement.{nl}"
+        f"- NEVER output CREATE TABLE, INSERT, UPDATE, DELETE, or DDL statements; a Table 1 is a SELECT query.{nl}"
+        f"- Use ONLY exact table and column names from the Schema above.{nl}"
+        f"- Prefer canonical tables (`patients`, `tblaptsummary`, `demographics`, `subjects`, `cgm_readings`, `hba1c`, `hba1c_labs`, `adverseevents`, `dka_adverse_events`) when present.{nl}"
+        f"- Wrap VARCHAR numeric columns in TRY_CAST(col AS DOUBLE) for AVG/SUM.{nl}"
+        f"- Return only the SQL query inside ```sql and ``` fences without leading 'sql' or '...' text.{nl}{nl}"
+        f"{history_context}User request: {user_query}"
+    )
+
+
 build_system_prompt = build_clinical_sql_prompt
 
 __all__ = [
@@ -150,6 +426,8 @@ __all__ = [
     "TABLE_1_RULES_SECTION",
     "TERMINOLOGY_RULES_SECTION",
     "build_clinical_sql_prompt",
+    "build_compact_clinical_sql_prompt",
     "build_system_prompt",
     "compact_schema_for_prompt",
+    "is_compact_local_model",
 ]

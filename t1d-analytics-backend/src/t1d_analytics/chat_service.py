@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
+import time
 import urllib.error
+from pathlib import Path
 from typing import (
     AsyncIterator,
     Callable,
@@ -13,6 +15,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
     Tuple,
     Union,
 )
@@ -48,33 +51,44 @@ from t1d_analytics.errors import (
 from t1d_analytics.llm_client import (
     PROVIDER_ENV_KEYS,
     AnyLlmFactoryProtocol,
+    LlmCompletionResponseProtocol,
     LlmTransportProtocol,
+    StreamChunkInput,
     build_clinical_sql_prompt,
+    build_compact_clinical_sql_prompt,
     complete_llm_prompt,
     create_any_llm_transport,
     extract_stream_delta,
     get_effective_api_key,
+    is_compact_local_model,
     probe_ollama_tags_and_version,
     resolve_installed_ollama_model_tag,
+    resolve_local_ollama_fallback_candidates,
     resolve_provider_and_model,
     sort_ollama_models,
 )
 from t1d_analytics.sql_agent import prune_schema_with_gemma_rag
+from t1d_analytics.sql_executor import execute_duckdb_query
 from t1d_analytics.sql_fallback_synthesizer import (
     _FALLBACK_DIAGNOSTIC_PREFIX,
     _TABLE_1_FALLBACK_KEYWORDS,
     GenerationModeLiteral,
     TranslationResult,
     _is_recoverable_local_ollama_crash,
-    _lookup_table_1_curated_sql,
+    _lookup_curated_template_sql,
+    _parse_schema_tables_and_columns,
     extract_fallback_error_from_text,
     format_llm_failure_reason,
     is_fallback_response_text,
     synthesize_fallback_clinical_sql,
 )
 from t1d_analytics.sql_utils import (
-    ALL_SQL_KEYWORDS,
+    _VALID_SHOW_SECOND_TOKENS,
+    READ_ONLY_SQL_PREFIXES,
     SqlValue,
+    _check_sql_syntax_with_conn,
+    _has_natural_language_sql_disqualifier,
+    is_sql_query,
     strip_sql_comments_and_parens,
 )
 from t1d_analytics.sql_utils import (
@@ -105,18 +119,9 @@ def _next_stream_token_or_eof(iterator: Iterator[str]) -> str:
         return _STREAM_DONE_SENTINEL
 
 
-_VALID_SHOW_SECOND_TOKENS = {
-    "tables",
-    "databases",
-    "schemas",
-    "all",
-    "variables",
-}
-
-
-def is_likely_sql_statement(query: str) -> bool:
+def _is_unambiguous_sql_attempt(query: str) -> bool:
     """
-    Determine whether a user input string begins with a SQL keyword rather than natural language.
+    Determine whether an input string is a structural read-only SQL attempt (even if syntactically malformed).
 
     Args:
     ----
@@ -124,7 +129,7 @@ def is_likely_sql_statement(query: str) -> bool:
 
     Returns:
     -------
-        bool: True if the input begins with a recognized SQL keyword (excluding natural language 'show ...' phrases), False otherwise.
+        bool: True if the input starts with a read-only SQL keyword and passes all natural-language prose disqualifiers.
 
     """
     unwrapped = strip_sql_comments_and_parens(query)
@@ -132,17 +137,29 @@ def is_likely_sql_statement(query: str) -> bool:
         return False
     tokens = unwrapped.split()
     first_word = tokens[0].lower().rstrip(";").strip()
-    if first_word not in ALL_SQL_KEYWORDS:
+    if first_word not in READ_ONLY_SQL_PREFIXES:
         return False
-    if first_word == "show" and len(tokens) > 1:
-        second_word = tokens[1].lower().rstrip(";").strip()
-        if second_word not in _VALID_SHOW_SECOND_TOKENS:
-            return False
-        if second_word == "all" and (
-            len(tokens) < 3 or tokens[2].lower().rstrip(";").strip() != "tables"
-        ):
-            return False
-    return True
+    return not _has_natural_language_sql_disqualifier(unwrapped, first_word, tokens)
+
+
+def is_likely_sql_statement(query: str) -> bool:
+    """
+    Determine whether a user input string is a valid read-only SQL statement rather than natural language.
+
+    Args:
+    ----
+        query: Raw user query string.
+
+    Returns:
+    -------
+        bool: True if the input is a read-only SQL statement that passes natural-language prose guards and DuckDB AST syntax parsing, False otherwise.
+
+    """
+    if not _is_unambiguous_sql_attempt(query):
+        return False
+    unwrapped = strip_sql_comments_and_parens(query)
+    first_word = unwrapped.split()[0].lower().rstrip(";").strip()
+    return _check_sql_syntax_with_conn(unwrapped, first_word)
 
 
 def _probe_installed_ollama_names() -> List[str]:
@@ -160,7 +177,7 @@ def _probe_installed_ollama_names() -> List[str]:
 
 def _resolve_and_select_local_ollama_model(
     actual_model: str,
-    probe_fn: Callable[[], List[str]] = _probe_installed_ollama_names,
+    probe_fn: Optional[Callable[[], List[str]]] = None,
 ) -> Tuple[str, Optional[str]]:
     """
     Normalize a requested local Ollama model against installed `/api/tags` models and return a lightweight fallback tag.
@@ -168,15 +185,18 @@ def _resolve_and_select_local_ollama_model(
     Args:
     ----
         actual_model: Requested Ollama model name (without `ollama/` prefix).
-        probe_fn: Callable returning the list of installed Ollama model names.
+        probe_fn: Optional callable returning the list of installed Ollama model names.
 
     Returns:
     -------
         Tuple[str, Optional[str]]: `(normalized_primary_model, fallback_lightweight_model)`.
 
     """
+    effective_probe = (
+        probe_fn if probe_fn is not None else _probe_installed_ollama_names
+    )
     try:
-        installed = probe_fn()
+        installed = effective_probe()
     except (urllib.error.URLError, OSError, ValueError, RuntimeError):
         installed = []
     if not installed:
@@ -185,14 +205,68 @@ def _resolve_and_select_local_ollama_model(
     ranked = sort_ollama_models(installed)
     matched = resolve_installed_ollama_model_tag(actual_model, ranked)
     primary = matched if matched is not None else ranked[0]
-    fallback: Optional[str] = None
-    for cand in ranked:
-        if cand != primary and not any(
-            h in cand.lower() for h in ("26b", "27b", "70b")
-        ):
-            fallback = cand
-            break
+    candidates = resolve_local_ollama_fallback_candidates(primary, ranked)
+    fallback = candidates[0] if candidates else None
     return primary, fallback
+
+
+def _resolve_local_ollama_candidates_list(
+    actual_model: str,
+    probe_fn: Optional[Callable[[], List[str]]] = None,
+) -> Tuple[str, List[str]]:
+    """
+    Resolve the primary local Ollama model tag and ordered list of lightweight fallback candidates.
+
+    Args:
+    ----
+        actual_model: Requested Ollama model name (without `ollama/` prefix).
+        probe_fn: Optional callable returning the list of installed Ollama model names.
+
+    Returns:
+    -------
+        Tuple[str, List[str]]: `(normalized_primary_model, ordered_fallback_candidates)`.
+
+    """
+    effective_probe = (
+        probe_fn if probe_fn is not None else _probe_installed_ollama_names
+    )
+    primary, first_fallback = _resolve_and_select_local_ollama_model(
+        actual_model, probe_fn=effective_probe
+    )
+    if first_fallback is None:
+        return primary, []
+    try:
+        installed = effective_probe()
+    except (urllib.error.URLError, OSError, ValueError, RuntimeError):
+        installed = []
+    extra = resolve_local_ollama_fallback_candidates(primary, installed)
+    ordered: List[str] = [first_fallback]
+    for cand in extra:
+        if cand not in ordered:
+            ordered.append(cand)
+    return primary, ordered
+
+
+def _resolve_effective_retries_for_provider(
+    resolved_provider: str,
+    default_max_retries: int = 3,
+) -> int:
+    """
+    Resolve the bounded maximum retry count (`effective_retries = 1` for local Ollama, `default_max_retries` otherwise).
+
+    Args:
+    ----
+        resolved_provider: Resolved LLM provider identifier.
+        default_max_retries: Default retry limit for non-Ollama providers.
+
+    Returns:
+    -------
+        int: Effective retry count (`1` when `resolved_provider == "ollama"`).
+
+    """
+    if resolved_provider.strip().lower() == "ollama":
+        return 1
+    return max(1, default_max_retries)
 
 
 class SseTokenEvent(TypedDict):
@@ -347,6 +421,8 @@ def build_sql_prompt_with_history(
     nl_query: str,
     history: Optional[List[ChatMessageModel]] = None,
     compact_schema: bool = False,
+    model_name: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> str:
     """
     Construct the clinical Text-to-SQL system prompt for an LLM with conversation history and RAG pruning.
@@ -357,6 +433,8 @@ def build_sql_prompt_with_history(
         nl_query: The clinician or user query.
         history: Optional list of prior conversation messages for multi-turn context.
         compact_schema: Whether to compact sample rows and table blocks for local CPU Ollama models.
+        model_name: Optional model identifier to auto-detect compact local CPU models.
+        provider: Optional provider identifier to auto-detect compact local CPU models.
 
     Returns:
     -------
@@ -377,6 +455,13 @@ def build_sql_prompt_with_history(
         )
 
     enriched_schema = prune_schema_with_gemma_rag(nl_query, schema)
+    use_compact = compact_schema or is_compact_local_model(model_name, provider)
+    if use_compact:
+        return build_compact_clinical_sql_prompt(
+            schema_context=enriched_schema,
+            user_query=nl_query,
+            history_context=history_context,
+        )
 
     return build_clinical_sql_prompt(
         schema=enriched_schema,
@@ -424,15 +509,48 @@ def _create_verified_llm_transport(
     return active_factory(resolved_provider)
 
 
+def _extract_completion_or_iterable_text(
+    response: Union[
+        LlmCompletionResponseProtocol,
+        StreamChunkInput,
+        List[StreamChunkInput],
+        Tuple[StreamChunkInput, ...],
+    ],
+    resolved_provider: str,
+) -> str:
+    """
+    Extract full text from either a completion response object or a sequence of stream chunks.
+
+    Args:
+    ----
+        response: Completion response object, scalar chunk, or list/tuple of chunks.
+        resolved_provider: Resolved LLM provider name.
+
+    Returns:
+    -------
+        str: Concatenated completion text.
+
+    """
+    if isinstance(response, (list, tuple)):
+        parts = [extract_stream_delta(chunk, resolved_provider) for chunk in response]
+        joined = "".join(p for p in parts if p)
+        return joined or str(response)
+    return extract_stream_delta(response, resolved_provider) or str(response)
+
+
 def _complete_non_streaming_with_fallback(
     llm: LlmTransportProtocol,
     resolved_provider: str,
     actual_model: str,
     fallback_model: Optional[str],
     prompt: str,
+    fallback_candidates: Optional[Sequence[str]] = None,
+    sleep_fn: Optional[Callable[[float], None]] = None,
+    skip_primary: bool = False,
+    initial_exc: Optional[Exception] = None,
 ) -> str:
     """
-    Execute a non-streaming completion call, retrying once with `fallback_model` on failure.
+    Execute a non-streaming completion call, retrying across candidate fallback models on failure.
 
     Args:
     ----
@@ -441,29 +559,55 @@ def _complete_non_streaming_with_fallback(
         actual_model: Primary model name.
         fallback_model: Optional lightweight fallback model name.
         prompt: Prompt string.
+        fallback_candidates: Optional ordered sequence of candidate fallback model tags.
+        sleep_fn: Optional injectable sleep callable for brief daemon recovery pause between retries.
+        skip_primary: Whether `actual_model` already crashed with a recoverable local Ollama error.
+        initial_exc: Initial exception raised when `skip_primary` is True.
 
     Returns:
     -------
         str: Extracted text from the completion response.
 
     """
-    try:
-        response = llm.completion(
-            model=actual_model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except (T1DError, OSError, RuntimeError, ValueError, TypeError) as primary_exc:
-        if fallback_model is not None:
-            logger.warning(
-                f"Local Ollama model '{actual_model}' failed ({type(primary_exc).__name__}: {primary_exc}); retrying with lightweight model '{fallback_model}'."
-            )
+    effective_sleep = sleep_fn if sleep_fn is not None else time.sleep
+    candidates: List[str] = (
+        list(fallback_candidates)
+        if fallback_candidates is not None
+        else ([fallback_model] if fallback_model is not None else [])
+    )
+    if not skip_primary:
+        try:
             response = llm.completion(
-                model=fallback_model,
+                model=actual_model,
                 messages=[{"role": "user", "content": prompt}],
             )
-        else:
-            raise
-    return extract_stream_delta(response, resolved_provider) or str(response)
+            return _extract_completion_or_iterable_text(response, resolved_provider)
+        except Exception as primary_exc:
+            if not candidates:
+                raise
+            last_exc: Exception = primary_exc
+    else:
+        last_exc = (
+            initial_exc
+            if initial_exc is not None
+            else RuntimeError(f"Primary model '{actual_model}' failed")
+        )
+
+    for candidate in candidates:
+        if _is_recoverable_local_ollama_crash(resolved_provider, last_exc):
+            effective_sleep(0.15)
+        logger.warning(
+            f"Local Ollama model '{actual_model}' failed ({type(last_exc).__name__}: {last_exc}); retrying with lightweight model '{candidate}'."
+        )
+        try:
+            response = llm.completion(
+                model=candidate,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return _extract_completion_or_iterable_text(response, resolved_provider)
+        except Exception as cand_exc:
+            last_exc = cand_exc
+    raise last_exc
 
 
 def stream_llm_completion_tokens(
@@ -472,9 +616,10 @@ def stream_llm_completion_tokens(
     api_key: Optional[str] = None,
     provider: Optional[str] = None,
     llm_factory: Optional[AnyLlmFactoryProtocol] = None,
+    sleep_fn: Optional[Callable[[float], None]] = None,
 ) -> Iterator[str]:
     """
-    Stream tokens from LLM using any-llm, falling back gracefully to a single completion block.
+    Stream tokens from LLM using any-llm, falling back gracefully across candidate local models on crash.
 
     Args:
     ----
@@ -483,6 +628,7 @@ def stream_llm_completion_tokens(
         api_key: Optional API key for external cloud provider.
         provider: Optional provider name override.
         llm_factory: Optional injectable factory creating an LLM transport client.
+        sleep_fn: Injectable sleep callable for brief daemon recovery pause between retries.
 
     Yields:
     ------
@@ -494,12 +640,15 @@ def stream_llm_completion_tokens(
 
     """
     resolved_provider, actual_model = resolve_provider_and_model(model_name, provider)
-    fallback_model: Optional[str] = None
-    if resolved_provider.lower() == "ollama" and llm_factory is None:
-        actual_model, fallback_model = _resolve_and_select_local_ollama_model(
+    is_local_ollama = resolved_provider.lower() == "ollama"
+    fallback_candidates: List[str] = []
+    if is_local_ollama and llm_factory is None:
+        actual_model, fallback_candidates = _resolve_local_ollama_candidates_list(
             actual_model
         )
+    fallback_model = fallback_candidates[0] if fallback_candidates else None
     llm = _create_verified_llm_transport(resolved_provider, api_key, llm_factory)
+    stream_crash_exc: Optional[Exception] = None
     try:
         stream_resp = llm.completion(
             model=actual_model,
@@ -514,7 +663,14 @@ def stream_llm_completion_tokens(
                 if delta:
                     yield delta
             return
-    except (T1DError, OSError, RuntimeError, ValueError, TypeError) as e:
+    except Exception as e:
+        if is_local_ollama and _is_recoverable_local_ollama_crash(resolved_provider, e):
+            stream_crash_exc = e
+            if not fallback_candidates and llm_factory is not None:
+                _, fallback_candidates = _resolve_local_ollama_candidates_list(
+                    actual_model
+                )
+                fallback_model = fallback_candidates[0] if fallback_candidates else None
         logger.warning(
             f"Native streaming failed for provider '{resolved_provider}' model '{actual_model}' ({type(e).__name__}: {e}). Falling back to non-streaming completion."
         )
@@ -525,6 +681,10 @@ def stream_llm_completion_tokens(
         actual_model=actual_model,
         fallback_model=fallback_model,
         prompt=prompt,
+        fallback_candidates=fallback_candidates if fallback_candidates else None,
+        sleep_fn=sleep_fn,
+        skip_primary=(stream_crash_exc is not None and bool(fallback_candidates)),
+        initial_exc=stream_crash_exc,
     )
 
 
@@ -572,6 +732,9 @@ def _ensure_any_llm_installed_and_ready(
     return effective_api_key
 
 
+_TRANSLATION_SCHEMA_CACHE: Dict[Tuple[str, int, int], str] = {}
+
+
 def _extract_schema_for_translation(
     db_path: str,
     connect_fn: Callable[..., duckdb.DuckDBPyConnection],
@@ -579,6 +742,9 @@ def _extract_schema_for_translation(
 ) -> str:
     """
     Open `db_path` read-only and extract its schema text for NL-to-SQL translation.
+
+    Caches extracted schema strings by `(resolved_path, st_mtime_ns, st_size)` when
+    using the default `duckdb.connect` and `get_database_schema` callables.
 
     Args:
     ----
@@ -596,6 +762,15 @@ def _extract_schema_for_translation(
         SchemaReadError: If reading the database schema fails.
 
     """
+    cache_key: Optional[Tuple[str, int, int]] = None
+    if connect_fn is duckdb.connect and schema_fn is get_database_schema:
+        db_file = Path(db_path)
+        if db_file.is_file():
+            st = db_file.stat()
+            cache_key = (str(db_file.resolve()), st.st_mtime_ns, st.st_size)
+            cached = _TRANSLATION_SCHEMA_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
     try:
         try:
             conn = connect_fn(db_path, read_only=True)
@@ -605,6 +780,10 @@ def _extract_schema_for_translation(
             schema = schema_fn(conn)
         finally:
             conn.close()
+        if cache_key is not None:
+            if len(_TRANSLATION_SCHEMA_CACHE) >= 32:
+                _TRANSLATION_SCHEMA_CACHE.clear()
+            _TRANSLATION_SCHEMA_CACHE[cache_key] = schema
         logger.debug(f"Retrieved schema: {schema[:200]}... (truncated)")
         return schema
     except DatabaseNotFoundError as dnf:
@@ -613,6 +792,150 @@ def _extract_schema_for_translation(
     except (duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
         logger.error(f"Failed to read schema: {e}")
         raise SchemaReadError(params={"error": str(e)}) from e
+
+
+def _invoke_llm_with_local_fallback(
+    prompt: str,
+    actual_model: str,
+    fallback_candidates: Sequence[str],
+    effective_api_key: Optional[str],
+    resolved_provider: str,
+    is_local_ollama: bool,
+    llm_factory: Optional[AnyLlmFactoryProtocol] = None,
+    sleep_fn: Optional[Callable[[float], None]] = None,
+) -> str:
+    """
+    Execute synchronous LLM completion and retry across candidate local Ollama fallback models on failure.
+
+    Args:
+    ----
+        prompt: Formatted SQL generation prompt string.
+        actual_model: Primary resolved model identifier.
+        fallback_candidates: Ordered sequence of lightweight local Ollama fallback model tags.
+        effective_api_key: Optional resolved provider API key.
+        resolved_provider: Resolved LLM provider name.
+        is_local_ollama: Whether the target provider is local Ollama.
+        llm_factory: Optional injectable LLM transport factory.
+        sleep_fn: Optional injectable sleep callable for brief daemon recovery pause between retries.
+
+    Returns:
+    -------
+        str: Full LLM completion response text.
+
+    Raises:
+    ------
+        Exception: Re-raises the last completion exception if all models fail.
+
+    """
+    effective_sleep = sleep_fn if sleep_fn is not None else time.sleep
+    try:
+        return complete_llm_prompt(
+            prompt=prompt,
+            model_name=actual_model,
+            api_key=effective_api_key,
+            provider=resolved_provider,
+            llm_factory=llm_factory,
+        )
+    except Exception as primary_exc:
+        if not is_local_ollama or not fallback_candidates:
+            raise
+        last_exc: Exception = primary_exc
+        for candidate in fallback_candidates:
+            if _is_recoverable_local_ollama_crash(resolved_provider, last_exc):
+                effective_sleep(0.15)
+            logger.warning(
+                f"Local Ollama model '{actual_model}' failed ({type(last_exc).__name__}: {last_exc}); retrying with lightweight model '{candidate}'."
+            )
+            try:
+                return complete_llm_prompt(
+                    prompt=prompt,
+                    model_name=candidate,
+                    api_key=effective_api_key,
+                    provider=resolved_provider,
+                    llm_factory=llm_factory,
+                )
+            except Exception as cand_exc:
+                last_exc = cand_exc
+        raise last_exc from primary_exc
+
+
+_CLINICAL_SCHEMA_MARKERS: Tuple[str, ...] = (
+    "patients",
+    "tblaptsummary",
+    "demographics",
+    "subjects",
+    "cgm_readings",
+    "hba1c",
+    "hba1c_labs",
+    "adverseevents",
+    "dka_adverse_events",
+)
+
+
+def _validate_or_repair_translated_sql(
+    db_path: str,
+    schema: str,
+    nl_query: str,
+    full_response: str,
+    sql_query: str,
+    actual_model: str,
+    resolved_provider: str,
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
+) -> Tuple[str, str]:
+    """
+    Validate LLM-generated SQL against the target clinical schema and repair invalid or non-matching template queries.
+
+    Args:
+    ----
+        db_path: Path to the target DuckDB file.
+        schema: Extracted database schema text.
+        nl_query: User's natural-language question.
+        full_response: Raw LLM markdown response text.
+        sql_query: Extracted candidate SQL query string.
+        actual_model: Resolved LLM model name.
+        resolved_provider: Resolved LLM provider identifier.
+        connect_fn: DuckDB connection factory callable.
+
+    Returns:
+    -------
+        Tuple[str, str]: `(repaired_full_response, repaired_sql_query)`.
+
+    """
+    nl = chr(10)
+    schema_map = _parse_schema_tables_and_columns(schema)
+    lower_tables = {t.lower() for t in schema_map}
+    curated_sql = (
+        _lookup_curated_template_sql(nl_query, lower_tables) if lower_tables else None
+    )
+    if curated_sql is not None:
+        comp = compare_predicted_and_gold_sql(
+            db_path=db_path,
+            pred_sql=sql_query,
+            gold_sql=curated_sql,
+            execute_fn=execute_duckdb_query,
+        )
+        if not comp.execution_accuracy or comp.syntax_error:
+            return f"```sql{nl}{curated_sql}{nl}```", curated_sql
+        return full_response, sql_query
+
+    if connect_fn is duckdb.connect and any(
+        m in lower_tables for m in _CLINICAL_SCHEMA_MARKERS
+    ):
+        try:
+            if not sql_query.strip():
+                raise ValueError("Empty SQL query")
+            execute_duckdb_query(db_path, sql_query)
+        except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError):
+            repaired = synthesize_fallback_clinical_sql(
+                schema,
+                nl_query,
+                include_diagnostic_note=False,
+                model_name=actual_model,
+                provider=resolved_provider,
+            )
+            return repaired.full_response, repaired.sql_query
+
+    return full_response, sql_query
 
 
 def translate_nl_to_sql(
@@ -667,59 +990,54 @@ def translate_nl_to_sql(
     schema = _extract_schema_for_translation(db_path, connect_fn, schema_fn)
 
     is_local_ollama = resolved_provider.lower() == "ollama"
-    fallback_model: Optional[str] = None
+    effective_retries = _resolve_effective_retries_for_provider(resolved_provider)
+    fallback_candidates: List[str] = []
     if is_local_ollama and llm_factory is None:
-        actual_model, fallback_model = _resolve_and_select_local_ollama_model(
+        actual_model, fallback_candidates = _resolve_local_ollama_candidates_list(
             actual_model
         )
     prompt = build_sql_prompt_with_history(
-        schema, nl_query, history=history, compact_schema=is_local_ollama
+        schema,
+        nl_query,
+        history=history,
+        compact_schema=is_local_ollama,
+        model_name=actual_model,
+        provider=resolved_provider,
     )
     nl = chr(10)
 
     try:
-        logger.info(f"Sending prompt to LLM ({resolved_provider}/{actual_model})...")
-        try:
-            full_response = complete_llm_prompt(
-                prompt=prompt,
-                model_name=actual_model,
-                api_key=effective_api_key,
-                provider=resolved_provider,
-                llm_factory=llm_factory,
-            )
-        except (T1DError, OSError, RuntimeError, ValueError, TypeError) as primary_exc:
-            if is_local_ollama and fallback_model is not None:
-                logger.warning(
-                    f"Local Ollama model '{actual_model}' failed ({type(primary_exc).__name__}: {primary_exc}); retrying once with lightweight model '{fallback_model}'."
-                )
-                full_response = complete_llm_prompt(
-                    prompt=prompt,
-                    model_name=fallback_model,
-                    api_key=effective_api_key,
-                    provider=resolved_provider,
-                    llm_factory=llm_factory,
-                )
-            else:
-                raise
+        logger.info(
+            f"Sending prompt to LLM ({resolved_provider}/{actual_model}, effective_retries={effective_retries})..."
+        )
+        full_response = _invoke_llm_with_local_fallback(
+            prompt=prompt,
+            actual_model=actual_model,
+            fallback_candidates=fallback_candidates,
+            effective_api_key=effective_api_key,
+            resolved_provider=resolved_provider,
+            is_local_ollama=is_local_ollama,
+            llm_factory=llm_factory,
+        )
         logger.info(f"LLM response:{nl}{full_response}")
         sql_query = _extract_sql_from_response(full_response)
+        full_response, sql_query = _validate_or_repair_translated_sql(
+            db_path=db_path,
+            schema=schema,
+            nl_query=nl_query,
+            full_response=full_response,
+            sql_query=sql_query,
+            actual_model=actual_model,
+            resolved_provider=resolved_provider,
+            connect_fn=connect_fn,
+        )
         return TranslationResult(
             full_response=full_response,
             sql_query=sql_query,
             used_fallback=False,
             generation_mode="llm",
         )
-    except (
-        T1DError,
-        urllib.error.URLError,
-        TimeoutError,
-        ConnectionError,
-        OSError,
-        RuntimeError,
-        ValueError,
-        TypeError,
-        KeyError,
-    ) as e:
+    except Exception as e:
         if _is_recoverable_local_ollama_crash(resolved_provider, e):
             logger.warning(
                 f"Local Ollama model '{actual_model}' failed with {type(e).__name__} ({e}); synthesizing schema-aware clinical SQL fallback."
@@ -761,7 +1079,11 @@ def _resolve_sql_mode_query(
         str: Executable SQL query string.
 
     """
-    if is_likely_sql_statement(message):
+    if (
+        is_likely_sql_statement(message)
+        or _is_unambiguous_sql_attempt(message)
+        or is_sql_query(message)
+    ):
         return message
     with connect_duckdb_read_only_pooled(
         db_path=db_path,
@@ -778,7 +1100,7 @@ def _resolve_effective_gold_sql(
     explicit_gold_sql: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Resolve an explicit `gold_sql` string or auto-detect a canonical Academic Table 1 gold SQL query.
+    Resolve an explicit `gold_sql` string or auto-detect a canonical Gold Template SQL query.
 
     Args:
     ----
@@ -792,7 +1114,7 @@ def _resolve_effective_gold_sql(
     """
     if explicit_gold_sql and explicit_gold_sql.strip():
         return explicit_gold_sql.strip()
-    return _lookup_table_1_curated_sql(message)
+    return _lookup_curated_template_sql(message)
 
 
 def _compute_optional_gold_comparison(
@@ -869,8 +1191,13 @@ def execute_chat_turn(
         )
         db_path = db_validator(request.db_path)
         provenance, is_synthetic = _resolve_db_provenance_flags(db_path)
-        is_raw_sql = is_likely_sql_statement(request.message)
-        if request.model.strip().lower() in ("sql", "") or is_raw_sql:
+        is_likely_sql = is_likely_sql_statement(request.message)
+        if request.model.strip().lower() in ("sql", "") or is_likely_sql:
+            is_raw_sql = (
+                is_likely_sql
+                or _is_unambiguous_sql_attempt(request.message)
+                or is_sql_query(request.message)
+            )
             sql_query = _resolve_sql_mode_query(db_path, request.message)
             results = execute_fn(db_path, sql_query)
             return ChatResponse(
@@ -934,15 +1261,7 @@ def execute_chat_turn(
         return ChatResponse(
             content="backend.errorNlpTranslation", error=error_parser(re_err)
         )
-    except (
-        duckdb.Error,
-        urllib.error.URLError,
-        TimeoutError,
-        ConnectionError,
-        OSError,
-        TypeError,
-        KeyError,
-    ) as e:
+    except Exception as e:
         logger.exception("Unexpected error during chat request.")
         return ChatResponse(content="backend.errorUnexpected", error=error_parser(e))
 
@@ -1017,7 +1336,7 @@ def execute_nl_to_sql_eval_turn(
             data_provenance=provenance,
             error=sql_err,
         )
-    except (T1DError, ValueError, RuntimeError) as exc:
+    except Exception as exc:
         return NlToSqlEvalResponse(
             question=request.question,
             model=request.model,
@@ -1070,7 +1389,11 @@ def _generate_sql_mode_sse_frames(
     provenance, is_synthetic = _resolve_db_provenance_flags(
         db_path, connect_fn=connect_fn
     )
-    is_raw_sql = is_likely_sql_statement(message)
+    is_raw_sql = (
+        is_likely_sql_statement(message)
+        or _is_unambiguous_sql_attempt(message)
+        or is_sql_query(message)
+    )
     try:
         sql_query = _resolve_sql_mode_query(
             db_path, message, connect_fn=connect_fn, schema_fn=schema_fn
@@ -1181,6 +1504,19 @@ def _finalize_nl_sse_frames(
         if used_fallback is not None
         else is_fallback_response_text(full_response)
     )
+    if not effective_fallback and message:
+        curated_tmpl_sql = _lookup_curated_template_sql(message)
+        if curated_tmpl_sql is not None:
+            comp_check = compare_predicted_and_gold_sql(
+                db_path=db_path,
+                pred_sql=sql_query,
+                gold_sql=curated_tmpl_sql,
+                execute_fn=execute_fn,
+            )
+            if not comp_check.execution_accuracy or comp_check.syntax_error:
+                nl = chr(10)
+                sql_query = curated_tmpl_sql
+                full_response = f"```sql{nl}{curated_tmpl_sql}{nl}```"
     resolved_llm_error = (
         llm_error
         if llm_error is not None
@@ -1376,6 +1712,119 @@ def _recover_ollama_stream_fallback_token(
     return synthesized.full_response, format_sse_frame(tok_event, sse_sep)
 
 
+async def _stream_nl_mode_sse_frames(
+    request: ChatRequest,
+    req: Optional[Request],
+    db_path: str,
+    sse_sep: str,
+    execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
+    connect_fn: Callable[..., duckdb.DuckDBPyConnection],
+    schema_fn: Callable[[duckdb.DuckDBPyConnection], str],
+    stream_fn: Callable[..., Iterator[str]],
+    error_parser: Callable[[Exception], ApiError],
+    heartbeat_interval_seconds: float = 3.0,
+) -> AsyncIterator[str]:
+    """
+    Stream NL-to-SQL tokens with `: keep-alive` SSE heartbeats every `3.0s` and finalize SQL execution without re-running translation.
+
+    Args:
+    ----
+        request: Incoming ChatRequest payload.
+        req: Optional FastAPI Request instance to detect client disconnection.
+        db_path: Validated DuckDB file path.
+        sse_sep: Double-newline SSE frame separator.
+        execute_fn: Read-only SQL execution callable.
+        connect_fn: DuckDB connection factory callable.
+        schema_fn: Database schema extraction callable.
+        stream_fn: Token streaming callable.
+        error_parser: Exception to ApiError converter callable.
+        heartbeat_interval_seconds: Interval in seconds between `: keep-alive` SSE comments while waiting for the next token.
+
+    Yields:
+    ------
+        str: Formatted SSE event frames and `: keep-alive` heartbeat comments.
+
+    """
+    schema = _read_schema_from_db(db_path, connect_fn, schema_fn)
+    resolved_prov, _ = resolve_provider_and_model(request.model, request.provider)
+    prompt = build_sql_prompt_with_history(
+        schema,
+        request.message,
+        history=request.history,
+        compact_schema=(resolved_prov.lower() == "ollama"),
+        model_name=request.model,
+        provider=resolved_prov,
+    )
+    full_parts: List[str] = []
+    used_fallback = False
+    stream_llm_error: Optional[str] = None
+    stream_llm_error_code: Optional[str] = None
+    try:
+        token_iter = iter(
+            stream_fn(
+                prompt,
+                request.model,
+                api_key=request.api_key,
+                provider=request.provider,
+            )
+        )
+        while True:
+            if await _is_request_disconnected(req):
+                logger.info("Client disconnected during SSE token streaming.")
+                return
+            next_task: asyncio.Task[str] = asyncio.create_task(
+                asyncio.to_thread(_next_stream_token_or_eof, token_iter)
+            )
+            while True:
+                done_set, _ = await asyncio.wait(
+                    {next_task}, timeout=max(0.05, heartbeat_interval_seconds)
+                )
+                if done_set:
+                    token = await next_task
+                    break
+                if await _is_request_disconnected(req):
+                    logger.info("Client disconnected during SSE heartbeat wait.")
+                    return
+                yield f": keep-alive{sse_sep}"
+            if token == _STREAM_DONE_SENTINEL:
+                break
+            full_parts.append(token)
+            tok_event: SseTokenEvent = {"event": "token", "token": token}
+            yield format_sse_frame(tok_event, sse_sep)
+    except Exception as stream_exc:
+        stream_llm_error, stream_llm_error_code = format_llm_failure_reason(
+            stream_exc, model_name=request.model, provider=resolved_prov
+        )
+        fb_resp, tok_frame = _recover_ollama_stream_fallback_token(
+            resolved_prov,
+            stream_exc,
+            schema,
+            request.message,
+            sse_sep,
+            model_name=request.model,
+        )
+        full_parts.append(fb_resp)
+        used_fallback = True
+        yield tok_frame
+
+    full_response = "".join(full_parts)
+    for frame in _finalize_nl_sse_frames(
+        db_path,
+        full_response,
+        request.auto_execute,
+        sse_sep,
+        execute_fn=execute_fn,
+        error_parser=error_parser,
+        connect_fn=connect_fn,
+        used_fallback=used_fallback,
+        message=request.message,
+        gold_sql=request.gold_sql,
+        llm_error=stream_llm_error,
+        llm_error_code=stream_llm_error_code,
+    ):
+        yield frame
+
+
 async def generate_sse_chat_events(
     request: ChatRequest,
     req: Optional[Request],
@@ -1432,80 +1881,24 @@ async def generate_sse_chat_events(
         return
 
     try:
-        schema = _read_schema_from_db(db_path, connect_fn, schema_fn)
-        resolved_prov, _ = resolve_provider_and_model(request.model, request.provider)
-        prompt = build_sql_prompt_with_history(
-            schema,
-            request.message,
-            history=request.history,
-            compact_schema=(resolved_prov.lower() == "ollama"),
-        )
-        full_parts: List[str] = []
-        used_fallback = False
-        stream_llm_error: Optional[str] = None
-        stream_llm_error_code: Optional[str] = None
-        try:
-            token_iter = iter(
-                stream_fn(
-                    prompt,
-                    request.model,
-                    api_key=request.api_key,
-                    provider=request.provider,
-                )
-            )
-            while True:
-                if await _is_request_disconnected(req):
-                    logger.info("Client disconnected during SSE token streaming.")
-                    return
-                token = await asyncio.to_thread(_next_stream_token_or_eof, token_iter)
-                if token == _STREAM_DONE_SENTINEL:
-                    break
-                full_parts.append(token)
-                tok_event: SseTokenEvent = {"event": "token", "token": token}
-                yield format_sse_frame(tok_event, sse_sep)
-        except (
-            T1DError,
-            urllib.error.URLError,
-            TimeoutError,
-            ConnectionError,
-            OSError,
-            RuntimeError,
-            ValueError,
-            TypeError,
-            KeyError,
-        ) as stream_exc:
-            stream_llm_error, stream_llm_error_code = format_llm_failure_reason(
-                stream_exc, model_name=request.model, provider=resolved_prov
-            )
-            fb_resp, tok_frame = _recover_ollama_stream_fallback_token(
-                resolved_prov,
-                stream_exc,
-                schema,
-                request.message,
-                sse_sep,
-                model_name=request.model,
-            )
-            full_parts.append(fb_resp)
-            used_fallback = True
-            yield tok_frame
-
-        full_response = "".join(full_parts)
-        for frame in _finalize_nl_sse_frames(
-            db_path,
-            full_response,
-            request.auto_execute,
-            sse_sep,
+        nl_stream = _stream_nl_mode_sse_frames(
+            request=request,
+            req=req,
+            db_path=db_path,
+            sse_sep=sse_sep,
             execute_fn=execute_fn,
-            error_parser=error_parser,
             connect_fn=connect_fn,
-            used_fallback=used_fallback,
-            message=request.message,
-            gold_sql=request.gold_sql,
-            llm_error=stream_llm_error,
-            llm_error_code=stream_llm_error_code,
-        ):
+            schema_fn=schema_fn,
+            stream_fn=stream_fn,
+            error_parser=error_parser,
+        )
+        while True:
+            try:
+                frame = await nl_stream.__anext__()
+            except StopAsyncIteration:
+                break
             yield frame
-    except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError, TypeError) as e:
+    except Exception as e:
         err_dict = error_parser(e).model_dump()
         nl_err_payload: SseTerminalPayload = {
             "content": "backend.errorNlpTranslation",
@@ -1515,6 +1908,9 @@ async def generate_sse_chat_events(
         }
         for frame in _emit_sse_terminal_payload(nl_err_payload, sse_sep):
             yield frame
+
+
+generate_sql_from_nl = translate_nl_to_sql
 
 
 __all__ = [
@@ -1537,11 +1933,14 @@ __all__ = [
     "_create_verified_llm_transport",
     "_emit_sse_terminal_payload",
     "_ensure_any_llm_installed_and_ready",
+    "_extract_completion_or_iterable_text",
     "_extract_schema_for_translation",
     "_finalize_nl_sse_frames",
     "_generate_sql_mode_sse_frames",
+    "_invoke_llm_with_local_fallback",
     "_is_recoverable_local_ollama_crash",
     "_is_request_disconnected",
+    "_is_unambiguous_sql_attempt",
     "_next_stream_token_or_eof",
     "_probe_installed_ollama_names",
     "_read_schema_from_db",
@@ -1549,8 +1948,11 @@ __all__ = [
     "_resolve_and_select_local_ollama_model",
     "_resolve_db_provenance_flags",
     "_resolve_effective_gold_sql",
+    "_resolve_effective_retries_for_provider",
+    "_resolve_local_ollama_candidates_list",
     "_resolve_sql_mode_query",
     "_serialize_gold_comparison",
+    "_stream_nl_mode_sse_frames",
     "_validate_sse_request_or_error",
     "build_sql_prompt_with_history",
     "execute_chat_turn",
@@ -1558,6 +1960,7 @@ __all__ = [
     "extract_fallback_error_from_text",
     "format_llm_failure_reason",
     "format_sse_frame",
+    "generate_sql_from_nl",
     "generate_sse_chat_events",
     "is_fallback_response_text",
     "is_likely_sql_statement",

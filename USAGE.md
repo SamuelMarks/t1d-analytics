@@ -194,7 +194,7 @@ This will launch a Vite development server. Check the terminal output for the lo
 
 ### The Interface
 
-- **Sidebar & Deep-Linked Sessions**: Manage persistent chat sessions synchronized with the backend. Click `+ New Chat` to create isolated conversations, or use the `⋮` menu to **Rename**, **Duplicate**, or **Delete** sessions. Active chats automatically sync with the URL hash (`#chat-<id>`) for bookmarking and sharing.
+- **Sidebar & Deep-Linked Sessions**: Manage persistent chat sessions synchronized with the backend. Click `+ New Chat` to create isolated conversations, or use the `⋮` menu to **Rename**, **Duplicate**, or **Delete** sessions. Active chats automatically sync with the URL path (`/chats/<id>`) for bookmarking and sharing.
 - **Schema Explorer & Database Switcher**: Browse available `.duckdb` files in the workspace, search tables and column types, and click any table to open the **Table Preview & Profiling Modal** (featuring server-side sorting, filtering, data-quality completeness metrics, and one-click CSV, JSON, Excel `.xlsx`, and Parquet downloads).
 - **Visual Cohort Builder & Template Library**:
   - Use the **Cohort Builder** modal to construct multi-table `JOIN`, `WHERE`, and aggregation queries visually without writing SQL by hand.

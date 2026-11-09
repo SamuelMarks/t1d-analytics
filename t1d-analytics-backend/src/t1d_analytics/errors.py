@@ -341,6 +341,13 @@ class TrainingJobNotFoundError(T1DError, KeyError):
     default_status_code = 404
 
 
+class ChatJobNotFoundError(T1DError, KeyError):
+    """Raised when a requested background chat or NL-to-SQL evaluation job ID does not exist."""
+
+    default_error_code = "backend.chatJobNotFound"
+    default_status_code = 404
+
+
 class TrainingError(T1DError, RuntimeError):
     """Base exception for synthetic data generation, training runner, and toolchain bridge errors."""
 

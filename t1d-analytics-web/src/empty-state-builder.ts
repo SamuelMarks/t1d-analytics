@@ -6,7 +6,10 @@
 
 import i18next from "i18next";
 import { DEFAULT_CHAT_MODEL, RAW_SQL_MODEL, type ChatState } from "./state";
-import { TABLE_1_EXAMPLE_QUERIES } from "./table1-queries";
+import {
+  TABLE_1_EXAMPLE_QUERIES,
+  type Table1ExampleSpec,
+} from "./table1-queries";
 
 /**
  * Options for constructing a schema diagnostic card via DOM APIs.
@@ -103,6 +106,10 @@ export function createSchemaDiagnosticCard(
  * Specification for a starter example query chip in the empty-state view.
  */
 export interface StarterQueryItem {
+  /** Stable identifier for the starter template ('starter-1' through 'starter-5'). */
+  id: string;
+  /** Complexity rating label ('Low', 'Low-Medium', 'Medium', 'Medium-High', 'High', 'Very High'). */
+  complexity: Table1ExampleSpec["complexity"];
   /** Localized display label for the starter chip button. */
   label: string;
   /** SQL or natural-language query populated into the input box when clicked. */
@@ -157,6 +164,8 @@ ORDER BY t.TxGroup, average_hba1c DESC;`;
 
   return [
     {
+      id: "starter-1",
+      complexity: "Low",
       label: i18next.t("ui.exampleQueries.patientDemographics"),
       query: `${i18next.t("ui.exampleQueries.patientDemographicsComment", "-- Patient Demographics & Treatment Breakdown")}
 
@@ -167,6 +176,8 @@ ${demoSql}`,
       goldSql: demoSql,
     },
     {
+      id: "starter-2",
+      complexity: "Low",
       label: i18next.t("ui.exampleQueries.adverseEvents"),
       query: `${i18next.t("ui.exampleQueries.adverseEventsComment", "-- Frequency of Adverse Events")}
 
@@ -177,6 +188,8 @@ ${adverseSql}`,
       goldSql: adverseSql,
     },
     {
+      id: "starter-3",
+      complexity: "Low",
       label: i18next.t("ui.exampleQueries.pumpManufacturers"),
       query: `${i18next.t("ui.exampleQueries.pumpManufacturersComment", "-- Patient Pump Manufacturers")}
 
@@ -187,6 +200,8 @@ ${pumpSql}`,
       goldSql: pumpSql,
     },
     {
+      id: "starter-4",
+      complexity: "Low-Medium",
       label: i18next.t("ui.exampleQueries.hba1cDemographics"),
       query: `${i18next.t("ui.exampleQueries.hba1cDemographicsComment", "-- Joining Subject Summaries with HbA1c Lab Results")}
 
@@ -197,11 +212,13 @@ ${hba1cSql}`,
       goldSql: hba1cSql,
     },
     {
+      id: "starter-5",
+      complexity: "Low",
       label: i18next.t("ui.exampleQueries.nlpFirst5"),
       query: nlpFirst5Prompt,
       mode: DEFAULT_CHAT_MODEL,
       question: nlpFirst5Prompt,
-      goldSql: "SELECT * FROM tblaptsummary LIMIT 5;",
+      goldSql: "SELECT * FROM demographics LIMIT 5;",
     },
   ];
 }
@@ -260,24 +277,35 @@ export function buildEmptyStateView(ui: EmptyStateHost): HTMLDivElement {
   noMessagesP.textContent = i18next.t("ui.noMessagesYet");
   emptyStateDiv.appendChild(noMessagesP);
 
+  let table1ChipActionMode: "sql" | "nl" = "sql";
+
   const chipsContainer = document.createElement("div");
   chipsContainer.className = "chips-container";
 
   buildStarterQueryItems().forEach((item) => {
     const chip = document.createElement("button");
     chip.className = "chip";
+    chip.setAttribute("data-starter-id", item.id);
     chip.textContent = item.label;
     chip.addEventListener("click", () => {
-      ui.chatInput.value = item.query;
-      const hasChipModeOption = Array.from(ui.modelSelect.options).some(
-        (opt) => opt.value === item.mode,
-      );
-      const targetChipMode = hasChipModeOption ? item.mode : RAW_SQL_MODEL;
-      ui.modelSelect.value = targetChipMode;
-      ui.state.setActiveChatModel(targetChipMode);
-      ui.state.setActiveGoldSql(
-        targetChipMode === RAW_SQL_MODEL ? null : item.goldSql,
-      );
+      if (table1ChipActionMode === "nl") {
+        ui.chatInput.value = item.question;
+        const targetLlm = resolvePreferredLlmModel(ui.modelSelect);
+        ui.modelSelect.value = targetLlm;
+        ui.state.setActiveChatModel(targetLlm);
+        ui.state.setActiveGoldSql(item.goldSql);
+      } else {
+        ui.chatInput.value = item.query;
+        const hasChipModeOption = Array.from(ui.modelSelect.options).some(
+          (opt) => opt.value === item.mode,
+        );
+        const targetChipMode = hasChipModeOption ? item.mode : RAW_SQL_MODEL;
+        ui.modelSelect.value = targetChipMode;
+        ui.state.setActiveChatModel(targetChipMode);
+        ui.state.setActiveGoldSql(
+          targetChipMode === RAW_SQL_MODEL ? null : item.goldSql,
+        );
+      }
       ui.chatInput.focus();
       ui.syncHighlight();
     });
@@ -293,7 +321,6 @@ export function buildEmptyStateView(ui: EmptyStateHost): HTMLDivElement {
   table1HeaderP.className = "table1-examples-heading";
   table1HeaderP.textContent = i18next.t("ui.exampleQueries.table1SectionTitle");
 
-  let table1ChipActionMode: "sql" | "nl" = "sql";
   const modePillGroup = document.createElement("div");
   modePillGroup.className = "template-mode-pill-group";
   modePillGroup.setAttribute("role", "group");

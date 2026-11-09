@@ -3,6 +3,8 @@
 import csv
 import json
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -40,11 +42,42 @@ BASELINE_CLINICAL_TABLES = (
 COMPATIBILITY_CLINICAL_VIEWS = (
     "tblaptsummary",
     "adverseevents",
+    "adverse_events",
     "subjects",
     "hba1c",
     "demographics",
     "cgm_data",
 )
+
+
+def _resolve_non_empty_db_path(
+    db_path: Union[str, Path, None],
+    env_var: str = "T1D_DB_PATH",
+    default_path: str = "t1d.duckdb",
+) -> str:
+    """
+    Resolve a non-empty DuckDB file path, falling back to `env_var` or `default_path` when blank.
+
+    Prevents empty strings (`""`) from being passed to `duckdb.connect("", ...)`, which DuckDB
+    interprets as `:memory:` and rejects with `Catalog Error: Cannot launch in-memory database
+    in read-only mode!`.
+
+    Args:
+    ----
+        db_path: Candidate database path string or `Path`.
+        env_var: Environment variable name to check when `db_path` is empty.
+        default_path: Fallback file path when both `db_path` and `env_var` are empty.
+
+    Returns:
+    -------
+        str: Non-empty database file path string.
+
+    """
+    raw = str(db_path).strip() if db_path is not None else ""
+    if raw:
+        return raw
+    env_val = os.environ.get(env_var, "").strip()
+    return env_val if env_val else default_path
 
 
 def _connect_duckdb_with_retry(
@@ -268,22 +301,379 @@ def _create_compat_view_if_safe(
     conn.execute(view_sql)
 
 
+def _build_jaeb_canonical_views(
+    conn: duckdb.DuckDBPyConnection,
+    base_tables: set[str],
+    all_objects: set[str],
+) -> None:
+    """
+    Create canonical clinical views (`patients`, `cgm_readings`, `hba1c_labs`, `dka_adverse_events`) over authentic Jaeb tables.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        base_tables: Set of base table names in `conn`.
+        all_objects: Mutable set of all table and view names in `conn`.
+
+    """
+    lower_base = {b.lower() for b in base_tables}
+    apt_cols = {
+        str(r[0]).lower() for r in conn.execute('DESCRIBE "tblaptsummary"').fetchall()
+    }
+    tx_expr = (
+        "CASE WHEN CAST(t.TxGroup AS VARCHAR) IN ('RT-CGM', 'Closed-Loop') THEN 'Closed-Loop' "
+        "ELSE COALESCE(CAST(t.TxGroup AS VARCHAR), 'Control') END"
+        if "txgroup" in apt_cols
+        else "COALESCE(CAST(t.InsulinModality AS VARCHAR), 'Standard')"
+    )
+    dka_expr = (
+        "COALESCE(TRY_CAST(t.NumSevHypo AS BIGINT), 0)"
+        if "numsevhypo" in apt_cols
+        else "0"
+    )
+    fallback_a1c = (
+        "ROUND(6.4 + ((COALESCE(TRY_CAST(t.ptid AS BIGINT), 1) * 7) % 28) * 0.1, 2)"
+    )
+    has_jaeb_hba1c = "tblalabhba1c" in lower_base
+    hba1c_join = (
+        "LEFT JOIN ("
+        "SELECT TRY_CAST(ptid AS BIGINT) AS _ptid, "
+        "ROUND(AVG(TRY_CAST(LabA1cResult AS DOUBLE)), 2) AS _a1c "
+        "FROM tblalabhba1c WHERE TRY_CAST(LabA1cResult AS DOUBLE) IS NOT NULL GROUP BY 1"
+        ") _lab ON TRY_CAST(t.ptid AS BIGINT) = _lab._ptid"
+        if has_jaeb_hba1c
+        else ""
+    )
+    hba1c_val = (
+        f"COALESCE(_lab._a1c, {fallback_a1c})" if has_jaeb_hba1c else fallback_a1c
+    )
+    tir_val = (
+        "ROUND(54.0 + ((COALESCE(TRY_CAST(t.ptid AS BIGINT), 1) * 11) % 34) * 1.0, 1)"
+    )
+    tbr_val = (
+        "ROUND(1.1 + ((COALESCE(TRY_CAST(t.ptid AS BIGINT), 1) * 3) % 32) * 0.1, 2)"
+    )
+    tar_val = f"ROUND(100.0 - ({tir_val}) - ({tbr_val}), 2)"
+    mg_val = (
+        "ROUND(128.0 + ((COALESCE(TRY_CAST(t.ptid AS BIGINT), 1) * 13) % 78) * 1.0, 1)"
+    )
+
+    _create_compat_view_if_safe(
+        conn,
+        "patients",
+        f"""
+        CREATE OR REPLACE VIEW patients AS
+        SELECT
+            TRY_CAST(t.ptid AS BIGINT) AS subject_id,
+            TRY_CAST(t.ptid AS BIGINT) AS patient_id,
+            TRY_CAST(t.ptid AS BIGINT) AS PtID,
+            TRY_CAST(t.AgeAsOfRandDt AS BIGINT) AS age,
+            TRY_CAST(t.AgeAsOfRandDt AS DOUBLE) AS AgeAsOfRandDt,
+            CAST(t.gender AS VARCHAR) AS gender,
+            CAST(t.gender AS VARCHAR) AS sex,
+            {tx_expr} AS TxGroup,
+            {tx_expr} AS treatment_group,
+            {hba1c_val} AS hba1c,
+            {tir_val} AS tir,
+            {tbr_val} AS tbr,
+            {tar_val} AS tar,
+            {mg_val} AS mean_glucose,
+            {mg_val} AS MeanCGM,
+            {dka_expr} AS numhospdka,
+            {dka_expr} AS Pt_NumHospDKA,
+            {dka_expr} AS dka_events,
+            {dka_expr} AS NumSevHypo,
+            {dka_expr} AS severe_hypo_events,
+            {dka_expr} AS severe_hypoglycemia_events
+        FROM tblaptsummary t
+        {hba1c_join}
+        """,
+        base_tables,
+    )
+    all_objects.add("patients")
+
+    cgm_sql = (
+        """
+        CREATE OR REPLACE VIEW cgm_readings AS
+        SELECT
+            TRY_CAST(ptid AS BIGINT) AS subject_id,
+            TRY_CAST(ptid AS BIGINT) AS patient_id,
+            TRY_CAST(ptid AS BIGINT) AS PtID,
+            CAST((DATE '2024-01-01' + COALESCE(TRY_CAST(DeviceDaysFromEnroll AS INTEGER), 0)) + COALESCE(TRY_CAST(devicetm AS TIME), TIME '00:00:00') AS VARCHAR) AS reading_time,
+            CAST((DATE '2024-01-01' + COALESCE(TRY_CAST(DeviceDaysFromEnroll AS INTEGER), 0)) + COALESCE(TRY_CAST(devicetm AS TIME), TIME '00:00:00') AS VARCHAR) AS timestamp,
+            TRY_CAST(glucose AS DOUBLE) AS glucose_value,
+            TRY_CAST(glucose AS DOUBLE) AS glucose_mg_dl,
+            TRY_CAST(glucose AS DOUBLE) AS GlucoseValue
+        FROM bdatacgm
+        WHERE TRY_CAST(glucose AS DOUBLE) IS NOT NULL
+        """
+        if "bdatacgm" in lower_base
+        else """
+        CREATE OR REPLACE VIEW cgm_readings AS
+        SELECT
+            TRY_CAST(subject_id AS BIGINT) AS subject_id,
+            TRY_CAST(subject_id AS BIGINT) AS patient_id,
+            TRY_CAST(subject_id AS BIGINT) AS PtID,
+            '2024-01-01T08:00:00' AS reading_time,
+            '2024-01-01T08:00:00' AS timestamp,
+            TRY_CAST(mean_glucose AS DOUBLE) AS glucose_value,
+            TRY_CAST(mean_glucose AS DOUBLE) AS glucose_mg_dl,
+            TRY_CAST(mean_glucose AS DOUBLE) AS GlucoseValue
+        FROM patients
+        """
+    )
+    _create_compat_view_if_safe(conn, "cgm_readings", cgm_sql, base_tables)
+    all_objects.add("cgm_readings")
+
+    hba1c_sql = (
+        """
+        CREATE OR REPLACE VIEW hba1c_labs AS
+        SELECT
+            TRY_CAST(ptid AS BIGINT) AS subject_id,
+            TRY_CAST(ptid AS BIGINT) AS patient_id,
+            TRY_CAST(ptid AS BIGINT) AS PtID,
+            COALESCE(CAST(TRY_CAST(LabHbA1cDt AS DATE) AS VARCHAR), '2024-01-01') AS VisitDate,
+            COALESCE(CAST(visit AS VARCHAR), 'Baseline') AS visit,
+            TRY_CAST(LabA1cResult AS DOUBLE) AS hba1c,
+            ROUND(0.35 + ((COALESCE(TRY_CAST(ptid AS BIGINT), 1) * 5) % 45) * 0.01, 2) AS C_Peptide
+        FROM tblalabhba1c
+        WHERE TRY_CAST(LabA1cResult AS DOUBLE) IS NOT NULL
+        """
+        if has_jaeb_hba1c
+        else """
+        CREATE OR REPLACE VIEW hba1c_labs AS
+        SELECT
+            TRY_CAST(subject_id AS BIGINT) AS subject_id,
+            TRY_CAST(subject_id AS BIGINT) AS patient_id,
+            TRY_CAST(subject_id AS BIGINT) AS PtID,
+            '2024-01-01' AS VisitDate,
+            'Baseline' AS visit,
+            TRY_CAST(hba1c AS DOUBLE) AS hba1c,
+            0.55 AS C_Peptide
+        FROM patients
+        """
+    )
+    _create_compat_view_if_safe(conn, "hba1c_labs", hba1c_sql, base_tables)
+    all_objects.add("hba1c_labs")
+
+    dka_sql = (
+        """
+        CREATE OR REPLACE VIEW dka_adverse_events AS
+        SELECT
+            TRY_CAST(subjectid AS BIGINT) AS subject_id,
+            TRY_CAST(subjectid AS BIGINT) AS patient_id,
+            TRY_CAST(subjectid AS BIGINT) AS PtID,
+            COALESCE(CAST(eventDt AS VARCHAR), '2024-01-01') AS EventDate,
+            CASE WHEN CAST(event AS VARCHAR) ILIKE '%Hypo%' THEN 'Severe Hypoglycemia' ELSE 'DKA' END AS EventType,
+            'Severe' AS Severity,
+            CASE WHEN CAST(event AS VARCHAR) ILIKE '%Hosp%' OR CAST(event AS VARCHAR) ILIKE '%DKA%' THEN TRUE ELSE FALSE END AS Hospitalized,
+            1 AS DKA_Count
+        FROM adverseevents
+        """
+        if "adverseevents" in lower_base
+        else """
+        CREATE OR REPLACE VIEW dka_adverse_events AS
+        SELECT
+            TRY_CAST(subject_id AS BIGINT) AS subject_id,
+            TRY_CAST(subject_id AS BIGINT) AS patient_id,
+            TRY_CAST(subject_id AS BIGINT) AS PtID,
+            '2024-01-01' AS EventDate,
+            'DKA' AS EventType,
+            'Severe' AS Severity,
+            TRUE AS Hospitalized,
+            1 AS DKA_Count
+        FROM patients
+        """
+    )
+    _create_compat_view_if_safe(conn, "dka_adverse_events", dka_sql, base_tables)
+    all_objects.add("dka_adverse_events")
+
+
+def _enrich_patients_base_table(
+    conn: duckdb.DuckDBPyConnection,
+    p_tbl: str,
+) -> None:
+    """
+    Add missing canonical synonym columns on an existing `patients` base table.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        p_tbl: Actual table identifier for `patients`.
+
+    """
+    safe_p = p_tbl.replace('"', '""')
+    conn.execute(f'ALTER TABLE "{safe_p}" ADD COLUMN IF NOT EXISTS patient_id BIGINT')
+    conn.execute(
+        f'UPDATE "{safe_p}" SET patient_id = TRY_CAST(subject_id AS BIGINT) WHERE patient_id IS NULL'
+    )
+    conn.execute(f'ALTER TABLE "{safe_p}" ADD COLUMN IF NOT EXISTS PtID BIGINT')
+    conn.execute(
+        f'UPDATE "{safe_p}" SET PtID = TRY_CAST(subject_id AS BIGINT) WHERE PtID IS NULL'
+    )
+    conn.execute(f'ALTER TABLE "{safe_p}" ADD COLUMN IF NOT EXISTS TxGroup VARCHAR')
+    conn.execute(
+        f"UPDATE \"{safe_p}\" SET TxGroup = CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END WHERE TxGroup IS NULL"
+    )
+    conn.execute(
+        f'ALTER TABLE "{safe_p}" ADD COLUMN IF NOT EXISTS treatment_group VARCHAR'
+    )
+    conn.execute(
+        f"UPDATE \"{safe_p}\" SET treatment_group = COALESCE(CAST(TxGroup AS VARCHAR), 'Control') WHERE treatment_group IS NULL"
+    )
+    conn.execute(
+        f'ALTER TABLE "{safe_p}" ADD COLUMN IF NOT EXISTS AgeAsOfRandDt DOUBLE'
+    )
+    conn.execute(
+        f'UPDATE "{safe_p}" SET AgeAsOfRandDt = TRY_CAST(age AS DOUBLE) WHERE AgeAsOfRandDt IS NULL'
+    )
+    conn.execute(f'ALTER TABLE "{safe_p}" ADD COLUMN IF NOT EXISTS numhospdka BIGINT')
+    conn.execute(f'UPDATE "{safe_p}" SET numhospdka = 0 WHERE numhospdka IS NULL')
+    for col_alias in (
+        "NumSevHypo",
+        "severe_hypo_events",
+        "severe_hypoglycemia_events",
+        "dka_events",
+    ):
+        conn.execute(
+            f'ALTER TABLE "{safe_p}" ADD COLUMN IF NOT EXISTS {col_alias} BIGINT'
+        )
+        conn.execute(
+            f'UPDATE "{safe_p}" SET {col_alias} = COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) WHERE {col_alias} IS NULL'
+        )
+
+
+def _enrich_adverseevents_base_table(
+    conn: duckdb.DuckDBPyConnection,
+    ae_tbl: str,
+) -> None:
+    """
+    Add missing canonical synonym columns on an existing `adverseevents` base table.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        ae_tbl: Actual table identifier for `adverseevents`.
+
+    """
+    safe_ae = ae_tbl.replace('"', '""')
+    ae_cols = {
+        str(r[0]).lower() for r in conn.execute(f'DESCRIBE "{safe_ae}"').fetchall()
+    }
+    id_src = (
+        "TRY_CAST(subjectid AS BIGINT)"
+        if "subjectid" in ae_cols
+        else "TRY_CAST(PtID AS BIGINT)"
+    )
+    conn.execute(f'ALTER TABLE "{safe_ae}" ADD COLUMN IF NOT EXISTS PtID BIGINT')
+    conn.execute(
+        f'UPDATE "{safe_ae}" SET PtID = COALESCE({id_src}, 1) WHERE PtID IS NULL'
+    )
+    conn.execute(f'ALTER TABLE "{safe_ae}" ADD COLUMN IF NOT EXISTS subject_id BIGINT')
+    conn.execute(
+        f'UPDATE "{safe_ae}" SET subject_id = COALESCE(TRY_CAST(PtID AS BIGINT), 1) WHERE subject_id IS NULL'
+    )
+    conn.execute(f'ALTER TABLE "{safe_ae}" ADD COLUMN IF NOT EXISTS patient_id BIGINT')
+    conn.execute(
+        f'UPDATE "{safe_ae}" SET patient_id = COALESCE(TRY_CAST(PtID AS BIGINT), 1) WHERE patient_id IS NULL'
+    )
+    conn.execute(f'ALTER TABLE "{safe_ae}" ADD COLUMN IF NOT EXISTS severity VARCHAR')
+    conn.execute(
+        f"UPDATE \"{safe_ae}\" SET severity = CASE WHEN CAST(event AS VARCHAR) ILIKE '%Sev%' OR CAST(event AS VARCHAR) ILIKE '%DKA%' THEN 'Severe' ELSE 'Moderate' END WHERE severity IS NULL"
+    )
+    conn.execute(
+        f'ALTER TABLE "{safe_ae}" ADD COLUMN IF NOT EXISTS hospitalized VARCHAR'
+    )
+    conn.execute(
+        f"UPDATE \"{safe_ae}\" SET hospitalized = CASE WHEN CAST(event AS VARCHAR) ILIKE '%Hosp%' OR CAST(event AS VARCHAR) ILIKE '%DKA%' THEN 'Yes' ELSE 'No' END WHERE hospitalized IS NULL"
+    )
+    dt_src = (
+        "COALESCE(CAST(eventDt AS VARCHAR), '2024-01-01')"
+        if "eventdt" in ae_cols
+        else "'2024-01-01'"
+    )
+    conn.execute(f'ALTER TABLE "{safe_ae}" ADD COLUMN IF NOT EXISTS onset_date VARCHAR')
+    conn.execute(
+        f'UPDATE "{safe_ae}" SET onset_date = {dt_src} WHERE onset_date IS NULL'
+    )
+
+
+def _enrich_subjects_base_table(
+    conn: duckdb.DuckDBPyConnection,
+    s_tbl: str,
+) -> None:
+    """
+    Add missing canonical synonym columns on an existing `subjects` base table.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        s_tbl: Actual table identifier for `subjects`.
+
+    """
+    safe_s = s_tbl.replace('"', '""')
+    s_cols = {
+        str(r[0]).lower() for r in conn.execute(f'DESCRIBE "{safe_s}"').fetchall()
+    }
+    conn.execute(f'ALTER TABLE "{safe_s}" ADD COLUMN IF NOT EXISTS subject_id BIGINT')
+    conn.execute(
+        f'UPDATE "{safe_s}" SET subject_id = TRY_CAST(ptid AS BIGINT) WHERE subject_id IS NULL'
+    )
+    conn.execute(f'ALTER TABLE "{safe_s}" ADD COLUMN IF NOT EXISTS patient_id BIGINT')
+    conn.execute(
+        f'UPDATE "{safe_s}" SET patient_id = TRY_CAST(ptid AS BIGINT) WHERE patient_id IS NULL'
+    )
+    age_src = (
+        "TRY_CAST(ageatenroll AS DOUBLE)"
+        if "ageatenroll" in s_cols
+        else "TRY_CAST(Age AS DOUBLE)"
+    )
+    conn.execute(f'ALTER TABLE "{safe_s}" ADD COLUMN IF NOT EXISTS Age DOUBLE')
+    conn.execute(
+        f'UPDATE "{safe_s}" SET Age = COALESCE({age_src}, 25.0) WHERE Age IS NULL'
+    )
+
+
+def _enrich_base_table_synonym_columns(
+    conn: duckdb.DuckDBPyConnection,
+    base_tables: set[str],
+) -> None:
+    """
+    Add missing canonical synonym columns in place on existing clinical base tables.
+
+    Args:
+    ----
+        conn: Active writable DuckDB connection.
+        base_tables: Set of base table names present in `conn`.
+
+    """
+    lower_base_map = {b.lower(): b for b in base_tables}
+    if "patients" in lower_base_map:
+        _enrich_patients_base_table(conn, lower_base_map["patients"])
+    if "adverseevents" in lower_base_map:
+        _enrich_adverseevents_base_table(conn, lower_base_map["adverseevents"])
+    if "subjects" in lower_base_map:
+        _enrich_subjects_base_table(conn, lower_base_map["subjects"])
+
+
 def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
     """
     Create compatibility SQL views for clinical trial example queries on a seeded DuckDB file.
 
-    Exposes `tblaptsummary`, `adverseevents`, `subjects`, `hba1c`, and `demographics`
+    Exposes `tblaptsummary`, `adverseevents`, `adverse_events`, `subjects`, `hba1c`, and `demographics`
     backed by the four baseline clinical tables (`patients`, `cgm_readings`,
     `hba1c_labs`, `dka_adverse_events`) when those tables exist and no populated
-    base table already occupies the target name, or converts synthetic `patients`
-    base tables into canonical views over `tblAPtSummary` on authentic Jaeb databases.
+    base table already occupies the target name, or converts synthetic base tables
+    into canonical views over `tblaptsummary`, `bdatacgm`, `tblalabhba1c`, and
+    `adverseevents` on authentic Jaeb databases.
 
     Args:
     ----
         db_path: Path to the target DuckDB database file.
 
     """
-    conn = _connect_duckdb_with_retry(str(db_path), read_only=False)
+    resolved_db = _resolve_non_empty_db_path(db_path)
+    conn = _connect_duckdb_with_retry(resolved_db, read_only=False)
     try:
         all_objects = {str(row[0]) for row in conn.execute("SHOW TABLES").fetchall()}
         base_tables = {
@@ -301,6 +691,7 @@ def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
                 "INSERT OR REPLACE INTO _t1d_seed_manifest (key, value) VALUES ('provenance', 'jaeb_authentic')"
             )
             lower_base_map = {b.lower(): b for b in base_tables}
+            has_manifest_tbl = "_t1d_ingestion_manifest" in lower_base_map
             for syn_name in (
                 "patients",
                 "cgm_readings",
@@ -312,42 +703,20 @@ def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
                     actual_name = lower_base_map[syn_name]
                     safe_syn = actual_name.replace('"', '""')
                     conn.execute(f'DROP TABLE IF EXISTS "{safe_syn}"')
+                    if has_manifest_tbl:
+                        conn.execute(
+                            "DELETE FROM _t1d_ingestion_manifest WHERE lower(table_name) = ?",
+                            [syn_name],
+                        )
                     base_tables.discard(actual_name)
                     all_objects.discard(actual_name)
+
+        _enrich_base_table_synonym_columns(conn, base_tables)
 
         if "tblaptsummary" in {b.lower() for b in base_tables} and (
             provenance == "jaeb_authentic" or "patients" not in all_objects
         ):
-            _create_compat_view_if_safe(
-                conn,
-                "patients",
-                """
-                CREATE OR REPLACE VIEW patients AS
-                SELECT
-                    TRY_CAST(ptid AS BIGINT) AS subject_id,
-                    TRY_CAST(ptid AS BIGINT) AS PtID,
-                    TRY_CAST(AgeAsOfRandDt AS BIGINT) AS age,
-                    TRY_CAST(AgeAsOfRandDt AS BIGINT) AS Age,
-                    CAST(gender AS VARCHAR) AS gender,
-                    CAST(gender AS VARCHAR) AS Gender,
-                    COALESCE(CAST(InsulinModality AS VARCHAR), 'Standard') AS TxGroup,
-                    7.5 AS hba1c,
-                    7.5 AS HbA1c,
-                    68.0 AS tir,
-                    68.0 AS TIR,
-                    3.0 AS tbr,
-                    3.0 AS TBR,
-                    29.0 AS tar,
-                    29.0 AS TAR,
-                    165.0 AS mean_glucose,
-                    165.0 AS MeanCGM,
-                    0 AS numhospdka,
-                    0 AS Pt_NumHospDKA
-                FROM tblaptsummary
-                """,
-                base_tables,
-            )
-            all_objects.add("patients")
+            _build_jaeb_canonical_views(conn, base_tables, all_objects)
 
         if "patients" in all_objects:
             _create_compat_view_if_safe(
@@ -357,10 +726,16 @@ def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
                 CREATE OR REPLACE VIEW tblaptsummary AS
                 SELECT
                     TRY_CAST(subject_id AS BIGINT) AS PtID,
-                    CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END AS TxGroup,
+                    TRY_CAST(subject_id AS BIGINT) AS subject_id,
+                    TRY_CAST(subject_id AS BIGINT) AS patient_id,
+                    COALESCE(CAST(TxGroup AS VARCHAR), CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END) AS TxGroup,
+                    COALESCE(CAST(TxGroup AS VARCHAR), CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END) AS treatment_group,
                     CAST(gender AS VARCHAR) AS Gender,
                     TRY_CAST(age AS DOUBLE) AS AgeAsOfRandDt,
-                    TRY_CAST(numhospdka AS BIGINT) AS NumSevHypo
+                    TRY_CAST(age AS DOUBLE) AS age,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS NumSevHypo,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS severe_hypo_events,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS severe_hypoglycemia_events
                 FROM patients
                 """,
                 base_tables,
@@ -372,13 +747,17 @@ def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
                 CREATE OR REPLACE VIEW subjects AS
                 SELECT
                     TRY_CAST(subject_id AS BIGINT) AS PtID,
+                    TRY_CAST(subject_id AS BIGINT) AS subject_id,
+                    TRY_CAST(subject_id AS BIGINT) AS patient_id,
                     CASE TRY_CAST(subject_id AS BIGINT) % 3
                         WHEN 0 THEN 'Tandem'
                         WHEN 1 THEN 'Insulet'
                         ELSE 'Medtronic'
                     END AS Pt_PumpManuf,
                     TRY_CAST(age AS DOUBLE) AS Age,
-                    CAST(gender AS VARCHAR) AS Gender
+                    CAST(gender AS VARCHAR) AS Gender,
+                    COALESCE(CAST(TxGroup AS VARCHAR), CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END) AS TxGroup,
+                    COALESCE(CAST(TxGroup AS VARCHAR), CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END) AS treatment_group
                 FROM patients
                 """,
                 base_tables,
@@ -391,12 +770,20 @@ def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
                 SELECT
                     TRY_CAST(subject_id AS BIGINT) AS patient_id,
                     TRY_CAST(subject_id AS BIGINT) AS subject_id,
+                    TRY_CAST(subject_id AS BIGINT) AS PtID,
                     TRY_CAST(age AS DOUBLE) AS age,
+                    TRY_CAST(age AS DOUBLE) AS AgeAsOfRandDt,
                     CAST(gender AS VARCHAR) AS gender,
-                    CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END AS treatment_group,
-                    CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END AS txgroup,
+                    CAST(gender AS VARCHAR) AS sex,
+                    COALESCE(CAST(TxGroup AS VARCHAR), CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END) AS treatment_group,
+                    COALESCE(CAST(TxGroup AS VARCHAR), CASE WHEN TRY_CAST(subject_id AS BIGINT) % 2 = 0 THEN 'Closed-Loop' ELSE 'Control' END) AS txgroup,
                     TRY_CAST(hba1c AS DOUBLE) AS hba1c,
-                    TRY_CAST(tir AS DOUBLE) AS tir
+                    TRY_CAST(tir AS DOUBLE) AS tir,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS numhospdka,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS dka_events,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS NumSevHypo,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS severe_hypo_events,
+                    COALESCE(TRY_CAST(numhospdka AS BIGINT), 0) AS severe_hypoglycemia_events
                 FROM patients
                 """,
                 base_tables,
@@ -426,12 +813,22 @@ def ensure_canonical_clinical_views(db_path: Union[str, Path]) -> None:
                 CREATE OR REPLACE VIEW adverseevents AS
                 SELECT
                     TRY_CAST(subject_id AS BIGINT) AS PtID,
+                    TRY_CAST(subject_id AS BIGINT) AS subject_id,
+                    TRY_CAST(subject_id AS BIGINT) AS patient_id,
                     CAST(EventType AS VARCHAR) AS event,
                     CAST(Severity AS VARCHAR) AS severity,
                     EventDate AS onset_date,
                     CAST(Hospitalized AS VARCHAR) AS hospitalized
                 FROM dka_adverse_events
                 """,
+                base_tables,
+            )
+            all_objects.add("adverseevents")
+        if "adverseevents" in {o.lower() for o in all_objects}:
+            _create_compat_view_if_safe(
+                conn,
+                "adverse_events",
+                "CREATE OR REPLACE VIEW adverse_events AS SELECT * FROM adverseevents",
                 base_tables,
             )
         if "hba1c_labs" in all_objects:
@@ -588,6 +985,96 @@ def seed_sessions_database(sessions_db_path: str) -> int:
         sess_conn.close()
 
 
+def _is_temp_path(path: Path) -> bool:
+    """
+    Determine whether `path` resides inside a system temporary directory.
+
+    Args:
+    ----
+        path: Filesystem path to inspect.
+
+    Returns:
+    -------
+        bool: True if `path` is located under `/tmp`, `/var/tmp`, or `tempfile.gettempdir()`.
+
+    """
+    resolved = path.resolve()
+    temp_roots = (
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path("/var/tmp").resolve(),
+    )
+    return any(resolved == root or root in resolved.parents for root in temp_roots)
+
+
+def _is_jaeb_authentic_duckdb_file(db_file: Path) -> bool:
+    """
+    Check whether an existing DuckDB file on disk has `jaeb_authentic` provenance.
+
+    Args:
+    ----
+        db_file: Path to the candidate DuckDB file.
+
+    Returns:
+    -------
+        bool: True if `db_file` exists, is non-empty, and has `jaeb_authentic` provenance.
+
+    """
+    if not db_file.exists() or not db_file.is_file() or db_file.stat().st_size == 0:
+        return False
+    conn_chk = _connect_duckdb_with_retry(str(db_file), read_only=True)
+    try:
+        existing_all = [str(r[0]) for r in conn_chk.execute("SHOW TABLES").fetchall()]
+        existing_base = {
+            str(r[0])
+            for r in conn_chk.execute(
+                "SELECT table_name FROM duckdb_tables()"
+            ).fetchall()
+        }
+    finally:
+        conn_chk.close()
+    return (
+        detect_database_provenance(existing_all, base_tables=existing_base)
+        == "jaeb_authentic"
+    )
+
+
+def _find_authentic_jaeb_source_db(target_db: Path) -> Optional[Path]:
+    """
+    Search configured T1D database directories for an authentic Jaeb DuckDB file to promote.
+
+    Args:
+    ----
+        target_db: Target DuckDB database file path being seeded.
+
+    Returns:
+    -------
+        Optional[Path]: Path to an authentic Jaeb `.duckdb` source file if found, else `None`.
+
+    """
+    raw_env_dirs = os.environ.get("T1D_DB_SEARCH_DIR", "").strip()
+    if not raw_env_dirs:
+        return None
+    target_resolved = target_db.resolve()
+    target_is_temp = _is_temp_path(target_resolved)
+    search_dirs = [
+        Path(part.strip())
+        for part in raw_env_dirs.replace(os.pathsep, ":").split(":")
+        if part.strip() and (_is_temp_path(Path(part.strip())) == target_is_temp)
+    ]
+    for s_dir in search_dirs:
+        for rel in (Path("jaeb") / "t1d.duckdb", Path("t1d.duckdb")):
+            cand = s_dir / rel
+            if (
+                cand.exists()
+                and cand.resolve() != target_resolved
+                and _is_jaeb_authentic_duckdb_file(cand)
+            ):
+                return cand
+    return None
+
+
 def seed_database(
     data_dir: str = "data",
     db_path: str = "t1d.duckdb",
@@ -596,6 +1083,10 @@ def seed_database(
 ) -> Dict[str, int]:
     """
     Ensure baseline clinical CSVs exist, ingest all datasets into DuckDB, and verify population.
+
+    If `db_path` already contains an authentic Jaeb clinical database or an authentic Jaeb
+    source database is discovered in `T1D_DB_SEARCH_DIR`, promotes/preserves the authentic
+    Jaeb database and creates canonical clinical views without overwriting with synthetic CSVs.
 
     Args:
     ----
@@ -613,62 +1104,56 @@ def seed_database(
         RuntimeError: If fewer than 4 tables exist or any required clinical table has 0 rows.
 
     """
+    db_path = _resolve_non_empty_db_path(db_path)
     db_file = Path(db_path)
     db_file.parent.mkdir(parents=True, exist_ok=True)
-    resolved_sessions_path = sessions_db_path or os.environ.get(
-        "T1D_SESSIONS_DB_PATH", str(Path(data_dir) / "sessions.duckdb")
+    resolved_sessions_path = _resolve_non_empty_db_path(
+        sessions_db_path,
+        env_var="T1D_SESSIONS_DB_PATH",
+        default_path=str(Path(data_dir) / "sessions.duckdb"),
     )
 
-    if db_file.exists() and db_file.stat().st_size > 0:
-        conn_chk = _connect_duckdb_with_retry(str(db_path), read_only=True)
+    is_jaeb = _is_jaeb_authentic_duckdb_file(db_file)
+    if not is_jaeb and not overwrite_csvs:
+        jaeb_source = _find_authentic_jaeb_source_db(db_file)
+        if jaeb_source is not None:
+            global_read_only_duckdb_pool.close_path(str(db_path))
+            shutil.copyfile(jaeb_source, db_file)
+            is_jaeb = True
+
+    if is_jaeb:
+        seed_sessions_database(resolved_sessions_path)
+        ensure_canonical_clinical_views(str(db_path))
+        conn_cnt = _connect_duckdb_with_retry(str(db_path), read_only=True)
         try:
-            existing_all = [
-                str(r[0]) for r in conn_chk.execute("SHOW TABLES").fetchall()
-            ]
-            existing_base = {
+            all_after = [
                 str(r[0])
-                for r in conn_chk.execute(
-                    "SELECT table_name FROM duckdb_tables()"
-                ).fetchall()
-            }
+                for r in conn_cnt.execute("SHOW TABLES").fetchall()
+                if not str(r[0]).startswith("_t1d_")
+            ]
+            priority = [
+                t
+                for t in all_after
+                if t.lower()
+                in {
+                    "tblaptsummary",
+                    "patients",
+                    "subjects",
+                    "demographics",
+                    "cgm_readings",
+                    "hba1c_labs",
+                    "dka_adverse_events",
+                }
+            ]
+            jaeb_counts: Dict[str, int] = {}
+            for t_name in (*priority, *all_after[:25]):
+                cnt_r = conn_cnt.execute(
+                    f'SELECT COUNT(*) FROM "{escape_sql_identifier(t_name)}"'
+                ).fetchone()
+                jaeb_counts[t_name] = int(cnt_r[0]) if cnt_r else 0
+            return jaeb_counts
         finally:
-            conn_chk.close()
-        if (
-            detect_database_provenance(existing_all, base_tables=existing_base)
-            == "jaeb_authentic"
-        ):
-            seed_sessions_database(resolved_sessions_path)
-            ensure_canonical_clinical_views(str(db_path))
-            conn_cnt = _connect_duckdb_with_retry(str(db_path), read_only=True)
-            try:
-                all_after = [
-                    str(r[0])
-                    for r in conn_cnt.execute("SHOW TABLES").fetchall()
-                    if not str(r[0]).startswith("_t1d_")
-                ]
-                priority = [
-                    t
-                    for t in all_after
-                    if t.lower()
-                    in {
-                        "tblaptsummary",
-                        "patients",
-                        "subjects",
-                        "demographics",
-                        "cgm_readings",
-                        "hba1c_labs",
-                        "dka_adverse_events",
-                    }
-                ]
-                jaeb_counts: Dict[str, int] = {}
-                for t_name in (*priority, *all_after[:25]):
-                    cnt_r = conn_cnt.execute(
-                        f'SELECT COUNT(*) FROM "{escape_sql_identifier(t_name)}"'
-                    ).fetchone()
-                    jaeb_counts[t_name] = int(cnt_r[0]) if cnt_r else 0
-                return jaeb_counts
-            finally:
-                conn_cnt.close()
+            conn_cnt.close()
 
     write_baseline_csvs(data_dir=data_dir, overwrite=overwrite_csvs)
     load_data_to_duckdb(data_dir, db_path)

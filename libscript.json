@@ -16,17 +16,33 @@
   "vars": {
     "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
     "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+    "POSTGRES_DATA_DIR": "${POSTGRES_DATA_DIR:-${DATA_DISK_MOUNT:-/mnt/data}/postgres}",
+    "PGDATA": "${PGDATA:-${DATA_DISK_MOUNT:-/mnt/data}/postgres}",
+    "VALKEY_DATA_DIR": "${VALKEY_DATA_DIR:-${DATA_DISK_MOUNT:-/mnt/data}/valkey}",
+    "REDIS_DATA_DIR": "${REDIS_DATA_DIR:-${DATA_DISK_MOUNT:-/mnt/data}/valkey}",
     "OLLAMA_HOST": "${OLLAMA_HOST:-http://127.0.0.1:11434}",
     "OLLAMA_MODEL_LIST": "gemma:2b,llama3.2:1b,phi4-mini",
     "DEFAULT_OLLAMA_MODEL": "gemma:2b"
   },
   "env": {
     "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
-    "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}"
+    "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+    "CERT_STORE_DIR": "${CERT_STORE_DIR:-/mnt/data/certs}",
+    "LETSENCRYPT_EMAIL": "${LETSENCRYPT_EMAIL:-admin@healthplatform.io}",
+    "LETSENCRYPT_RENEW_BEFORE_SECONDS": "${LETSENCRYPT_RENEW_BEFORE_SECONDS:-0}",
+    "T1D_OLLAMA_TIMEOUT_SECONDS": "25",
+    "T1D_CHAT_TRANSLATE_TIMEOUT_SECONDS": "30",
+    "OLLAMA_KEEP_ALIVE": "24h"
   },
   "remote_env": {
     "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
-    "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}"
+    "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
+    "CERT_STORE_DIR": "${CERT_STORE_DIR:-/mnt/data/certs}",
+    "LETSENCRYPT_EMAIL": "${LETSENCRYPT_EMAIL:-admin@healthplatform.io}",
+    "LETSENCRYPT_RENEW_BEFORE_SECONDS": "${LETSENCRYPT_RENEW_BEFORE_SECONDS:-0}",
+    "T1D_OLLAMA_TIMEOUT_SECONDS": "25",
+    "T1D_CHAT_TRANSLATE_TIMEOUT_SECONDS": "30",
+    "OLLAMA_KEEP_ALIVE": "24h"
   },
   "deps": {
     "python": "3.12",
@@ -36,9 +52,18 @@
     "duckdb": "latest",
     "nginx": "latest",
     "ollama": "latest",
+    "certbot": "latest",
     "uv": "latest"
   },
   "dependencies": {
+    "system": {
+      "nginx": "latest",
+      "postgresql": "latest",
+      "valkey": "latest",
+      "duckdb": "latest",
+      "ollama": "latest",
+      "certbot": "latest"
+    },
     "runtime": [
       {
         "name": "python",
@@ -143,7 +168,7 @@
         "chat_sessions": 1,
         "t1d_cohort_metadata": 4
       },
-      "seed_command": "PGPASSWORD=\"postgres\" psql -h \"${POSTGRES_SERVER:-127.0.0.1}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USER:-postgres}\" -d t1d_analytics_db -c \"CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Session', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO chat_sessions (id, title) VALUES ('default-t1d-session', 'T1D Clinical Analytics Baseline Session') ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW(); CREATE TABLE IF NOT EXISTS t1d_cohort_metadata (table_name TEXT PRIMARY KEY, min_rows INTEGER NOT NULL, description TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO t1d_cohort_metadata (table_name, min_rows, description) VALUES ('patients', 100, 'T1D clinical trial baseline cohort'), ('cgm_readings', 200, 'Continuous glucose monitoring traces'), ('hba1c_labs', 150, 'Longitudinal HbA1c and C-Peptide labs'), ('dka_adverse_events', 25, 'Diabetic ketoacidosis and severe hypoglycemia events') ON CONFLICT (table_name) DO UPDATE SET min_rows = EXCLUDED.min_rows, description = EXCLUDED.description, updated_at = NOW();\""
+      "seed_command": "for _ef in .env .env.secrets .env.libscript; do if [ -f \"$_ef\" ]; then set -a; . \"./$_ef\"; set +a; fi; done; PGPASSWORD=\"${POSTGRES_PASSWORD:-postgres}\" psql -h \"${POSTGRES_SERVER:-127.0.0.1}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USER:-postgres}\" -d t1d_analytics_db -c \"CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Session', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO chat_sessions (id, title) VALUES ('default-t1d-session', 'T1D Clinical Analytics Baseline Session') ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW(); CREATE TABLE IF NOT EXISTS t1d_cohort_metadata (table_name TEXT PRIMARY KEY, min_rows INTEGER NOT NULL, description TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO t1d_cohort_metadata (table_name, min_rows, description) VALUES ('patients', 100, 'T1D clinical trial baseline cohort'), ('cgm_readings', 200, 'Continuous glucose monitoring traces'), ('hba1c_labs', 150, 'Longitudinal HbA1c and C-Peptide labs'), ('dka_adverse_events', 25, 'Diabetic ketoacidosis and severe hypoglycemia events') ON CONFLICT (table_name) DO UPDATE SET min_rows = EXCLUDED.min_rows, description = EXCLUDED.description, updated_at = NOW();\""
     },
     {
       "engine": "duckdb",
@@ -172,7 +197,7 @@
         "hba1c_labs": 150,
         "dka_adverse_events": 25
       },
-      "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" && _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -f \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ] && [ ! -f \"$_db\" ]; then cp -f \"$_cand\" \"$_db\" && break; fi; done && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('$_db')\"",
+      "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; [ -f .env.libscript ] && . ./.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":${HOME:-/root}/.local/bin:\"*) ;; *) PATH=\"${HOME:-/root}/.local/bin:/root/.local/bin:$PATH\" ;; esac; export PATH && _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" && _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && _tcnt=0 && if [ -s \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader 'SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false;' 2>/dev/null | tr -d '[:space:]' || printf '0'); fi && if [ \"${_tcnt:-0}\" -eq 0 ] 2>/dev/null && [ -s \"$_db\" ] && [ -x t1d-analytics-backend/.venv/bin/python ]; then _tcnt=$(t1d-analytics-backend/.venv/bin/python -c \"import sys, duckdb; conn = duckdb.connect(sys.argv[1], read_only=True); print(conn.execute('SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false').fetchone()[0]); conn.close()\" \"$_db\" 2>/dev/null | tr -d '[:space:]' || printf '0'); fi && if [ \"${_tcnt:-0}\" -lt 25 ] 2>/dev/null; then for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -s \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ]; then _ctcnt=0; if command -v duckdb >/dev/null 2>&1; then _ctcnt=$(duckdb \"$_cand\" -readonly -csv -noheader 'SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false;' 2>/dev/null | tr -d '[:space:]' || printf '0'); fi; if [ \"${_ctcnt:-0}\" -eq 0 ] 2>/dev/null && [ -x t1d-analytics-backend/.venv/bin/python ]; then _ctcnt=$(t1d-analytics-backend/.venv/bin/python -c \"import sys, duckdb; conn = duckdb.connect(sys.argv[1], read_only=True); print(conn.execute('SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false').fetchone()[0]); conn.close()\" \"$_cand\" 2>/dev/null | tr -d '[:space:]' || printf '30'); fi; if [ \"${_ctcnt:-30}\" -ge 25 ] 2>/dev/null; then cp -f \"$_cand\" \"$_db\" && _tcnt=\"$_ctcnt\" && break; fi; fi; done; fi && if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then echo \"[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into $_db...\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; else t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\"; fi && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}')\" && if [ \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" != \"data/t1d.duckdb\" ] && [ \"${_tcnt:-0}\" -ge 25 ] 2>/dev/null; then rm -f data/t1d.duckdb t1d-analytics-backend/data/t1d.duckdb 2>/dev/null || true; fi",
       "health_command": "if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
     },
     {
@@ -201,15 +226,24 @@
       "working_dir": "t1d-analytics-web",
       "source_dir": "t1d-analytics-web",
       "output_dir": "dist",
-      "artifact_check": "t1d-analytics-web/dist/index.html",
-      "build_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-}:${SERVICE_EXTRA_PATH:-}:$PATH\" VOLTA_HOME=\"${VOLTA_HOME:-}\" && _src_hash=$({ cksum package.json package-lock.json vite.config.ts tsconfig.json index.html 2>/dev/null || true; find src public -type f -exec cksum {} + 2>/dev/null | sort || true; } | cksum | awk '{print $1\"_\"$2}') && if [ \"${FORCE_REBUILD:-0}\" != \"1\" ] && [ -f dist/index.html ] && [ -f dist/.libscript_src_hash ] && [ \"$(cat dist/.libscript_src_hash 2>/dev/null)\" = \"$_src_hash\" ]; then printf '[BUILD] [REUSE] Vite frontend bundle already up-to-date (hash %s).\\n' \"$_src_hash\"; else rm -rf dist .vite .libscript_build.sha256 && npm run build && printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256; fi"
+      "artifact_check": "dist/index.html",
+      "build_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":${SERVICE_EXTRA_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_EXTRA_PATH:-}\" ] && PATH=\"${SERVICE_EXTRA_PATH}:$PATH\" ;; esac; export PATH VOLTA_HOME=\"${VOLTA_HOME:-}\" && _src_hash=$({ for _cff_f in package.json package-lock.json pnpm-lock.yaml yarn.lock angular.json vite.config.ts vite.config.js vite.config.mts tsconfig.json tsconfig.app.json tsconfig.spec.json index.html postcss.config.js postcss.config.cjs tailwind.config.js tailwind.config.ts .env .env.production; do [ -f \"$_cff_f\" ] && cksum \"$_cff_f\" 2>/dev/null || true; done; for _cff_sub in src public; do [ -d \"$_cff_sub\" ] && find \"$_cff_sub\" -type f -exec cksum {} + 2>/dev/null | sort || true; done; } | cksum | awk '{print $1\"_\"$2}') && if [ \"${FORCE_REBUILD:-0}\" != \"1\" ] && [ -f dist/index.html ] && { { [ -f .libscript_build.sha256 ] && [ \"$(cat .libscript_build.sha256 2>/dev/null)\" = \"$_src_hash\" ]; } || { [ -f dist/.libscript_src_hash ] && [ \"$(cat dist/.libscript_src_hash 2>/dev/null)\" = \"$_src_hash\" ]; }; }; then printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256 && printf '[BUILD] [REUSE] Vite frontend bundle already up-to-date (hash %s).\\n' \"$_src_hash\"; else rm -rf dist .vite .libscript_build.sha256 && npm run build && [ -f dist/index.html ] && printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256; fi"
     }
   },
   "ingress": {
     "provider": "nginx",
     "domain": "t1d-analytics.healthplatform.io",
+    "server_name": "t1d-analytics.healthplatform.io",
     "expect_html": "<html",
     "tls": "letsencrypt",
+    "cert_store_dir": "${CERT_STORE_DIR:-/mnt/data/certs}",
+    "acme_webroot": "${CERT_STORE_DIR:-/mnt/data/certs}/acme-webroot",
+    "email": "${LETSENCRYPT_EMAIL:-admin@healthplatform.io}",
+    "renew_before_seconds": 0,
+    "proxy_connect_timeout": 60,
+    "proxy_send_timeout": 300,
+    "proxy_read_timeout": 300,
+    "proxy_buffering": "off",
     "port": 3000,
     "listen": [
       80,
@@ -246,6 +280,13 @@
         "cmd_windows": "rem Block device mounts managed by Windows Disk Management",
         "condition": "unix",
         "ignore_errors": true
+      },
+      {
+        "name": "prepare-t1d-data-dir",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; _u=\"${REMOTE_USER:-$(id -un)}\"; _g=\"${REMOTE_GROUP:-$(id -gn)}\"; _mnt=\"${DATA_DISK_MOUNT:-/mnt/data}\"; sudo mkdir -p \"$_mnt\" \"$_mnt/ollama_models\" \"$_mnt/postgres\" \"$_mnt/valkey\" data && find \"$_mnt\" -mindepth 1 -maxdepth 1 ! -name ollama_models ! -name postgres ! -name postgresql ! -name valkey ! -name redis ! -name certs -exec sudo chown -R \"${_u}:${_g}\" {} + 2>/dev/null || true; sudo chown \"${_u}:${_g}\" \"$_mnt\" 2>/dev/null || true; sudo chown -R \"${_u}:${_g}\" data 2>/dev/null || true; for _pgd in \"$_mnt/postgres\" \"$_mnt/postgresql\"; do if [ -d \"$_pgd\" ]; then sudo chown -R postgres:postgres \"$_pgd\" 2>/dev/null || true; sudo chmod 0700 \"$_pgd\" 2>/dev/null || true; fi; done; for _vkd in \"$_mnt/valkey\" \"$_mnt/redis\"; do if [ -d \"$_vkd\" ]; then (sudo chown -R valkey:valkey \"$_vkd\" 2>/dev/null || sudo chown -R redis:redis \"$_vkd\" 2>/dev/null || true); sudo chmod 0750 \"$_vkd\" 2>/dev/null || true; fi; done; if [ -d \"$_mnt/ollama_models\" ]; then sudo chown -R ollama:ollama \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod 02775 \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod -R u+rwX,g+rwXs,o+rX \"$_mnt/ollama_models\" 2>/dev/null || sudo chmod -R a+rwX \"$_mnt/ollama_models\" 2>/dev/null || true; fi",
+        "cmd_windows": "if not exist data mkdir data",
+        "condition": "unix",
+        "ignore_errors": true
       }
     ],
     "install": [
@@ -258,42 +299,47 @@
       },
       {
         "name": "install-t1d-backend-deps",
-        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export HOME=\"${REMOTE_HOME:-/home/${REMOTE_USER}}\" UV_PYTHON_INSTALL_DIR=\"${REMOTE_HOME:-/home/${REMOTE_USER}}/.local/share/uv/python\" UV_CACHE_DIR=\"${REMOTE_HOME:-/home/${REMOTE_USER}}/.cache/uv\" PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && _lock_hash=$(cksum uv.lock 2>/dev/null | awk '{print $1\"_\"$2}' || printf 'none') && if [ \"${FORCE_REINSTALL:-0}\" != \"1\" ] && [ -x .venv/bin/t1d-analytics ] && [ -x .venv/bin/uvicorn ] && [ -f .venv/.libscript_lock_hash ] && [ \"$(cat .venv/.libscript_lock_hash 2>/dev/null)\" = \"$_lock_hash\" ]; then printf '[REUSE] t1d-analytics-backend .venv is up-to-date.\\n'; else uv sync --python 3.12 && printf '%s\\n' \"$_lock_hash\" > .venv/.libscript_lock_hash; fi",
-        "cmd_windows": "uv sync --python 3.12",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; export HOME=\"${REMOTE_HOME:-/home/${REMOTE_USER}}\" UV_PYTHON_INSTALL_DIR=\"${REMOTE_HOME:-/home/${REMOTE_USER}}/.local/share/uv/python\" UV_CACHE_DIR=\"${REMOTE_HOME:-/home/${REMOTE_USER}}/.cache/uv\" PATH VOLTA_HOME=\"${VOLTA_HOME:-}\" && _lock_hash=$(cksum uv.lock pyproject.toml requirements.txt 2>/dev/null | cksum | awk '{print $1\"_\"$2}' || printf 'none') && _old_lock_hash=$(cat .venv/.libscript_lock_hash 2>/dev/null || printf 'none') && if [ \"${FORCE_REINSTALL:-0}\" != \"1\" ] && [ -x .venv/bin/t1d-analytics ] && [ -x .venv/bin/uvicorn ] && [ \"$_old_lock_hash\" = \"$_lock_hash\" ]; then printf '[REUSE] t1d-analytics-backend .venv is up-to-date (hash %s).\\n' \"$_lock_hash\"; else (if type libscript_python_venv >/dev/null 2>&1; then libscript_python_venv \"\" .venv 3.12; elif [ -f \"${LIBSCRIPT_ROOT_DIR:-$HOME/repos/libscript}/_lib/_common/python_env.sh\" ]; then . \"${LIBSCRIPT_ROOT_DIR:-$HOME/repos/libscript}/_lib/_common/python_env.sh\" && libscript_python_venv \"\" .venv 3.12; fi) && (if [ -f uv.lock ] || [ -f pyproject.toml ]; then uv sync --python 3.12; fi) && (if [ -f requirements.txt ]; then uv pip install --python .venv/bin/python -r requirements.txt || .venv/bin/pip install -r requirements.txt; fi) && printf '%s\\n' \"$_lock_hash\" > .venv/.libscript_lock_hash; fi",
+        "cmd_windows": "set \"_OLD_LOCK_HASH=none\" && (if exist \".venv\\.libscript_lock_hash\" set /p _OLD_LOCK_HASH=<.venv\\.libscript_lock_hash) && set \"_LOCK_HASH=none\" && set \"_PY_LOCK_TMP=%TEMP%\\t1d_py_lock_%RANDOM%.txt\" && (for %L in (uv.lock pyproject.toml requirements.txt) do @if exist \"%L\" type \"%L\" >> \"!_PY_LOCK_TMP!\" 2>nul) && (if exist \"!_PY_LOCK_TMP!\" (for /f \"skip=1 tokens=1\" %H in ('certutil -hashfile \"!_PY_LOCK_TMP!\" SHA256 2^>nul') do @if \"!_LOCK_HASH!\"==\"none\" set \"_LOCK_HASH=%H\") & del /f /q \"!_PY_LOCK_TMP!\" >nul 2>&1) && if not \"%FORCE_REINSTALL%\"==\"1\" if exist \".venv\\Scripts\\t1d-analytics.exe\" if exist \".venv\\Scripts\\uvicorn.exe\" if \"!_OLD_LOCK_HASH!\"==\"!_LOCK_HASH!\" (echo [REUSE] t1d-analytics-backend .venv is up-to-date ^(hash !_LOCK_HASH!^).) else ((if exist \"%LIBSCRIPT_ROOT_DIR%\\_lib\\_common\\python_env.cmd\" call \"%LIBSCRIPT_ROOT_DIR%\\_lib\\_common\\python_env.cmd\" :libscript_python_venv .venv 3.12) && uv sync --python 3.12 && (if exist \"requirements.txt\" (uv pip install --python .venv\\Scripts\\python.exe -r requirements.txt || .venv\\Scripts\\pip.exe install -r requirements.txt)) && echo !_LOCK_HASH!>.venv\\.libscript_lock_hash)",
         "working_dir": "t1d-analytics-backend"
       },
       {
         "name": "install-t1d-frontend-deps",
-        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && _pkg_hash=$(cksum package-lock.json 2>/dev/null | awk '{print $1\"_\"$2}' || printf 'none') && if [ \"${FORCE_REINSTALL:-0}\" != \"1\" ] && [ -d node_modules/vite ] && [ -f node_modules/.libscript_pkg_hash ] && [ \"$(cat node_modules/.libscript_pkg_hash 2>/dev/null)\" = \"$_pkg_hash\" ]; then printf '[REUSE] t1d-analytics-web node_modules is up-to-date.\\n'; else npm install && printf '%s\\n' \"$_pkg_hash\" > node_modules/.libscript_pkg_hash; fi",
-        "cmd_windows": "npm install",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; export PATH VOLTA_HOME=\"${VOLTA_HOME:-}\" && _pkg_hash=$(cksum package.json package-lock.json 2>/dev/null | cksum | awk '{print $1\"_\"$2}' || printf 'none') && if [ \"${FORCE_REINSTALL:-0}\" != \"1\" ] && [ -d node_modules/vite ] && [ -x node_modules/.bin/vite ] && [ -x node_modules/.bin/tsc ] && [ -f node_modules/.libscript_pkg_hash ] && [ \"$(cat node_modules/.libscript_pkg_hash 2>/dev/null)\" = \"$_pkg_hash\" ]; then printf '%s\\n' \"$_pkg_hash\" > .libscript_deps.sha256 && printf '[REUSE] t1d-analytics-web node_modules is up-to-date (hash %s).\\n' \"$_pkg_hash\"; else npm i --no-audit --no-fund && _pkg_hash=$(cksum package.json package-lock.json 2>/dev/null | cksum | awk '{print $1\"_\"$2}' || printf 'none') && printf '%s\\n' \"$_pkg_hash\" > node_modules/.libscript_pkg_hash && printf '%s\\n' \"$_pkg_hash\" > .libscript_deps.sha256; fi",
+        "cmd_windows": "set \"_OLD_PKG_HASH=none\" && (if exist \"node_modules\\.libscript_pkg_hash\" set /p _OLD_PKG_HASH=<node_modules\\.libscript_pkg_hash) && set \"_PKG_HASH=none\" && set \"_PKG_TMP=%TEMP%\\t1d_pkg_fp_%RANDOM%.txt\" && (for %F in (package.json package-lock.json) do @if exist \"%F\" type \"%F\" >> \"!_PKG_TMP!\" 2>nul) && (if exist \"!_PKG_TMP!\" (for /f \"skip=1 tokens=1\" %H in ('certutil -hashfile \"!_PKG_TMP!\" SHA256 2^>nul') do @if \"!_PKG_HASH!\"==\"none\" set \"_PKG_HASH=%H\") & del /f /q \"!_PKG_TMP!\" >nul 2>&1) && if not \"%FORCE_REINSTALL%\"==\"1\" if exist \"node_modules\\vite\" if exist \"node_modules\\.bin\\vite.cmd\" if exist \"node_modules\\.bin\\tsc.cmd\" if exist \"node_modules\\.libscript_pkg_hash\" if \"!_OLD_PKG_HASH!\"==\"!_PKG_HASH!\" (echo !_PKG_HASH!>.libscript_deps.sha256 && echo [REUSE] t1d-analytics-web node_modules is up-to-date ^(hash !_PKG_HASH!^).) else (call npm i --no-audit --no-fund && set \"_PKG_HASH=none\" && set \"_PKG_TMP=%TEMP%\\t1d_pkg_fp_%RANDOM%.txt\" && (for %F in (package.json package-lock.json) do @if exist \"%F\" type \"%F\" >> \"!_PKG_TMP!\" 2>nul) && (if exist \"!_PKG_TMP!\" (for /f \"skip=1 tokens=1\" %H in ('certutil -hashfile \"!_PKG_TMP!\" SHA256 2^>nul') do @if \"!_PKG_HASH!\"==\"none\" set \"_PKG_HASH=%H\") & del /f /q \"!_PKG_TMP!\" >nul 2>&1) && echo !_PKG_HASH!>node_modules\\.libscript_pkg_hash && echo !_PKG_HASH!>.libscript_deps.sha256)",
         "working_dir": "t1d-analytics-web"
       }
     ],
     "post_install": [
       {
         "name": "fix-t1d-workspace-ownership",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo chown -R \"${REMOTE_USER:-ubuntu}:${REMOTE_GROUP:-ubuntu}\" \"${DATA_DISK_MOUNT:-/mnt/data}\" . || true",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; _u=\"${REMOTE_USER:-$(id -un)}\"; _g=\"${REMOTE_GROUP:-$(id -gn)}\"; _mnt=\"${DATA_DISK_MOUNT:-/mnt/data}\"; find \"$_mnt\" -mindepth 1 -maxdepth 1 ! -name ollama_models ! -name postgres ! -name postgresql ! -name valkey ! -name redis ! -name certs -exec sudo chown -R \"${_u}:${_g}\" {} + 2>/dev/null || true; sudo chown \"${_u}:${_g}\" \"$_mnt\" 2>/dev/null || true; sudo chown -R \"${_u}:${_g}\" . || true; for _pgd in \"$_mnt/postgres\" \"$_mnt/postgresql\"; do if [ -d \"$_pgd\" ]; then sudo chown -R postgres:postgres \"$_pgd\" 2>/dev/null || true; sudo chmod 0700 \"$_pgd\" 2>/dev/null || true; fi; done; for _vkd in \"$_mnt/valkey\" \"$_mnt/redis\"; do if [ -d \"$_vkd\" ]; then (sudo chown -R valkey:valkey \"$_vkd\" 2>/dev/null || sudo chown -R redis:redis \"$_vkd\" 2>/dev/null || true); sudo chmod 0750 \"$_vkd\" 2>/dev/null || true; fi; done; if [ -d \"$_mnt/ollama_models\" ]; then sudo chown -R ollama:ollama \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod 02775 \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod -R u+rwX,g+rwXs,o+rX \"$_mnt/ollama_models\" 2>/dev/null || sudo chmod -R a+rwX \"$_mnt/ollama_models\" 2>/dev/null || true; fi",
         "cmd_windows": "rem Workspace ownership managed by Windows ACLs",
         "condition": "unix",
+        "ignore_errors": true
+      },
+      {
+        "name": "verify-ollama-gemma-2b",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\" GGML_BACKEND_AMX=\"0\" OLLAMA_LLM_LIBRARY=\"${OLLAMA_LLM_LIBRARY:-cpu_avx2}\" OLLAMA_NUM_GPU=\"${OLLAMA_NUM_GPU:-0}\" OLLAMA_FLASH_ATTENTION=\"${OLLAMA_FLASH_ATTENTION:-0}\" OLLAMA_CONTEXT_LENGTH=\"${OLLAMA_CONTEXT_LENGTH:-2048}\"; _i=0; while [ \"$_i\" -lt 15 ]; do curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; _i=$((_i + 1)); done; if command -v ollama >/dev/null 2>&1; then if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; _g_fam=$(ollama show gemma:2b 2>/dev/null | awk '/family/ {print $2; exit}' || true); _g_id=$(ollama list 2>/dev/null | awk '$1 ~ /^gemma:2b$/ {print $2; exit}' || true); _l_id=$(ollama list 2>/dev/null | awk '$1 ~ /^llama3\\.2:1b$/ {print $2; exit}' || true); if [ \"$_g_fam\" = \"llama\" ] || { [ -n \"$_g_id\" ] && [ \"$_g_id\" = \"$_l_id\" ]; }; then ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; fi; curl -fsS http://127.0.0.1:11434/api/tags 2>/dev/null | grep -Fq 'gemma:2b' || ollama pull gemma:2b || true; _smoke=$(curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' 2>&1 || true); case \"$_smoke\" in *'llama-server process has terminated'*|*'segmentation fault'*|*'core dumped'*) if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' >/dev/null 2>&1 || true ;; esac; fi",
+        "cmd_windows": "where ollama >nul 2>&1 && (powershell -NoProfile -Command \"for ($i=0; $i -lt 15; $i++) { try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 } }; $show = (ollama show gemma:2b 2>$null | Out-String); if ($show -match 'family\\s+llama') { ollama rm gemma:2b; ollama pull gemma:2b }; $tags = try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 5 | ConvertTo-Json -Compress } catch { '' }; if ($tags -notmatch 'gemma:2b') { ollama pull gemma:2b }; $body = '{\\\"model\\\":\\\"gemma:2b\\\",\\\"prompt\\\":\\\"SELECT 1;\\\",\\\"stream\\\":false,\\\"options\\\":{\\\"use_mmap\\\":false,\\\"num_predict\\\":1,\\\"num_ctx\\\":512,\\\"num_gpu\\\":0,\\\"num_thread\\\":4}}'; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch { if ($_.Exception.Message -match 'llama-server process has terminated|segmentation fault') { ollama rm gemma:2b; ollama pull gemma:2b; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch {} } }\")",
         "ignore_errors": true
       }
     ],
     "db_migrate": [
       {
         "name": "prepare-t1d-data-dir",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo mkdir -p \"${DATA_DISK_MOUNT:-/mnt/data}\" data && sudo chown -R $(whoami):$(whoami) \"${DATA_DISK_MOUNT:-/mnt/data}\" data",
+        "command": "for _ef in .env .env.secrets .env.libscript; do if [ -f \"$_ef\" ]; then set -a; . \"./$_ef\"; set +a; fi; done; _u=\"${REMOTE_USER:-$(id -un)}\"; _g=\"${REMOTE_GROUP:-$(id -gn)}\"; _mnt=\"${DATA_DISK_MOUNT:-/mnt/data}\"; sudo mkdir -p \"$_mnt\" \"$_mnt/ollama_models\" \"$_mnt/postgres\" \"$_mnt/valkey\" data && find \"$_mnt\" -mindepth 1 -maxdepth 1 ! -name ollama_models ! -name postgres ! -name postgresql ! -name valkey ! -name redis ! -name certs -exec sudo chown -R \"${_u}:${_g}\" {} + 2>/dev/null || true; sudo chown \"${_u}:${_g}\" \"$_mnt\" 2>/dev/null || true; sudo chown -R \"${_u}:${_g}\" data && for _pgd in \"$_mnt/postgres\" \"$_mnt/postgresql\"; do if [ -d \"$_pgd\" ]; then sudo chown -R postgres:postgres \"$_pgd\" 2>/dev/null || true; sudo chmod 0700 \"$_pgd\" 2>/dev/null || true; fi; done; for _vkd in \"$_mnt/valkey\" \"$_mnt/redis\"; do if [ -d \"$_vkd\" ]; then (sudo chown -R valkey:valkey \"$_vkd\" 2>/dev/null || sudo chown -R redis:redis \"$_vkd\" 2>/dev/null || true); sudo chmod 0750 \"$_vkd\" 2>/dev/null || true; fi; done; if [ -d \"$_mnt/ollama_models\" ]; then sudo chown -R ollama:ollama \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod 02775 \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod -R u+rwX,g+rwXs,o+rX \"$_mnt/ollama_models\" 2>/dev/null || sudo chmod -R a+rwX \"$_mnt/ollama_models\" 2>/dev/null || true; fi; if command -v psql >/dev/null 2>&1; then PGPASSWORD=\"${POSTGRES_PASSWORD:-postgres}\" psql -h \"${POSTGRES_SERVER:-127.0.0.1}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USER:-postgres}\" -d t1d_analytics_db -c \"CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Session', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO chat_sessions (id, title) VALUES ('default-t1d-session', 'T1D Clinical Analytics Baseline Session') ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW(); CREATE TABLE IF NOT EXISTS t1d_cohort_metadata (table_name TEXT PRIMARY KEY, min_rows INTEGER NOT NULL, description TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO t1d_cohort_metadata (table_name, min_rows, description) VALUES ('patients', 100, 'T1D clinical trial baseline cohort'), ('cgm_readings', 200, 'Continuous glucose monitoring traces'), ('hba1c_labs', 150, 'Longitudinal HbA1c and C-Peptide labs'), ('dka_adverse_events', 25, 'Diabetic ketoacidosis and severe hypoglycemia events') ON CONFLICT (table_name) DO UPDATE SET min_rows = EXCLUDED.min_rows, description = EXCLUDED.description, updated_at = NOW();\" >/dev/null 2>&1 || true; fi",
         "cmd_windows": "if not exist data mkdir data",
         "condition": "unix"
       },
       {
         "name": "upsert-and-confirm-t1d-duckdb",
-        "condition": "unless_env LIBSCRIPT_DB_DUCKDB_POPULATED=1",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; [ -f .env.libscript ] && . ./.env.libscript; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\"; _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"; _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\"; _tcnt=0; if [ -f \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); fi; if [ \"${_tcnt:-0}\" -lt 25 ] 2>/dev/null; then for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -f \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ]; then cp -f \"$_cand\" \"$_db\" && _tcnt=30 && break; fi; done; fi; if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then printf '[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into \"%s\"...\\n' \"$_db\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; else t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('$_db')\"; fi; if command -v duckdb >/dev/null 2>&1 && [ -f \"$_db\" ]; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog');\" 2>/dev/null | tr -d ' \\r\\n' || printf '0'); _sz=$(du -sh \"$_db\" 2>/dev/null | awk '{print $1}'); printf '[UPSERT:DUCKDB] [CONFIRM] T1D DuckDB \"%s\" verified (%s, %s tables); sessions DB \"%s\" verified.\\n' \"$_db\" \"${_sz:-0B}\" \"${_tcnt:-0}\" \"$_sdb\"; fi",
-        "cmd_windows": "echo [UPSERT:DUCKDB] Verifying and upserting T1D DuckDB datasets... && (if not exist \"%T1D_DB_PATH%\" if exist \"\\mnt\\data\\t1d\\jaeb\\t1d.duckdb\" copy /Y \"\\mnt\\data\\t1d\\jaeb\\t1d.duckdb\" \"%T1D_DB_PATH%\" >nul) && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe seed --data-dir data --db \"%T1D_DB_PATH%\" --sessions-db \"%T1D_SESSIONS_DB_PATH%\" && t1d-analytics-backend\\.venv\\Scripts\\python.exe -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views(r'%T1D_DB_PATH%')\" && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe doctor --db \"%T1D_DB_PATH%\" --min-tables 4 --min-rows 400"
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; [ -f .env.libscript ] && . ./.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":${HOME:-/root}/.local/bin:\"*) ;; *) PATH=\"${HOME:-/root}/.local/bin:/root/.local/bin:$PATH\" ;; esac; export PATH; _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\"; _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\"; _tcnt=0; if [ -f \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader 'SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false;' 2>/dev/null | tr -d '[:space:]' || printf '0'); fi; if [ \"${_tcnt:-0}\" -eq 0 ] 2>/dev/null && [ -s \"$_db\" ] && [ -x t1d-analytics-backend/.venv/bin/python ]; then _tcnt=$(t1d-analytics-backend/.venv/bin/python -c \"import sys, duckdb; conn = duckdb.connect(sys.argv[1], read_only=True); print(conn.execute('SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false').fetchone()[0]); conn.close()\" \"$_db\" 2>/dev/null | tr -d '[:space:]' || printf '0'); fi; if [ \"${_tcnt:-0}\" -lt 25 ] 2>/dev/null; then for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -f \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ]; then _ctcnt=0; if command -v duckdb >/dev/null 2>&1; then _ctcnt=$(duckdb \"$_cand\" -readonly -csv -noheader 'SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false;' 2>/dev/null | tr -d '[:space:]' || printf '0'); fi; if [ \"${_ctcnt:-0}\" -eq 0 ] 2>/dev/null && [ -x t1d-analytics-backend/.venv/bin/python ]; then _ctcnt=$(t1d-analytics-backend/.venv/bin/python -c \"import sys, duckdb; conn = duckdb.connect(sys.argv[1], read_only=True); print(conn.execute('SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false').fetchone()[0]); conn.close()\" \"$_cand\" 2>/dev/null | tr -d '[:space:]' || printf '30'); fi; if [ \"${_ctcnt:-30}\" -ge 25 ] 2>/dev/null; then cp -f \"$_cand\" \"$_db\" && _tcnt=\"$_ctcnt\" && break; fi; fi; done; fi; if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then echo \"[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into $_db...\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; else t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\"; fi && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('$_db')\"; if [ \"$_db\" != \"data/t1d.duckdb\" ] && [ \"${_tcnt:-0}\" -ge 25 ] 2>/dev/null; then rm -f data/t1d.duckdb t1d-analytics-backend/data/t1d.duckdb 2>/dev/null || true; fi; if [ -f \"$_db\" ]; then if command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader 'SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false;' 2>/dev/null | tr -d '[:space:]' || printf '0'); fi; if [ \"${_tcnt:-0}\" -eq 0 ] 2>/dev/null && [ -x t1d-analytics-backend/.venv/bin/python ]; then _tcnt=$(t1d-analytics-backend/.venv/bin/python -c \"import sys, duckdb; conn = duckdb.connect(sys.argv[1], read_only=True); print(conn.execute('SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false').fetchone()[0]); conn.close()\" \"$_db\" 2>/dev/null | tr -d '[:space:]' || printf '0'); fi; _sz=$(du -sh \"$_db\" 2>/dev/null | awk '{print $1}'); echo \"[UPSERT:DUCKDB] [CONFIRM] T1D DuckDB $_db verified (${_sz:-0B}, ${_tcnt:-0} tables); sessions DB $_sdb verified.\"; fi",
+        "cmd_windows": "echo [UPSERT:DUCKDB] Verifying and upserting T1D DuckDB datasets... && (if not exist \"%T1D_DB_PATH%\" if exist \"\\mnt\\data\\t1d\\jaeb\\t1d.duckdb\" copy /Y \"\\mnt\\data\\t1d\\jaeb\\t1d.duckdb\" \"%T1D_DB_PATH%\" >nul) && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe seed --data-dir data --db \"%T1D_DB_PATH%\" --sessions-db \"%T1D_SESSIONS_DB_PATH%\" && t1d-analytics-backend\\.venv\\Scripts\\python.exe -c \"import sys; from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views(sys.argv[1])\" \"%T1D_DB_PATH%\" && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe doctor --db \"%T1D_DB_PATH%\" --min-tables 4 --min-rows 400"
       },
       {
         "name": "ensure-duckdb-permissions",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo chown -R \"${REMOTE_USER:-ubuntu}:${REMOTE_GROUP:-ubuntu}\" \"${DATA_DISK_MOUNT:-/mnt/data}\" data 2>/dev/null || true",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; _u=\"${REMOTE_USER:-$(id -un)}\"; _g=\"${REMOTE_GROUP:-$(id -gn)}\"; _mnt=\"${DATA_DISK_MOUNT:-/mnt/data}\"; find \"$_mnt\" -mindepth 1 -maxdepth 1 ! -name ollama_models ! -name postgres ! -name postgresql ! -name valkey ! -name redis ! -name certs -exec sudo chown -R \"${_u}:${_g}\" {} + 2>/dev/null || true; sudo chown \"${_u}:${_g}\" \"$_mnt\" 2>/dev/null || true; sudo chown -R \"${_u}:${_g}\" data 2>/dev/null || true; for _pgd in \"$_mnt/postgres\" \"$_mnt/postgresql\"; do if [ -d \"$_pgd\" ]; then sudo chown -R postgres:postgres \"$_pgd\" 2>/dev/null || true; sudo chmod 0700 \"$_pgd\" 2>/dev/null || true; fi; done; for _vkd in \"$_mnt/valkey\" \"$_mnt/redis\"; do if [ -d \"$_vkd\" ]; then (sudo chown -R valkey:valkey \"$_vkd\" 2>/dev/null || sudo chown -R redis:redis \"$_vkd\" 2>/dev/null || true); sudo chmod 0750 \"$_vkd\" 2>/dev/null || true; fi; done; if [ -d \"$_mnt/ollama_models\" ]; then sudo chown -R ollama:ollama \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod 02775 \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod -R u+rwX,g+rwXs,o+rX \"$_mnt/ollama_models\" 2>/dev/null || sudo chmod -R a+rwX \"$_mnt/ollama_models\" 2>/dev/null || true; fi",
         "cmd_windows": "rem DuckDB permissions managed by Windows ACLs",
         "condition": "unix"
       }
@@ -304,12 +350,19 @@
         "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\"; if command -v ollama >/dev/null 2>&1; then _i=0; while [ \"$_i\" -lt 30 ]; do curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; _i=$((_i + 1)); done; if ! ollama list >/dev/null 2>&1; then (nohup ollama serve >/dev/null 2>&1 & sleep 2); fi; if ! command -v nvidia-smi >/dev/null 2>&1; then for _big in gemma2:27b gemma4:26b gemma4:latest gemma:latest; do ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx \"$_big\" && ollama rm \"$_big\" 2>/dev/null || true; done; fi; for _m in gemma:2b llama3.2:1b phi4-mini; do ollama list 2>/dev/null | grep -Fq \"$_m\" || ollama pull \"$_m\" || true; done; fi",
         "cmd_windows": "where ollama >nul 2>&1 && (powershell -NoProfile -Command \"for ($i=0; $i -lt 30; $i++) { try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 } }\" & (where nvidia-smi >nul 2>&1 || (ollama rm gemma2:27b 2>nul & ollama rm gemma4:26b 2>nul & ollama rm gemma4:latest 2>nul & ollama rm gemma:latest 2>nul)) & for %%M in (gemma:2b llama3.2:1b phi4-mini) do @(ollama list 2>nul | findstr /I /C:\"%%M\" >nul || ollama pull %%M))",
         "ignore_errors": true
+      },
+      {
+        "name": "mount-data-disk",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; _u=\"${REMOTE_USER:-$(id -un)}\"; _g=\"${REMOTE_GROUP:-$(id -gn)}\"; _mnt=\"${DATA_DISK_MOUNT:-/mnt/data}\"; sudo mkdir -p \"$_mnt\" \"$_mnt/ollama_models\" \"$_mnt/postgres\" \"$_mnt/valkey\" \"${TMP_DATA_DIR:-/tmp/data}\" data && find \"$_mnt\" -mindepth 1 -maxdepth 1 ! -name ollama_models ! -name postgres ! -name postgresql ! -name valkey ! -name redis ! -name certs -exec sudo chown -R \"${_u}:${_g}\" {} + 2>/dev/null || true; sudo chown \"${_u}:${_g}\" \"$_mnt\" 2>/dev/null || true; sudo chown -R \"${_u}:${_g}\" \"${TMP_DATA_DIR:-/tmp/data}\" data 2>/dev/null || true; for _pgd in \"$_mnt/postgres\" \"$_mnt/postgresql\"; do if [ -d \"$_pgd\" ]; then sudo chown -R postgres:postgres \"$_pgd\" 2>/dev/null || true; sudo chmod 0700 \"$_pgd\" 2>/dev/null || true; fi; done; for _vkd in \"$_mnt/valkey\" \"$_mnt/redis\"; do if [ -d \"$_vkd\" ]; then (sudo chown -R valkey:valkey \"$_vkd\" 2>/dev/null || sudo chown -R redis:redis \"$_vkd\" 2>/dev/null || true); sudo chmod 0750 \"$_vkd\" 2>/dev/null || true; fi; done; if [ -d \"$_mnt/ollama_models\" ]; then sudo chown -R ollama:ollama \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod 02775 \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod -R u+rwX,g+rwXs,o+rX \"$_mnt/ollama_models\" 2>/dev/null || sudo chmod -R a+rwX \"$_mnt/ollama_models\" 2>/dev/null || true; fi",
+        "cmd_windows": "rem Data ownership managed by Windows ACLs",
+        "condition": "unix",
+        "ignore_errors": true
       }
     ],
     "pre_start": [
       {
         "name": "normalize-t1d-data-ownership",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; sudo chown -R \"${REMOTE_USER:-ubuntu}:${REMOTE_GROUP:-ubuntu}\" \"${DATA_DISK_MOUNT:-/mnt/data}\" \"${TMP_DATA_DIR:-/tmp/data}\" data 2>/dev/null || true",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; _u=\"${REMOTE_USER:-$(id -un)}\"; _g=\"${REMOTE_GROUP:-$(id -gn)}\"; _mnt=\"${DATA_DISK_MOUNT:-/mnt/data}\"; find \"$_mnt\" -mindepth 1 -maxdepth 1 ! -name ollama_models ! -name postgres ! -name postgresql ! -name valkey ! -name redis ! -name certs -exec sudo chown -R \"${_u}:${_g}\" {} + 2>/dev/null || true; sudo chown \"${_u}:${_g}\" \"$_mnt\" 2>/dev/null || true; sudo chown -R \"${_u}:${_g}\" \"${TMP_DATA_DIR:-/tmp/data}\" data 2>/dev/null || true; for _pgd in \"$_mnt/postgres\" \"$_mnt/postgresql\"; do if [ -d \"$_pgd\" ]; then sudo chown -R postgres:postgres \"$_pgd\" 2>/dev/null || true; sudo chmod 0700 \"$_pgd\" 2>/dev/null || true; fi; done; for _vkd in \"$_mnt/valkey\" \"$_mnt/redis\"; do if [ -d \"$_vkd\" ]; then (sudo chown -R valkey:valkey \"$_vkd\" 2>/dev/null || sudo chown -R redis:redis \"$_vkd\" 2>/dev/null || true); sudo chmod 0750 \"$_vkd\" 2>/dev/null || true; fi; done; if [ -d \"$_mnt/ollama_models\" ]; then sudo chown -R ollama:ollama \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod 02775 \"$_mnt/ollama_models\" 2>/dev/null || true; sudo chmod -R u+rwX,g+rwXs,o+rX \"$_mnt/ollama_models\" 2>/dev/null || sudo chmod -R a+rwX \"$_mnt/ollama_models\" 2>/dev/null || true; fi",
         "cmd_windows": "rem Data ownership managed by Windows ACLs",
         "condition": "unix"
       },
@@ -320,36 +373,54 @@
         "ignore_errors": true
       }
     ],
+    "post_start": [
+      {
+        "name": "verify-ollama-gemma-2b",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\" GGML_BACKEND_AMX=\"0\" OLLAMA_LLM_LIBRARY=\"${OLLAMA_LLM_LIBRARY:-cpu_avx2}\" OLLAMA_NUM_GPU=\"${OLLAMA_NUM_GPU:-0}\" OLLAMA_FLASH_ATTENTION=\"${OLLAMA_FLASH_ATTENTION:-0}\" OLLAMA_CONTEXT_LENGTH=\"${OLLAMA_CONTEXT_LENGTH:-2048}\"; _i=0; while [ \"$_i\" -lt 15 ]; do curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; _i=$((_i + 1)); done; if command -v ollama >/dev/null 2>&1; then if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; _g_fam=$(ollama show gemma:2b 2>/dev/null | awk '/family/ {print $2; exit}' || true); _g_id=$(ollama list 2>/dev/null | awk '$1 ~ /^gemma:2b$/ {print $2; exit}' || true); _l_id=$(ollama list 2>/dev/null | awk '$1 ~ /^llama3\\.2:1b$/ {print $2; exit}' || true); if [ \"$_g_fam\" = \"llama\" ] || { [ -n \"$_g_id\" ] && [ \"$_g_id\" = \"$_l_id\" ]; }; then ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; fi; curl -fsS http://127.0.0.1:11434/api/tags 2>/dev/null | grep -Fq 'gemma:2b' || ollama pull gemma:2b || true; _smoke=$(curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' 2>&1 || true); case \"$_smoke\" in *'llama-server process has terminated'*|*'segmentation fault'*|*'core dumped'*) if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' >/dev/null 2>&1 || true ;; esac; fi",
+        "cmd_windows": "where ollama >nul 2>&1 && (powershell -NoProfile -Command \"for ($i=0; $i -lt 15; $i++) { try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 } }; $show = (ollama show gemma:2b 2>$null | Out-String); if ($show -match 'family\\s+llama') { ollama rm gemma:2b; ollama pull gemma:2b }; $tags = try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 5 | ConvertTo-Json -Compress } catch { '' }; if ($tags -notmatch 'gemma:2b') { ollama pull gemma:2b }; $body = '{\\\"model\\\":\\\"gemma:2b\\\",\\\"prompt\\\":\\\"SELECT 1;\\\",\\\"stream\\\":false,\\\"options\\\":{\\\"use_mmap\\\":false,\\\"num_predict\\\":1,\\\"num_ctx\\\":512,\\\"num_gpu\\\":0,\\\"num_thread\\\":4}}'; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch { if ($_.Exception.Message -match 'llama-server process has terminated|segmentation fault') { ollama rm gemma:2b; ollama pull gemma:2b; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch {} } }\")",
+        "ignore_errors": true
+      }
+    ],
     "health": [
       {
+        "name": "verify-ollama-gemma-2b",
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\" GGML_BACKEND_AMX=\"0\" OLLAMA_LLM_LIBRARY=\"${OLLAMA_LLM_LIBRARY:-cpu_avx2}\" OLLAMA_NUM_GPU=\"${OLLAMA_NUM_GPU:-0}\" OLLAMA_FLASH_ATTENTION=\"${OLLAMA_FLASH_ATTENTION:-0}\" OLLAMA_CONTEXT_LENGTH=\"${OLLAMA_CONTEXT_LENGTH:-2048}\"; _i=0; while [ \"$_i\" -lt 15 ]; do curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; _i=$((_i + 1)); done; if command -v ollama >/dev/null 2>&1; then if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; _g_fam=$(ollama show gemma:2b 2>/dev/null | awk '/family/ {print $2; exit}' || true); _g_id=$(ollama list 2>/dev/null | awk '$1 ~ /^gemma:2b$/ {print $2; exit}' || true); _l_id=$(ollama list 2>/dev/null | awk '$1 ~ /^llama3\\.2:1b$/ {print $2; exit}' || true); if [ \"$_g_fam\" = \"llama\" ] || { [ -n \"$_g_id\" ] && [ \"$_g_id\" = \"$_l_id\" ]; }; then ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; fi; curl -fsS http://127.0.0.1:11434/api/tags 2>/dev/null | grep -Fq 'gemma:2b' || ollama pull gemma:2b || true; _smoke=$(curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' 2>&1 || true); case \"$_smoke\" in *'llama-server process has terminated'*|*'segmentation fault'*|*'core dumped'*) if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' >/dev/null 2>&1 || true ;; esac; fi",
+        "cmd_windows": "where ollama >nul 2>&1 && (powershell -NoProfile -Command \"for ($i=0; $i -lt 15; $i++) { try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 } }; $show = (ollama show gemma:2b 2>$null | Out-String); if ($show -match 'family\\s+llama') { ollama rm gemma:2b; ollama pull gemma:2b }; $tags = try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 5 | ConvertTo-Json -Compress } catch { '' }; if ($tags -notmatch 'gemma:2b') { ollama pull gemma:2b }; $body = '{\\\"model\\\":\\\"gemma:2b\\\",\\\"prompt\\\":\\\"SELECT 1;\\\",\\\"stream\\\":false,\\\"options\\\":{\\\"use_mmap\\\":false,\\\"num_predict\\\":1,\\\"num_ctx\\\":512,\\\"num_gpu\\\":0,\\\"num_thread\\\":4}}'; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch { if ($_.Exception.Message -match 'llama-server process has terminated|segmentation fault') { ollama rm gemma:2b; ollama pull gemma:2b; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch {} } }\")",
+        "ignore_errors": true
+      },
+      {
         "name": "doctor-check",
-        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
+        "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400",
+        "cmd_windows": "if defined T1D_DB_PATH (set \"_DB=%T1D_DB_PATH%\") else (set \"_DB=data\\t1d_analytics.duckdb\") && t1d-analytics-backend\\.venv\\Scripts\\t1d-analytics.exe doctor --db \"!_DB!\" --min-tables 4 --min-rows 400"
       },
       {
         "name": "verify-t1d-api-deep-health",
-        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '(.status == \"healthy\" or .status == \"ready\") and .database.connected == true and (if (.database.table_count // 0) > 25 then .database.is_synthetic_faked_data == false else true end)'"
+        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '(.status == \"healthy\" or .status == \"ready\") and .database.connected == true and (if (.database.table_count // 0) > 25 then .database.is_synthetic_faked_data == false else true end)'",
+        "cmd_windows": "powershell -NoProfile -Command \"$p = if ($env:T1D_API_PORT) { $env:T1D_API_PORT } else { '8001' }; $r = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $p + '/api/status') -TimeoutSec 5; if (-not (($r.status -eq 'healthy' -or $r.status -eq 'ready') -and $r.database.connected -eq $true)) { exit 1 }\""
       },
       {
         "name": "api-status-check",
-        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '(.status == \"ready\" or .status == \"healthy\") and .tables_count >= 4 and .total_rows > 0'"
+        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/status\" | jq -e '(.status == \"ready\" or .status == \"healthy\") and .tables_count >= 4 and .total_rows > 0'",
+        "cmd_windows": "powershell -NoProfile -Command \"$p = if ($env:T1D_API_PORT) { $env:T1D_API_PORT } else { '8001' }; $r = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $p + '/api/status') -TimeoutSec 5; if (-not (($r.status -eq 'ready' -or $r.status -eq 'healthy') -and $r.tables_count -ge 4 -and $r.total_rows -gt 0)) { exit 1 }\""
       },
       {
         "name": "api-models-check",
-        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/models\" | jq -e '[.models[] | select(.provider == \"ollama\" and .available == true and .reachable == true)] | length > 0'"
+        "command": "set -a && [ -f .env ] && . ./.env && set +a && curl -sf \"http://127.0.0.1:${T1D_API_PORT:-8001}/api/models\" | jq -e '[.models[] | select(.provider == \"ollama\" and .available == true and .reachable == true)] | length > 0'",
+        "cmd_windows": "powershell -NoProfile -Command \"$p = if ($env:T1D_API_PORT) { $env:T1D_API_PORT } else { '8001' }; $r = Invoke-RestMethod -Uri ('http://127.0.0.1:' + $p + '/api/models') -TimeoutSec 5; $ok = @($r.models | Where-Object { $_.provider -eq 'ollama' -and $_.available -eq $true -and $_.reachable -eq $true }); if ($ok.Count -le 0) { exit 1 }\""
       }
     ],
     "build": [
       {
         "name": "build-vite-web",
-        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; export PATH=\"$SERVICE_PATH:$PATH\" VOLTA_HOME=\"$VOLTA_HOME\" && _src_hash=$({ cksum package.json package-lock.json vite.config.ts tsconfig.json index.html 2>/dev/null || true; find src public -type f -exec cksum {} + 2>/dev/null | sort || true; } | cksum | awk '{print $1\"_\"$2}') && if [ \"${FORCE_REBUILD:-0}\" != \"1\" ] && [ -f dist/index.html ] && [ -f dist/.libscript_src_hash ] && [ \"$(cat dist/.libscript_src_hash 2>/dev/null)\" = \"$_src_hash\" ]; then _cnt=$(find dist -type f 2>/dev/null | wc -l | tr -d ' '); _sz=$(du -sh dist 2>/dev/null | awk '{print $1}'); printf '[BUILD] [REUSE] Vite build (vite build) output verified at dist/index.html (%s files, %s, hash %s; pass --force-rebuild to re-run vite build).\\n' \"${_cnt:-0}\" \"${_sz:-0B}\" \"$_src_hash\"; else printf '[BUILD] [vite build] Building React/Vite frontend (t1d-analytics-web, hash %s) -> dist/...\\n' \"$_src_hash\" && rm -rf dist .vite .libscript_build.sha256 && npm run build && printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256; fi",
-        "cmd_windows": "if not \"%FORCE_REBUILD%\"==\"1\" if exist \"dist\\index.html\" if exist \"dist\\.libscript_src_hash\" (echo [BUILD] [REUSE] Vite build ^(vite build^) output verified at dist\\index.html ^(pass --force-rebuild to re-run vite build^).) else (echo [BUILD] [vite build] Building React/Vite frontend ^(t1d-analytics-web^) -^> dist\\... && npm run build && echo rebuilt > dist\\.libscript_src_hash)",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; export PATH VOLTA_HOME=\"${VOLTA_HOME:-}\" && _src_hash=$({ for _cff_f in package.json package-lock.json pnpm-lock.yaml yarn.lock angular.json vite.config.ts vite.config.js vite.config.mts tsconfig.json tsconfig.app.json tsconfig.spec.json index.html postcss.config.js postcss.config.cjs tailwind.config.js tailwind.config.ts .env .env.production; do [ -f \"$_cff_f\" ] && cksum \"$_cff_f\" 2>/dev/null || true; done; for _cff_sub in src public; do [ -d \"$_cff_sub\" ] && find \"$_cff_sub\" -type f -exec cksum {} + 2>/dev/null | sort || true; done; } | cksum | awk '{print $1\"_\"$2}') && if [ \"${FORCE_REBUILD:-0}\" != \"1\" ] && [ -f dist/index.html ] && { { [ -f .libscript_build.sha256 ] && [ \"$(cat .libscript_build.sha256 2>/dev/null)\" = \"$_src_hash\" ]; } || { [ -f dist/.libscript_src_hash ] && [ \"$(cat dist/.libscript_src_hash 2>/dev/null)\" = \"$_src_hash\" ]; }; }; then printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256 && _cnt=$(find dist -type f 2>/dev/null | wc -l | tr -d ' '); _sz=$(du -sh dist 2>/dev/null | awk '{print $1}'); printf '[BUILD] [REUSE] Vite build (vite build) output verified at dist/index.html (%s files, %s, hash %s; pass --force-rebuild to re-run vite build).\\n' \"${_cnt:-0}\" \"${_sz:-0B}\" \"$_src_hash\"; else printf '[BUILD] [vite build] Building React/Vite frontend (t1d-analytics-web, hash %s) -> dist/...\\n' \"$_src_hash\" && rm -rf dist .vite .libscript_build.sha256 && npm run build && [ -f dist/index.html ] && printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256; fi",
+        "cmd_windows": "if not \"%FORCE_REBUILD%\"==\"1\" if exist \"dist\\index.html\" if exist \".libscript_build.sha256\" if exist \"dist\\.libscript_src_hash\" (echo [BUILD] [REUSE] Vite build ^(vite build^) output verified at dist\\index.html ^(pass --force-rebuild to re-run vite build^).) else (echo [BUILD] [vite build] Building React/Vite frontend ^(t1d-analytics-web^) -^> dist\\... && npm run build && (set \"_CFF_TMP=%TEMP%\\libscript_fe_fp_%RANDOM%.txt\" && (for %F in (package.json package-lock.json pnpm-lock.yaml yarn.lock angular.json vite.config.ts vite.config.js vite.config.mts tsconfig.json tsconfig.app.json tsconfig.spec.json index.html postcss.config.js postcss.config.cjs tailwind.config.js tailwind.config.ts .env .env.production) do @if exist \"%F\" for %Z in (\"%F\") do @echo %~nxZ:%~zZ:%~tZ>>\"!_CFF_TMP!\") && (if exist \"src\" for /r \"src\" %S in (*) do @echo %~nxS:%~zS:%~tS>>\"!_CFF_TMP!\") && (if exist \"public\" for /r \"public\" %P in (*) do @echo %~nxP:%~zP:%~tP>>\"!_CFF_TMP!\") && (for /f \"skip=1 tokens=1\" %H in ('certutil -hashfile \"!_CFF_TMP!\" SHA256 2^>nul') do @if not exist \".libscript_build.sha256\" (echo %H>.libscript_build.sha256 && echo %H>dist\\.libscript_src_hash)) && del /f /q \"!_CFF_TMP!\" >nul 2>&1))",
         "working_dir": "t1d-analytics-web"
       }
     ]
   },
   "services": {
     "t1d-api": {
-      "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.local/bin:/root/.local/bin:$PATH\" && uv run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port ${T1D_API_PORT:-8001}",
+      "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":/home/${REMOTE_USER}/.local/bin:\"*) ;; *) PATH=\"/home/${REMOTE_USER}/.local/bin:/root/.local/bin:$PATH\" ;; esac; export PATH && uv run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port ${T1D_API_PORT:-8001}",
       "working_dir": "t1d-analytics-backend",
       "user": "${SERVICE_USER:-ubuntu}",
       "port": 8001,
@@ -362,7 +433,7 @@
         "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
         "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
         "T1D_JAEB_DIR": "${T1D_JAEB_DIR:-/mnt/data/t1d/jaeb}",
-        "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics-test/data}",
+        "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics/data}",
         "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}",
         "T1D_POSTGRES_URL": "${T1D_POSTGRES_URL:-postgresql://postgres:postgres@127.0.0.1:5432/t1d_analytics_db}",
         "POSTGRES_SERVER": "127.0.0.1",
@@ -371,8 +442,11 @@
         "POSTGRES_DB": "t1d_analytics_db",
         "POSTGRES_PORT": "5432",
         "OLLAMA_HOST": "${OLLAMA_HOST:-http://127.0.0.1:11434}",
-        "OLLAMA_MODEL_LIST": "gemma:2b,llama3.2:1b,phi4-mini",
+        "OLLAMA_MODEL_LIST": "${OLLAMA_MODEL_LIST:-gemma:2b,llama3.2:1b,phi4-mini}",
         "DEFAULT_OLLAMA_MODEL": "gemma:2b",
+        "OLLAMA_NUM_CTX": "${OLLAMA_NUM_CTX:-2048}",
+        "OLLAMA_NUM_GPU": "${OLLAMA_NUM_GPU:-0}",
+        "OLLAMA_NUM_THREAD": "${OLLAMA_NUM_THREAD:-8}",
         "PATH": "${SERVICE_PATH}"
       },
       "health_check": {
@@ -385,9 +459,9 @@
       }
     },
     "t1d-web": {
-      "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
-      "production_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
-      "dev_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
+      "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":/home/${REMOTE_USER}/.libscript/nodejs/22/bin:\"*) ;; *) PATH=\"/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" ;; esac; export PATH && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
+      "production_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":/home/${REMOTE_USER}/.libscript/nodejs/22/bin:\"*) ;; *) PATH=\"/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" ;; esac; export PATH && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
+      "dev_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":/home/${REMOTE_USER}/.libscript/nodejs/22/bin:\"*) ;; *) PATH=\"/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" ;; esac; export PATH && npx vite --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
       "working_dir": "t1d-analytics-web",
       "user": "${SERVICE_USER:-ubuntu}",
       "port": 3000,
@@ -447,7 +521,7 @@
           "chat_sessions": 1,
           "t1d_cohort_metadata": 4
         },
-        "seed_command": "PGPASSWORD=\"postgres\" psql -h \"${POSTGRES_SERVER:-127.0.0.1}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USER:-postgres}\" -d t1d_analytics_db -c \"CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Session', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO chat_sessions (id, title) VALUES ('default-t1d-session', 'T1D Clinical Analytics Baseline Session') ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW(); CREATE TABLE IF NOT EXISTS t1d_cohort_metadata (table_name TEXT PRIMARY KEY, min_rows INTEGER NOT NULL, description TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO t1d_cohort_metadata (table_name, min_rows, description) VALUES ('patients', 100, 'T1D clinical trial baseline cohort'), ('cgm_readings', 200, 'Continuous glucose monitoring traces'), ('hba1c_labs', 150, 'Longitudinal HbA1c and C-Peptide labs'), ('dka_adverse_events', 25, 'Diabetic ketoacidosis and severe hypoglycemia events') ON CONFLICT (table_name) DO UPDATE SET min_rows = EXCLUDED.min_rows, description = EXCLUDED.description, updated_at = NOW();\""
+        "seed_command": "for _ef in .env .env.secrets .env.libscript; do if [ -f \"$_ef\" ]; then set -a; . \"./$_ef\"; set +a; fi; done; PGPASSWORD=\"${POSTGRES_PASSWORD:-postgres}\" psql -h \"${POSTGRES_SERVER:-127.0.0.1}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USER:-postgres}\" -d t1d_analytics_db -c \"CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Session', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO chat_sessions (id, title) VALUES ('default-t1d-session', 'T1D Clinical Analytics Baseline Session') ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW(); CREATE TABLE IF NOT EXISTS t1d_cohort_metadata (table_name TEXT PRIMARY KEY, min_rows INTEGER NOT NULL, description TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()); INSERT INTO t1d_cohort_metadata (table_name, min_rows, description) VALUES ('patients', 100, 'T1D clinical trial baseline cohort'), ('cgm_readings', 200, 'Continuous glucose monitoring traces'), ('hba1c_labs', 150, 'Longitudinal HbA1c and C-Peptide labs'), ('dka_adverse_events', 25, 'Diabetic ketoacidosis and severe hypoglycemia events') ON CONFLICT (table_name) DO UPDATE SET min_rows = EXCLUDED.min_rows, description = EXCLUDED.description, updated_at = NOW();\""
       },
       {
         "engine": "duckdb",
@@ -476,13 +550,23 @@
           "hba1c_labs": 150,
           "dka_adverse_events": 25
         },
-        "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"${SERVICE_PATH:-/home/${REMOTE_USER}/.local/bin:/root/.local/bin}:$PATH\" && _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" && _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -f \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ] && [ ! -f \"$_db\" ]; then cp -f \"$_cand\" \"$_db\" && break; fi; done && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('$_db')\"",
+        "seed_command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; [ -f .env.libscript ] && . ./.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":${HOME:-/root}/.local/bin:\"*) ;; *) PATH=\"${HOME:-/root}/.local/bin:/root/.local/bin:$PATH\" ;; esac; export PATH && _db=\"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" && _sdb=\"${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}\" && if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && _tcnt=0 && if [ -s \"$_db\" ] && command -v duckdb >/dev/null 2>&1; then _tcnt=$(duckdb \"$_db\" -readonly -csv -noheader 'SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false;' 2>/dev/null | tr -d '[:space:]' || printf '0'); fi && if [ \"${_tcnt:-0}\" -eq 0 ] 2>/dev/null && [ -s \"$_db\" ] && [ -x t1d-analytics-backend/.venv/bin/python ]; then _tcnt=$(t1d-analytics-backend/.venv/bin/python -c \"import sys, duckdb; conn = duckdb.connect(sys.argv[1], read_only=True); print(conn.execute('SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false').fetchone()[0]); conn.close()\" \"$_db\" 2>/dev/null | tr -d '[:space:]' || printf '0'); fi && if [ \"${_tcnt:-0}\" -lt 25 ] 2>/dev/null; then for _cand in /mnt/data/t1d/jaeb/t1d.duckdb /mnt/data/t1d/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb /Volumes/TOSHIBA_EXT/stanford/t1d/t1d.duckdb; do if [ -s \"$_cand\" ] && [ \"$_cand\" != \"$_db\" ]; then _ctcnt=0; if command -v duckdb >/dev/null 2>&1; then _ctcnt=$(duckdb \"$_cand\" -readonly -csv -noheader 'SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false;' 2>/dev/null | tr -d '[:space:]' || printf '0'); fi; if [ \"${_ctcnt:-0}\" -eq 0 ] 2>/dev/null && [ -x t1d-analytics-backend/.venv/bin/python ]; then _ctcnt=$(t1d-analytics-backend/.venv/bin/python -c \"import sys, duckdb; conn = duckdb.connect(sys.argv[1], read_only=True); print(conn.execute('SELECT COUNT(*) FROM duckdb_tables() WHERE internal = false').fetchone()[0]); conn.close()\" \"$_cand\" 2>/dev/null | tr -d '[:space:]' || printf '30'); fi; if [ \"${_ctcnt:-30}\" -ge 25 ] 2>/dev/null; then cp -f \"$_cand\" \"$_db\" && _tcnt=\"$_ctcnt\" && break; fi; fi; done; fi && if [ \"${_tcnt:-0}\" -lt 4 ] 2>/dev/null; then echo \"[UPSERT:DUCKDB] Seeding and loading T1D clinical datasets into $_db...\" && t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\" && t1d-analytics-backend/.venv/bin/t1d-analytics load --data-dir data --db \"$_db\"; else t1d-analytics-backend/.venv/bin/t1d-analytics seed --data-dir data --db \"$_db\" --sessions-db \"$_sdb\"; fi && t1d-analytics-backend/.venv/bin/python -c \"from t1d_analytics.seed import ensure_canonical_clinical_views; ensure_canonical_clinical_views('${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}')\" && if [ \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" != \"data/t1d.duckdb\" ] && [ \"${_tcnt:-0}\" -ge 25 ] 2>/dev/null; then rm -f data/t1d.duckdb t1d-analytics-backend/data/t1d.duckdb 2>/dev/null || true; fi",
         "health_command": "if [ ! -x t1d-analytics-backend/.venv/bin/t1d-analytics ]; then (cd t1d-analytics-backend && uv sync --python 3.12); fi && t1d-analytics-backend/.venv/bin/t1d-analytics doctor --db \"${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}\" --min-tables 4 --min-rows 400"
       }
     ],
+    "frontends": {
+      "web": {
+        "framework": "vite",
+        "working_dir": "t1d-analytics-web",
+        "source_dir": "t1d-analytics-web",
+        "output_dir": "dist",
+        "artifact_check": "dist/index.html",
+        "build_command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":${SERVICE_EXTRA_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_EXTRA_PATH:-}\" ] && PATH=\"${SERVICE_EXTRA_PATH}:$PATH\" ;; esac; export PATH VOLTA_HOME=\"${VOLTA_HOME:-}\" && _src_hash=$({ for _cff_f in package.json package-lock.json pnpm-lock.yaml yarn.lock angular.json vite.config.ts vite.config.js vite.config.mts tsconfig.json tsconfig.app.json tsconfig.spec.json index.html postcss.config.js postcss.config.cjs tailwind.config.js tailwind.config.ts .env .env.production; do [ -f \"$_cff_f\" ] && cksum \"$_cff_f\" 2>/dev/null || true; done; for _cff_sub in src public; do [ -d \"$_cff_sub\" ] && find \"$_cff_sub\" -type f -exec cksum {} + 2>/dev/null | sort || true; done; } | cksum | awk '{print $1\"_\"$2}') && if [ \"${FORCE_REBUILD:-0}\" != \"1\" ] && [ -f dist/index.html ] && { { [ -f .libscript_build.sha256 ] && [ \"$(cat .libscript_build.sha256 2>/dev/null)\" = \"$_src_hash\" ]; } || { [ -f dist/.libscript_src_hash ] && [ \"$(cat dist/.libscript_src_hash 2>/dev/null)\" = \"$_src_hash\" ]; }; }; then printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256 && printf '[BUILD] [REUSE] Vite frontend bundle already up-to-date (hash %s).\\n' \"$_src_hash\"; else rm -rf dist .vite .libscript_build.sha256 && npm run build && [ -f dist/index.html ] && printf '%s\\n' \"$_src_hash\" > dist/.libscript_src_hash && printf '%s\\n' \"$_src_hash\" > .libscript_build.sha256; fi"
+      }
+    },
     "services": {
       "t1d-api": {
-        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.local/bin:/root/.local/bin:$PATH\" && uv run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port ${T1D_API_PORT:-8001}",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":/home/${REMOTE_USER}/.local/bin:\"*) ;; *) PATH=\"/home/${REMOTE_USER}/.local/bin:/root/.local/bin:$PATH\" ;; esac; export PATH && uv run uvicorn t1d_analytics.api:app --host 0.0.0.0 --port ${T1D_API_PORT:-8001}",
         "working_dir": "t1d-analytics-backend",
         "user": "${SERVICE_USER:-ubuntu}",
         "port": 8001,
@@ -495,7 +579,7 @@
           "T1D_DB_PATH": "${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}",
           "T1D_DB_SEARCH_DIR": "${T1D_DB_SEARCH_DIR:-/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d}",
           "T1D_JAEB_DIR": "${T1D_JAEB_DIR:-/mnt/data/t1d/jaeb}",
-          "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics-test/data}",
+          "T1D_DATA_DIR": "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics/data}",
           "T1D_SESSIONS_DB_PATH": "${T1D_SESSIONS_DB_PATH:-/mnt/data/t1d_sessions.duckdb}",
           "T1D_POSTGRES_URL": "${T1D_POSTGRES_URL:-postgresql://postgres:postgres@127.0.0.1:5432/t1d_analytics_db}",
           "POSTGRES_SERVER": "127.0.0.1",
@@ -504,8 +588,11 @@
           "POSTGRES_DB": "t1d_analytics_db",
           "POSTGRES_PORT": "5432",
           "OLLAMA_HOST": "${OLLAMA_HOST:-http://127.0.0.1:11434}",
-          "OLLAMA_MODEL_LIST": "gemma:2b,llama3.2:1b,phi4-mini",
+          "OLLAMA_MODEL_LIST": "${OLLAMA_MODEL_LIST:-gemma:2b,llama3.2:1b,phi4-mini}",
           "DEFAULT_OLLAMA_MODEL": "gemma:2b",
+          "OLLAMA_NUM_CTX": "${OLLAMA_NUM_CTX:-2048}",
+          "OLLAMA_NUM_GPU": "${OLLAMA_NUM_GPU:-0}",
+          "OLLAMA_NUM_THREAD": "${OLLAMA_NUM_THREAD:-8}",
           "PATH": "${SERVICE_PATH}"
         },
         "health_check": {
@@ -518,7 +605,7 @@
         }
       },
       "t1d-web": {
-        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; export PATH=\"${SERVICE_PATH}:/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
+        "command": "set -a; [ -f ../.env ] && . ../.env; [ -f ../.env.secrets ] && . ../.env.secrets; [ -f ../.env.libscript ] && . ../.env.libscript; set +a; case \":$PATH:\" in *\":${SERVICE_PATH:-}:\"*) ;; *) [ -n \"${SERVICE_PATH:-}\" ] && PATH=\"${SERVICE_PATH}:$PATH\" ;; esac; case \":$PATH:\" in *\":/home/${REMOTE_USER}/.libscript/nodejs/22/bin:\"*) ;; *) PATH=\"/home/${REMOTE_USER}/.libscript/nodejs/22/bin:/home/${REMOTE_USER}/.libscript/nodejs/20/bin:/home/${REMOTE_USER}/.volta/bin:/root/.libscript/nodejs/22/bin:$PATH\" ;; esac; export PATH && npx vite preview --port ${T1D_WEB_PORT:-3000} --host 0.0.0.0",
         "working_dir": "t1d-analytics-web",
         "user": "${SERVICE_USER:-ubuntu}",
         "port": 3000,
@@ -549,15 +636,75 @@
           "cmd_windows": "where ollama >nul 2>&1 && (powershell -NoProfile -Command \"for ($i=0; $i -lt 30; $i++) { try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 } }\" & (where nvidia-smi >nul 2>&1 || (ollama rm gemma2:27b 2>nul & ollama rm gemma4:26b 2>nul & ollama rm gemma4:latest 2>nul & ollama rm gemma:latest 2>nul)) & for %%M in (gemma:2b llama3.2:1b phi4-mini) do @(ollama list 2>nul | findstr /I /C:\"%%M\" >nul || ollama pull %%M))",
           "ignore_errors": true
         }
+      ],
+      "post_start": [
+        {
+          "name": "verify-ollama-gemma-2b",
+          "command": "set -a; [ -f .env ] && . ./.env; [ -f .env.secrets ] && . ./.env.secrets; set +a; export PATH=\"/usr/local/bin:$HOME/.local/bin:$PATH\" GGML_BACKEND_AMX=\"0\" OLLAMA_LLM_LIBRARY=\"${OLLAMA_LLM_LIBRARY:-cpu_avx2}\" OLLAMA_NUM_GPU=\"${OLLAMA_NUM_GPU:-0}\" OLLAMA_FLASH_ATTENTION=\"${OLLAMA_FLASH_ATTENTION:-0}\" OLLAMA_CONTEXT_LENGTH=\"${OLLAMA_CONTEXT_LENGTH:-2048}\"; _i=0; while [ \"$_i\" -lt 15 ]; do curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break; sleep 1; _i=$((_i + 1)); done; if command -v ollama >/dev/null 2>&1; then if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; _g_fam=$(ollama show gemma:2b 2>/dev/null | awk '/family/ {print $2; exit}' || true); _g_id=$(ollama list 2>/dev/null | awk '$1 ~ /^gemma:2b$/ {print $2; exit}' || true); _l_id=$(ollama list 2>/dev/null | awk '$1 ~ /^llama3\\.2:1b$/ {print $2; exit}' || true); if [ \"$_g_fam\" = \"llama\" ] || { [ -n \"$_g_id\" ] && [ \"$_g_id\" = \"$_l_id\" ]; }; then ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; fi; curl -fsS http://127.0.0.1:11434/api/tags 2>/dev/null | grep -Fq 'gemma:2b' || ollama pull gemma:2b || true; _smoke=$(curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' 2>&1 || true); case \"$_smoke\" in *'llama-server process has terminated'*|*'segmentation fault'*|*'core dumped'*) if [ -d /mnt/data/ollama_models ]; then if id ollama >/dev/null 2>&1; then sudo chown -R ollama:ollama /mnt/data/ollama_models 2>/dev/null || true; else sudo chown -R \"${SERVICE_USER:-$(id -un)}\" /mnt/data/ollama_models 2>/dev/null || true; fi; sudo chmod -R u+rwX,g+rwXs,o+rX /mnt/data/ollama_models 2>/dev/null || true; fi; ollama rm gemma:2b 2>/dev/null || true && ollama pull gemma:2b || true; curl -sS -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{\"model\":\"gemma:2b\",\"prompt\":\"SELECT 1;\",\"stream\":false,\"options\":{\"use_mmap\":false,\"num_predict\":1,\"num_ctx\":512,\"num_gpu\":0,\"num_thread\":4}}' >/dev/null 2>&1 || true ;; esac; fi",
+          "cmd_windows": "where ollama >nul 2>&1 && (powershell -NoProfile -Command \"for ($i=0; $i -lt 15; $i++) { try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 } }; $show = (ollama show gemma:2b 2>$null | Out-String); if ($show -match 'family\\s+llama') { ollama rm gemma:2b; ollama pull gemma:2b }; $tags = try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 5 | ConvertTo-Json -Compress } catch { '' }; if ($tags -notmatch 'gemma:2b') { ollama pull gemma:2b }; $body = '{\\\"model\\\":\\\"gemma:2b\\\",\\\"prompt\\\":\\\"SELECT 1;\\\",\\\"stream\\\":false,\\\"options\\\":{\\\"use_mmap\\\":false,\\\"num_predict\\\":1,\\\"num_ctx\\\":512,\\\"num_gpu\\\":0,\\\"num_thread\\\":4}}'; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch { if ($_.Exception.Message -match 'llama-server process has terminated|segmentation fault') { ollama rm gemma:2b; ollama pull gemma:2b; try { Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/generate' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null } catch {} } }\")",
+          "ignore_errors": true
+        }
       ]
     },
+    "service_overrides": {
+      "postgres": {
+        "POSTGRES_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/postgres",
+        "PGDATA": "${DATA_DISK_MOUNT:-/mnt/data}/postgres"
+      },
+      "postgresql": {
+        "POSTGRES_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/postgres",
+        "PGDATA": "${DATA_DISK_MOUNT:-/mnt/data}/postgres"
+      },
+      "valkey": {
+        "VALKEY_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey",
+        "REDIS_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey"
+      },
+      "redis": {
+        "VALKEY_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey",
+        "REDIS_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey"
+      },
+      "ollama": {
+        "OLLAMA_MODELS": "${DATA_MOUNT_DIR}/ollama_models",
+        "OLLAMA_MODELS_DIR": "${DATA_MOUNT_DIR}/ollama_models",
+        "OLLAMA_HOST": "127.0.0.1:11434",
+        "OLLAMA_NUM_PARALLEL": "1",
+        "OLLAMA_MAX_LOADED_MODELS": "1",
+        "GGML_BACKEND_AMX": "0",
+        "OLLAMA_LLM_LIBRARY": "cpu_avx2",
+        "OLLAMA_NUM_GPU": "0",
+        "OLLAMA_FLASH_ATTENTION": "0",
+        "OLLAMA_KV_CACHE_TYPE": "f16",
+        "OLLAMA_CONTEXT_LENGTH": "2048",
+        "OLLAMA_MAX_QUEUE": "16",
+        "OLLAMA_KEEP_ALIVE": "24h"
+      }
+    },
+    "storage": {
+      "data_disk": {
+        "mount_path": "${DATA_DISK_MOUNT:-/mnt/data}",
+        "directories": [
+          "/mnt/data/postgres",
+          "/mnt/data/valkey",
+          "/mnt/data/t1d",
+          "/mnt/data/t1d/jaeb",
+          "/mnt/data/ollama_models",
+          "/mnt/data/certs",
+          "/mnt/data/certs/live",
+          "/mnt/data/certs/letsencrypt",
+          "/mnt/data/certs/acme-webroot"
+        ]
+      }
+    },
     "node": {
-      "size": "${NODE_SIZE}",
+      "size": "${VM_SIZE:-Standard_D8s_v7}",
       "data_disks": [
         {
+          "name": "data-disk",
           "size_gb": 100,
-          "mount_path": "${DATA_DISK_MOUNT}",
-          "name": "data-disk"
+          "mount_path": "${DATA_DISK_MOUNT:-/mnt/data}",
+          "fstype": "ext4",
+          "delete_on_termination": false,
+          "retain_on_deprovision": true
         }
       ],
       "capabilities": [
@@ -575,13 +722,44 @@
       ]
     }
   },
+  "state": {
+    "directories": [
+      "/mnt/data/t1d",
+      "/mnt/data/certs"
+    ]
+  },
   "init_system": "${INIT_SYSTEM:-auto}",
   "service_overrides": {
+    "postgres": {
+      "POSTGRES_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/postgres",
+      "PGDATA": "${DATA_DISK_MOUNT:-/mnt/data}/postgres"
+    },
+    "postgresql": {
+      "POSTGRES_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/postgres",
+      "PGDATA": "${DATA_DISK_MOUNT:-/mnt/data}/postgres"
+    },
+    "valkey": {
+      "VALKEY_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey",
+      "REDIS_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey"
+    },
+    "redis": {
+      "VALKEY_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey",
+      "REDIS_DATA_DIR": "${DATA_DISK_MOUNT:-/mnt/data}/valkey"
+    },
     "ollama": {
       "OLLAMA_MODELS": "${DATA_MOUNT_DIR}/ollama_models",
+      "OLLAMA_MODELS_DIR": "${DATA_MOUNT_DIR}/ollama_models",
       "OLLAMA_HOST": "127.0.0.1:11434",
       "OLLAMA_NUM_PARALLEL": "1",
-      "OLLAMA_MAX_LOADED_MODELS": "1"
+      "OLLAMA_MAX_LOADED_MODELS": "1",
+      "GGML_BACKEND_AMX": "0",
+      "OLLAMA_LLM_LIBRARY": "cpu_avx2",
+      "OLLAMA_NUM_GPU": "0",
+      "OLLAMA_FLASH_ATTENTION": "0",
+      "OLLAMA_KV_CACHE_TYPE": "f16",
+      "OLLAMA_CONTEXT_LENGTH": "2048",
+      "OLLAMA_MAX_QUEUE": "16",
+      "OLLAMA_KEEP_ALIVE": "10m"
     }
   }
 }

@@ -442,7 +442,53 @@ exit 0
     assert res_rem_fail.returncode == 1
     assert "ERROR: Remote test suite failed." in res_rem_fail.stderr
 
-    # 5. Full success with provider-specific cli.sh and remote tests
+    # 4b. Live-cloud TLS and read-only cert store check fails
+    cli_code_tls_fail = """#!/bin/sh
+cmd="$1"
+if [ "$cmd" = "provision" ]; then exit 0; fi
+if [ "$cmd" = "deprovision" ]; then exit 0; fi
+if [ "$cmd" = "custom_cloud" ]; then shift 5; elif [ "$cmd" = "cloud" ]; then shift 6; fi
+if [ "$cmd" = "custom_cloud" ] || [ "$cmd" = "cloud" ]; then
+    remote_cmd="$1"
+    case "$remote_cmd" in
+        *fullchain.pem*) exit 1 ;;
+        *) exit 0 ;;
+    esac
+fi
+exit 0
+"""
+    make_executable(cli_script, cli_code_tls_fail)
+    res_tls_fail = run_test_sh(["--live-cloud"], env_overrides=env)
+    assert res_tls_fail.returncode == 1
+    assert (
+        "ERROR: Let's Encrypt TLS or read-only certificate persistence check failed."
+        in res_tls_fail.stderr
+    )
+
+    # 4c. Live-cloud async chat job polling check fails
+    cli_code_poll_fail = """#!/bin/sh
+cmd="$1"
+if [ "$cmd" = "provision" ]; then exit 0; fi
+if [ "$cmd" = "deprovision" ]; then exit 0; fi
+if [ "$cmd" = "custom_cloud" ]; then shift 5; elif [ "$cmd" = "cloud" ]; then shift 6; fi
+if [ "$cmd" = "custom_cloud" ] || [ "$cmd" = "cloud" ]; then
+    remote_cmd="$1"
+    case "$remote_cmd" in
+        *api/chat/jobs*) exit 1 ;;
+        *) exit 0 ;;
+    esac
+fi
+exit 0
+"""
+    make_executable(cli_script, cli_code_poll_fail)
+    res_poll_fail = run_test_sh(["--live-cloud"], env_overrides=env)
+    assert res_poll_fail.returncode == 1
+    assert (
+        "ERROR: Async chat job polling verification against https://t1d-analytics.healthplatform.io failed."
+        in res_poll_fail.stderr
+    )
+
+    # 5. Full success with provider-specific cli.sh, --live-cloud, and remote tests
     libscript_root = tmp_path / "libscript"
     provider_dir = libscript_root / "_lib" / "cloud-providers" / "custom_cloud"
     provider_dir.mkdir(parents=True)
@@ -468,9 +514,13 @@ exit 0
         "LIBSCRIPT_ROOT_DIR": str(libscript_root),
         "CLOUD_PROVIDER": "custom_cloud",
     }
-    res_success = run_test_sh(["-t"], env_overrides=env_success)
+    res_success = run_test_sh(["--live-cloud", "-t"], env_overrides=env_success)
     assert res_success.returncode == 0
     assert "custom provider cli executing:" in res_success.stdout
+    assert (
+        "Verifying strict Let's Encrypt TLS and read-only certificate store on remote host..."
+        in res_success.stdout
+    )
     assert "Remote test suite passed." in res_success.stdout
     assert (
         "Deployment and remote health verification passed successfully in "
@@ -565,6 +615,9 @@ def test_test_cmd_control_flow_and_arguments() -> None:
         "RG_NAME",
         "LOCATION",
         "REMOTE_DEST",
+        "CERT_STORE_DIR",
+        "LETSENCRYPT_EMAIL",
+        "LETSENCRYPT_RENEW_BEFORE_SECONDS",
         "RUN_LOCAL",
         "RUN_REMOTE_TESTS",
         "MOCK_CLOUD",
@@ -594,6 +647,12 @@ def test_libscript_config_and_docs_consistency() -> None:
     dotenv_vars = load_dotenv_dict()
     assert "REMOTE_USER" in dotenv_vars
     assert "DATA_DISK_MOUNT" in dotenv_vars
+    assert dotenv_vars["NODE_SIZE"] == "Standard_D8s_v7"
+    assert dotenv_vars["VM_SIZE"] == "Standard_D8s_v7"
+    assert dotenv_vars["POSTGRES_DATA_DIR"] == "/mnt/data/postgres"
+    assert dotenv_vars["PGDATA"] == "/mnt/data/postgres"
+    assert dotenv_vars["VALKEY_DATA_DIR"] == "/mnt/data/valkey"
+    assert dotenv_vars["REDIS_DATA_DIR"] == "/mnt/data/valkey"
     assert "T1D_DB_PATH" in dotenv_vars
     assert "T1D_DB_SEARCH_DIR" in dotenv_vars
     assert "/mnt/data/t1d" in dotenv_vars["T1D_DB_SEARCH_DIR"]
@@ -617,10 +676,29 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert config["name"] == "t1d-analytics"
     assert ".env" in config["env_files"]
     assert ".env.secrets" in config["env_files"]
+    for env_block in (config["env"], config["remote_env"]):
+        assert env_block["CERT_STORE_DIR"] == "${CERT_STORE_DIR:-/mnt/data/certs}"
+        assert (
+            env_block["LETSENCRYPT_EMAIL"]
+            == "${LETSENCRYPT_EMAIL:-admin@healthplatform.io}"
+        )
+        assert (
+            env_block["LETSENCRYPT_RENEW_BEFORE_SECONDS"]
+            == "${LETSENCRYPT_RENEW_BEFORE_SECONDS:-0}"
+        )
+        assert env_block["T1D_OLLAMA_TIMEOUT_SECONDS"] == "25"
+        assert env_block["T1D_CHAT_TRANSLATE_TIMEOUT_SECONDS"] == "30"
+        assert env_block["OLLAMA_KEEP_ALIVE"] == "24h"
+    assert config["ingress"]["proxy_connect_timeout"] == 60
+    assert config["ingress"]["proxy_send_timeout"] == 300
+    assert config["ingress"]["proxy_read_timeout"] == 300
+    assert config["ingress"]["proxy_buffering"] == "off"
     assert "deps" in config
     assert config["deps"]["python"] == "3.12"
     assert config["deps"]["duckdb"] == "latest"
     assert config["deps"]["postgres"] == "18"
+    assert config["deps"]["certbot"] == "latest"
+    assert config["dependencies"]["system"]["certbot"] == "latest"
     assert "databases" in config
     db_engines = [db["engine"] for db in config["databases"]]
     assert "postgres" in db_engines
@@ -629,6 +707,26 @@ def test_libscript_config_and_docs_consistency() -> None:
     assert config["frontends"]["web"]["source_dir"] in ("t1d-analytics-web", "web")
     assert config["frontends"]["web"]["output_dir"] == "dist"
     assert config["ingress"]["provider"] == "nginx"
+    assert config["ingress"]["domain"] == "t1d-analytics.healthplatform.io"
+    assert config["ingress"]["server_name"] == "t1d-analytics.healthplatform.io"
+    assert config["ingress"]["tls"] == "letsencrypt"
+    assert config["ingress"]["cert_store_dir"] == "${CERT_STORE_DIR:-/mnt/data/certs}"
+    assert (
+        config["ingress"]["acme_webroot"]
+        == "${CERT_STORE_DIR:-/mnt/data/certs}/acme-webroot"
+    )
+    assert config["ingress"]["email"] == "${LETSENCRYPT_EMAIL:-admin@healthplatform.io}"
+    assert config["ingress"]["renew_before_seconds"] == 0
+    storage_dirs = config["infrastructure"]["storage"]["data_disk"]["directories"]
+    for expected_dir in (
+        "/mnt/data/certs",
+        "/mnt/data/certs/live",
+        "/mnt/data/certs/letsencrypt",
+        "/mnt/data/certs/acme-webroot",
+    ):
+        assert expected_dir in storage_dirs
+    assert "/mnt/data/t1d" in config["state"]["directories"]
+    assert "/mnt/data/certs" in config["state"]["directories"]
     assert config["ingress"]["routes"]["/api"]["proxy"] in (
         "http://127.0.0.1:8000",
         "http://127.0.0.1:8001",
@@ -763,5 +861,154 @@ def test_libscript_config_and_docs_consistency() -> None:
     )
     assert libscript_cfg["vars"]["DEFAULT_OLLAMA_MODEL"] == "gemma:2b"
     assert (
+        libscript_cfg["vars"]["POSTGRES_DATA_DIR"]
+        == "${POSTGRES_DATA_DIR:-${DATA_DISK_MOUNT:-/mnt/data}/postgres}"
+    )
+    assert (
+        libscript_cfg["vars"]["PGDATA"]
+        == "${PGDATA:-${DATA_DISK_MOUNT:-/mnt/data}/postgres}"
+    )
+    assert (
+        libscript_cfg["vars"]["VALKEY_DATA_DIR"]
+        == "${VALKEY_DATA_DIR:-${DATA_DISK_MOUNT:-/mnt/data}/valkey}"
+    )
+    assert (
+        libscript_cfg["vars"]["REDIS_DATA_DIR"]
+        == "${REDIS_DATA_DIR:-${DATA_DISK_MOUNT:-/mnt/data}/valkey}"
+    )
+    node_cfg = libscript_cfg["infrastructure"]["node"]
+    assert node_cfg["size"] == "${VM_SIZE:-Standard_D8s_v7}"
+    disk0 = node_cfg["data_disks"][0]
+    assert disk0["name"] == "data-disk"
+    assert disk0["size_gb"] == 100
+    assert disk0["mount_path"] == "${DATA_DISK_MOUNT:-/mnt/data}"
+    assert disk0["fstype"] == "ext4"
+    assert disk0["delete_on_termination"] is False
+    assert disk0["retain_on_deprovision"] is True
+    for overrides in (
+        libscript_cfg["service_overrides"],
+        libscript_cfg["infrastructure"]["service_overrides"],
+    ):
+        assert (
+            overrides["postgres"]["PGDATA"] == "${DATA_DISK_MOUNT:-/mnt/data}/postgres"
+        )
+        assert (
+            overrides["postgresql"]["PGDATA"]
+            == "${DATA_DISK_MOUNT:-/mnt/data}/postgres"
+        )
+        assert (
+            overrides["valkey"]["VALKEY_DATA_DIR"]
+            == "${DATA_DISK_MOUNT:-/mnt/data}/valkey"
+        )
+        assert (
+            overrides["redis"]["REDIS_DATA_DIR"]
+            == "${DATA_DISK_MOUNT:-/mnt/data}/valkey"
+        )
+    assert (
         libscript_cfg["service_overrides"]["ollama"]["OLLAMA_HOST"] == "127.0.0.1:11434"
     )
+    assert (
+        "_tcnt" in libscript_cfg["databases"][1]["seed_command"]
+        and '[ ! -f "$_db" ]' not in libscript_cfg["databases"][1]["seed_command"]
+        and "ensure_canonical_clinical_views('${T1D_DB_PATH:-/mnt/data/t1d_analytics.duckdb}')"
+        in libscript_cfg["databases"][1]["seed_command"]
+        and "t1d-analytics-backend/.venv/bin/python -c"
+        in libscript_cfg["databases"][1]["seed_command"]
+        and "_ctcnt" in libscript_cfg["databases"][1]["seed_command"]
+    )
+    assert (
+        "t1d-analytics-backend/.venv/bin/python -c"
+        in libscript_cfg["infrastructure"]["databases"][1]["seed_command"]
+        and "_ctcnt" in libscript_cfg["infrastructure"]["databases"][1]["seed_command"]
+    )
+    db_migrate_cmd = libscript_cfg["hooks"]["db_migrate"][1]["command"]
+    assert "t1d-analytics-backend/.venv/bin/python -c" in db_migrate_cmd
+    assert "_ctcnt" in db_migrate_cmd
+    post_install_ollama_cmd = libscript_cfg["hooks"]["post_install"][1]["command"]
+    assert "if id ollama >/dev/null 2>&1; then" in post_install_ollama_cmd
+    assert "${SERVICE_USER:-$(id -un)}" in post_install_ollama_cmd
+    assert (
+        libscript_cfg["ingress"]["domain"] == "t1d-analytics.healthplatform.io"
+        and libscript_cfg["ingress"]["routes"]["/api"]["proxy"]
+        == "http://127.0.0.1:8001"
+        and libscript_cfg["ingress"]["routes"]["/"]["static"]
+        == "./t1d-analytics-web/dist"
+        and libscript_cfg["ingress"]["routes"]["/"]["spa"] is True
+    )
+    assert (
+        libscript_cfg["services"]["t1d-api"]["env"]["T1D_DATA_DIR"]
+        == "${T1D_DATA_DIR:-/home/${REMOTE_USER}/t1d-analytics/data}"
+    )
+    shared_deploy_sh = REPO_ROOT.parent / "deploy_pulse_query_and_t1d_analytics.sh"
+    if shared_deploy_sh.is_file():
+        shared_txt = shared_deploy_sh.read_text(encoding="utf-8")
+        assert "# ## sync_local_jaeb_db_if_needed" in shared_txt
+        assert "sync_local_jaeb_db_if_needed()" in shared_txt
+        assert "T1D_LOCAL_JAEB_DB" in shared_txt
+
+
+def test_libscript_shell_commands_syntax_and_escape_safety() -> None:
+    """Verify all shell commands in libscript.json pass `/bin/sh -n -c` and contain no quote/newline escape hazards."""
+    import json
+
+    libscript_cfg = json.loads(
+        (REPO_ROOT / "libscript.json").read_text(encoding="utf-8")
+    )
+
+    shell_commands: list[str] = [
+        str(libscript_cfg["databases"][0]["seed_command"]),
+        str(libscript_cfg["databases"][1]["seed_command"]),
+        str(libscript_cfg["databases"][1]["health_command"]),
+        str(libscript_cfg["infrastructure"]["databases"][0]["seed_command"]),
+        str(libscript_cfg["infrastructure"]["databases"][1]["seed_command"]),
+        str(libscript_cfg["infrastructure"]["databases"][1]["health_command"]),
+        str(libscript_cfg["frontends"]["web"]["build_command"]),
+        str(libscript_cfg["infrastructure"]["frontends"]["web"]["build_command"]),
+    ]
+    all_hook_lists = [
+        *libscript_cfg["hooks"].values(),
+        *libscript_cfg["infrastructure"]["hooks"].values(),
+    ]
+    for hook_items in all_hook_lists:
+        for hook in hook_items:
+            shell_commands.append(str(hook["command"]))
+            assert str(hook["cmd_windows"]).strip() != ""
+
+    for cmd in shell_commands:
+        res = subprocess.run(
+            ["/bin/sh", "-n", "-c", cmd],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert res.returncode == 0, f"Shell syntax error: {res.stderr}"
+
+    for duckdb_cmd in (
+        str(libscript_cfg["databases"][1]["seed_command"]),
+        str(libscript_cfg["infrastructure"]["databases"][1]["seed_command"]),
+        str(libscript_cfg["hooks"]["db_migrate"][1]["command"]),
+    ):
+        assert '"SELECT ' not in duckdb_cmd
+        assert '\\"SELECT ' not in duckdb_cmd
+        assert "\\r" not in duckdb_cmd
+        assert "\\n" not in duckdb_cmd
+        assert "\r" not in duckdb_cmd
+        assert "\n" not in duckdb_cmd
+        assert "tr -d '[:space:]'" in duckdb_cmd
+        assert "sys.argv[1]" in duckdb_cmd
+        assert "t1d-analytics load --data-dir data --db" in duckdb_cmd
+        assert 'case ":$PATH:" in *":${SERVICE_PATH:-}:"*)' in duckdb_cmd
+
+    expected_env_loop = (
+        'for _ef in .env .env.secrets .env.libscript; do if [ -f "$_ef" ]; then '
+        'set -a; . "./$_ef"; set +a; fi; done'
+    )
+    for pg_cmd in (
+        str(libscript_cfg["databases"][0]["seed_command"]),
+        str(libscript_cfg["hooks"]["db_migrate"][0]["command"]),
+        str(libscript_cfg["infrastructure"]["databases"][0]["seed_command"]),
+    ):
+        assert expected_env_loop in pg_cmd
+        assert 'PGPASSWORD="${POSTGRES_PASSWORD:-postgres}"' in pg_cmd
+
+    assert '\\"' not in str(libscript_cfg["hooks"]["db_migrate"][0]["cmd_windows"])

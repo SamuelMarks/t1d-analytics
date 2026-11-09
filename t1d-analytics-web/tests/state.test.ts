@@ -6,10 +6,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  buildChatPath,
   ChatState,
   decodeLegacyHtmlEntities,
+  extractChatIdFromLocation,
   parsePersistedChatState,
   resolveTableJoin,
+  safeDecodeUriComponent,
 } from "../src/state";
 
 describe("ChatState", () => {
@@ -763,5 +766,117 @@ describe("ChatState", () => {
     await state.flushPendingSyncTasks();
     expect(deleteResolved).toBe(true);
     delayedFetchSpy.mockRestore();
+  });
+
+  it("parses and builds shareable /chats/${ID} paths and loads shared remote sessions", async () => {
+    expect(
+      extractChatIdFromLocation({
+        pathname: "/chats/chat-1793964989501-1-476",
+        hash: "",
+      }),
+    ).toBe("chat-1793964989501-1-476");
+    expect(
+      extractChatIdFromLocation({
+        pathname: "/chats/chat-1793964989501-1-476/",
+        hash: "",
+      }),
+    ).toBe("chat-1793964989501-1-476");
+    expect(
+      extractChatIdFromLocation({
+        pathname: "/chats/chat%20encoded",
+        hash: "",
+      }),
+    ).toBe("chat encoded");
+    expect(
+      extractChatIdFromLocation({
+        pathname: "/chats/%E0%A4%A",
+        hash: "",
+      }),
+    ).toBe("%E0%A4%A");
+    expect(safeDecodeUriComponent("%E0%A4%A")).toBe("%E0%A4%A");
+    expect(
+      extractChatIdFromLocation({
+        pathname: "/",
+        hash: "#chat-legacy-123",
+      }),
+    ).toBe("chat-legacy-123");
+    expect(
+      extractChatIdFromLocation({
+        pathname: "/",
+        hash: "#",
+      }),
+    ).toBeNull();
+    expect(
+      extractChatIdFromLocation({
+        pathname: "/",
+        hash: "",
+      }),
+    ).toBeNull();
+
+    expect(buildChatPath("chat-123")).toBe("/chats/chat-123");
+    expect(buildChatPath(null)).toBe("/");
+    expect(buildChatPath("")).toBe("/");
+
+    // 1. loadSharedSession when chat already exists locally
+    const localChat = state.createChat("Existing Local");
+    state.createChat("Other Chat");
+    const loadedLocal = await state.loadSharedSession(localChat.id);
+    expect(loadedLocal?.id).toBe(localChat.id);
+    expect(state.activeChatId).toBe(localChat.id);
+
+    // 2. loadSharedSession when chat is fetched from /api/sessions/{id}
+    state.deletedChatIds.add("shared-remote-99");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(
+        JSON.stringify({
+          session_id: "shared-remote-99",
+          title: "Shared Clinical Session",
+          created_at: "2026-11-07T00:00:00Z",
+          updated_at: "2026-11-07T00:00:00Z",
+          messages: [{ role: "user", content: "SELECT * FROM patients;" }],
+        }),
+      ),
+    );
+    const loadedRemote = await state.loadSharedSession("shared-remote-99");
+    expect(loadedRemote?.id).toBe("shared-remote-99");
+    expect(loadedRemote?.title).toBe("Shared Clinical Session");
+    expect(loadedRemote?.messages).toHaveLength(1);
+    expect(state.activeChatId).toBe("shared-remote-99");
+    expect(state.deletedChatIds.has("shared-remote-99")).toBe(false);
+
+    // 3. loadSharedSession when server returns 404
+    fetchSpy.mockResolvedValueOnce(
+      createJsonResponse(JSON.stringify({ detail: "Not found" }), 404),
+    );
+    const missing = await state.loadSharedSession("missing-session");
+    expect(missing).toBeNull();
+
+    // 4. loadSharedSession when server returns payload without session_id
+    fetchSpy.mockResolvedValueOnce(createJsonResponse(JSON.stringify({})));
+    const emptyPayload = await state.loadSharedSession("empty-payload-id");
+    expect(emptyPayload).toBeNull();
+
+    // 5. loadSharedSession when fetch throws network error
+    fetchSpy.mockRejectedValueOnce(new Error("Offline"));
+    const failed = await state.loadSharedSession("offline-session");
+    expect(failed).toBeNull();
+
+    // 6. syncWithServer activates routeChatId when window.location matches /chats/{id}
+    window.history.replaceState(null, "", `/chats/${localChat.id}`);
+    fetchSpy.mockImplementation(async () =>
+      createJsonResponse(JSON.stringify({ sessions: [] })),
+    );
+    await state.syncWithServer();
+    expect(state.activeChatId).toBe(localChat.id);
+
+    // 7. syncWithServer when window is undefined
+    const origWindow = globalThis.window;
+    vi.stubGlobal("window", undefined);
+    await state.syncWithServer();
+    vi.stubGlobal("window", origWindow);
+    window.history.replaceState(null, "", "/");
+
+    fetchSpy.mockRestore();
   });
 });

@@ -29,8 +29,10 @@ from t1d_analytics.clinical_prompts import (
     TABLE_1_RULES_SECTION,
     TERMINOLOGY_RULES_SECTION,
     build_clinical_sql_prompt,
+    build_compact_clinical_sql_prompt,
     build_system_prompt,
     compact_schema_for_prompt,
+    is_compact_local_model,
 )
 from t1d_analytics.errors import MissingApiKeyError, MissingSdkError
 from t1d_analytics.llm_stream_protocols import (
@@ -42,15 +44,21 @@ from t1d_analytics.llm_stream_protocols import (
 from t1d_analytics.ollama_discovery import (
     DEFAULT_CHOICE_HF_REPOS,
     DEFAULT_CHOICE_OLLAMA_MODELS,
+    DEFAULT_OLLAMA_GENERATE_TIMEOUT_SECONDS,
     DEFAULT_OLLAMA_HOST,
+    OllamaRunnerOptionsDict,
     _UrlResponseProtocol,
+    build_safe_ollama_options,
+    call_local_ollama_generate,
     configure_ollama_env,
     generate_ollama_json_completion,
+    generate_ollama_text_completion,
     is_filesystem_path_token,
     normalize_ollama_host,
     probe_ollama_tags_and_version,
     read_configured_ollama_model_list,
     resolve_installed_ollama_model_tag,
+    resolve_local_ollama_fallback_candidates,
     resolve_ollama_base_url,
     sort_ollama_models,
 )
@@ -543,9 +551,14 @@ def complete_llm_prompt(
     api_key: Optional[str] = None,
     provider: Optional[str] = None,
     llm_factory: Optional[AnyLlmFactoryProtocol] = None,
+    use_direct_ollama: bool = False,
 ) -> str:
     """
-    Execute a synchronous LLM chat completion using `any-llm` and return the stripped text.
+    Execute a synchronous LLM chat completion and return the stripped text.
+
+    When `resolved_provider == "ollama"` and `use_direct_ollama=True` (or when
+    `any-llm` fails and `llm_factory is None`), calls `call_local_ollama_generate`
+    directly with CPU-safe runner options.
 
     Args:
     ----
@@ -554,6 +567,7 @@ def complete_llm_prompt(
         api_key: Optional explicit API key for cloud providers.
         provider: Optional explicit provider override.
         llm_factory: Optional injectable factory `(provider, api_key) -> LlmTransportProtocol`.
+        use_direct_ollama: When True and targeting `ollama` without a custom `llm_factory`, call `call_local_ollama_generate` directly.
 
     Returns:
     -------
@@ -563,6 +577,14 @@ def complete_llm_prompt(
     resolved_provider, actual_model = resolve_provider_and_model(model_name, provider)
     if resolved_provider == "ollama":
         normalize_ollama_host()
+        if use_direct_ollama and llm_factory is None:
+            return call_local_ollama_generate(
+                model=actual_model,
+                prompt=prompt,
+                num_ctx=2048,
+                num_gpu=0,
+            )
+
     effective_api_key = get_effective_api_key(resolved_provider, api_key)
 
     active_factory: AnyLlmFactoryProtocol = (
@@ -574,11 +596,24 @@ def complete_llm_prompt(
         else active_factory(resolved_provider)
     )
 
-    response = llm.completion(
-        model=actual_model,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return extract_stream_delta(response, resolved_provider).strip()
+    try:
+        response = llm.completion(
+            model=actual_model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return extract_stream_delta(response, resolved_provider).strip()
+    except Exception as primary_exc:
+        if resolved_provider == "ollama" and llm_factory is None:
+            try:
+                return generate_ollama_text_completion(
+                    model=actual_model,
+                    prompt=prompt,
+                    num_ctx=2048,
+                    num_gpu=0,
+                )
+            except Exception:
+                raise primary_exc from None
+        raise
 
 
 def probe_providers_status(
@@ -756,11 +791,63 @@ def fetch_available_models(
     return ModelsResponse(models=models)
 
 
+def generate_sql_from_nl(
+    schema_context: str,
+    user_query: str,
+    model_name: str = "gemma:2b",
+    provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    history_context: str = "",
+    llm_factory: Optional[AnyLlmFactoryProtocol] = None,
+) -> str:
+    """
+    Generate a DuckDB SQL response from a natural-language question using compact prompts for local CPU Ollama models.
+
+    Args:
+    ----
+        schema_context: Database schema string.
+        user_query: Natural language clinical question.
+        model_name: Target model identifier.
+        provider: Optional explicit provider override.
+        api_key: Optional API key for cloud providers.
+        history_context: Optional prior conversation history text.
+        llm_factory: Optional injectable LLM transport factory.
+
+    Returns:
+    -------
+        str: Raw LLM completion response containing the generated SQL query.
+
+    """
+    resolved_provider, _ = resolve_provider_and_model(model_name, provider)
+    if is_compact_local_model(model_name, resolved_provider):
+        prompt = build_compact_clinical_sql_prompt(
+            schema_context=schema_context,
+            user_query=user_query,
+            history_context=history_context,
+        )
+    else:
+        prompt = build_clinical_sql_prompt(
+            schema=schema_context,
+            nl_query=user_query,
+            history_context=history_context,
+            require_markdown_fence=True,
+        )
+    return complete_llm_prompt(
+        prompt=prompt,
+        model_name=model_name,
+        api_key=api_key,
+        provider=resolved_provider,
+        llm_factory=llm_factory,
+        use_direct_ollama=(llm_factory is None and resolved_provider == "ollama"),
+    )
+
+
 __all__ = [
     "ANY_LLM_PROVIDER_CATALOG",
     "CLOUD_MODEL_CATALOG",
     "DEFAULT_CHOICE_HF_REPOS",
     "DEFAULT_CHOICE_OLLAMA_MODELS",
+    "DEFAULT_OLLAMA_GENERATE_TIMEOUT_SECONDS",
     "DEFAULT_OLLAMA_HOST",
     "MULTI_TRIAL_UNION_SECTION",
     "PROVIDER_ALT_ENV_KEYS",
@@ -772,13 +859,17 @@ __all__ = [
     "LlmCompletionResponseProtocol",
     "LlmMessageChoicesContainerProtocol",
     "LlmTransportProtocol",
+    "OllamaRunnerOptionsDict",
     "StreamChunkInput",
     "_AnyLlmListModelsFn",
     "_AnyLlmModelProtocol",
     "_AnyLlmTransportAdapter",
     "_discover_additional_provider_models",
     "build_clinical_sql_prompt",
+    "build_compact_clinical_sql_prompt",
+    "build_safe_ollama_options",
     "build_system_prompt",
+    "call_local_ollama_generate",
     "compact_schema_for_prompt",
     "complete_llm_prompt",
     "configure_ollama_env",
@@ -787,7 +878,10 @@ __all__ = [
     "extract_stream_delta",
     "fetch_available_models",
     "generate_ollama_json_completion",
+    "generate_ollama_text_completion",
+    "generate_sql_from_nl",
     "get_effective_api_key",
+    "is_compact_local_model",
     "is_filesystem_path_token",
     "is_provider_configured",
     "normalize_ollama_host",
@@ -796,6 +890,7 @@ __all__ = [
     "probe_providers_status",
     "read_configured_ollama_model_list",
     "resolve_installed_ollama_model_tag",
+    "resolve_local_ollama_fallback_candidates",
     "resolve_ollama_base_url",
     "resolve_provider_and_model",
     "sort_ollama_models",

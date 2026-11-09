@@ -55,6 +55,10 @@ NODE_NAME="${NODE_NAME:-test-t1d-analytics-node}"
 RG_NAME="${RG_NAME:-default-rg}"
 LOCATION="${LOCATION:-default-region}"
 REMOTE_DEST="${REMOTE_DEST:-t1d-analytics-test}"
+CERT_STORE_DIR="${CERT_STORE_DIR:-/mnt/data/certs}"
+LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-admin@healthplatform.io}"
+LETSENCRYPT_RENEW_BEFORE_SECONDS="${LETSENCRYPT_RENEW_BEFORE_SECONDS:-0}"
+export CERT_STORE_DIR LETSENCRYPT_EMAIL LETSENCRYPT_RENEW_BEFORE_SECONDS
 
 RUN_LOCAL=0
 RUN_REMOTE_TESTS=0
@@ -89,6 +93,7 @@ for arg in "$@"; do
             echo "  RG_NAME            Resource group or project name. Default: $RG_NAME"
             echo "  LOCATION           Cloud region/datacenter. Default: $LOCATION"
             echo "  REMOTE_DEST        Destination folder on remote node. Default: $REMOTE_DEST"
+            echo "  CERT_STORE_DIR     Persistent certificate store path. Default: $CERT_STORE_DIR"
             exit 0
             ;;
     esac
@@ -111,6 +116,11 @@ if [ "$MOCK_CLOUD" -eq 1 ]; then
     }
     trap mock_cleanup EXIT INT TERM
 
+    echo 'Verifying Let'\''s Encrypt TLS and certificate store configuration in libscript.json...'
+    if ! grep -q '"tls":[[:space:]]*"letsencrypt"' "$REPO_DIR/libscript.json" || ! grep -q '"cert_store_dir":[[:space:]]*"\${CERT_STORE_DIR:-/mnt/data/certs}"' "$REPO_DIR/libscript.json"; then
+        echo 'ERROR: libscript.json is missing .ingress.tls == "letsencrypt" or .ingress.cert_store_dir.' >&2
+        exit 1
+    fi
     echo 'Verifying remote execution...'
     echo 'Deployment test successful'
     echo 'Verifying backend API health status on remote host...'
@@ -239,7 +249,7 @@ fi
 
 # 2. Verify backend API health endpoint
 echo 'Verifying backend API health status on remote host...'
-if ! remote_exec "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"; then
+if ! remote_exec "_api_url=\"http://127.0.0.1:\${T1D_API_PORT:-8001}\"; curl -sf \"\${_api_url}/api/status\" >/dev/null 2>&1 || _api_url='http://127.0.0.1:8000'; (curl -sf \"\${_api_url}/api/status\" | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf \"\${_api_url}/api/health\" | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' \"\${_api_url}/api/execute-sql\" | jq -e '(.rows // .sqlResult | length) > 0')"; then
     echo 'WARNING: Backend API health endpoint check failed. Gathering diagnostic logs...'
     remote_exec "journalctl -u t1d-api -n 30 --no-pager 2>/dev/null || docker logs --tail 30 t1d-backend 2>/dev/null || true"
     exit 1
@@ -253,7 +263,21 @@ if ! remote_exec "curl -sf -I http://localhost:3000/ || curl -sf -I http://127.0
     exit 1
 fi
 
-# 4. Optional: Run full test suite on remote compute instance
+# 4. In live-cloud mode, verify strict Let's Encrypt TLS, read-only /mnt/data/certs persistence, and async polling on /api/chat/jobs
+if [ "$LIVE_CLOUD" -eq 1 ]; then
+    echo 'Verifying strict Let'\''s Encrypt TLS and read-only certificate store on remote host...'
+    if ! remote_exec "test -f \"$CERT_STORE_DIR/live/t1d-analytics.healthplatform.io/fullchain.pem\" && test -f \"$CERT_STORE_DIR/live/t1d-analytics.healthplatform.io/privkey.pem\" && ! test -w \"$CERT_STORE_DIR/live/t1d-analytics.healthplatform.io/privkey.pem\" && curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 \"https://t1d-analytics.healthplatform.io/api/health\" >/dev/null"; then
+        echo 'ERROR: Let'\''s Encrypt TLS or read-only certificate persistence check failed.' >&2
+        exit 1
+    fi
+    echo 'Verifying async chat job polling against https://t1d-analytics.healthplatform.io/api/chat/jobs...'
+    if ! remote_exec "_job_resp=\$(curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 -X POST -H 'Content-Type: application/json' -d '{\"message\": \"Show patient count, average age, and total severe hypoglycemia events grouped by treatment group.\", \"model\": \"ollama:gemma:2b\"}' \"https://t1d-analytics.healthplatform.io/api/chat/jobs\") && printf '%s\n' \"\$_job_resp\" | jq -e '.status == \"pending\" or .job_id != null' >/dev/null && _jid=\$(printf '%s\n' \"\$_job_resp\" | jq -r '.job_id') && _p=0 && while [ \"\$_p\" -lt 90 ]; do _poll=\$(curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 \"https://t1d-analytics.healthplatform.io/api/chat/jobs/\$_jid\") && _st=\$(printf '%s\n' \"\$_poll\" | jq -r '.status') && if [ \"\$_st\" != \"pending\" ]; then printf '%s\n' \"\$_poll\" | jq -e '.sqlQuery != null and (.sqlResult | length) > 0' >/dev/null && exit 0; fi; sleep 1; _p=\$((_p + 1)); done; exit 1"; then
+        echo 'ERROR: Async chat job polling verification against https://t1d-analytics.healthplatform.io failed.' >&2
+        exit 1
+    fi
+fi
+
+# 5. Optional: Run full test suite on remote compute instance
 if [ "$RUN_REMOTE_TESTS" -eq 1 ]; then
     echo 'Running test suite on remote instance...'
     if ! remote_exec "cd $REMOTE_DEST && pytest -q"; then

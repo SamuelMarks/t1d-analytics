@@ -1,16 +1,13 @@
 @echo off
 :: # test.cmd
-::
 :: ## Overview
 :: End-to-end cloud deployment, health verification, and test execution harness
 :: for T1D Analytics using LibScript on Windows.
-::
 :: ## Usage
 :: test.cmd [--unit-mock|--mock-cloud|--dry-run] [--live-cloud] [--local|-l] [--run-remote-tests|-t]
 
 setlocal EnableDelayedExpansion
 set "THIS_FILE=%~f0"
-
 if defined STACK (
     echo "!STACK!" | findstr /I /C:":!THIS_FILE!:" >nul 2>&1
     if not errorlevel 1 (
@@ -19,10 +16,8 @@ if defined STACK (
     )
 )
 set "STACK=%STACK%:!THIS_FILE!:"
-
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-
 if not defined LIBSCRIPT_ROOT_DIR (
     set "d=%SCRIPT_DIR%"
     call :find_root
@@ -69,6 +64,9 @@ if "%NODE_NAME%"=="" set "NODE_NAME=test-t1d-analytics-node"
 if "%RG_NAME%"=="" set "RG_NAME=default-rg"
 if "%LOCATION%"=="" set "LOCATION=default-region"
 if "%REMOTE_DEST%"=="" set "REMOTE_DEST=t1d-analytics-test"
+if "%CERT_STORE_DIR%"=="" set "CERT_STORE_DIR=/mnt/data/certs"
+if "%LETSENCRYPT_EMAIL%"=="" set "LETSENCRYPT_EMAIL=admin@healthplatform.io"
+if "%LETSENCRYPT_RENEW_BEFORE_SECONDS%"=="" set "LETSENCRYPT_RENEW_BEFORE_SECONDS=0"
 
 set "RUN_LOCAL=0"
 set "RUN_REMOTE_TESTS=0"
@@ -140,6 +138,7 @@ echo   NODE_NAME          Name of compute node. Default: %NODE_NAME%
 echo   RG_NAME            Resource group or project name. Default: %RG_NAME%
 echo   LOCATION           Cloud region/datacenter. Default: %LOCATION%
 echo   REMOTE_DEST        Destination folder on remote node. Default: %REMOTE_DEST%
+echo   CERT_STORE_DIR     Persistent certificate store path. Default: %CERT_STORE_DIR%
 exit /b 0
 
 :: ## after_args
@@ -233,9 +232,9 @@ if errorlevel 1 (
 )
 
 echo Verifying backend API health on remote host...
-call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
+call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "_api_url=http://127.0.0.1:8001; curl -sf ${_api_url}/api/status >/dev/null 2>&1 || _api_url=http://127.0.0.1:8000; (curl -sf ${_api_url}/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf ${_api_url}/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' ${_api_url}/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
 if errorlevel 1 (
-    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "(curl -sf http://127.0.0.1:8000/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf http://127.0.0.1:8000/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' http://127.0.0.1:8000/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
+    call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "_api_url=http://127.0.0.1:8001; curl -sf ${_api_url}/api/status >/dev/null 2>&1 || _api_url=http://127.0.0.1:8000; (curl -sf ${_api_url}/api/status | jq -e '.status == \"ready\" and .tables_count >= 1') && (curl -sf ${_api_url}/api/health | jq -e '.database.details.total_rows > 0') && (curl -sf -X POST -H 'Content-Type: application/json' -d '{\"query\": \"SHOW TABLES\"}' ${_api_url}/api/execute-sql | jq -e '(.rows // .sqlResult | length) > 0')"
     if errorlevel 1 (
         echo WARNING: Backend API health check failed on %CLOUD_PROVIDER%. 1>&2
         set "EXIT_CODE=1"
@@ -251,6 +250,29 @@ if errorlevel 1 (
         echo WARNING: Frontend web service check failed on %CLOUD_PROVIDER%. 1>&2
         set "EXIT_CODE=1"
         goto cleanup
+    )
+)
+
+if "%LIVE_CLOUD%"=="1" (
+    echo Verifying strict Let's Encrypt TLS and read-only certificate store on remote host...
+    call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "test -f %CERT_STORE_DIR%/live/t1d-analytics.healthplatform.io/fullchain.pem && test -f %CERT_STORE_DIR%/live/t1d-analytics.healthplatform.io/privkey.pem && ! test -w %CERT_STORE_DIR%/live/t1d-analytics.healthplatform.io/privkey.pem && curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 https://t1d-analytics.healthplatform.io/api/health"
+    if errorlevel 1 (
+        call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "test -f %CERT_STORE_DIR%/live/t1d-analytics.healthplatform.io/fullchain.pem && test -f %CERT_STORE_DIR%/live/t1d-analytics.healthplatform.io/privkey.pem && ! test -w %CERT_STORE_DIR%/live/t1d-analytics.healthplatform.io/privkey.pem && curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 https://t1d-analytics.healthplatform.io/api/health"
+        if errorlevel 1 (
+            echo ERROR: Let's Encrypt TLS or read-only certificate persistence check failed. 1>&2
+            set "EXIT_CODE=1"
+            goto cleanup
+        )
+    )
+    echo Verifying async chat job polling against https://t1d-analytics.healthplatform.io/api/chat/jobs...
+    call "%LIBSCRIPT_CLI%" "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "_job_resp=$(curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 -X POST -H 'Content-Type: application/json' -d '{\"message\": \"Show patient count, average age, and total severe hypoglycemia events grouped by treatment group.\", \"model\": \"ollama:gemma:2b\"}' https://t1d-analytics.healthplatform.io/api/chat/jobs) && printf '%%s\n' \"$_job_resp\" | jq -e '.status == \"pending\" or .job_id != null' >/dev/null && _jid=$(printf '%%s\n' \"$_job_resp\" | jq -r '.job_id') && _p=0 && while [ \"$_p\" -lt 90 ]; do _poll=$(curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 https://t1d-analytics.healthplatform.io/api/chat/jobs/$_jid) && _st=$(printf '%%s\n' \"$_poll\" | jq -r '.status') && if [ \"$_st\" != \"pending\" ]; then printf '%%s\n' \"$_poll\" | jq -e '.sqlQuery != null and (.sqlResult | length) > 0' >/dev/null && exit 0; fi; sleep 1; _p=$((_p + 1)); done; exit 1"
+    if errorlevel 1 (
+        call "%LIBSCRIPT_CLI%" cloud "%CLOUD_PROVIDER%" node exec "%NODE_NAME%" "%RG_NAME%" "_job_resp=$(curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 -X POST -H 'Content-Type: application/json' -d '{\"message\": \"Show patient count, average age, and total severe hypoglycemia events grouped by treatment group.\", \"model\": \"ollama:gemma:2b\"}' https://t1d-analytics.healthplatform.io/api/chat/jobs) && printf '%%s\n' \"$_job_resp\" | jq -e '.status == \"pending\" or .job_id != null' >/dev/null && _jid=$(printf '%%s\n' \"$_job_resp\" | jq -r '.job_id') && _p=0 && while [ \"$_p\" -lt 90 ]; do _poll=$(curl -sfL --resolve t1d-analytics.healthplatform.io:443:127.0.0.1 https://t1d-analytics.healthplatform.io/api/chat/jobs/$_jid) && _st=$(printf '%%s\n' \"$_poll\" | jq -r '.status') && if [ \"$_st\" != \"pending\" ]; then printf '%%s\n' \"$_poll\" | jq -e '.sqlQuery != null and (.sqlResult | length) > 0' >/dev/null && exit 0; fi; sleep 1; _p=$((_p + 1)); done; exit 1"
+        if errorlevel 1 (
+            echo ERROR: Async chat job polling verification against https://t1d-analytics.healthplatform.io failed. 1>&2
+            set "EXIT_CODE=1"
+            goto cleanup
+        )
     )
 )
 
@@ -285,6 +307,17 @@ echo ==========================================================
 echo Running in Mock Cloud mode (--mock-cloud specified)...
 echo Simulating provisioning on %CLOUD_PROVIDER% (%NODE_NAME%)...
 echo ==========================================================
+echo Verifying Let's Encrypt TLS and certificate store configuration in libscript.json...
+findstr /C:"\"tls\": \"letsencrypt\"" "%REPO_DIR%libscript.json" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: libscript.json is missing .ingress.tls == "letsencrypt" or .ingress.cert_store_dir. 1>&2
+    exit /b 1
+)
+findstr /C:"\"cert_store_dir\": \"${CERT_STORE_DIR:-/mnt/data/certs}\"" "%REPO_DIR%libscript.json" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: libscript.json is missing .ingress.tls == "letsencrypt" or .ingress.cert_store_dir. 1>&2
+    exit /b 1
+)
 echo Verifying remote execution...
 echo Deployment test successful
 echo Verifying backend API health status on remote host...

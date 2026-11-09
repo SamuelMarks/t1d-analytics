@@ -52,11 +52,19 @@ import {
 } from "./modal-utils";
 import { isReadOnlySqlStatement, updateInputHighlight } from "./sql-highlight";
 import { dispatchChatRequest } from "./sse-stream";
-import { ChatState, safeStorageGet, safeStorageSet } from "./state";
+import {
+  buildChatPath,
+  ChatState,
+  extractChatIdFromLocation,
+  safeStorageGet,
+  safeStorageSet,
+} from "./state";
 
 export {
+  buildChatPath,
   buildCohortSql,
   CohortBuilderModalController,
+  extractChatIdFromLocation,
   isDbStatusCode,
   ModelSelectorController,
   normalizeJoinType,
@@ -138,6 +146,10 @@ export class ChatUI
   public readonly streamingToggleBtn: HTMLButtonElement;
   /** Whether real-time SSE token streaming is enabled in the UI. */
   public streamingEnabled: boolean = false;
+  /** Whether to dispatch via `POST /api/chat/jobs` before `/api/chat`. */
+  public asyncJobPollingEnabled: boolean = false;
+  /** Polling interval in milliseconds when waiting on a pending chat job. */
+  public pollIntervalMs: number = 800;
   /** Dropdown select element for switching the UI language/locale. */
   public readonly langSelect: HTMLSelectElement;
   /** Button element to toggle between dark mode and light mode. */
@@ -206,8 +218,13 @@ export class ChatUI
     requireElementById<HTMLElement>("build-timestamp").textContent =
       `built on ${getBuildTimestampUtc()}`;
 
-    if (window.location.hash) {
-      this.state.setActiveChat(window.location.hash.slice(1));
+    const initialChatId = extractChatIdFromLocation(window.location);
+    if (initialChatId) {
+      if (this.state.chats.some((c) => c.id === initialChatId)) {
+        this.state.setActiveChat(initialChatId);
+      } else {
+        void this.hydrateSharedChat(initialChatId);
+      }
     }
 
     this.bindEvents();
@@ -215,18 +232,47 @@ export class ChatUI
     void this.schemaExplorerController.loadSchema();
     this.render();
 
-    window.addEventListener(
-      "hashchange",
-      () => {
-        const hashId = window.location.hash.slice(1);
-        if (hashId && hashId !== this.state.activeChatId) {
-          this.state.setActiveChat(hashId);
-          this.render();
-          this.chatInput.focus();
-        }
-      },
-      { signal: this.globalListenerController.signal },
-    );
+    const onRouteChange = (): void => {
+      this.handleLocationChange();
+    };
+    window.addEventListener("popstate", onRouteChange, {
+      signal: this.globalListenerController.signal,
+    });
+    window.addEventListener("hashchange", onRouteChange, {
+      signal: this.globalListenerController.signal,
+    });
+  }
+
+  /**
+   * Handles browser URL changes (`popstate` or legacy `hashchange`), activating the target chat
+   * locally or hydrating it from `/api/sessions/{id}`.
+   * @returns {void}
+   */
+  public handleLocationChange(): void {
+    const routeChatId = extractChatIdFromLocation(window.location);
+    if (routeChatId && routeChatId !== this.state.activeChatId) {
+      this.cancelActiveRequest();
+      if (this.state.chats.some((c) => c.id === routeChatId)) {
+        this.state.setActiveChat(routeChatId);
+        this.render();
+        this.chatInput.focus();
+      } else {
+        void this.hydrateSharedChat(routeChatId);
+      }
+    }
+  }
+
+  /**
+   * Fetches and activates a shared chat session by ID from the backend if not yet in local state.
+   * @param {string} chatId - Unique chat session identifier from a `/chats/${ID}` URL.
+   * @returns {Promise<void>}
+   */
+  public async hydrateSharedChat(chatId: string): Promise<void> {
+    const loaded = await this.state.loadSharedSession(chatId);
+    if (loaded) {
+      this.render();
+      this.chatInput.focus();
+    }
   }
 
   /**
@@ -377,11 +423,15 @@ export class ChatUI
     });
 
     this.updateThemeButtonLabel();
-    this.themeToggleBtn.addEventListener("click", () => {
-      const isLight = document.body.classList.toggle("light-mode");
-      safeStorageSet("t1d_theme", isLight ? "light" : "dark");
-      this.updateThemeButtonLabel();
-    });
+    this.themeToggleBtn.addEventListener(
+      "click",
+      () => {
+        const isLight = document.body.classList.toggle("light-mode");
+        safeStorageSet("t1d_theme", isLight ? "light" : "dark");
+        this.updateThemeButtonLabel();
+      },
+      { signal: this.globalListenerController.signal },
+    );
   }
 
   /**
@@ -623,6 +673,8 @@ export class ChatUI
         loadingDiv,
         onTokenScroll: () => this.scrollToBottom(),
         signal: reqSignal,
+        useAsyncJobEndpoint: this.asyncJobPollingEnabled && model !== "sql",
+        pollIntervalMs: this.pollIntervalMs,
       });
       loadingDiv.remove();
       if (outcome.data.is_synthetic_data === true) {
@@ -701,14 +753,15 @@ export class ChatUI
    * @returns {void}
    */
   public render(): void {
+    const activeChat = this.state.getActiveChat();
+    const targetPath = buildChatPath(activeChat ? activeChat.id : null);
     if (
-      this.state.activeChatId &&
-      window.location.hash !== `#${this.state.activeChatId}`
+      window.location.pathname !== targetPath ||
+      window.location.hash !== ""
     ) {
-      window.history.replaceState(null, "", `#${this.state.activeChatId}`);
+      window.history.replaceState(null, "", targetPath);
     }
 
-    const activeChat = this.state.getActiveChat();
     const appTitle = i18next.t("app.title");
     document.title = activeChat
       ? `${activeChat.title} - ${appTitle}`

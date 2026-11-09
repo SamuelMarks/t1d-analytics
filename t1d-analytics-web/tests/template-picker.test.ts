@@ -264,11 +264,18 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     const sqlPill = queryTestElement<HTMLButtonElement>(
       '[data-chip-mode="sql"]',
     );
+    const firstStarterChip = queryTestElement<HTMLButtonElement>(".chip");
     const firstTable1Chip = queryTestElement<HTMLButtonElement>(".table1-chip");
 
-    // Switch to NL mode and click Table 1 chip
+    // Switch to NL mode and click both Starter chip and Table 1 chip
     nlPill.click();
     expect(nlPill.getAttribute("aria-pressed")).toBe("true");
+    ui.modelSelect.value = RAW_SQL_MODEL;
+    firstStarterChip.click();
+    expect(ui.modelSelect.value).toBe("gemma:2b");
+    expect(state.activeGoldSql).toContain("SELECT");
+    expect(ui.chatInput.value).toContain("Show patient count");
+
     ui.modelSelect.value = RAW_SQL_MODEL;
     firstTable1Chip.click();
     expect(ui.modelSelect.value).toBe("gemma:2b");

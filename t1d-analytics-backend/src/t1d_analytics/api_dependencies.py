@@ -51,7 +51,11 @@ from t1d_analytics.errors import (
     UnauthorizedApiError,
     exception_to_error_detail,
 )
-from t1d_analytics.job_manager import TrainingJobManager
+from t1d_analytics.job_manager import (
+    ChatJobManager,
+    TrainingJobManager,
+    global_chat_job_manager,
+)
 from t1d_analytics.llm_client import CLOUD_MODEL_CATALOG
 from t1d_analytics.rate_limiter import (
     BaseRateLimiter as BaseRateLimiter,
@@ -312,6 +316,23 @@ def resolve_training_job_manager(target_app: FastAPI) -> TrainingJobManager:
     return mgr if isinstance(mgr, TrainingJobManager) else global_training_job_manager
 
 
+def resolve_chat_job_manager(target_app: FastAPI) -> ChatJobManager:
+    """
+    Resolve the active `ChatJobManager` from `target_app.state` or fall back to the global singleton.
+
+    Args:
+    ----
+        target_app: FastAPI application instance.
+
+    Returns:
+    -------
+        ChatJobManager: Active background chat job manager.
+
+    """
+    mgr = getattr(target_app.state, "chat_job_manager", None)
+    return mgr if isinstance(mgr, ChatJobManager) else global_chat_job_manager
+
+
 _default_session_store = SessionStore(
     conn_factory=get_sessions_conn, lock=_sessions_lock
 )
@@ -447,6 +468,8 @@ class AppServices:
     cloud_provider_models: Dict[str, List[str]]
     get_session_store: Callable[[], SessionStore]
     get_training_job_manager: Callable[[], TrainingJobManager]
+    chat_job_manager: ChatJobManager = global_chat_job_manager
+    get_chat_job_manager: Callable[[], ChatJobManager] = lambda: global_chat_job_manager
 
 
 class AppServicesRegistry:
@@ -514,6 +537,7 @@ def create_default_app_services(
     target_app: Optional[FastAPI] = None,
     session_store_getter: Optional[Callable[[], SessionStore]] = None,
     job_manager_getter: Optional[Callable[[], TrainingJobManager]] = None,
+    chat_job_manager_getter: Optional[Callable[[], ChatJobManager]] = None,
 ) -> AppServices:
     """
     Construct a strongly typed `AppServices` bundle bound to canonical backend modules.
@@ -523,6 +547,7 @@ def create_default_app_services(
         target_app: Optional FastAPI application instance.
         session_store_getter: Optional callable returning active `SessionStore`.
         job_manager_getter: Optional callable returning active `TrainingJobManager`.
+        chat_job_manager_getter: Optional callable returning active `ChatJobManager`.
 
     Returns:
     -------
@@ -532,6 +557,9 @@ def create_default_app_services(
     from t1d_analytics.training_runner import global_training_job_manager
 
     _ = target_app
+    resolved_chat_mgr_getter = chat_job_manager_getter or (
+        lambda: global_chat_job_manager
+    )
     return AppServices(
         validate_db_path=validate_db_path,
         validate_workspace_artifact_path=validate_workspace_artifact_path,
@@ -583,6 +611,8 @@ def create_default_app_services(
         get_session_store=session_store_getter or (lambda: _default_session_store),
         get_training_job_manager=job_manager_getter
         or (lambda: global_training_job_manager),
+        chat_job_manager=resolved_chat_mgr_getter(),
+        get_chat_job_manager=resolved_chat_mgr_getter,
     )
 
 

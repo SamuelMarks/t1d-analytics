@@ -95,12 +95,12 @@ export class TemplatePickerController {
    */
   public buildTemplateItems(): TemplateLibraryItem[] {
     const items: TemplateLibraryItem[] = [];
-    buildStarterQueryItems().forEach((starter, idx) => {
+    buildStarterQueryItems().forEach((starter) => {
       items.push({
-        id: `starter-${idx + 1}`,
+        id: starter.id,
         category: "starter",
         title: starter.label,
-        complexity: "Low",
+        complexity: starter.complexity,
         question: starter.question,
         goldSql: starter.goldSql,
       });

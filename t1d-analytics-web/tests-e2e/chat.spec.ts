@@ -86,10 +86,16 @@ test.describe("Chat UI E2E", () => {
     const chatTitle = page.locator(".chat-item-title").first();
     await expect(chatTitle).toBeVisible();
 
-    // Check hash is present
-    await page.waitForFunction(() => window.location.hash.includes("chat-"));
-    const hash = await page.evaluate(() => window.location.hash);
-    expect(hash).toMatch(/^#chat-/);
+    // Check /chats/${ID} path is present with no hash
+    await page.waitForFunction(() =>
+      window.location.pathname.startsWith("/chats/chat-"),
+    );
+    const { pathname, hash } = await page.evaluate(() => ({
+      pathname: window.location.pathname,
+      hash: window.location.hash,
+    }));
+    expect(pathname).toMatch(/^\/chats\/chat-/);
+    expect(hash).toBe("");
   });
 
   test("Temporary chat fallback", async ({ page }) => {
@@ -764,7 +770,7 @@ test("Chat session lifecycle: create, keyboard/mouse switch, dropdown keyboard n
     "Temporary chat",
   );
 
-  // Test URL hash navigation between chats
+  // Test URL path navigation (/chats/${ID}) and legacy hash upgrade between chats
   await page.click("#new-chat-btn");
   const ids = await page.evaluate(() => {
     const raw = localStorage.getItem("t1d_analytics_chats");
@@ -774,6 +780,17 @@ test("Chat session lifecycle: create, keyboard/mouse switch, dropdown keyboard n
   });
   expect(ids.length).toBe(2);
 
-  await page.goto(`/#${ids[0]}`);
+  await page.goto(`/chats/${ids[0]}`);
   await expect(chatItems.nth(0)).toHaveClass(/active/);
+  expect(await page.evaluate(() => window.location.pathname)).toBe(
+    `/chats/${ids[0]}`,
+  );
+  expect(await page.evaluate(() => window.location.hash)).toBe("");
+
+  await page.goto(`/#${ids[1]}`);
+  await expect(chatItems.nth(1)).toHaveClass(/active/);
+  expect(await page.evaluate(() => window.location.pathname)).toBe(
+    `/chats/${ids[1]}`,
+  );
+  expect(await page.evaluate(() => window.location.hash)).toBe("");
 });

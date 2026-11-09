@@ -555,7 +555,9 @@ def test_get_system_health_providers_dict(tmp_path: Path) -> None:
     assert "openai" in providers_dict
 
 
-def test_detect_database_provenance_and_jaeb_views(tmp_path: Path) -> None:
+def test_detect_database_provenance_and_jaeb_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Test detect_database_provenance, ensure_canonical_clinical_views, and seed_database across jaeb_authentic, synthetic_seed, and custom DBs."""
     from t1d_analytics.diagnostics import (
         check_database_health,
@@ -651,3 +653,86 @@ def test_detect_database_provenance_and_jaeb_views(tmp_path: Path) -> None:
     conn_ev.execute("CREATE TABLE unrelated_only (id INT)")
     conn_ev.close()
     ensure_canonical_clinical_views(str(empty_views_db))
+
+    # Full Jaeb schema with tblaptsummary (TxGroup, NumSevHypo), tblalabhba1c, bdatacgm, adverseevents, and _t1d_ingestion_manifest
+    from t1d_analytics.ingestion import load_data_to_duckdb
+    from t1d_analytics.seed import write_baseline_csvs
+
+    jaeb_store = tmp_path / "jaeb_store" / "jaeb"
+    jaeb_store.mkdir(parents=True)
+    full_jaeb_src = jaeb_store / "t1d.duckdb"
+    c_fj = duckdb.connect(str(full_jaeb_src))
+    c_fj.execute(
+        "CREATE TABLE tblaptsummary (RecID BIGINT, ptid BIGINT, gender VARCHAR, AgeAsOfRandDt BIGINT, InsulinModality VARCHAR, NumSevHypo VARCHAR, TxGroup VARCHAR)"
+    )
+    c_fj.execute(
+        "INSERT INTO tblaptsummary VALUES (1, 307, 'M', 46, 'Pump', '1', 'RT-CGM'), (2, 258, 'F', 18, 'Injections', '0', 'Control')"
+    )
+    c_fj.execute(
+        "CREATE TABLE tblalabhba1c (RecID BIGINT, visit VARCHAR, ptid BIGINT, LabHbA1cDt TIMESTAMP, LabA1cResult DOUBLE)"
+    )
+    c_fj.execute(
+        "INSERT INTO tblalabhba1c VALUES (1, 'Baseline', 307, TIMESTAMP '2024-01-09 00:00:00', 7.3), (2, 'Baseline', 258, TIMESTAMP '2024-01-14 00:00:00', 6.1)"
+    )
+    c_fj.execute(
+        "CREATE TABLE bdatacgm (RecID BIGINT, ptid BIGINT, DeviceDaysFromEnroll BIGINT, devicetm TIME, glucose BIGINT)"
+    )
+    c_fj.execute(
+        "INSERT INTO bdatacgm VALUES (1, 307, 0, TIME '08:00:00', 142), (2, 258, 1, TIME '09:30:00', 118)"
+    )
+    c_fj.execute(
+        "CREATE TABLE adverseevents (subjectid BIGINT, event VARCHAR, eventDt VARCHAR)"
+    )
+    c_fj.execute(
+        "INSERT INTO adverseevents VALUES (307, 'DKA', '08DEC2024'), (258, 'Severe Hypo', '02OCT2024')"
+    )
+    c_fj.execute(
+        "CREATE TABLE _t1d_ingestion_manifest (source_file VARCHAR, table_name VARCHAR, file_hash VARCHAR, row_count BIGINT, loaded_at TIMESTAMP, file_size BIGINT)"
+    )
+    c_fj.execute(
+        "INSERT INTO _t1d_ingestion_manifest VALUES ('data/patients.csv', 'patients', 'h', 100, CURRENT_TIMESTAMP, 1000)"
+    )
+    c_fj.execute("CREATE TABLE patients (subject_id INT)")
+    c_fj.execute("INSERT INTO patients VALUES (1)")
+    for idx in range(26):
+        c_fj.execute(f"CREATE TABLE jaeb_extra_{idx} (id INT)")
+    c_fj.close()
+
+    # Promote full_jaeb_src via T1D_DB_SEARCH_DIR into a fresh target_promoted_db
+    monkeypatch.setenv(
+        "T1D_DB_SEARCH_DIR",
+        f"{tmp_path / 'empty_search'}:{tmp_path / 'jaeb_store'}",
+    )
+    promoted_db = tmp_path / "promoted_jaeb.duckdb"
+    syn_data_dir = tmp_path / "syn_csv_dir"
+    write_baseline_csvs(str(syn_data_dir))
+    promoted_counts = seed_database(
+        data_dir=str(syn_data_dir),
+        db_path=str(promoted_db),
+        sessions_db_path=str(tmp_path / "prom_sessions.duckdb"),
+    )
+    assert promoted_counts["patients"] == 2
+    assert promoted_counts["cgm_readings"] == 2
+    assert promoted_counts["hba1c_labs"] == 2
+    assert promoted_counts["dka_adverse_events"] == 2
+
+    # Calling load_data_to_duckdb with synthetic CSVs on >25-table Jaeb DB skips overwriting canonical views
+    load_data_to_duckdb(str(syn_data_dir), str(promoted_db))
+    c_pv = duckdb.connect(str(promoted_db), read_only=True)
+    assert c_pv.execute("SELECT COUNT(*) FROM patients").fetchone() == (2,)
+    c_pv.close()
+    monkeypatch.setenv("T1D_DB_SEARCH_DIR", str(tmp_path / "empty_search"))
+    from t1d_analytics.seed import (
+        _find_authentic_jaeb_source_db,
+        _resolve_non_empty_db_path,
+    )
+
+    assert _find_authentic_jaeb_source_db(tmp_path / "none_found.duckdb") is None
+    monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
+    monkeypatch.delenv("T1D_DB_PATH", raising=False)
+    assert _resolve_non_empty_db_path("", default_path="fallback.duckdb") == (
+        "fallback.duckdb"
+    )
+    monkeypatch.setenv("T1D_DB_PATH", str(promoted_db))
+    assert _resolve_non_empty_db_path("") == str(promoted_db)
+    ensure_canonical_clinical_views("")

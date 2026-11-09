@@ -19,7 +19,10 @@ from t1d_analytics.analytics import (
 from t1d_analytics.api_schemas import TableDataResponse
 from t1d_analytics.db_security import validate_db_path
 from t1d_analytics.duckdb_pool import (
-    connect_duckdb_read_only_pooled,
+    ReadOnlyDuckDbCursorProxy,
+    _attach_jaeb_read_only_if_present,
+    _create_read_only_cursor_proxy,
+    connect_duckdb_read_only_cursor,
     global_read_only_duckdb_pool,
 )
 from t1d_analytics.errors import (
@@ -45,7 +48,11 @@ logger = logging.getLogger(__name__)
 
 
 def _copy_table_to_parquet_file(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Union[
+        duckdb.DuckDBPyConnection,
+        ReadOnlyDuckDbCursorProxy,
+        "_ClosingReadOnlyTableCursor",
+    ],
     escaped_table: str,
     target_path: Union[str, Path],
     use_zstd_compression: bool = False,
@@ -60,7 +67,7 @@ def _copy_table_to_parquet_file(
 
     Args:
     ----
-        conn: Open DuckDB connection to the source database.
+        conn: Open DuckDB connection or read-only cursor proxy to the source database.
         escaped_table: Double-quote-escaped table identifier.
         target_path: Destination filesystem path for the Parquet file.
         use_zstd_compression: Whether to include ``COMPRESSION ZSTD`` in the ``COPY`` options.
@@ -185,8 +192,10 @@ def export_table(
         global_read_only_duckdb_pool.close_path(db_path)
 
     conn = duckdb.connect(db_path, read_only=True)
+    _attach_jaeb_read_only_if_present(conn, db_path)
+    cursor_proxy = _create_read_only_cursor_proxy(conn)
     try:
-        tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+        tables = [r[0] for r in cursor_proxy.execute("SHOW TABLES").fetchall()]
         if table_name not in tables:
             raise TableNotFoundError(
                 f"Table '{table_name}' does not exist in database."
@@ -196,13 +205,13 @@ def export_table(
 
         if fmt == "parquet":
             _copy_table_to_parquet_file(
-                conn=conn,
+                conn=cursor_proxy,
                 escaped_table=escaped_tbl,
                 target_path=target_path.resolve(),
                 use_zstd_compression=False,
             )
         elif fmt == "csv":
-            result = conn.execute(f'SELECT * FROM "{escaped_tbl}"')
+            result = cursor_proxy.execute(f'SELECT * FROM "{escaped_tbl}"')
             columns = (
                 [desc[0] for desc in result.description] if result.description else []
             )
@@ -213,7 +222,7 @@ def export_table(
                     for sanitized_row in sanitized_batch:
                         writer.writerow(sanitized_row)
         else:
-            result = conn.execute(f'SELECT * FROM "{escaped_tbl}"')
+            result = cursor_proxy.execute(f'SELECT * FROM "{escaped_tbl}"')
             columns = (
                 [desc[0] for desc in result.description] if result.description else []
             )
@@ -224,6 +233,7 @@ def export_table(
                 target_path=target_path,
             )
     finally:
+        cursor_proxy.close()
         conn.close()
 
 
@@ -280,12 +290,61 @@ def _validate_table_and_db_path(
     return target_db, escape_sql_identifier(table_name)
 
 
+class _ClosingReadOnlyTableCursor:
+    """Wrapper closing both the dedicated read-only cursor and its parent DuckDB connection on `.close()`."""
+
+    def __init__(
+        self,
+        conn: duckdb.DuckDBPyConnection,
+        cursor_proxy: ReadOnlyDuckDbCursorProxy,
+    ) -> None:
+        """
+        Initialize the closing table cursor wrapper.
+
+        Args:
+        ----
+            conn: Parent DuckDB connection.
+            cursor_proxy: Dedicated read-only cursor proxy.
+
+        """
+        self._conn = conn
+        self._cursor_proxy = cursor_proxy
+        self._closed = False
+
+    def execute(
+        self,
+        query: str,
+        parameters: Optional[Sequence[SqlRawInputValue]] = None,
+    ) -> duckdb.DuckDBPyConnection:
+        """
+        Execute a SQL query on the underlying read-only cursor proxy.
+
+        Args:
+        ----
+            query: SQL statement to execute.
+            parameters: Optional positional bind parameters.
+
+        Returns:
+        -------
+            duckdb.DuckDBPyConnection: Executed DuckDB cursor relation.
+
+        """
+        return self._cursor_proxy.execute(query, parameters)
+
+    def close(self) -> None:
+        """Close the read-only cursor proxy and then close the parent DuckDB connection."""
+        try:
+            self._cursor_proxy.close()
+        finally:
+            self._conn.close()
+
+
 def _open_validated_table_connection(
     target_db: str,
     table_name: str,
-) -> duckdb.DuckDBPyConnection:
+) -> _ClosingReadOnlyTableCursor:
     """
-    Open a read-only DuckDB connection and verify that `table_name` exists in `SHOW TABLES`.
+    Open a read-only DuckDB connection, attach Jaeb data if present, create a cursor, and verify `table_name` exists.
 
     Args:
     ----
@@ -294,7 +353,7 @@ def _open_validated_table_connection(
 
     Returns:
     -------
-        duckdb.DuckDBPyConnection: Open read-only connection when the table exists.
+        _ClosingReadOnlyTableCursor: Open read-only cursor wrapper when the table exists.
 
     Raises:
     ------
@@ -302,15 +361,19 @@ def _open_validated_table_connection(
 
     """
     conn = duckdb.connect(target_db, read_only=True)
+    _attach_jaeb_read_only_if_present(conn, target_db)
+    cursor_proxy = _create_read_only_cursor_proxy(conn)
     try:
-        tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+        tables = [row[0] for row in cursor_proxy.execute("SHOW TABLES").fetchall()]
     except (duckdb.Error, OSError, RuntimeError, ValueError):
+        cursor_proxy.close()
         conn.close()
         raise
     if table_name not in tables:
+        cursor_proxy.close()
         conn.close()
         raise TableNotFoundError(params={})
-    return conn
+    return _ClosingReadOnlyTableCursor(conn=conn, cursor_proxy=cursor_proxy)
 
 
 def _build_table_search_filter(
@@ -446,16 +509,16 @@ def fetch_paginated_table_data(
         raise InvalidSortOrderError(params={"order": order})
 
     try:
-        with connect_duckdb_read_only_pooled(
+        with connect_duckdb_read_only_cursor(
             db_path=target_db,
             connect_fn=duckdb.connect,
             disable_external_access=True,
-        ) as conn:
-            tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+        ) as db_cursor:
+            tables = [row[0] for row in db_cursor.execute("SHOW TABLES").fetchall()]
             if table_name not in tables:
                 raise TableNotFoundError(params={})
 
-            cols_info = conn.execute(f'DESCRIBE "{escaped_table}"').fetchall()
+            cols_info = db_cursor.execute(f'DESCRIBE "{escaped_table}"').fetchall()
             column_names = [str(c[0]) for c in cols_info]
 
             order_by_clause = _build_table_order_by_clause(
@@ -466,14 +529,14 @@ def fetch_paginated_table_data(
             count_query = (
                 f'SELECT COUNT(*) FROM "{escaped_table}" {where_clause}'.strip()
             )
-            count_result = conn.execute(count_query, params).fetchone()
+            count_result = db_cursor.execute(count_query, params).fetchone()
             total_count = int(count_result[0]) if count_result else 0
             clamped_limit, page, total_pages = _compute_pagination_bounds(
                 total_count, limit, offset
             )
 
             query = f'SELECT * FROM "{escaped_table}" {where_clause} {order_by_clause} LIMIT {clamped_limit} OFFSET {offset}'.strip()
-            result = conn.execute(query, params)
+            result = db_cursor.execute(query, params)
             columns = (
                 [desc[0] for desc in result.description] if result.description else []
             )
@@ -535,7 +598,7 @@ def fetch_table_profile(
 
 def _stream_temp_file_and_cleanup(
     file_path: str,
-    db_conn: duckdb.DuckDBPyConnection,
+    db_conn: Union[duckdb.DuckDBPyConnection, _ClosingReadOnlyTableCursor],
     prepare_fn: Optional[Callable[[], None]] = None,
     chunk_size: int = 65536,
 ) -> Iterator[bytes]:
@@ -772,7 +835,7 @@ def stream_csv_export(
         first_batch: Sequence[Sequence[SqlRawInputValue]] = result.fetchmany(500)
 
         def _generate_csv_chunks(
-            db_conn: duckdb.DuckDBPyConnection,
+            db_conn: Union[duckdb.DuckDBPyConnection, _ClosingReadOnlyTableCursor],
             initial_batch: Sequence[Sequence[SqlRawInputValue]],
         ) -> Iterator[bytes]:
             """
@@ -858,7 +921,7 @@ def stream_json_export(
         first_batch: Sequence[Sequence[SqlRawInputValue]] = result.fetchmany(500)
 
         def _generate_json_chunks(
-            db_conn: duckdb.DuckDBPyConnection,
+            db_conn: Union[duckdb.DuckDBPyConnection, _ClosingReadOnlyTableCursor],
             initial_batch: Sequence[Sequence[SqlRawInputValue]],
         ) -> Iterator[bytes]:
             """

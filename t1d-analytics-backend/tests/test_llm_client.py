@@ -586,3 +586,164 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
     assert by_name_off["unpulled:7b"].error_code == "PROVIDER_OFFLINE"
     monkeypatch.delenv("OLLAMA_MODEL_LIST", raising=False)
     monkeypatch.delenv("OLLAMA_MODELS", raising=False)
+
+
+def test_build_safe_ollama_options_and_text_completion_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test build_safe_ollama_options, _parse_env_int, generate_ollama_text_completion, and complete_llm_prompt fallback."""
+    from unittest.mock import patch
+
+    import pytest
+
+    from t1d_analytics.errors import LlmTranslationError
+    from t1d_analytics.llm_client import (
+        build_safe_ollama_options,
+        complete_llm_prompt,
+        generate_ollama_text_completion,
+    )
+
+    monkeypatch.delenv("OLLAMA_NUM_CTX", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_GPU", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_THREAD", raising=False)
+    opts_default = build_safe_ollama_options()
+    assert opts_default == {
+        "temperature": 0.0,
+        "num_predict": 512,
+        "num_ctx": 2048,
+        "num_gpu": 0,
+        "num_thread": 8,
+        "use_mmap": False,
+    }
+
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "1024")
+    monkeypatch.setenv("OLLAMA_NUM_GPU", "0")
+    monkeypatch.setenv("OLLAMA_NUM_THREAD", "not-an-int")
+    opts_env = build_safe_ollama_options(temperature=0.2, max_tokens=256)
+    assert opts_env["num_ctx"] == 1024
+    assert opts_env["num_gpu"] == 0
+    assert opts_env["num_thread"] == 8
+
+    opts_explicit = build_safe_ollama_options(num_ctx=512, num_gpu=1, num_thread=4)
+    assert opts_explicit["num_ctx"] == 512
+    assert opts_explicit["num_gpu"] == 1
+    assert opts_explicit["num_thread"] == 4
+
+    class _MockGenerateOkResp:
+        """Protocol-compliant URL response returning valid Ollama /api/generate JSON."""
+
+        status = 200
+
+        def read(self) -> bytes:
+            """Return serialized Ollama generate payload."""
+            return b'{"response": "  SELECT 1;  "}'
+
+        def __enter__(self) -> "_MockGenerateOkResp":
+            """Enter context."""
+            return self
+
+        def __exit__(
+            self,
+            exc_type: Optional[type],
+            exc_val: Optional[BaseException],
+            exc_tb: Optional[Union[str, int, float, bool]],
+        ) -> Optional[bool]:
+            """Exit context."""
+            return None
+
+    class _MockGenerateHttp500Resp(_MockGenerateOkResp):
+        """Protocol-compliant URL response with HTTP 500 status."""
+
+        status = 500
+
+    class _MockGenerateJsonErrResp(_MockGenerateOkResp):
+        """Protocol-compliant URL response returning a JSON error field."""
+
+        def read(self) -> bytes:
+            """Return serialized Ollama error JSON."""
+            return b'{"error": "llama-server process has terminated: signal: segmentation fault (core dumped)"}'
+
+    txt_ok = generate_ollama_text_completion(
+        model="gemma:2b",
+        prompt="SELECT 1;",
+        urlopen_fn=lambda req, timeout=45.0: _MockGenerateOkResp(),
+    )
+    assert txt_ok == "SELECT 1;"
+
+    with pytest.raises(LlmTranslationError, match="Ollama HTTP 500"):
+        generate_ollama_text_completion(
+            model="gemma:2b",
+            prompt="SELECT 1;",
+            urlopen_fn=lambda req, timeout=45.0: _MockGenerateHttp500Resp(),
+        )
+
+    with pytest.raises(LlmTranslationError, match="segmentation fault"):
+        generate_ollama_text_completion(
+            model="gemma:2b",
+            prompt="SELECT 1;",
+            urlopen_fn=lambda req, timeout=45.0: _MockGenerateJsonErrResp(),
+        )
+
+    class _CustomAnyLlm500Error(Exception):
+        """Custom third-party exception simulating an any-llm HTTP 500 failure."""
+
+    class _FailingAnyLlmTransport:
+        """Transport that raises _CustomAnyLlm500Error on completion."""
+
+        def completion(
+            self,
+            *,
+            model: str,
+            messages: Sequence[dict[str, str]],
+            stream: bool = False,
+        ) -> str:
+            """Raise simulated 500 error."""
+            _ = (model, messages, stream)
+            raise _CustomAnyLlm500Error("llama-server segfault")
+
+    with (
+        patch(
+            "t1d_analytics.llm_client.create_any_llm_transport",
+            return_value=_FailingAnyLlmTransport(),
+        ),
+        patch(
+            "t1d_analytics.llm_client.generate_ollama_text_completion",
+            return_value="SELECT 42;",
+        ),
+    ):
+        recovered = complete_llm_prompt(
+            prompt="Count",
+            model_name="gemma:2b",
+            provider="ollama",
+        )
+        assert recovered == "SELECT 42;"
+
+    with (
+        patch(
+            "t1d_analytics.llm_client.create_any_llm_transport",
+            return_value=_FailingAnyLlmTransport(),
+        ),
+        patch(
+            "t1d_analytics.llm_client.generate_ollama_text_completion",
+            side_effect=RuntimeError("native generate also failed"),
+        ),
+        pytest.raises(_CustomAnyLlm500Error, match="llama-server segfault"),
+    ):
+        complete_llm_prompt(
+            prompt="Count",
+            model_name="gemma:2b",
+            provider="ollama",
+        )
+
+    with (
+        patch(
+            "t1d_analytics.llm_client.create_any_llm_transport",
+            return_value=_FailingAnyLlmTransport(),
+        ),
+        pytest.raises(_CustomAnyLlm500Error, match="llama-server segfault"),
+    ):
+        complete_llm_prompt(
+            prompt="Count",
+            model_name="openai/gpt-4o",
+            api_key="sk-test",
+        )

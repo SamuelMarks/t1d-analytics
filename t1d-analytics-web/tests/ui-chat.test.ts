@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { ChatState, type Message } from "../src/state";
+import { deduplicateErrorPrefix, parseApiError } from "../src/api-client";
 import { consumeSseChatStream } from "../src/sse-stream";
 import { ChatUI } from "../src/ui";
 import {
@@ -515,27 +516,65 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     state.setActiveChat(chat1.id);
     ui.render();
     expect(document.title).toBe("Chat #1 - t1d-analytics");
+    expect(window.location.pathname).toBe(`/chats/${chat1.id}`);
+    expect(window.location.hash).toBe("");
 
     const input = getTestElement<HTMLTextAreaElement>("chat-input");
     const focusSpy = vi.spyOn(input, "focus");
 
-    window.location.hash = `#${chat2.id}`;
-    window.dispatchEvent(new Event("hashchange"));
+    window.history.pushState(null, "", `/chats/${chat2.id}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
     expect(state.activeChatId).toBe(chat2.id);
+    expect(window.location.pathname).toBe(`/chats/${chat2.id}`);
     expect(focusSpy).toHaveBeenCalled();
 
-    window.location.hash = "";
-    focusSpy.mockClear();
+    // Legacy hash navigation upgrades to /chats/${id} path with empty hash
+    window.location.hash = `#${chat1.id}`;
     window.dispatchEvent(new Event("hashchange"));
+    expect(state.activeChatId).toBe(chat1.id);
+    expect(window.location.pathname).toBe(`/chats/${chat1.id}`);
+    expect(window.location.hash).toBe("");
+
+    window.history.pushState(null, "", "/");
+    focusSpy.mockClear();
+    window.dispatchEvent(new PopStateEvent("popstate"));
     expect(focusSpy).not.toHaveBeenCalled();
 
-    window.location.hash = `#${chat2.id}`;
+    window.history.pushState(null, "", `/chats/${chat1.id}`);
     focusSpy.mockClear();
+    window.dispatchEvent(new PopStateEvent("popstate"));
     expect(focusSpy).not.toHaveBeenCalled();
+
+    // Navigating via popstate to a shared remote chat ID not in local state hydrates from /api/sessions/{id}
+    mockFetch.mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => ({
+        session_id: "shared-popstate-chat",
+        title: "Shared Popstate Chat",
+        created_at: "2026-11-07T00:00:00Z",
+        updated_at: "2026-11-07T00:00:00Z",
+        messages: [{ role: "user", content: "Shared question" }],
+      }),
+    }));
+    window.history.pushState(null, "", "/chats/shared-popstate-chat");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await flushPromises();
+    expect(state.activeChatId).toBe("shared-popstate-chat");
+    expect(window.location.pathname).toBe("/chats/shared-popstate-chat");
+
+    // When shared chat ID is not found on the server (404), hydrateSharedChat exits cleanly
+    mockFetch.mockImplementationOnce(async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({ detail: "Not found" }),
+    }));
+    await ui.hydrateSharedChat("nonexistent-shared-id");
+    expect(state.activeChatId).toBe("shared-popstate-chat");
 
     state.activeChatId = null;
     ui.render();
     expect(document.title).toBe("t1d-analytics");
+    expect(window.location.pathname).toBe("/");
 
     state.setActiveChat(chat1.id);
     ui.render();
@@ -570,17 +609,35 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(document.body.classList.contains("light-mode")).toBe(true);
     expect(localStorage.getItem("t1d_theme")).toBe("light");
 
-    // Re-instantiating ChatUI hydrates light theme and initial window.location.hash
-    window.location.hash = `#${chat2.id}`;
+    // Re-instantiating ChatUI hydrates light theme and initial /chats/${id} pathname
+    window.history.replaceState(null, "", `/chats/${chat2.id}`);
     const lightUi = new ChatUI(state);
     expect(document.body.classList.contains("light-mode")).toBe(true);
     expect(state.activeChatId).toBe(chat2.id);
+    expect(window.location.pathname).toBe(`/chats/${chat2.id}`);
     lightUi.dispose();
+
+    // Re-instantiating ChatUI on a shared remote /chats/${id} not yet in local state triggers hydrateSharedChat
+    mockFetch.mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => ({
+        session_id: "shared-init-chat",
+        title: "Shared Init Chat",
+        created_at: "2026-11-07T00:00:00Z",
+        updated_at: "2026-11-07T00:00:00Z",
+        messages: [],
+      }),
+    }));
+    window.history.replaceState(null, "", "/chats/shared-init-chat");
+    const sharedInitUi = new ChatUI(state);
+    await flushPromises();
+    expect(state.activeChatId).toBe("shared-init-chat");
+    void sharedInitUi;
 
     const freshThemeBtn = getTestElement<HTMLButtonElement>("theme-toggle-btn");
     localStorage.setItem("t1d_theme", "dark");
     state.setActiveChat(chat1.id);
-    window.location.hash = "";
+    window.history.replaceState(null, "", "/");
     const darkUi = new ChatUI(state);
     expect(document.body.classList.contains("light-mode")).toBe(false);
     freshThemeBtn.click();
@@ -1006,6 +1063,39 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     expect(resCrlf.streamText).toBe("Hello ");
     expect(resCrlf.finalData?.content).toBe("Final CRLF");
 
+    const errEventChunks = [
+      `data: {"event":"error","error":"backend.invalidDatabasePath"}\r\n\r\n`,
+    ];
+    let idxErrEv = 0;
+    const errEventStream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (idxErrEv < errEventChunks.length) {
+          controller.enqueue(
+            new TextEncoder().encode(errEventChunks[idxErrEv++]),
+          );
+        } else {
+          controller.close();
+        }
+      },
+    });
+    const resErrEv = await consumeSseChatStream(
+      errEventStream.getReader(),
+      () => {},
+    );
+    expect(resErrEv.streamUsed).toBe(true);
+    expect(resErrEv.finalData?.error).toBe("backend.invalidDatabasePath");
+
+    expect(
+      deduplicateErrorPrefix(
+        "Internal server error: Internal server error: llama-server process has terminated",
+      ),
+    ).toBe("Internal server error: llama-server process has terminated");
+    expect(
+      parseApiError(
+        "Internal server error: Internal server error: signal: segmentation fault",
+      ),
+    ).toBe("Internal server error: signal: segmentation fault");
+
     streamBtn.click();
     expect(ui.streamingEnabled).toBe(false);
 
@@ -1043,5 +1133,105 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     stopBtn.click();
     await sendPromise;
     expect(stopBtn.classList.contains("hidden")).toBe(true);
+  });
+
+  it("supports async job polling via POST /api/chat/jobs and GET /api/chat/jobs/{jobId} as well as pending POST /api/chat responses", async () => {
+    const chat = state.createChat();
+    ui.render();
+    ui.streamingEnabled = false;
+    ui.asyncJobPollingEnabled = true;
+    ui.pollIntervalMs = 5;
+
+    // 1. POST /api/chat/jobs -> status: "pending", followed by 2 polls -> status: "complete"
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        job_id: "chatjob-123",
+        status: "pending",
+        partial_content: "",
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        job_id: "chatjob-123",
+        status: "pending",
+        partial_content: "Generating DuckDB SQL...",
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        job_id: "chatjob-123",
+        status: "complete",
+        content: "Here is the grouped cohort summary:",
+        sqlQuery:
+          'SELECT "TxGroup" AS treatment_group, COUNT(*) AS patient_count FROM "patients" GROUP BY "TxGroup";',
+        sqlResult: [{ treatment_group: "AID", patient_count: 12 }],
+        is_synthetic_data: false,
+        is_rule_based_sql: false,
+      }),
+    });
+
+    await ui.handleSendMessage(
+      "Show patient count grouped by treatment group",
+      "gemma:2b",
+    );
+    const lastMsg = chat.messages[chat.messages.length - 1];
+    expect(lastMsg?.content).toContain("Here is the grouped cohort summary:");
+    expect(lastMsg?.sqlResult?.[0]?.treatment_group).toBe("AID");
+
+    // 2. Fallback to POST /api/chat when POST /api/chat/jobs returns 404, and poll when POST /api/chat returns status: "pending"
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: async () => ({ detail: "Not found" }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        job_id: "chatjob-456",
+        status: "pending",
+        content: "",
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        job_id: "chatjob-456",
+        status: "complete",
+        content: "Completed from /api/chat pending ticket",
+        sqlQuery: "SELECT 1 AS ok;",
+        sqlResult: [{ ok: 1 }],
+      }),
+    });
+
+    await ui.handleSendMessage("Fallback from 404 jobs endpoint", "gemma:2b");
+    expect(chat.messages[chat.messages.length - 1]?.content).toContain(
+      "Completed from /api/chat pending ticket",
+    );
+
+    // 3. Aborting an in-flight polling loop via stop button
+    ui.pollIntervalMs = 500;
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        job_id: "chatjob-abort",
+        status: "pending",
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        job_id: "chatjob-abort",
+        status: "pending",
+        partial_content: "Still running...",
+      }),
+    });
+    const abortSendPromise = ui.handleSendMessage("Abort poll", "gemma:2b");
+    await flushPromises();
+    getTestElement<HTMLButtonElement>("stop-btn").click();
+    await abortSendPromise;
+    expect(chat.messages[chat.messages.length - 1]?.isError).toBe(true);
   });
 });

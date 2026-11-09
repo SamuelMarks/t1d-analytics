@@ -11,6 +11,12 @@ from t1d_analytics.errors import InvalidDatabasePathError
 ALLOWED_DB_EXTENSIONS = (".duckdb", ".db")
 LOCAL_T1D_DB_SEARCH_ROOT = Path("/Volumes/TOSHIBA_EXT/stanford/t1d")
 REMOTE_T1D_DB_SEARCH_ROOT = Path("/mnt/data/t1d")
+REMOTE_MNT_DATA_ROOT = Path("/mnt/data")
+REMOTE_DISCOVERY_DB_CANDIDATES: tuple[Path, ...] = (
+    REMOTE_T1D_DB_SEARCH_ROOT / "jaeb" / "t1d.duckdb",
+    REMOTE_T1D_DB_SEARCH_ROOT / "t1d.duckdb",
+    REMOTE_MNT_DATA_ROOT / "t1d_analytics.duckdb",
+)
 DEFAULT_JAEB_EXTERNAL_ROOT = LOCAL_T1D_DB_SEARCH_ROOT
 DEFAULT_DB_SEARCH_DIRS: tuple[Path, ...] = (
     REMOTE_T1D_DB_SEARCH_ROOT,
@@ -226,6 +232,10 @@ def get_allowed_db_roots() -> List[Path]:
     """
     Return the default list of allowed filesystem directory roots for DuckDB access.
 
+    Always includes `REMOTE_T1D_DB_SEARCH_ROOT` (`/mnt/data/t1d`) and `/mnt/data/t1d/jaeb`
+    (as well as `/mnt/data` when present on disk) so `/mnt/data/t1d` databases can be queried
+    directly even if only the parent `/mnt/data` directory existed at import time.
+
     Returns
     -------
         List[Path]: Resolved allowed directory Paths.
@@ -243,12 +253,20 @@ def get_allowed_db_roots() -> List[Path]:
         Path("/tmp").resolve(),
         Path("/private/tmp").resolve(),
         Path("/var/tmp").resolve(),
+        REMOTE_T1D_DB_SEARCH_ROOT.resolve(),
+        (REMOTE_T1D_DB_SEARCH_ROOT / "jaeb").resolve(),
     ]
+    if _safe_path_exists(REMOTE_MNT_DATA_ROOT):
+        resolved_mnt = REMOTE_MNT_DATA_ROOT.resolve()
+        if resolved_mnt not in allowed_dirs:
+            allowed_dirs.append(resolved_mnt)
     env_db = os.environ.get("T1D_DB_PATH")
     if env_db:
-        allowed_dirs.append(Path(env_db).resolve().parent)
+        env_parent = Path(env_db).resolve().parent
+        if env_parent not in allowed_dirs:
+            allowed_dirs.append(env_parent)
     for search_dir in get_t1d_db_search_dirs():
-        if search_dir.exists():
+        if _safe_path_exists(search_dir):
             resolved_search = search_dir.resolve()
             if resolved_search not in allowed_dirs:
                 allowed_dirs.append(resolved_search)
@@ -291,6 +309,33 @@ def _iter_duckdb_files_in_dir(
     return matches
 
 
+def _resolve_bare_filename_db_path(raw_path: str) -> str:
+    """
+    Resolve a bare `.duckdb` filename against `T1D_DB_PATH` and `get_t1d_db_search_dirs()`.
+
+    Args:
+    ----
+        raw_path: Bare database filename without directory separators.
+
+    Returns:
+    -------
+        str: Matched existing path string, or `raw_path` if no match exists.
+
+    """
+    env_db_cand = os.environ.get("T1D_DB_PATH")
+    if (
+        env_db_cand
+        and Path(env_db_cand).name == raw_path
+        and Path(env_db_cand).exists()
+    ):
+        return env_db_cand
+    for s_dir in get_t1d_db_search_dirs():
+        for cand in (s_dir / raw_path, s_dir / "jaeb" / raw_path):
+            if cand.exists():
+                return str(cand)
+    return raw_path
+
+
 def resolve_default_db_path(db_path: Optional[str] = None) -> str:
     """
     Resolve the target DuckDB database path from an explicit argument, `T1D_DB_PATH`, `T1D_DB_SEARCH_DIR`, or `data/t1d.duckdb`.
@@ -324,6 +369,14 @@ def resolve_default_db_path(db_path: Optional[str] = None) -> str:
                 return str(found[0])
             if Path("data/t1d.duckdb").exists():
                 raw_path = "data/t1d.duckdb"
+    elif (
+        db_path
+        and "/" not in raw_path
+        and "\\" not in raw_path
+        and "\0" not in raw_path
+        and not Path(raw_path).exists()
+    ):
+        return _resolve_bare_filename_db_path(raw_path)
     return raw_path
 
 
@@ -448,14 +501,19 @@ def discover_workspace_databases() -> DatabaseListResponse:
     default_db = resolve_default_db_path()
     all_files: List[Path] = []
     default_resolved: Optional[str] = None
+    default_size = 0
     if default_db:
         p_def = Path(default_db)
         default_resolved = str(p_def.resolve())
         if p_def.exists():
+            default_size = p_def.stat().st_size
             all_files.append(p_def)
 
     for local_dir in (Path(), Path("./data")):
         all_files.extend(_iter_duckdb_files_in_dir(local_dir, include_subdirs=False))
+    for remote_cand in REMOTE_DISCOVERY_DB_CANDIDATES:
+        if _safe_path_exists(remote_cand):
+            all_files.append(remote_cand)
     for ext_dir in get_t1d_db_search_dirs():
         all_files.extend(_iter_duckdb_files_in_dir(ext_dir, include_subdirs=True))
 
@@ -465,6 +523,14 @@ def discover_workspace_databases() -> DatabaseListResponse:
     for p in all_files:
         resolved_path = p.resolve()
         resolved = str(resolved_path)
+        p_size = p.stat().st_size if p.exists() else 0
+        if (
+            default_size > 50_000_000
+            and resolved != default_resolved
+            and p.name == "t1d.duckdb"
+            and p_size < 10_000_000
+        ):
+            continue
         if resolved not in seen_paths:
             seen_paths.add(resolved)
             is_in_cwd = resolved_path.is_relative_to(cwd_resolved)
@@ -478,7 +544,7 @@ def discover_workspace_databases() -> DatabaseListResponse:
                 DatabaseItem(
                     name=item_name,
                     path=str(p),
-                    size_bytes=p.stat().st_size if p.exists() else 0,
+                    size_bytes=p_size,
                 )
             )
 

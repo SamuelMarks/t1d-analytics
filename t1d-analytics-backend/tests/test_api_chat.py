@@ -1560,6 +1560,7 @@ def test_ollama_crash_fallback_and_readonly_sql_routing(mock_db: str) -> None:
 
     assert is_likely_sql_statement("   ") is False
     assert is_likely_sql_statement("SELECT * FROM users") is True
+    assert is_likely_sql_statement("DROP TABLE users") is False
     assert is_likely_sql_statement("SHOW TABLES") is True
     assert is_likely_sql_statement("SHOW ALL TABLES") is True
     assert is_likely_sql_statement("Show all users") is False
@@ -1860,3 +1861,1168 @@ def test_format_llm_failure_reason_and_chat_response_to_dict() -> None:
     d_full = resp_full.to_dict()
     assert isinstance(d_full["error"], dict)
     assert isinstance(d_full["gold_comparison"], dict)
+
+    # Deduplication of repeated "Internal server error: " prefixes
+    dup_err_str = (
+        "Internal server error: Internal server error: "
+        "llama-server process has terminated: signal: segmentation fault (core dumped) (status code: 500)"
+    )
+    msg_dup, code_dup = format_llm_failure_reason(dup_err_str)
+    assert msg_dup == (
+        "Internal server error: llama-server process has terminated: "
+        "signal: segmentation fault (core dumped) (status code: 500)"
+    )
+    assert code_dup == "backend.llmInvalidSqlOutput"
+
+
+def test_gemma_2b_third_party_exception_recovery_in_chat_and_stream(
+    mock_db: str,
+) -> None:
+    """Verify /api/chat and /api/chat/stream recover with HTTP 200 and rule-based SQL when any_llm raises a non-RuntimeError Exception subclass."""
+
+    class _CustomAnyLlmHttp500Error(Exception):
+        """Third-party exception subclassing Exception directly (not RuntimeError/OSError)."""
+
+    crash_msg = (
+        "Internal server error: Internal server error: "
+        "llama-server process has terminated: signal: segmentation fault (core dumped) (status code: 500)"
+    )
+
+    with (
+        patch(
+            "t1d_analytics.chat_service.complete_llm_prompt",
+            side_effect=_CustomAnyLlmHttp500Error(crash_msg),
+        ),
+        patch(
+            "t1d_analytics.chat_service._probe_installed_ollama_names",
+            return_value=["gemma:2b", "llama3.2:1b"],
+        ),
+    ):
+        resp_batch = client.post(
+            "/api/chat",
+            json={
+                "message": "How many users?",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+        )
+        assert resp_batch.status_code == 200
+        batch_data = resp_batch.json()
+        assert batch_data["is_rule_based_sql"] is True
+        assert batch_data["generation_mode"] == "rule_based_fallback"
+        assert batch_data["sqlQuery"] == 'SELECT COUNT(*) AS count FROM "users";'
+        assert batch_data["llm_error_code"] == "backend.llmMemoryCrash"
+        assert "Internal server error: Internal server error:" not in (
+            batch_data["llm_error"] or ""
+        )
+
+    with patch(
+        "t1d_analytics.api_dependencies.stream_llm_completion_tokens",
+        side_effect=_CustomAnyLlmHttp500Error(crash_msg),
+    ):
+        resp_stream = client.post(
+            "/api/chat/stream",
+            json={
+                "message": "How many users?",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+        )
+        assert resp_stream.status_code == 200
+        assert '"is_rule_based_sql": true' in resp_stream.text
+        assert '"generation_mode": "rule_based_fallback"' in resp_stream.text
+        assert 'SELECT COUNT(*) AS count FROM \\"users\\";' in resp_stream.text
+        assert "Internal server error: Internal server error:" not in resp_stream.text
+
+
+def test_table_1_natural_language_prompts_and_sql_classification(
+    tmp_path: Path,
+) -> None:
+    """Verify all 7 TABLE_1_BENCHMARK_SUITE prompts and natural-language starters are never misclassified as literal SQL."""
+    from t1d_analytics.chat_service import is_likely_sql_statement
+    from t1d_analytics.seed import seed_database
+    from t1d_analytics.sql_fallback_synthesizer import synthesize_fallback_clinical_sql
+    from t1d_analytics.sql_utils import is_sql_query
+    from t1d_analytics.training_data import TABLE_1_BENCHMARK_SUITE
+
+    seeded_db = tmp_path / "seeded_t1.duckdb"
+    seed_database(
+        data_dir=str(Path(__file__).resolve().parent / "test_data"),
+        db_path=str(seeded_db),
+        sessions_db_path=str(tmp_path / "sessions_t1.duckdb"),
+    )
+
+    nl_prompts = [
+        *(spec["question"] for spec in TABLE_1_BENCHMARK_SUITE),
+        "Summarize baseline HbA1c by arm",
+        "With Closed-Loop vs Control patients, what is mean TIR?",
+        "Select patients who had DKA events.",
+        "Table 1 comparing Closed-Loop vs Control",
+        "Describe baseline demographics across treatment arms",
+        "Explain the relationship between TIR and HbA1c",
+    ]
+    for prompt in nl_prompts:
+        assert is_likely_sql_statement(prompt) is False, f"Failed on: {prompt}"
+        assert is_sql_query(prompt) is False, f"Failed on: {prompt}"
+
+    # Verify all 7 Table 1 benchmark questions synthesize curated gold SQL in fallback/sql mode
+    schema_text = (
+        "Table: patients\nColumns: subject_id (INT), age (DOUBLE), gender (VARCHAR), TxGroup (VARCHAR), "
+        "hba1c (DOUBLE), tir (DOUBLE), tbr (DOUBLE), tar (DOUBLE), mean_glucose (DOUBLE), numhospdka (INT)\n"
+    )
+    for spec in TABLE_1_BENCHMARK_SUITE:
+        fb = synthesize_fallback_clinical_sql(schema_text, spec["question"])
+        assert fb.sql_query == spec["gold_sql"]
+
+    # Also verify generic Table 1 fallback when schema does not have "patients" table
+    non_patients_schema = "Table: subjects\nColumns: subject_id (INT), age (DOUBLE), gender (VARCHAR), arm (VARCHAR)\n"
+    fb_non_patients = synthesize_fallback_clinical_sql(
+        non_patients_schema, TABLE_1_BENCHMARK_SUITE[1]["question"]
+    )
+    assert 'FROM "subjects"' in fb_non_patients.sql_query
+
+    # Verify Table 1 Chip #2 routes to translate_nl_to_sql when model="gemma:2b"
+    table1_arm_prompt = TABLE_1_BENCHMARK_SUITE[1]["question"]
+    table1_arm_gold_sql = TABLE_1_BENCHMARK_SUITE[1]["gold_sql"]
+    with patch(
+        "t1d_analytics.api_dependencies.translate_nl_to_sql",
+        return_value=TranslationResult(
+            full_response=f"```sql\n{table1_arm_gold_sql}\n```",
+            sql_query=table1_arm_gold_sql,
+        ),
+    ) as mock_translate:
+        resp_llm = client.post(
+            "/api/chat",
+            json={
+                "message": table1_arm_prompt,
+                "model": "gemma:2b",
+                "db_path": str(seeded_db),
+            },
+        )
+        assert resp_llm.status_code == 200
+        mock_translate.assert_called_once()
+        llm_data = resp_llm.json()
+        assert llm_data["error"] is None
+        assert llm_data["sqlQuery"] == table1_arm_gold_sql
+        assert isinstance(llm_data["sqlResult"], list)
+        assert len(llm_data["sqlResult"]) >= 1
+
+    # Verify Table 1 Chip #2 in model="sql" mode synthesizes and executes valid DuckDB SQL
+    resp_sql_mode = client.post(
+        "/api/chat",
+        json={
+            "message": table1_arm_prompt,
+            "model": "sql",
+            "db_path": str(seeded_db),
+        },
+    )
+    assert resp_sql_mode.status_code == 200
+    sql_mode_data = resp_sql_mode.json()
+    assert sql_mode_data["error"] is None
+    assert sql_mode_data["sqlQuery"] == table1_arm_gold_sql
+    assert sql_mode_data["is_rule_based_sql"] is True
+    assert isinstance(sql_mode_data["sqlResult"], list)
+    assert len(sql_mode_data["sqlResult"]) >= 1
+
+
+def test_multi_candidate_local_fallback_in_sync_and_streaming(
+    mock_db: str,
+) -> None:
+    """Verify translate_nl_to_sql and stream_llm_completion_tokens retry across multiple candidate fallback models (llama3.2:1b, phi4-mini) on local Ollama crash."""
+    from t1d_analytics.chat_service import (
+        _complete_non_streaming_with_fallback,
+        _extract_completion_or_iterable_text,
+        _invoke_llm_with_local_fallback,
+        _resolve_local_ollama_candidates_list,
+        stream_llm_completion_tokens,
+        translate_nl_to_sql,
+    )
+
+    crash_exc = RuntimeError(
+        "llama-server process has terminated: signal: segmentation fault (core dumped) (status code: 500)"
+    )
+
+    # 1. _resolve_local_ollama_candidates_list with probe error on second call
+    call_count = 0
+
+    def _flaky_probe() -> list[str]:
+        """Return tags on first call and raise OSError on second call."""
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return ["gemma:2b", "llama3.2:1b", "phi4-mini"]
+        raise OSError("probe failed")
+
+    prim, cands = _resolve_local_ollama_candidates_list(
+        "gemma:2b", probe_fn=_flaky_probe
+    )
+    assert prim == "gemma:2b"
+    assert cands == ["llama3.2:1b"]
+
+    # 2. translate_nl_to_sql multi-candidate retry: gemma:2b fails -> llama3.2:1b fails -> phi4-mini succeeds
+    sleep_delays: list[float] = []
+    with (
+        patch(
+            "t1d_analytics.chat_service._probe_installed_ollama_names",
+            return_value=["gemma:2b", "llama3.2:1b", "phi4-mini"],
+        ),
+        patch(
+            "t1d_analytics.chat_service.complete_llm_prompt",
+            side_effect=[
+                crash_exc,
+                crash_exc,
+                '```sql\nSELECT COUNT(*) AS count FROM "users";\n```',
+            ],
+        ) as mock_comp,
+        patch(
+            "t1d_analytics.chat_service.time.sleep",
+            side_effect=lambda d: sleep_delays.append(d),
+        ),
+    ):
+        res_sync = translate_nl_to_sql(
+            db_path=mock_db,
+            nl_query="How many users?",
+            model_name="gemma:2b",
+            provider="ollama",
+        )
+        assert res_sync.used_fallback is False
+        assert res_sync.generation_mode == "llm"
+        assert res_sync.sql_query == 'SELECT COUNT(*) AS count FROM "users";'
+        assert "segmentation fault" not in res_sync.full_response
+        assert mock_comp.call_count == 3
+        assert len(sleep_delays) == 2
+
+    # 3. _invoke_llm_with_local_fallback when all candidates fail (including non-crash error)
+    with (
+        patch(
+            "t1d_analytics.chat_service.complete_llm_prompt",
+            side_effect=[
+                crash_exc,
+                RuntimeError("non-crash failure"),
+                RuntimeError("final failure"),
+            ],
+        ),
+        pytest.raises(RuntimeError, match="final failure"),
+    ):
+        _invoke_llm_with_local_fallback(
+            prompt="SELECT 1;",
+            actual_model="gemma:2b",
+            fallback_candidates=["llama3.2:1b", "phi4-mini"],
+            effective_api_key=None,
+            resolved_provider="ollama",
+            is_local_ollama=True,
+            sleep_fn=lambda _: None,
+        )
+
+    # 4. stream_llm_completion_tokens multi-candidate retry when primary crashes on stream=True
+    mock_transport = MagicMock()
+    mock_transport.completion.side_effect = [
+        crash_exc,
+        crash_exc,
+        ['```sql\nSELECT COUNT(*) AS count FROM "users";\n```'],
+    ]
+    stream_sleeps: list[float] = []
+    with (
+        patch(
+            "t1d_analytics.chat_service._probe_installed_ollama_names",
+            return_value=["gemma:2b", "llama3.2:1b", "phi4-mini"],
+        ),
+        patch(
+            "t1d_analytics.chat_service.create_any_llm_transport",
+            return_value=mock_transport,
+        ),
+    ):
+        tokens = list(
+            stream_llm_completion_tokens(
+                prompt="Count users",
+                model_name="gemma:2b",
+                provider="ollama",
+                sleep_fn=lambda d: stream_sleeps.append(d),
+            )
+        )
+        joined_tokens = "".join(tokens)
+        assert 'SELECT COUNT(*) AS count FROM "users";' in joined_tokens
+        assert "segmentation fault (core dumped)" not in joined_tokens
+        assert mock_transport.completion.call_count == 3
+        assert len(stream_sleeps) == 2
+
+    # 5. stream_llm_completion_tokens with custom llm_factory when primary crashes on stream=True
+    factory_transport = MagicMock()
+    factory_transport.completion.side_effect = [
+        crash_exc,
+        '```sql\nSELECT * FROM "users" LIMIT 5;\n```',
+    ]
+    with patch(
+        "t1d_analytics.chat_service._probe_installed_ollama_names",
+        return_value=["gemma:2b", "llama3.2:1b"],
+    ):
+        factory_tokens = list(
+            stream_llm_completion_tokens(
+                prompt="List users",
+                model_name="gemma:2b",
+                provider="ollama",
+                llm_factory=lambda prov, api_key=None: factory_transport,
+                sleep_fn=lambda _: None,
+            )
+        )
+        assert 'SELECT * FROM "users" LIMIT 5;' in "".join(factory_tokens)
+
+    # 6. _extract_completion_or_iterable_text and _complete_non_streaming_with_fallback edge branches
+    assert _extract_completion_or_iterable_text(["", ""], "ollama") == "['', '']"
+
+    class _NonDeltaObj:
+        """Object satisfying _DeltaTextProtocol with empty text returning custom __str__."""
+
+        text: str = ""
+
+        def __str__(self) -> str:
+            """Return string representation."""
+            return "SELECT 99;"
+
+    assert (
+        _extract_completion_or_iterable_text(_NonDeltaObj(), "ollama") == "SELECT 99;"
+    )
+
+    skip_transport = MagicMock()
+    skip_transport.completion.side_effect = [RuntimeError("candidate failed")]
+    with pytest.raises(RuntimeError, match="candidate failed"):
+        _complete_non_streaming_with_fallback(
+            llm=skip_transport,
+            resolved_provider="ollama",
+            actual_model="gemma:2b",
+            fallback_model="llama3.2:1b",
+            prompt="SELECT 1;",
+            sleep_fn=lambda _: None,
+            skip_primary=True,
+            initial_exc=None,
+        )
+
+
+def test_chat_job_manager_and_async_polling_endpoints(mock_db: str) -> None:
+    """Test ChatJobManager, /api/chat/jobs, /api/chat?async_poll=true, and /api/eval/nl-to-sql/jobs."""
+    from typing import Callable
+
+    from t1d_analytics.api import get_chat_job_manager, get_rate_limiter
+    from t1d_analytics.api_dependencies import resolve_chat_job_manager
+    from t1d_analytics.api_schemas import (
+        ApiError,
+        ChatRequest,
+        ChatResponse,
+        NlToSqlEvalRequest,
+        NlToSqlEvalResponse,
+    )
+    from t1d_analytics.errors import ChatJobNotFoundError
+    from t1d_analytics.job_manager import ChatJobManager, ChatJobState
+
+    err_inst = ChatJobNotFoundError(params={"job_id": "missing"})
+    assert err_inst.error_code == "backend.chatJobNotFound"
+    assert err_inst.status_code == 404
+
+    assert isinstance(get_chat_job_manager(), ChatJobManager)
+    assert isinstance(resolve_chat_job_manager(app), ChatJobManager)
+
+    pending_state = ChatJobState(
+        job_id="chatjob-pending",
+        status="pending",
+        created_at="2026-01-01T00:00:00Z",
+        partial_content="SELECT ",
+    )
+    assert pending_state.to_chat_response().status == "pending"
+    assert pending_state.to_chat_response().partial_content == "SELECT "
+    assert (
+        pending_state.to_eval_response(
+            fallback_question="Q1", fallback_model="gemma:2b"
+        ).status
+        == "pending"
+    )
+    assert pending_state.to_dict()["status"] == "pending"
+
+    failed_empty_state = ChatJobState(
+        job_id="chatjob-failed-empty",
+        status="failed",
+        created_at="2026-01-01T00:00:00Z",
+        partial_content="part",
+    )
+    assert failed_empty_state.to_chat_response().status == "failed"
+    assert (
+        failed_empty_state.to_eval_response(
+            fallback_question="Q2", fallback_model="gemma:2b"
+        ).status
+        == "failed"
+    )
+    assert failed_empty_state.to_dict()["status"] == "failed"
+
+    mgr = ChatJobManager()
+    assert mgr.get_chat_job("nonexistent") is None
+    assert mgr.get_chat_job_response("nonexistent") is None
+    assert mgr.get_eval_job_response("nonexistent") is None
+    assert mgr.wait_for_chat_job("nonexistent", timeout=0.01) is None
+
+    def _ok_worker(
+        req: ChatRequest, on_progress: Callable[[str], None]
+    ) -> ChatResponse:
+        """Emit partial progress and return completed ChatResponse."""
+        on_progress("")
+        on_progress("Partial SQL ")
+        return ChatResponse(
+            content=f"Done: {req.message}",
+            sqlQuery="SELECT 1 AS val;",
+            sqlResult=[{"val": 1}],
+        )
+
+    t1 = mgr.submit_chat_job(ChatRequest(message="hello", model="sql"), _ok_worker)
+    done_dict = mgr.wait_for_chat_job(t1["job_id"], timeout=5.0)
+    assert done_dict is not None
+    assert done_dict["status"] == "complete"
+    assert done_dict["content"] == "Done: hello"
+    assert done_dict["partial_content"] == "Partial SQL "
+
+    def _silent_worker(
+        req: ChatRequest, _on_progress: Callable[[str], None]
+    ) -> ChatResponse:
+        """Return completed ChatResponse without emitting partial progress."""
+        return ChatResponse(content=f"Silent: {req.message}")
+
+    t_silent = mgr.submit_chat_job(
+        ChatRequest(message="quiet", model="sql"), _silent_worker
+    )
+    done_silent = mgr.wait_for_chat_job(t_silent["job_id"], timeout=5.0)
+    assert done_silent is not None
+    assert done_silent["partial_content"] == "Silent: quiet"
+
+    def _fail_worker(
+        _req: ChatRequest, on_progress: Callable[[str], None]
+    ) -> ChatResponse:
+        """Emit progress and raise RuntimeError."""
+        on_progress("Before crash")
+        raise RuntimeError("Worker boom")
+
+    t_fail = mgr.submit_chat_job(
+        ChatRequest(message="crash", model="sql"), _fail_worker
+    )
+    done_fail = mgr.wait_for_chat_job(t_fail["job_id"], timeout=5.0)
+    assert done_fail is not None
+    assert done_fail["status"] == "failed"
+    assert done_fail["error"] is not None
+
+    def _eval_ok(
+        req: NlToSqlEvalRequest, on_progress: Callable[[str], None]
+    ) -> NlToSqlEvalResponse:
+        """Emit eval progress and return NlToSqlEvalResponse."""
+        on_progress("")
+        on_progress("Eval partial")
+        return NlToSqlEvalResponse(
+            question=req.question,
+            model=req.model,
+            content="Eval complete",
+            sqlQuery="SELECT 1;",
+            sqlResult=[{"x": 1}],
+        )
+
+    te1 = mgr.submit_eval_job(
+        NlToSqlEvalRequest(question="Count", model="gemma:2b"), _eval_ok
+    )
+    mgr.wait_for_chat_job(te1["job_id"], timeout=5.0)
+    ev_resp = mgr.get_eval_job_response(te1["job_id"])
+    assert ev_resp is not None
+    assert ev_resp.status == "complete"
+    assert ev_resp.partial_content == "Eval partial"
+
+    def _eval_silent(
+        req: NlToSqlEvalRequest, _on_progress: Callable[[str], None]
+    ) -> NlToSqlEvalResponse:
+        """Return NlToSqlEvalResponse without emitting progress."""
+        return NlToSqlEvalResponse(
+            question=req.question,
+            model=req.model,
+            content="",
+        )
+
+    te_silent = mgr.submit_eval_job(
+        NlToSqlEvalRequest(question="Silent", model="gemma:2b"), _eval_silent
+    )
+    mgr.wait_for_chat_job(te_silent["job_id"], timeout=5.0)
+    assert mgr.get_eval_job_response(te_silent["job_id"]) is not None
+
+    def _eval_fail(
+        _req: NlToSqlEvalRequest, on_progress: Callable[[str], None]
+    ) -> NlToSqlEvalResponse:
+        """Emit progress and raise ValueError."""
+        on_progress("Eval crash progress")
+        raise ValueError("Eval boom")
+
+    te_fail = mgr.submit_eval_job(
+        NlToSqlEvalRequest(question="Fail", model="gemma:2b"), _eval_fail
+    )
+    mgr.wait_for_chat_job(te_fail["job_id"], timeout=5.0)
+    ev_fail_resp = mgr.get_eval_job_response(te_fail["job_id"])
+    assert ev_fail_resp is not None
+    assert ev_fail_resp.status == "failed"
+
+    pruned_count = mgr.prune_completed_chat_jobs(max_retained=1)
+    assert pruned_count >= 1
+
+    empty_job_resp = client.post(
+        "/api/chat/jobs",
+        json={"message": "   ", "model": "sql", "db_path": mock_db},
+    )
+    assert empty_job_resp.status_code == 400
+
+    missing_job_resp = client.get("/api/chat/jobs/chatjob-missing-999")
+    assert missing_job_resp.status_code == 404
+    assert missing_job_resp.json()["detail"]["error_code"] == "backend.chatJobNotFound"
+
+    submit_resp = client.post(
+        "/api/chat/jobs",
+        json={
+            "message": "SELECT count(*) AS cnt FROM users",
+            "model": "sql",
+            "db_path": mock_db,
+        },
+        headers={"x-provider": "ollama", "x-provider-api-key": "test-key"},
+    )
+    assert submit_resp.status_code == 200
+    job_ticket = submit_resp.json()
+    assert job_ticket["status"] == "pending"
+    jid = job_ticket["job_id"]
+    assert jid.startswith("chatjob-")
+
+    get_chat_job_manager().wait_for_chat_job(jid, timeout=5.0)
+    poll_resp = client.get(f"/api/chat/jobs/{jid}")
+    assert poll_resp.status_code == 200
+    poll_data = poll_resp.json()
+    assert poll_data["status"] == "complete"
+    assert poll_data["sqlResult"] == [{"cnt": 2}]
+
+    async_body_resp = client.post(
+        "/api/chat",
+        json={
+            "message": "SELECT 1 AS a",
+            "model": "sql",
+            "db_path": mock_db,
+            "async_poll": True,
+        },
+    )
+    assert async_body_resp.status_code == 200
+    jid2 = async_body_resp.json()["job_id"]
+    get_chat_job_manager().wait_for_chat_job(jid2, timeout=5.0)
+    assert client.get(f"/api/chat/jobs/{jid2}").json()["status"] == "complete"
+
+    with patch(
+        "t1d_analytics.routers.chat_routes.execute_chat_turn",
+        return_value=ChatResponse(
+            content="",
+            error=ApiError(error_code="backend.syntaxError", params={}),
+        ),
+    ):
+        empty_content_ticket = client.post(
+            "/api/chat/jobs",
+            json={"message": "SELECT 1", "model": "sql", "db_path": mock_db},
+        ).json()
+        get_chat_job_manager().wait_for_chat_job(
+            empty_content_ticket["job_id"], timeout=5.0
+        )
+
+    get_rate_limiter().reset()
+    assert (
+        client.post(
+            "/api/eval/nl-to-sql/jobs",
+            json={"question": "   ", "model": "gemma:2b", "db_path": mock_db},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.get("/api/eval/nl-to-sql/jobs/chatjob-missing-eval").status_code == 404
+    )
+
+    with patch(
+        "t1d_analytics.api.generate_sql_from_nl",
+        return_value='```sql\nSELECT COUNT(*) AS count FROM "users";\n```',
+    ):
+        eval_submit = client.post(
+            "/api/eval/nl-to-sql/jobs",
+            json={
+                "question": "How many users?",
+                "gold_sql": 'SELECT COUNT(*) AS count FROM "users";',
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+            headers={"x-provider": "ollama", "x-provider-api-key": "k"},
+        )
+        assert eval_submit.status_code == 200
+        eval_jid = eval_submit.json()["job_id"]
+        get_chat_job_manager().wait_for_chat_job(eval_jid, timeout=5.0)
+        eval_poll = client.get(f"/api/eval/nl-to-sql/jobs/{eval_jid}")
+        assert eval_poll.status_code == 200
+        assert eval_poll.json()["status"] == "complete"
+
+        eval_async_param = client.post(
+            "/api/eval/nl-to-sql?async_poll=true",
+            json={
+                "question": "How many users?",
+                "model": "gemma:2b",
+                "db_path": mock_db,
+            },
+        )
+        assert eval_async_param.status_code == 200
+        assert eval_async_param.json()["status"] == "pending"
+        get_chat_job_manager().wait_for_chat_job(
+            eval_async_param.json()["job_id"], timeout=5.0
+        )
+
+    with patch(
+        "t1d_analytics.routers.chat_routes.execute_nl_to_sql_eval_turn",
+        return_value=NlToSqlEvalResponse(
+            question="Q",
+            model="gemma:2b",
+            content="",
+        ),
+    ):
+        ev_empty = client.post(
+            "/api/eval/nl-to-sql/jobs",
+            json={"question": "Q", "model": "gemma:2b", "db_path": mock_db},
+        ).json()
+        get_chat_job_manager().wait_for_chat_job(ev_empty["job_id"], timeout=5.0)
+    get_rate_limiter().reset()
+
+
+def test_compact_prompts_and_direct_ollama_generation() -> None:
+    """Test compact local CPU prompts, direct call_local_ollama_generate path, and grouped fallback SQL."""
+    from t1d_analytics.chat_service import _resolve_effective_retries_for_provider
+    from t1d_analytics.clinical_prompts import (
+        _prune_table_columns_line,
+        build_compact_clinical_sql_prompt,
+        is_compact_local_model,
+    )
+    from t1d_analytics.llm_client import complete_llm_prompt, generate_sql_from_nl
+    from t1d_analytics.sql_fallback_synthesizer import (
+        _build_treatment_group_hypo_summary_sql,
+        synthesize_fallback_clinical_sql,
+    )
+
+    assert is_compact_local_model("gemma:2b", "ollama") is True
+    assert is_compact_local_model(None, None) is False
+    assert is_compact_local_model("sql", None) is False
+    assert is_compact_local_model("ollama:gemma:2b", None) is True
+    assert is_compact_local_model("openai/gpt-4o", None) is False
+    assert is_compact_local_model("gemma:2b", None) is True
+    assert is_compact_local_model("claude-3-5-sonnet", None) is False
+
+    assert _prune_table_columns_line("Not columns", 5) == "Not columns"
+    assert _prune_table_columns_line("Columns: a, b, c", 5) == "Columns: a, b, c"
+    assert _prune_table_columns_line("Columns: a, b, c", 2) == "Columns: a, b"
+
+    long_sample = "Sample row: " + ("x" * 120)
+    many_cols = "Columns: " + ", ".join(f"c{i} (INT)" for i in range(20))
+    schema_txt = (
+        f"Database Overview\n\nTable: patients\n{many_cols}\n{long_sample}\n\n"
+        f"Table: cgm_readings\nColumns: id (INT), glucose (DOUBLE)"
+    )
+    compact_prompt = build_compact_clinical_sql_prompt(
+        schema_context=schema_txt,
+        user_query="Show average glucose in patients",
+    )
+    assert "Table: patients" in compact_prompt
+    assert "..." in compact_prompt
+    assert "c19" not in compact_prompt
+
+    empty_compact = build_compact_clinical_sql_prompt(
+        schema_context="",
+        user_query="Count patients",
+    )
+    assert "User request: Count patients" in empty_compact
+
+    assert _resolve_effective_retries_for_provider("ollama") == 1
+    assert _resolve_effective_retries_for_provider("openai", 3) == 3
+
+    with patch(
+        "t1d_analytics.llm_client.call_local_ollama_generate",
+        return_value="```sql\nSELECT 1;\n```",
+    ) as mock_direct_ollama:
+        direct_out = complete_llm_prompt(
+            "SELECT 1", "ollama/gemma:2b", use_direct_ollama=True
+        )
+        assert "SELECT 1;" in direct_out
+        assert mock_direct_ollama.called
+
+        nl_local = generate_sql_from_nl(
+            schema_context="Table: patients\nColumns: subject_id (INT)",
+            user_query="Count patients",
+            model_name="gemma:2b",
+            provider="ollama",
+        )
+        assert "SELECT 1;" in nl_local
+
+    mock_cloud_llm = MagicMock()
+    mock_cloud_llm.completion.return_value = "```sql\nSELECT 2;\n```"
+    nl_cloud = generate_sql_from_nl(
+        schema_context="Table: patients\nColumns: subject_id (INT)",
+        user_query="Count patients",
+        model_name="openai/gpt-4o",
+        provider="openai",
+        api_key="sk-test",
+        llm_factory=lambda prov, api_key=None: mock_cloud_llm,
+    )
+    assert "SELECT 2;" in nl_cloud
+
+    assert (
+        _build_treatment_group_hypo_summary_sql({"other": ["col_a", "col_b"]}, "other")
+        is None
+    )
+    assert (
+        _build_treatment_group_hypo_summary_sql(
+            {"patients": ["TxGroup", "age", "numsevhypo"]}, "patients"
+        )
+        is not None
+    )
+    assert (
+        _build_treatment_group_hypo_summary_sql(
+            {"patients": ["only_id"], "custom_tbl": ["TxGroup"]}, "custom_tbl"
+        )
+        == 'SELECT "TxGroup" AS treatment_group, COUNT(*) AS patient_count FROM "custom_tbl" GROUP BY "TxGroup" ORDER BY "TxGroup";'
+    )
+    grouped_schema = (
+        "Table: patients\n"
+        "Columns: subject_id (INT), TxGroup (VARCHAR), age (DOUBLE), numsevhypo (INT)"
+    )
+    grouped_fb = synthesize_fallback_clinical_sql(
+        schema=grouped_schema,
+        nl_query="Show patient count, average age, and total severe hypoglycemia events grouped by treatment group.",
+        model="gemma:2b",
+    )
+    assert 'GROUP BY "TxGroup"' in grouped_fb.sql_query
+    assert "total_severe_hypo_events" in grouped_fb.sql_query
+
+
+def test_stream_nl_mode_sse_frames_heartbeats(mock_db: str) -> None:
+    """Test _stream_nl_mode_sse_frames keep-alive heartbeat emission and pre-token disconnect."""
+    import asyncio
+    import time
+    from typing import Iterator, Optional
+
+    from t1d_analytics.api import get_rate_limiter
+    from t1d_analytics.api_schemas import ApiError, ChatRequest
+    from t1d_analytics.chat_service import _stream_nl_mode_sse_frames
+
+    def _slow_stream(
+        _prompt: str,
+        _model: str,
+        api_key: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Iterator[str]:
+        """Yield a single SQL code fence after a short delay to trigger SSE heartbeat."""
+        _ = (api_key, provider)
+        time.sleep(0.12)
+        yield '```sql\nSELECT COUNT(*) AS cnt FROM "users";\n```'
+
+    async def _collect_frames() -> list[str]:
+        """Collect all SSE frames from _stream_nl_mode_sse_frames."""
+        frames: list[str] = []
+        async for f in _stream_nl_mode_sse_frames(
+            request=ChatRequest(
+                message="Count users",
+                model="gemma:2b",
+                db_path=mock_db,
+                auto_execute=False,
+            ),
+            req=None,
+            db_path=mock_db,
+            sse_sep="\n\n",
+            execute_fn=lambda _db, _q: [],
+            connect_fn=duckdb.connect,
+            schema_fn=lambda _c: "Table: users\nColumns: id (INT)",
+            stream_fn=_slow_stream,
+            error_parser=lambda _e: ApiError(
+                error_code="backend.errorUnexpected", params={}
+            ),
+            heartbeat_interval_seconds=0.05,
+        ):
+            frames.append(f)
+        return frames
+
+    collected = asyncio.run(_collect_frames())
+    assert any(": keep-alive" in f for f in collected)
+
+    class _DisconnectImmediatelyReq:
+        """Fake Request disconnecting on first check inside _stream_nl_mode_sse_frames."""
+
+        async def is_disconnected(self) -> bool:
+            """Return True immediately."""
+            return True
+
+    async def _collect_pre_token_disconnect_frames() -> list[str]:
+        """Collect frames when client disconnects before first token."""
+        frames: list[str] = []
+        async for f in _stream_nl_mode_sse_frames(
+            request=ChatRequest(
+                message="Count users",
+                model="gemma:2b",
+                db_path=mock_db,
+                auto_execute=False,
+            ),
+            req=_DisconnectImmediatelyReq(),  # type: ignore[arg-type]
+            db_path=mock_db,
+            sse_sep="\n\n",
+            execute_fn=lambda _db, _q: [],
+            connect_fn=duckdb.connect,
+            schema_fn=lambda _c: "Table: users\nColumns: id (INT)",
+            stream_fn=_slow_stream,
+            error_parser=lambda _e: ApiError(
+                error_code="backend.errorUnexpected", params={}
+            ),
+            heartbeat_interval_seconds=0.05,
+        ):
+            frames.append(f)
+        return frames
+
+    assert len(asyncio.run(_collect_pre_token_disconnect_frames())) == 0
+    get_rate_limiter().reset()
+
+
+def test_stream_nl_mode_sse_frames_midstream_disconnects(mock_db: str) -> None:
+    """Test _stream_nl_mode_sse_frames and generate_sse_chat_events client disconnect during heartbeat wait."""
+    import asyncio
+    import time
+    from typing import Iterator, Optional
+
+    from t1d_analytics.api import get_rate_limiter
+    from t1d_analytics.api_schemas import ApiError, ChatRequest
+    from t1d_analytics.chat_service import (
+        _stream_nl_mode_sse_frames,
+        generate_sse_chat_events,
+    )
+
+    def _slow_stream(
+        _prompt: str,
+        _model: str,
+        api_key: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Iterator[str]:
+        """Yield a single SQL code fence after a short delay to trigger SSE heartbeat."""
+        _ = (api_key, provider)
+        time.sleep(0.12)
+        yield '```sql\nSELECT COUNT(*) AS cnt FROM "users";\n```'
+
+    class _DisconnectOnHeartbeatReq:
+        """Fake Request disconnecting on second check during heartbeat wait."""
+
+        def __init__(self) -> None:
+            """Initialize counter."""
+            self.calls = 0
+
+        async def is_disconnected(self) -> bool:
+            """Return True on second call."""
+            self.calls += 1
+            return self.calls >= 2
+
+    async def _collect_disconnect_frames() -> list[str]:
+        """Collect frames when client disconnects during heartbeat wait."""
+        frames: list[str] = []
+        async for f in _stream_nl_mode_sse_frames(
+            request=ChatRequest(
+                message="Count users",
+                model="gemma:2b",
+                db_path=mock_db,
+                auto_execute=False,
+            ),
+            req=_DisconnectOnHeartbeatReq(),  # type: ignore[arg-type]
+            db_path=mock_db,
+            sse_sep="\n\n",
+            execute_fn=lambda _db, _q: [],
+            connect_fn=duckdb.connect,
+            schema_fn=lambda _c: "Table: users\nColumns: id (INT)",
+            stream_fn=_slow_stream,
+            error_parser=lambda _e: ApiError(
+                error_code="backend.errorUnexpected", params={}
+            ),
+            heartbeat_interval_seconds=0.05,
+        ):
+            frames.append(f)
+        return frames
+
+    assert len(asyncio.run(_collect_disconnect_frames())) == 0
+
+    async def _collect_gen_sse_disconnect() -> list[str]:
+        """Collect frames from generate_sse_chat_events when client disconnects mid-stream."""
+        frames: list[str] = []
+        async for f in generate_sse_chat_events(
+            request=ChatRequest(
+                message="Count users",
+                model="gemma:2b",
+                db_path=mock_db,
+                auto_execute=False,
+            ),
+            req=_DisconnectOnHeartbeatReq(),  # type: ignore[arg-type]
+            db_validator=lambda p: p or mock_db,
+            execute_fn=lambda _db, _q: [],
+            connect_fn=duckdb.connect,
+            schema_fn=lambda _c: "Table: users\nColumns: id (INT)",
+            stream_fn=_slow_stream,
+            error_parser=lambda _e: ApiError(
+                error_code="backend.errorUnexpected", params={}
+            ),
+        ):
+            frames.append(f)
+        return frames
+
+    assert len(asyncio.run(_collect_gen_sse_disconnect())) == 0
+    get_rate_limiter().reset()
+
+
+def test_all_12_gold_templates_sql_and_gemma2b_nl_to_sql(tmp_path: Path) -> None:
+    """
+    Test all 12 Gold Templates in SQL mode and gemma:2b NL-to-SQL mode plus the user-reported demographics query.
+
+    Args:
+    ----
+        tmp_path: Pytest temporary directory fixture.
+
+    """
+    from t1d_analytics.api import get_rate_limiter
+    from t1d_analytics.api_schemas import ApiError
+    from t1d_analytics.chat_service import (
+        _TRANSLATION_SCHEMA_CACHE,
+        _extract_schema_for_translation,
+        _finalize_nl_sse_frames,
+        translate_nl_to_sql,
+    )
+    from t1d_analytics.seed import ensure_canonical_clinical_views, seed_database
+    from t1d_analytics.sql_executor import execute_duckdb_query
+    from t1d_analytics.training_data import (
+        compare_predicted_and_gold_sql,
+        get_all_gold_templates,
+    )
+
+    seeded_db = str(tmp_path / "gold_templates_seeded.duckdb")
+    seed_database(str(tmp_path / "seed_csvs"), seeded_db)
+
+    # Also test Jaeb-style base tables with 3-col adverseevents and subjects with ageatenroll
+    jaeb_db = str(tmp_path / "gold_templates_jaeb.duckdb")
+    conn_j = duckdb.connect(jaeb_db)
+    conn_j.execute(
+        "CREATE TABLE tblaptsummary (ptid BIGINT, TxGroup VARCHAR, gender VARCHAR, AgeAsOfRandDt DOUBLE, NumSevHypo DOUBLE)"
+    )
+    conn_j.execute(
+        "INSERT INTO tblaptsummary VALUES (1, 'Closed-Loop', 'F', 24.0, 2.0), (2, 'Control', 'M', 38.0, 1.0)"
+    )
+    conn_j.execute(
+        "CREATE TABLE adverseevents (subjectid BIGINT, event VARCHAR, eventDt VARCHAR)"
+    )
+    conn_j.execute(
+        "INSERT INTO adverseevents VALUES (1, 'DKA', '2024-01-02'), (2, 'Severe Hypo', '2024-02-03')"
+    )
+    conn_j.execute(
+        "CREATE TABLE subjects (ptid BIGINT, Pt_PumpManuf VARCHAR, gender VARCHAR, ageatenroll VARCHAR)"
+    )
+    conn_j.execute(
+        "INSERT INTO subjects VALUES (1, 'Tandem', 'F', '24'), (2, 'Insulet', 'M', '38')"
+    )
+    conn_j.execute("CREATE TABLE hba1c (PtID BIGINT, HbA1c DOUBLE)")
+    conn_j.execute("INSERT INTO hba1c VALUES (1, 6.8), (2, 7.6)")
+    conn_j.close()
+    ensure_canonical_clinical_views(jaeb_db)
+
+    # Verify the exact user-reported demographics JOIN patients query on both DBs
+    user_reported_sql = """
+    SELECT
+        p.subject_id,
+        p.patient_id,
+        ROUND(AVG(d.age), 2) as average_age,
+        COUNT(d.severe_hypoglycemia_events) as total_severe_hypoglycemia_events
+    FROM demographics d
+    JOIN patients p ON d.patient_id = p.patient_id
+    WHERE d.treatment_group = 'Control'
+    AND d.severe_hypoglycemia_events >= 0
+    GROUP BY p.subject_id, p.patient_id
+    ORDER BY p.subject_id, average_age DESC;
+    """
+    for target_db in (seeded_db, jaeb_db):
+        rows_user = execute_duckdb_query(target_db, user_reported_sql)
+        assert len(rows_user) >= 1
+        rows_ae = execute_duckdb_query(
+            target_db,
+            "SELECT event as event_type, severity, hospitalized, COUNT(*) as event_count FROM adverseevents GROUP BY event, severity, hospitalized ORDER BY event_count DESC;",
+        )
+        assert len(rows_ae) >= 1
+        rows_ae_syn = execute_duckdb_query(
+            target_db, "SELECT COUNT(*) AS cnt FROM adverse_events;"
+        )
+        cnt_val = rows_ae_syn[0]["cnt"]
+        assert isinstance(cnt_val, int) and cnt_val >= 1
+
+    all_templates = get_all_gold_templates()
+    assert len(all_templates) == 12
+
+    # 1. Test every single Gold Template in literal SQL mode and gemma:2b NL->SQL mode
+    for idx, tmpl in enumerate(all_templates):
+        gold_rows = execute_duckdb_query(seeded_db, tmpl["gold_sql"])
+        assert len(gold_rows) >= 1
+        jaeb_rows = execute_duckdb_query(jaeb_db, tmpl["gold_sql"])
+        assert len(jaeb_rows) >= 1
+
+        # Simulate gemma:2b returning broken SQL on even indices and exact SQL on odd indices
+        fake_llm_out = (
+            "```sql\nsql ...\nSELECT invalid_col FROM nonexistent_tbl;\n```"
+            if idx % 2 == 0
+            else f"```sql\n{tmpl['gold_sql']}\n```"
+        )
+        with patch(
+            "t1d_analytics.chat_service._invoke_llm_with_local_fallback",
+            return_value=fake_llm_out,
+        ):
+            res = translate_nl_to_sql(
+                seeded_db,
+                tmpl["question"],
+                model_name="gemma:2b",
+                provider="ollama",
+            )
+            comp_res = compare_predicted_and_gold_sql(
+                seeded_db, res.sql_query, tmpl["gold_sql"], execute_duckdb_query
+            )
+            assert comp_res.execution_accuracy is True
+            assert comp_res.syntax_error is False
+
+        # Also test _finalize_nl_sse_frames repairing broken template SQL and keeping valid template SQL in streaming mode
+        sse_frames = list(
+            _finalize_nl_sse_frames(
+                db_path=seeded_db,
+                full_response=(
+                    "```sql\nSELECT broken_col FROM bad_tbl;\n```"
+                    if idx % 2 == 0
+                    else f"```sql\n{tmpl['gold_sql']}\n```"
+                ),
+                auto_execute=True,
+                sse_sep="\n\n",
+                execute_fn=execute_duckdb_query,
+                error_parser=lambda _e: ApiError(
+                    error_code="backend.errorUnexpected", params={}
+                ),
+                message=tmpl["question"],
+            )
+        )
+        assert any('"event": "result"' in f for f in sse_frames)
+
+    # 2. Test _validate_or_repair_translated_sql on free-form clinical query when LLM returns empty or valid SQL
+    with patch(
+        "t1d_analytics.chat_service._invoke_llm_with_local_fallback",
+        return_value="",
+    ):
+        freeform_empty = translate_nl_to_sql(
+            seeded_db,
+            "How many patients are in the cohort?",
+            model_name="gemma:2b",
+            provider="ollama",
+        )
+        assert len(execute_duckdb_query(seeded_db, freeform_empty.sql_query)) >= 1
+    with patch(
+        "t1d_analytics.chat_service._invoke_llm_with_local_fallback",
+        return_value="```sql\nSELECT COUNT(*) AS cnt FROM patients;\n```",
+    ):
+        freeform_ok = translate_nl_to_sql(
+            seeded_db,
+            "How many patients are in the cohort?",
+            model_name="gemma:2b",
+            provider="ollama",
+        )
+        assert "SELECT COUNT(*)" in freeform_ok.sql_query
+
+    from t1d_analytics.analytics import get_database_schema
+
+    # 3. Test _TRANSLATION_SCHEMA_CACHE eviction when cache has >= 32 entries
+    _TRANSLATION_SCHEMA_CACHE.clear()
+    for i in range(32):
+        _TRANSLATION_SCHEMA_CACHE[(f"/fake/db_{i}.duckdb", i, i)] = "Table: x"
+    s1 = _extract_schema_for_translation(seeded_db, duckdb.connect, get_database_schema)
+    assert "Table:" in s1
+    s2 = _extract_schema_for_translation(seeded_db, duckdb.connect, get_database_schema)
+    assert s2 == s1
+    get_rate_limiter().reset()
+
+
+def test_sql_extraction_and_clinical_prompt_domain_boosts() -> None:
+    """Test extract_sql_from_response edge cases, domain boosts, and curated template schema guards."""
+    from t1d_analytics.clinical_prompts import build_compact_clinical_sql_prompt
+    from t1d_analytics.sql_fallback_synthesizer import _lookup_curated_template_sql
+    from t1d_analytics.sql_utils import extract_sql_from_response
+
+    # 1. Strip leading "-- Synthesized schema-guided fallback SQL" and DDL preambles
+    fenced_fb = "```sql\n-- Synthesized schema-guided fallback SQL for patients\nSELECT * FROM patients;\n```"
+    assert extract_sql_from_response(fenced_fb) == "SELECT * FROM patients;"
+
+    ddl_then_select = (
+        "```sql\nsql ...\nCREATE TABLE temp_cohort (id INT);\n"
+        "-- Calculate summary\nSELECT * FROM patients LIMIT 5;\n```"
+    )
+    assert (
+        extract_sql_from_response(ddl_then_select) == "SELECT * FROM patients LIMIT 5;"
+    )
+
+    unclosed_fence = (
+        "Here is the query:\n```sql\nsql ...\nSELECT * FROM demographics LIMIT 5;"
+    )
+    assert (
+        extract_sql_from_response(unclosed_fence)
+        == "SELECT * FROM demographics LIMIT 5;"
+    )
+
+    # 2. Test _score_canonical_domain_boost and _prune_table_columns_line priority column retention
+    wide_cols = (
+        ", ".join([f"col_{i} (INT)" for i in range(20)])
+        + ", Pt_PumpManuf (VARCHAR), custom_metric (DOUBLE)"
+    )
+    schema_txt = (
+        f"Table: subjects\nColumns: {wide_cols}\n\n"
+        "Table: adverseevents\nColumns: PtID (INT), event (VARCHAR), severity (VARCHAR)\n\n"
+        "Table: tblaptsummary\nColumns: PtID (INT), TxGroup (VARCHAR), NumSevHypo (INT)\n\n"
+        "Table: hba1c\nColumns: PtID (INT), HbA1c (DOUBLE)\n\n"
+        "Table: demographics\nColumns: patient_id (INT), age (DOUBLE)"
+    )
+    for q_text in (
+        "Count insulin pump manufacturer users with custom_metric",
+        "Show adverse event severity and occurrence",
+        "Show severe hypoglycemia by treatment group",
+        "Join with hba1c lab results and c-peptide",
+        "Show first 5 patients in demographics table",
+    ):
+        prompt_out = build_compact_clinical_sql_prompt(
+            schema_txt, q_text, max_tables=3, max_cols_per_table=5
+        )
+        assert "CREATE TABLE" in prompt_out
+    pump_prompt = build_compact_clinical_sql_prompt(
+        schema_txt,
+        "Count the number of subjects using each insulin pump manufacturer and custom_metric.",
+        max_tables=2,
+        max_cols_per_table=4,
+    )
+    assert "Pt_PumpManuf" in pump_prompt
+    assert "custom_metric" in pump_prompt
+
+    # 3. Test _lookup_curated_template_sql schema table checks and localized starter-5 prompt
+    assert (
+        _lookup_curated_template_sql(
+            "人口統計テーブルの最初の5人の患者を表示してください。",
+            {"demographics"},
+        )
+        == "SELECT * FROM demographics LIMIT 5;"
+    )
+    assert (
+        _lookup_curated_template_sql(
+            "Show me the first 5 patients in the demographics table.",
+            {"other_table"},
+        )
+        is None
+    )
+    assert (
+        _lookup_curated_template_sql(
+            "Count the number of subjects using each insulin pump manufacturer.",
+            {"other_table"},
+        )
+        is None
+    )
+    assert (
+        _lookup_curated_template_sql(
+            "Generate an overall Table 1 baseline summary for the patients cohort showing total N, mean and SD of age, female count and percentage, mean HbA1c, and mean CGM metrics (TIR, TBR, TAR, and mean glucose).",
+            {"other_table"},
+        )
+        is None
+    )

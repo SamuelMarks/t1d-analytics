@@ -6,6 +6,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Union,
 )
 
 import duckdb
@@ -13,7 +14,12 @@ from typing_extensions import TypedDict
 
 from t1d_analytics.api_schemas import ColumnInfo, TableSchemaModel
 from t1d_analytics.diagnostics import DatabaseStatusCode, check_database_health
-from t1d_analytics.duckdb_pool import connect_duckdb_read_only_pooled
+from t1d_analytics.duckdb_pool import (
+    ReadOnlyDuckDbCursorProxy,
+    _create_read_only_cursor_proxy,
+    connect_duckdb_read_only_cursor,
+    connect_duckdb_read_only_pooled,
+)
 from t1d_analytics.errors import (
     DatabaseNotFoundError,
     InvalidTableNameError,
@@ -79,55 +85,70 @@ class TableProfileResult(TypedDict):
 
 
 def get_database_schema_models(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
 ) -> List[TableSchemaModel]:
     """
-    Extract structured table schema models from the DuckDB database.
+    Extract structured table schema models from the DuckDB database using a read-only cursor.
 
     Args:
     ----
-        conn: The DuckDB connection.
+        conn: The DuckDB connection or read-only cursor proxy.
 
     Returns:
     -------
         List[TableSchemaModel]: Ordered list of structured table schema models.
 
     """
-    cols_map = extract_table_columns_map(
-        conn, exclude_internal=True, exclude_training_tables=False
+    cursor_proxy = (
+        conn
+        if isinstance(conn, ReadOnlyDuckDbCursorProxy)
+        else _create_read_only_cursor_proxy(conn)
     )
-    models: List[TableSchemaModel] = []
-    for table_name, columns in cols_map.items():
-        escaped_table = escape_sql_identifier(str(table_name))
-        col_infos = [
-            ColumnInfo(name=col_name, type=col_type) for col_name, col_type in columns
-        ]
-
-        try:
-            sample = conn.execute(f'SELECT * FROM "{escaped_table}" LIMIT 1').fetchone()
-            sample_desc = (
-                f"Sample row: {sample}" if sample else "Sample row: (empty table)"
-            )
-        except (duckdb.Error, RuntimeError, ValueError, TypeError):
-            sample_desc = "Sample row: (could not fetch)"
-
-        models.append(
-            TableSchemaModel(
-                table_name=str(table_name),
-                columns=col_infos,
-                sample_row=sample_desc,
-            )
+    should_close_proxy = not isinstance(conn, ReadOnlyDuckDbCursorProxy)
+    try:
+        cols_map = extract_table_columns_map(
+            cursor_proxy, exclude_internal=True, exclude_training_tables=False
         )
-    return models
+        models: List[TableSchemaModel] = []
+        for table_name, columns in cols_map.items():
+            escaped_table = escape_sql_identifier(str(table_name))
+            col_infos = [
+                ColumnInfo(name=col_name, type=col_type)
+                for col_name, col_type in columns
+            ]
+
+            try:
+                sample = cursor_proxy.execute(
+                    f'SELECT * FROM "{escaped_table}" LIMIT 1'
+                ).fetchone()
+                sample_desc = (
+                    f"Sample row: {sample}" if sample else "Sample row: (empty table)"
+                )
+            except (duckdb.Error, RuntimeError, ValueError, TypeError):
+                sample_desc = "Sample row: (could not fetch)"
+
+            models.append(
+                TableSchemaModel(
+                    table_name=str(table_name),
+                    columns=col_infos,
+                    sample_row=sample_desc,
+                )
+            )
+        return models
+    finally:
+        if should_close_proxy:
+            cursor_proxy.close()
 
 
-def get_database_schema(conn: duckdb.DuckDBPyConnection) -> str:
+def get_database_schema(
+    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
+) -> str:
     """
     Extract the database schema as a text description, including sample data.
 
     Args:
     ----
-        conn: The DuckDB connection.
+        conn: The DuckDB connection or read-only cursor proxy.
 
     Returns:
     -------
@@ -439,20 +460,22 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
             f"Database file not found: {db_path}", params={"path": db_path}
         )
 
-    with connect_duckdb_read_only_pooled(
+    with connect_duckdb_read_only_cursor(
         db_path=db_path,
         connect_fn=duckdb.connect,
         disable_external_access=True,
-    ) as conn:
-        tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+    ) as db_cursor:
+        tables = [r[0] for r in db_cursor.execute("SHOW TABLES").fetchall()]
         if table_name not in tables:
             raise TableNotFoundError(
                 f"Table '{table_name}' does not exist in database."
             )
 
-        cols = conn.execute(f'DESCRIBE "{table_name}"').fetchall()
+        cols = db_cursor.execute(f'DESCRIBE "{table_name}"').fetchall()
         if not cols:
-            count_row = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
+            count_row = db_cursor.execute(
+                f'SELECT COUNT(*) FROM "{table_name}"'
+            ).fetchone()
             empty_total_rows = int(count_row[0]) if count_row else 0
             return {
                 "table_name": table_name,
@@ -464,7 +487,7 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
         select_exprs, col_meta = _build_profile_select_expressions(cols)
         escaped_tbl = table_name.replace('"', '""')
         agg_sql = f'SELECT {", ".join(select_exprs)} FROM "{escaped_tbl}"'
-        agg_res = conn.execute(agg_sql).fetchone()
+        agg_res = db_cursor.execute(agg_sql).fetchone()
 
         total_rows = int(agg_res[0]) if (agg_res and agg_res[0] is not None) else 0
         column_profiles: List[ColumnProfileRecord] = []

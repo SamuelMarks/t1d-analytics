@@ -35,10 +35,39 @@ test.describe("Chat UI Full E2E", () => {
     const chatTitle = page.locator(".chat-item-title").first();
     await expect(chatTitle).toBeVisible();
 
-    // Check hash is present
-    await page.waitForFunction(() => window.location.hash.includes("chat-"));
-    const hash = await page.evaluate(() => window.location.hash);
-    expect(hash).toMatch(/^#chat-/);
+    // Check /chats/${ID} path is present with no hash
+    await page.waitForFunction(() =>
+      window.location.pathname.startsWith("/chats/chat-"),
+    );
+    const { pathname, hash } = await page.evaluate(() => ({
+      pathname: window.location.pathname,
+      hash: window.location.hash,
+    }));
+    expect(pathname).toMatch(/^\/chats\/chat-/);
+    expect(hash).toBe("");
+
+    // Seed a remote session and verify opening /chats/${sessionId} with cleared localStorage hydrates it
+    const sharedId = `chat-shared-e2e-${Date.now()}`;
+    await page.evaluate(async (id) => {
+      await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: id,
+          title: "Shared Full E2E Chat",
+          messages: [{ role: "user", content: "SELECT * FROM tiny LIMIT 1;" }],
+        }),
+      });
+      localStorage.clear();
+    }, sharedId);
+
+    await page.goto(`/chats/${sharedId}`);
+    await expect(
+      page.locator("#chat-list .chat-item.active .chat-item-title"),
+    ).toHaveText("Shared Full E2E Chat", { timeout: 10000 });
+    expect(await page.evaluate(() => window.location.pathname)).toBe(
+      `/chats/${sharedId}`,
+    );
   });
 
   test("Temporary chat fallback", async ({ page }) => {

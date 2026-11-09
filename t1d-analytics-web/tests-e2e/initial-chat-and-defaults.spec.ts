@@ -158,10 +158,10 @@ test.describe("Initial Chat Window & Default Chat Lifecycle", () => {
 
   /**
    * Verifies that clicking `+ New Chat`, deleting the last chat into `Temporary chat`,
-   * and reloading with a URL hash all preserve a valid `#model-select` value ('sql')
+   * and reloading on a `/chats/${ID}` URL path all preserve a valid `#model-select` value ('sql')
    * and never leave `#model-select` blank ('') when Ollama is offline.
    */
-  test("Preserves valid 'sql' model selection across + New Chat, Temporary chat fallback, and hash reload when Ollama is offline", async ({
+  test("Preserves valid 'sql' model selection across + New Chat, Temporary chat fallback, and /chats/${ID} reload when Ollama is offline", async ({
     page,
   }) => {
     let lastRequestedModel: string | undefined;
@@ -224,7 +224,10 @@ test.describe("Initial Chat Window & Default Chat Lifecycle", () => {
     await expect(page.locator(".message.assistant")).toBeVisible();
     expect(lastRequestedModel).toBe("sql");
 
-    // 4. Reload with URL hash and verify modelSelect remains 'sql'
+    // 4. Reload on /chats/${ID} path and verify modelSelect remains 'sql'
+    expect(await page.evaluate(() => window.location.pathname)).toMatch(
+      /^\/chats\/chat-/,
+    );
     await page.reload();
     await expect(page.locator("#model-select")).toHaveValue("sql");
   });
