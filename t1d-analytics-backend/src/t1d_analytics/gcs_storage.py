@@ -5,20 +5,16 @@ import base64
 import hashlib
 import importlib
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import (
-    Callable,
-    Iterable,
-    Optional,
     Protocol,
-    Tuple,
-    Union,
     runtime_checkable,
 )
 
 from t1d_analytics.errors import (
     ChecksumMismatchError,
-    DatabaseNotFoundError,
+    DatasetNotFoundError,
     GcsStorageError,
     InvalidGcsUriError,
     MissingSdkError,
@@ -29,7 +25,7 @@ class GcsBlobProtocol(Protocol):
     """Protocol representing a Google Cloud Storage Blob."""
 
     name: str
-    md5_hash: Optional[str]
+    md5_hash: str | None
 
     def download_to_filename(self, filename: str) -> None:
         """Download blob contents to local file."""
@@ -45,7 +41,7 @@ class Md5BlobProtocol(Protocol):
     """Runtime-checkable protocol for GCS blobs exposing md5_hash."""
 
     @property
-    def md5_hash(self) -> Optional[str]:
+    def md5_hash(self) -> str | None:
         """Return base64-encoded MD5 hash string."""
         ...
 
@@ -66,22 +62,20 @@ class GcsClientProtocol(Protocol):
         ...
 
     def list_blobs(
-        self, bucket_or_name: Union[GcsBucketProtocol, str], prefix: str = ""
+        self, bucket_or_name: GcsBucketProtocol | str, prefix: str = ""
     ) -> Iterable[GcsBlobProtocol]:
         """List blobs in bucket matching prefix."""
         ...
 
 
-def _compute_md5_base64(payload: bytes) -> str:
+def compute_md5_base64(payload: bytes) -> str:
     """
     Compute the base64-encoded MD5 digest of a byte payload for GCS integrity verification.
 
     Args:
-    ----
         payload: Raw file bytes to hash.
 
     Returns:
-    -------
         str: ASCII base64-encoded MD5 digest string.
 
     """
@@ -90,20 +84,17 @@ def _compute_md5_base64(payload: bytes) -> str:
     ).decode("ascii")
 
 
-def parse_gcs_uri(gcs_uri: str) -> Tuple[str, str]:
+def parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:
     """
     Validate a `gs://` URI and return `(bucket_name, prefix)`.
 
     Args:
-    ----
         gcs_uri: GCS URI string starting with `gs://`.
 
     Returns:
-    -------
         Tuple[str, str]: `(bucket_name, object_prefix)`.
 
     Raises:
-    ------
         InvalidGcsUriError: If `gcs_uri` does not start with `gs://`.
 
     """
@@ -117,20 +108,17 @@ def parse_gcs_uri(gcs_uri: str) -> Tuple[str, str]:
     return bucket_name, prefix
 
 
-def _resolve_gcs_client(gcs_client: Optional[GcsClientProtocol]) -> GcsClientProtocol:
+def resolve_gcs_client(gcs_client: GcsClientProtocol | None) -> GcsClientProtocol:
     """
     Return the provided `gcs_client` or dynamically instantiate `google.cloud.storage.Client()`.
 
     Args:
-    ----
         gcs_client: Optional injectable GCS client instance.
 
     Returns:
-    -------
         GcsClientProtocol: Active GCS client.
 
     Raises:
-    ------
         MissingSdkError: If `google-cloud-storage` is not installed.
 
     """
@@ -156,13 +144,11 @@ def verify_gcs_blob_md5(
     Verify that a downloaded file's MD5 digest matches the remote GCS blob's `md5_hash`.
 
     Args:
-    ----
         blob: Downloaded GCS blob reference.
         dest_file: Local destination file path.
         validate_checksum: Whether checksum validation is enabled.
 
     Raises:
-    ------
         ChecksumMismatchError: If the computed local MD5 does not match `blob.md5_hash`.
 
     """
@@ -172,11 +158,51 @@ def verify_gcs_blob_md5(
         else None
     )
     if isinstance(remote_md5, str) and remote_md5 and dest_file.exists():
-        local_md5 = _compute_md5_base64(dest_file.read_bytes())
+        local_md5 = compute_md5_base64(dest_file.read_bytes())
         if local_md5 != remote_md5:
             raise ChecksumMismatchError(
                 f"Checksum mismatch for '{dest_file.name}': expected {remote_md5}, got {local_md5}"
             )
+
+
+def _download_checkpoints_attempt_sync(
+    client: GcsClientProtocol,
+    bucket_url: str,
+    bucket_name: str,
+    prefix: str,
+    output_dir: Path,
+    validate_checksum: bool,
+) -> Path:
+    """
+    Execute a single synchronous GCS checkpoint listing, file download, and MD5 verification pass.
+
+    Args:
+        client: Active GCS client protocol instance.
+        bucket_url: Original GCS `gs://` URI for diagnostics.
+        bucket_name: Parsed GCS bucket name.
+        prefix: Object key prefix within the bucket.
+        output_dir: Local destination directory.
+        validate_checksum: Whether MD5 verification is enabled.
+
+    Returns:
+        Path: `output_dir` upon successful download of all blobs.
+
+    Raises:
+        GcsStorageError: If no checkpoint blobs exist under `prefix`.
+        ChecksumMismatchError: If any downloaded file MD5 mismatches `blob.md5_hash`.
+
+    """
+    bucket = client.bucket(bucket_name)
+    blobs = list(client.list_blobs(bucket, prefix=prefix))
+    if not blobs:
+        raise GcsStorageError(f"No checkpoint files found at '{bucket_url}'.")
+    for blob in blobs:
+        rel_name = blob.name[len(prefix) :].lstrip("/")
+        dest_file = output_dir / rel_name
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(dest_file))
+        verify_gcs_blob_md5(blob, dest_file, validate_checksum)
+    return output_dir
 
 
 async def download_checkpoints_from_gcs(
@@ -184,13 +210,12 @@ async def download_checkpoints_from_gcs(
     output_dir: Path,
     max_retries: int = 3,
     validate_checksum: bool = True,
-    gcs_client: Optional[GcsClientProtocol] = None,
+    gcs_client: GcsClientProtocol | None = None,
 ) -> Path:
     """
-    Download trained model checkpoints from Google Cloud Storage to a local directory.
+    Download trained model checkpoints from Google Cloud Storage asynchronously via worker threads.
 
     Args:
-    ----
         bucket_url: GCS bucket URI containing model checkpoints.
         output_dir: Destination local directory path.
         max_retries: Maximum download retry attempts.
@@ -198,11 +223,9 @@ async def download_checkpoints_from_gcs(
         gcs_client: Optional injectable GCS client instance.
 
     Returns:
-    -------
         Path: Path to the local directory containing downloaded checkpoints.
 
     Raises:
-    ------
         InvalidGcsUriError: If bucket URI does not begin with 'gs://'.
         ChecksumMismatchError: If checksum mismatches.
         GcsStorageError: If download fails after retries.
@@ -210,22 +233,20 @@ async def download_checkpoints_from_gcs(
     """
     bucket_name, prefix = parse_gcs_uri(bucket_url)
     output_dir.mkdir(parents=True, exist_ok=True)
-    client = _resolve_gcs_client(gcs_client)
+    client = resolve_gcs_client(gcs_client)
 
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            bucket = client.bucket(bucket_name)
-            blobs = list(client.list_blobs(bucket, prefix=prefix))
-            if not blobs:
-                raise GcsStorageError(f"No checkpoint files found at '{bucket_url}'.")
-            for blob in blobs:
-                rel_name = blob.name[len(prefix) :].lstrip("/")
-                dest_file = output_dir / rel_name
-                dest_file.parent.mkdir(parents=True, exist_ok=True)
-                blob.download_to_filename(str(dest_file))
-                verify_gcs_blob_md5(blob, dest_file, validate_checksum)
-            return output_dir
+            return await asyncio.to_thread(
+                _download_checkpoints_attempt_sync,
+                client,
+                bucket_url,
+                bucket_name,
+                prefix,
+                output_dir,
+                validate_checksum,
+            )
         except ChecksumMismatchError:
             raise
         except (OSError, RuntimeError, ValueError, TimeoutError, ConnectionError) as e:
@@ -242,14 +263,13 @@ def sync_dataset_to_gcs(
     gcs_bucket: str,
     max_retries: int = 3,
     validate_checksum: bool = True,
-    sleep_fn: Optional[Callable[[float], None]] = None,
-    gcs_client: Optional[GcsClientProtocol] = None,
+    sleep_fn: Callable[[float], None] | None = None,
+    gcs_client: GcsClientProtocol | None = None,
 ) -> str:
     """
     Synchronize exported dataset file to Google Cloud Storage bucket with retries and checksums.
 
     Args:
-    ----
         local_path: Local dataset filepath.
         gcs_bucket: Destination GCS bucket URL (e.g., 'gs://bucket-name').
         max_retries: Number of upload retry attempts.
@@ -258,30 +278,26 @@ def sync_dataset_to_gcs(
         gcs_client: Optional injectable GCS client instance.
 
     Returns:
-    -------
         str: Remote GCS target URI.
 
     Raises:
-    ------
         InvalidGcsUriError: If bucket URL is invalid.
-        DatabaseNotFoundError: If local dataset file does not exist.
+        DatasetNotFoundError: If local dataset file does not exist.
         GcsStorageError: If upload fails after retries.
 
     """
     bucket_name, blob_prefix = parse_gcs_uri(gcs_bucket)
     if not local_path.exists():
-        raise DatabaseNotFoundError(f"Local file not found at '{local_path}'.")
+        raise DatasetNotFoundError(f"Local file not found at '{local_path}'.")
 
     bucket_clean = gcs_bucket.rstrip("/")
     dest_uri = f"{bucket_clean}/{local_path.name}"
-    client = _resolve_gcs_client(gcs_client)
+    client = resolve_gcs_client(gcs_client)
     blob_name = f"{blob_prefix}/{local_path.name}".lstrip("/")
-    local_md5 = (
-        _compute_md5_base64(local_path.read_bytes()) if validate_checksum else ""
-    )
+    local_md5 = compute_md5_base64(local_path.read_bytes()) if validate_checksum else ""
 
     backoff_sleep = sleep_fn or time.sleep
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
             bucket = client.bucket(bucket_name)
@@ -303,10 +319,10 @@ __all__ = [
     "GcsBucketProtocol",
     "GcsClientProtocol",
     "Md5BlobProtocol",
-    "_compute_md5_base64",
-    "_resolve_gcs_client",
+    "compute_md5_base64",
     "download_checkpoints_from_gcs",
     "parse_gcs_uri",
+    "resolve_gcs_client",
     "sync_dataset_to_gcs",
     "verify_gcs_blob_md5",
 ]

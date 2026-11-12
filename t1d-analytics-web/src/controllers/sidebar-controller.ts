@@ -6,6 +6,7 @@
  */
 
 import i18next from "i18next";
+import { type AppEventBus } from "../event-bus";
 import { requireElementById, trapModalFocus } from "../modal-utils";
 import { type Chat, type ChatState } from "../state";
 
@@ -52,25 +53,31 @@ export const defaultSidebarDialogService: SidebarDialogService = {
 };
 
 /**
- * Host contract required by `SidebarController`.
+ * Narrow injected dependencies for `SidebarController`.
  */
-export interface SidebarHost {
+export interface SidebarDeps {
   /** Global application state store. */
   state: ChatState;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
   /** Textarea element where the user types queries or SQL. */
   chatInput: HTMLTextAreaElement;
-  /** Cancels any active in-flight chat request or polling loop. */
-  cancelActiveRequest?(): void;
-  /** Re-renders the entire UI. */
-  render(): void;
+  /** AbortSignal for global document listeners. */
+  signal: AbortSignal;
+  /** Optional custom dialog service for rename and delete interactions. */
+  dialogService?: SidebarDialogService;
 }
 
 /**
  * Controller managing the sidebar chat list, dropdown menus, and mobile sidebar drawer.
  */
 export class SidebarController {
-  /** Host UI reference. */
-  private readonly ui: SidebarHost;
+  /** Shared application state store. */
+  private readonly state: ChatState;
+  /** Domain event bus. */
+  private readonly events: AppEventBus;
+  /** Chat composer textarea element. */
+  private readonly chatInput: HTMLTextAreaElement;
   /** Sidebar navigation element. */
   public readonly sidebarEl: HTMLElement;
   /** Sidebar list element containing chat sessions. */
@@ -88,17 +95,13 @@ export class SidebarController {
 
   /**
    * Creates a new `SidebarController`.
-   * @param {SidebarHost} ui - Host UI instance.
-   * @param {AbortSignal} signal - AbortSignal for global document listeners.
-   * @param {SidebarDialogService} [dialogService=defaultSidebarDialogService] - Dialog service for rename/delete.
+   * @param {SidebarDeps} deps - Narrow state, event bus, and composer dependencies.
    */
-  constructor(
-    ui: SidebarHost,
-    signal: AbortSignal,
-    dialogService: SidebarDialogService = defaultSidebarDialogService,
-  ) {
-    this.ui = ui;
-    this.dialogService = dialogService;
+  constructor(deps: SidebarDeps) {
+    this.state = deps.state;
+    this.events = deps.events;
+    this.chatInput = deps.chatInput;
+    this.dialogService = deps.dialogService ?? defaultSidebarDialogService;
     this.sidebarEl = requireElementById<HTMLElement>("sidebar");
     this.chatListEl = requireElementById<HTMLElement>("chat-list");
     this.newChatBtn = requireElementById<HTMLButtonElement>("new-chat-btn");
@@ -108,7 +111,7 @@ export class SidebarController {
       requireElementById<HTMLButtonElement>("close-sidebar-btn");
     this.overlay = requireElementById<HTMLElement>("overlay");
 
-    this.bindEvents(signal);
+    this.bindEvents(deps.signal);
   }
 
   /**
@@ -117,41 +120,57 @@ export class SidebarController {
    * @returns {void}
    */
   private bindEvents(signal: AbortSignal): void {
-    this.newChatBtn.addEventListener("click", () => {
-      this.ui.cancelActiveRequest?.();
-      this.ui.state.createChat();
-      const hasCloudKeys = Boolean(
-        this.ui.state.getApiKey("openai") ||
-        this.ui.state.getApiKey("anthropic") ||
-        this.ui.state.getApiKey("google") ||
-        this.ui.state.getConfiguredModels().length > 0,
-      );
-      if (!this.ui.state.systemStatus.ollamaOnline && !hasCloudKeys) {
-        this.ui.state.setActiveChatModel("sql");
-      }
-      this.ui.render();
-      this.closeMobileSidebar();
-      this.ui.chatInput.focus();
-    });
+    this.newChatBtn.addEventListener(
+      "click",
+      () => {
+        this.events.emit("cancelActiveRequest", undefined);
+        this.state.createChat();
+        const hasCloudKeys = Boolean(
+          this.state.getApiKey("openai") ||
+          this.state.getApiKey("anthropic") ||
+          this.state.getApiKey("google") ||
+          this.state.getConfiguredModels().length > 0,
+        );
+        if (!this.state.systemStatus.ollamaOnline && !hasCloudKeys) {
+          this.state.setActiveChatModel("sql");
+        }
+        this.events.emit("renderRequested", undefined);
+        this.closeMobileSidebar();
+        this.chatInput.focus();
+      },
+      { signal },
+    );
 
-    this.openSidebarBtn.addEventListener("click", () => {
-      document.body.classList.add("sidebar-open");
-      this.openSidebarBtn.setAttribute("aria-expanded", "true");
-      this.closeSidebarBtn.focus();
-    });
+    this.openSidebarBtn.addEventListener(
+      "click",
+      () => {
+        document.body.classList.add("sidebar-open");
+        this.openSidebarBtn.setAttribute("aria-expanded", "true");
+        this.closeSidebarBtn.focus();
+      },
+      { signal },
+    );
 
+    /**
+     * Closes the mobile sidebar drawer and restores focus to `openSidebarBtn`.
+     * @returns {void}
+     */
     const closeSidebar = (): void => {
       this.closeMobileSidebar();
       this.openSidebarBtn.focus();
     };
 
-    this.closeSidebarBtn.addEventListener("click", closeSidebar);
-    this.overlay.addEventListener("click", closeSidebar);
-    this.sidebarEl.addEventListener("keydown", (e: KeyboardEvent) => {
-      if (document.body.classList.contains("sidebar-open")) {
-        trapModalFocus(e, this.sidebarEl, closeSidebar);
-      }
-    });
+    this.closeSidebarBtn.addEventListener("click", closeSidebar, { signal });
+    this.overlay.addEventListener("click", closeSidebar, { signal });
+    this.sidebarEl.addEventListener(
+      "keydown",
+      (e: KeyboardEvent) => {
+        if (document.body.classList.contains("sidebar-open")) {
+          trapModalFocus(e, this.sidebarEl, closeSidebar);
+        }
+      },
+      { signal },
+    );
 
     document.addEventListener(
       "click",
@@ -198,7 +217,7 @@ export class SidebarController {
    * @returns {HTMLLIElement} Constructed list item element.
    */
   private buildChatListItem(chat: Chat): HTMLLIElement {
-    const isActive = chat.id === this.ui.state.activeChatId;
+    const isActive = chat.id === this.state.activeChatId;
     const li = document.createElement("li");
     li.className = `chat-item ${isActive ? "active" : ""}`;
 
@@ -210,12 +229,16 @@ export class SidebarController {
       titleBtn.setAttribute("aria-current", "page");
     }
 
+    /**
+     * Cancels any in-flight request, activates `chat.id`, and focuses the composer.
+     * @returns {void}
+     */
     const activateChat = (): void => {
-      this.ui.cancelActiveRequest?.();
-      this.ui.state.setActiveChat(chat.id);
-      this.ui.render();
+      this.events.emit("cancelActiveRequest", undefined);
+      this.state.setActiveChat(chat.id);
+      this.events.emit("renderRequested", undefined);
       this.closeMobileSidebar();
-      this.ui.chatInput.focus();
+      this.chatInput.focus();
     };
 
     titleBtn.addEventListener("click", activateChat);
@@ -271,8 +294,8 @@ export class SidebarController {
         chat.title,
       );
       if (newTitle !== null) {
-        this.ui.state.renameChat(chat.id, newTitle);
-        this.ui.render();
+        this.state.renameChat(chat.id, newTitle);
+        this.events.emit("renderRequested", undefined);
       }
     });
 
@@ -290,8 +313,8 @@ export class SidebarController {
       e.stopPropagation();
       this.closeAllDropdowns();
       dropdownBtn.focus();
-      this.ui.state.duplicateChat(chat.id);
-      this.ui.render();
+      this.state.duplicateChat(chat.id);
+      this.events.emit("renderRequested", undefined);
     });
 
     const deleteBtn = document.createElement("button");
@@ -313,13 +336,17 @@ export class SidebarController {
           i18next.t("ui.deleteConfirm", { title: chat.title }),
         )
       ) {
-        this.ui.state.deleteChat(chat.id);
-        this.ui.render();
-        this.ui.chatInput.focus();
+        this.state.deleteChat(chat.id);
+        this.events.emit("renderRequested", undefined);
+        this.chatInput.focus();
       }
     });
 
-    const menuItems = [renameBtn, duplicateBtn, deleteBtn];
+    const menuItems: readonly HTMLButtonElement[] = [
+      renameBtn,
+      duplicateBtn,
+      deleteBtn,
+    ];
 
     dropdownBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -351,16 +378,16 @@ export class SidebarController {
       );
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        menuItems[(index + 1) % menuItems.length].focus();
+        menuItems[(index + 1) % menuItems.length]?.focus();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        menuItems[(index - 1 + menuItems.length) % menuItems.length].focus();
+        menuItems[(index - 1 + menuItems.length) % menuItems.length]?.focus();
       } else if (e.key === "Home") {
         e.preventDefault();
-        menuItems[0].focus();
+        renameBtn.focus();
       } else if (e.key === "End") {
         e.preventDefault();
-        menuItems[menuItems.length - 1].focus();
+        deleteBtn.focus();
       } else if (e.key === "Escape") {
         e.preventDefault();
         this.closeAllDropdowns();
@@ -396,13 +423,18 @@ export class SidebarController {
     );
 
     let committed = false;
+    /**
+     * Commits or cancels the inline rename input and triggers a sidebar re-render.
+     * @param {boolean} save - Whether to persist the edited title.
+     * @returns {void}
+     */
     const commitRename = (save: boolean): void => {
       if (committed) return;
       committed = true;
       if (save && input.value.trim()) {
-        this.ui.state.renameChat(chat.id, input.value.trim());
+        this.state.renameChat(chat.id, input.value.trim());
       }
-      this.ui.render();
+      this.events.emit("renderRequested", undefined);
     };
 
     input.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -430,7 +462,7 @@ export class SidebarController {
    */
   public renderSidebar(): void {
     this.chatListEl.replaceChildren();
-    for (const chat of this.ui.state.chats) {
+    for (const chat of this.state.chats) {
       this.chatListEl.appendChild(this.buildChatListItem(chat));
     }
   }

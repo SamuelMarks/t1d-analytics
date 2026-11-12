@@ -2,83 +2,82 @@
  * @file cohort-modal-controller.ts
  * @module controllers/cohort-modal-controller
  * Composable sub-controller managing the Visual Cohort Query Builder modal,
- * table relationship join resolution, and live DuckDB SQL generation.
+ * table relationship join resolution, and live DuckDB SQL generation via `ModalDialogController`.
  */
 
 import i18next from "i18next";
 import {
   buildCohortSql,
+  escapeSqlIdentifier,
   normalizeJoinType,
   resolveTableJoin,
 } from "../cohort-sql";
-import { requireElementById, trapModalFocus } from "../modal-utils";
+import { type AppEventBus } from "../event-bus";
+import { ModalDialogController, requireElementById } from "../modal-utils";
 import { type ChatState } from "../state";
 
 /**
- * Host contract required by `CohortBuilderModalController`.
+ * Narrow injected dependencies for `CohortBuilderModalController`.
  */
-export interface CohortBuilderHost {
-  /** Global application state store. */
+export interface CohortBuilderModalDeps {
+  /** Shared application state store. */
   state: ChatState;
-  /** Textarea element where the user types queries or SQL. */
-  chatInput: HTMLTextAreaElement;
-  /** Dropdown select element for choosing the active LLM or SQL engine. */
-  modelSelect: HTMLSelectElement;
-  /** Synchronizes syntax highlighting in the chat input. */
-  syncHighlight(): void;
-  /** Sends a message or executes a SQL query directly. */
-  handleSendMessage(text?: string, modelOverride?: string): Promise<void>;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
 }
 
 /**
- * Controller managing the Visual Cohort Query Builder modal lifecycle and SQL preview.
+ * Controller managing the Visual Cohort Query Builder modal (`#cohort-modal`).
  */
 export class CohortBuilderModalController {
-  /** Host UI reference. */
-  private readonly ui: CohortBuilderHost;
-  /** Header button to open the Visual Cohort Query Builder modal. */
+  /** Shared application state store. */
+  private readonly state: ChatState;
+  /** Domain event bus. */
+  private readonly events: AppEventBus;
+  /** Composable modal dialog lifecycle controller. */
+  private readonly dialog: ModalDialogController;
+  /** Persistent AbortController for form input listeners. */
+  private readonly listenerController = new AbortController();
+  /** Button to open the Visual Cohort Query Builder modal. */
   public readonly cohortFilterBtn: HTMLButtonElement;
-  /** Modal dialog container for the Visual Cohort Query Builder. */
+  /** Modal overlay container for the Visual Cohort Query Builder. */
   public readonly cohortModal: HTMLElement;
   /** Button to close the Visual Cohort Query Builder modal. */
   public readonly closeCohortModalBtn: HTMLButtonElement;
-  /** Select dropdown for the primary cohort table. */
+  /** Primary target table dropdown inside the cohort modal. */
   public readonly cohortTableSelect: HTMLSelectElement;
-  /** Select dropdown for the optional joined secondary table. */
+  /** Secondary join table dropdown inside the cohort modal. */
   public readonly cohortJoinTableSelect: HTMLSelectElement;
-  /** Select dropdown for the SQL join type (INNER JOIN or LEFT JOIN). */
+  /** SQL join type dropdown (`INNER JOIN`, `LEFT JOIN`) inside the cohort modal. */
   public readonly cohortJoinTypeSelect: HTMLSelectElement;
-  /** Input field for the SQL join ON condition. */
+  /** Join condition (`ON`) input field inside the cohort modal. */
   public readonly cohortJoinOnInput: HTMLInputElement;
-  /** Number input for minimum patient age filter. */
+  /** Minimum age filter input inside the cohort modal. */
   public readonly cohortMinAge: HTMLInputElement;
-  /** Number input for maximum patient age filter. */
+  /** Maximum age filter input inside the cohort modal. */
   public readonly cohortMaxAge: HTMLInputElement;
-  /** Select dropdown for biological sex/gender filter. */
+  /** Sex/gender filter dropdown inside the cohort modal. */
   public readonly cohortGenderSelect: HTMLSelectElement;
-  /** Text input for clinical treatment group filter. */
+  /** Treatment group filter input inside the cohort modal. */
   public readonly cohortTxGroup: HTMLInputElement;
-  /** Number input for maximum Time-in-Range (TIR) threshold. */
+  /** Maximum Time-in-Range (`TIR < %`) filter input inside the cohort modal. */
   public readonly cohortMaxTIR: HTMLInputElement;
-  /** Number input for minimum HbA1c threshold. */
+  /** Minimum HbA1c (`HbA1c >= %`) filter input inside the cohort modal. */
   public readonly cohortMinHbA1c: HTMLInputElement;
-  /** Preformatted text element showing the live generated DuckDB SQL. */
+  /** Code element displaying the live generated DuckDB SQL query. */
   public readonly cohortSqlPreview: HTMLElement;
   /** Button to insert the generated cohort SQL into the chat input. */
   public readonly cohortInsertChatBtn: HTMLButtonElement;
   /** Button to immediately execute the generated cohort SQL. */
   public readonly cohortExecuteBtn: HTMLButtonElement;
-  /** Element that held focus prior to opening the cohort modal. */
-  private previousFocusCohort: Element | null = null;
-  /** Keydown listener for focus trapping inside the cohort modal. */
-  private onCohortModalKeyDown: ((e: KeyboardEvent) => void) | null = null;
 
   /**
    * Creates a new `CohortBuilderModalController`.
-   * @param {CohortBuilderHost} ui - Host UI instance.
+   * @param {CohortBuilderModalDeps} deps - Narrow state and event bus dependencies.
    */
-  constructor(ui: CohortBuilderHost) {
-    this.ui = ui;
+  constructor(deps: CohortBuilderModalDeps) {
+    this.state = deps.state;
+    this.events = deps.events;
     this.cohortFilterBtn =
       requireElementById<HTMLButtonElement>("cohort-filter-btn");
     this.cohortModal = requireElementById<HTMLElement>("cohort-modal");
@@ -114,6 +113,12 @@ export class CohortBuilderModalController {
     this.cohortExecuteBtn =
       requireElementById<HTMLButtonElement>("cohort-execute-btn");
 
+    this.dialog = new ModalDialogController({
+      modalEl: this.cohortModal,
+      closeBtn: this.closeCohortModalBtn,
+      initialFocusEl: this.closeCohortModalBtn,
+    });
+
     this.bindEvents();
   }
 
@@ -122,37 +127,49 @@ export class CohortBuilderModalController {
    * @returns {void}
    */
   private bindEvents(): void {
-    this.cohortFilterBtn.addEventListener("click", () => {
-      this.open();
-    });
+    const signal = this.listenerController.signal;
 
-    this.closeCohortModalBtn.addEventListener("click", () => {
-      this.close();
-    });
+    this.cohortFilterBtn.addEventListener(
+      "click",
+      () => {
+        this.open();
+      },
+      { signal },
+    );
 
-    this.cohortModal.addEventListener("click", (e) => {
-      if (e.target === this.cohortModal) {
-        this.close();
-      }
-    });
+    this.cohortTableSelect.addEventListener(
+      "change",
+      () => {
+        this.handleJoinTableChange();
+        this.updateSqlPreview();
+      },
+      { signal },
+    );
 
-    this.cohortTableSelect.addEventListener("change", () => {
-      this.handleJoinTableChange();
-      this.updateSqlPreview();
-    });
+    this.cohortJoinTableSelect.addEventListener(
+      "change",
+      () => {
+        this.handleJoinTableChange();
+        this.updateSqlPreview();
+      },
+      { signal },
+    );
 
-    this.cohortJoinTableSelect.addEventListener("change", () => {
-      this.handleJoinTableChange();
-      this.updateSqlPreview();
-    });
+    this.cohortJoinTypeSelect.addEventListener(
+      "change",
+      () => {
+        this.updateSqlPreview();
+      },
+      { signal },
+    );
 
-    this.cohortJoinTypeSelect.addEventListener("change", () => {
-      this.updateSqlPreview();
-    });
-
-    this.cohortJoinOnInput.addEventListener("input", () => {
-      this.updateSqlPreview();
-    });
+    this.cohortJoinOnInput.addEventListener(
+      "input",
+      () => {
+        this.updateSqlPreview();
+      },
+      { signal },
+    );
 
     const cohortInputs = [
       this.cohortMinAge,
@@ -163,53 +180,82 @@ export class CohortBuilderModalController {
       this.cohortMinHbA1c,
     ];
     for (const inp of cohortInputs) {
-      inp.addEventListener("input", () => this.updateSqlPreview());
-      inp.addEventListener("change", () => this.updateSqlPreview());
+      inp.addEventListener("input", () => this.updateSqlPreview(), { signal });
+      inp.addEventListener("change", () => this.updateSqlPreview(), { signal });
     }
 
-    this.cohortInsertChatBtn.addEventListener("click", () => {
-      const sql = this.getCohortSql();
-      this.ui.chatInput.value = sql;
-      this.ui.syncHighlight();
-      this.close();
-      this.ui.chatInput.focus();
-    });
+    this.cohortInsertChatBtn.addEventListener(
+      "click",
+      () => {
+        const sql = this.getCohortSql();
+        this.close();
+        this.events.emit("templateSelected", {
+          promptText: sql,
+          targetModel: "keep",
+          goldSql: null,
+        });
+      },
+      { signal },
+    );
 
-    this.cohortExecuteBtn.addEventListener("click", () => {
-      const sql = this.getCohortSql();
-      this.close();
-      this.ui.modelSelect.value = "sql";
-      this.ui.state.setActiveChatModel("sql");
-      void this.ui.handleSendMessage(sql, "sql");
-    });
+    this.cohortExecuteBtn.addEventListener(
+      "click",
+      () => {
+        const sql = this.getCohortSql();
+        this.close();
+        this.events.emit("templateSelected", {
+          promptText: sql,
+          targetModel: "sql",
+          goldSql: null,
+          autoSend: true,
+        });
+      },
+      { signal },
+    );
   }
 
   /**
-   * Generates the cohort filter DuckDB SQL query from active modal inputs.
+   * Generates the cohort filter DuckDB SQL query from active modal inputs and typed schema metadata.
    * @returns {string} The generated DuckDB SQL statement.
    */
   public getCohortSql(): string {
+    const primaryTable = this.cohortTableSelect.value || "patients";
+    const joinTable = this.cohortJoinTableSelect.value || undefined;
     const minAgeStr = this.cohortMinAge.value.trim();
     const maxAgeStr = this.cohortMaxAge.value.trim();
     const maxTirStr = this.cohortMaxTIR.value.trim();
     const minHba1cStr = this.cohortMinHbA1c.value.trim();
+    const joinCond = this.cohortJoinOnInput.value.trim();
+    const genderVal = this.cohortGenderSelect.value;
+    const txVal = this.cohortTxGroup.value.trim();
+
+    const primaryCols = this.state.getTableColumns(primaryTable);
+    const joinCols = joinTable
+      ? this.state.getTableColumns(joinTable)
+      : undefined;
 
     return buildCohortSql({
-      tableName: this.cohortTableSelect.value || "patients",
-      joinTableName: this.cohortJoinTableSelect.value || undefined,
+      tableName: primaryTable,
       joinType: normalizeJoinType(this.cohortJoinTypeSelect.value),
-      joinCondition: this.cohortJoinOnInput.value.trim() || undefined,
-      minAge: minAgeStr !== "" ? Number(minAgeStr) : undefined,
-      maxAge: maxAgeStr !== "" ? Number(maxAgeStr) : undefined,
-      gender: this.cohortGenderSelect.value || undefined,
-      txGroup: this.cohortTxGroup.value.trim() || undefined,
-      maxTIR: maxTirStr !== "" ? Number(maxTirStr) : undefined,
-      minHbA1c: minHba1cStr !== "" ? Number(minHba1cStr) : undefined,
+      ...(primaryCols ? { tableColumns: primaryCols } : {}),
+      ...(joinTable
+        ? {
+            joinTableName: joinTable,
+            ...(joinCols ? { joinTableColumns: joinCols } : {}),
+          }
+        : {}),
+      ...(joinCond ? { joinCondition: joinCond } : {}),
+      ...(minAgeStr !== "" ? { minAge: Number(minAgeStr) } : {}),
+      ...(maxAgeStr !== "" ? { maxAge: Number(maxAgeStr) } : {}),
+      ...(genderVal ? { gender: genderVal } : {}),
+      ...(txVal ? { txGroup: txVal } : {}),
+      ...(maxTirStr !== "" ? { maxTIR: Number(maxTirStr) } : {}),
+      ...(minHba1cStr !== "" ? { minHbA1c: Number(minHba1cStr) } : {}),
     });
   }
 
   /**
-   * Updates join condition and types when target or secondary tables change.
+   * Updates join condition and types when target or secondary tables change using typed schema state.
    * @returns {void}
    */
   public handleJoinTableChange(): void {
@@ -221,31 +267,17 @@ export class CohortBuilderModalController {
       return;
     }
 
-    const pNode = document
-      .querySelector(`.schema-table-name[data-table="${primaryTable}"]`)
-      ?.closest(".schema-table");
-    const jNode = document
-      .querySelector(`.schema-table-name[data-table="${joinTable}"]`)
-      ?.closest(".schema-table");
-    const pCols = pNode
-      ? Array.from(pNode.querySelectorAll(".col-name")).map((el) =>
-          String(el.textContent).trim(),
-        )
-      : undefined;
-    const jCols = jNode
-      ? Array.from(jNode.querySelectorAll(".col-name")).map((el) =>
-          String(el.textContent).trim(),
-        )
-      : undefined;
+    const pCols = this.state.getTableColumns(primaryTable);
+    const jCols = this.state.getTableColumns(joinTable);
 
     const resolved = resolveTableJoin(primaryTable, joinTable, pCols, jCols);
-    const escPrimary = primaryTable.replace(/"/g, '""');
-    const escJoin = joinTable.replace(/"/g, '""');
+    const quotedPrimary = escapeSqlIdentifier(primaryTable);
+    const quotedJoin = escapeSqlIdentifier(joinTable);
     if (resolved) {
       this.cohortJoinTypeSelect.value = resolved.defaultJoinType;
-      this.cohortJoinOnInput.value = `"${escPrimary}".${resolved.fromColumn} = "${escJoin}".${resolved.toColumn}`;
+      this.cohortJoinOnInput.value = `${quotedPrimary}.${escapeSqlIdentifier(resolved.fromColumn)} = ${quotedJoin}.${escapeSqlIdentifier(resolved.toColumn)}`;
     } else {
-      this.cohortJoinOnInput.value = `"${escPrimary}".patient_id = "${escJoin}".patient_id`;
+      this.cohortJoinOnInput.value = `${quotedPrimary}."patient_id" = ${quotedJoin}."patient_id"`;
     }
   }
 
@@ -258,18 +290,14 @@ export class CohortBuilderModalController {
   }
 
   /**
-   * Opens the Visual Cohort Query Builder modal and populates available clinical tables.
+   * Opens the Visual Cohort Query Builder modal and populates available clinical tables from typed schema state.
    * @returns {void}
    */
   public open(): void {
-    if (this.cohortModal.classList.contains("hidden")) {
-      this.previousFocusCohort = document.activeElement;
-    }
-    const schemaTables = Array.from(
-      document.querySelectorAll(".schema-table-name"),
-    )
-      .map((el) => el.getAttribute("data-table"))
-      .filter((t): t is string => Boolean(t));
+    this.dialog.captureOpenerFocus();
+    const schemaTables = this.state.schemaTables
+      .map((t) => t.name)
+      .filter((t) => t.length > 0);
 
     const tables =
       schemaTables.length > 0
@@ -301,21 +329,7 @@ export class CohortBuilderModalController {
 
     this.handleJoinTableChange();
     this.updateSqlPreview();
-    this.cohortModal.classList.remove("hidden");
-    this.cohortModal.setAttribute("aria-hidden", "false");
-
-    if (this.onCohortModalKeyDown) {
-      this.cohortModal.removeEventListener(
-        "keydown",
-        this.onCohortModalKeyDown,
-      );
-    }
-    this.onCohortModalKeyDown = (e: KeyboardEvent): void => {
-      trapModalFocus(e, this.cohortModal, () => this.close());
-    };
-    this.cohortModal.addEventListener("keydown", this.onCohortModalKeyDown);
-
-    this.closeCohortModalBtn.focus();
+    this.dialog.open(this.closeCohortModalBtn);
   }
 
   /**
@@ -323,31 +337,15 @@ export class CohortBuilderModalController {
    * @returns {void}
    */
   public close(): void {
-    this.cohortModal.classList.add("hidden");
-    this.cohortModal.setAttribute("aria-hidden", "true");
-    if (this.onCohortModalKeyDown) {
-      this.cohortModal.removeEventListener(
-        "keydown",
-        this.onCohortModalKeyDown,
-      );
-      this.onCohortModalKeyDown = null;
-    }
-    if (this.previousFocusCohort instanceof HTMLElement) {
-      this.previousFocusCohort.focus();
-    }
+    this.dialog.close();
   }
 
   /**
-   * Removes any active modal keydown listeners when disposing the UI.
+   * Disposes modal and form listeners when tearing down the UI.
    * @returns {void}
    */
   public dispose(): void {
-    if (this.onCohortModalKeyDown) {
-      this.cohortModal.removeEventListener(
-        "keydown",
-        this.onCohortModalKeyDown,
-      );
-      this.onCohortModalKeyDown = null;
-    }
+    this.dialog.dispose();
+    this.listenerController.abort();
   }
 }

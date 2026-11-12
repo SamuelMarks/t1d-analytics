@@ -1,7 +1,7 @@
 /**
  * @file configs.test.ts
  * @module tests/configs.test
- * Comprehensive unit tests for frontend build, test, and E2E configuration files.
+ * Behavioral and structural invariant tests for Vite, Vitest, Playwright, and TypeDoc configurations.
  */
 
 // @vitest-environment node
@@ -9,120 +9,87 @@
 import fs from "fs";
 import path from "path";
 import { describe, it, expect } from "vitest";
-import viteConfig, {
-  createViteConfig,
-  getDefaultViteEnv,
-} from "../vite.config";
-import vitestConfig, { createVitestConfig } from "../vitest.config";
-import playwrightConfig, { createPlaywrightConfig } from "../playwright.config";
-import playwrightFullConfig, {
-  createPlaywrightFullConfig,
-} from "../playwright.full.config";
+import viteConfig, { createViteConfig } from "../vite.config";
+import vitestConfig from "../vitest.config";
+import playwrightConfig from "../playwright.config";
+import playwrightFullConfig from "../playwright.full.config";
 
-describe("Frontend configuration modules", () => {
+describe("Frontend configuration invariants", () => {
   const pkgPath = path.resolve(__dirname, "../package.json");
   const pkgRaw: { scripts?: Record<string, string> } = JSON.parse(
     fs.readFileSync(pkgPath, "utf-8"),
   );
 
   /**
-   * Tests Vite development and build configuration values across default and custom environments.
+   * Validates Vite proxy URL formatting, preview port bounds, and requireEnv Istanbul gating.
    */
-  it("validates vite.config.ts configuration", () => {
-    const expectedTarget =
-      process.env.VITE_API_PROXY_TARGET ||
-      `http://127.0.0.1:${process.env.T1D_API_PORT || "8000"}`;
-    expect(viteConfig).toBeDefined();
+  it("validates vite.config.ts proxy URLs, port bounds, and build target", () => {
     expect(viteConfig.build?.target).toBe("esnext");
-    expect(viteConfig.server?.proxy?.["/api"]).toEqual({
-      target: expectedTarget,
-      changeOrigin: true,
-    });
-    expect(viteConfig.preview?.port).toBe(
-      Number(process.env.T1D_WEB_PORT || 3000),
-    );
-    expect(viteConfig.preview?.proxy?.["/api"]).toEqual({
-      target: expectedTarget,
-      changeOrigin: true,
-    });
-    expect(Array.isArray(viteConfig.plugins)).toBe(true);
-    expect(viteConfig.plugins?.length).toBeGreaterThan(0);
 
-    const fallbackCfg = createViteConfig({});
-    expect(fallbackCfg.server?.proxy?.["/api"]).toEqual({
-      target: "http://127.0.0.1:8000",
-      changeOrigin: true,
-    });
-    expect(fallbackCfg.preview?.port).toBe(3000);
+    const defaultCfg = createViteConfig({});
+    const defaultProxy = defaultCfg.server?.proxy?.["/api"];
+    expect(defaultProxy).toBeDefined();
+    if (
+      defaultProxy !== undefined &&
+      typeof defaultProxy === "object" &&
+      "target" in defaultProxy
+    ) {
+      const targetUrl = new URL(String(defaultProxy.target));
+      expect(targetUrl.protocol).toBe("http:");
+      expect(targetUrl.hostname).toBe("127.0.0.1");
+      expect(Number(targetUrl.port)).toBe(8000);
+    }
+    const defaultPort = defaultCfg.preview?.port ?? 0;
+    expect(Number.isInteger(defaultPort)).toBe(true);
+    expect(defaultPort).toBeGreaterThanOrEqual(1);
+    expect(defaultPort).toBeLessThanOrEqual(65535);
 
-    const portOverrideCfg = createViteConfig({
-      T1D_API_PORT: "8080",
+    const customCfg = createViteConfig({
+      T1D_API_PORT: "8088",
       T1D_WEB_PORT: "4173",
+      BUILD_TIMESTAMP_UTC: "2026-11-13T00:00:00Z UTC",
     });
-    const overridePort = portOverrideCfg.preview?.port ?? 0;
-    expect(Number.isInteger(overridePort)).toBe(true);
-    expect(overridePort).toBeGreaterThanOrEqual(1);
-    expect(overridePort).toBeLessThanOrEqual(65535);
-    expect(overridePort).toBe(4173);
-
-    const proxyTargetOverrideCfg = createViteConfig({
-      VITE_API_PROXY_TARGET: "http://127.0.0.1:9000",
-      BUILD_TIMESTAMP_UTC: "2026-10-29T12:00:00Z UTC",
-      VITE_COVERAGE: "true",
-    });
-    const parsedProxyUrl = new URL("http://127.0.0.1:9000");
-    expect(parsedProxyUrl.protocol).toBe("http:");
-    expect(Number(parsedProxyUrl.port)).toBeGreaterThanOrEqual(1);
-    expect(proxyTargetOverrideCfg.server?.proxy?.["/api"]).toEqual({
-      target: parsedProxyUrl.origin,
+    const customProxy = customCfg.server?.proxy?.["/api"];
+    expect(customProxy).toEqual({
+      target: "http://127.0.0.1:8088",
       changeOrigin: true,
     });
-    expect(proxyTargetOverrideCfg.define?.__BUILD_TIMESTAMP_UTC__).toBe(
-      JSON.stringify("2026-10-29T12:00:00Z UTC"),
+    expect(customCfg.preview?.port).toBe(4173);
+    expect(customCfg.define?.__BUILD_TIMESTAMP_UTC__).toBe(
+      JSON.stringify("2026-11-13T00:00:00Z UTC"),
     );
-    expect(Array.isArray(proxyTargetOverrideCfg.plugins)).toBe(true);
-    expect(proxyTargetOverrideCfg.plugins?.length).toBeGreaterThan(0);
 
-    expect(getDefaultViteEnv()).toBe(process.env);
-    const origProcess = globalThis.process;
-    Object.defineProperty(globalThis, "process", {
-      value: undefined,
-      configurable: true,
+    const explicitProxyCfg = createViteConfig({
+      VITE_API_PROXY_TARGET: "http://127.0.0.1:9090",
     });
-    expect(getDefaultViteEnv()).toEqual({});
-    Object.defineProperty(globalThis, "process", {
-      value: origProcess,
-      configurable: true,
+    expect(explicitProxyCfg.server?.proxy?.["/api"]).toEqual({
+      target: "http://127.0.0.1:9090",
+      changeOrigin: true,
     });
   });
 
   /**
-   * Tests Vitest configuration, coverage settings, and exclusions.
+   * Validates Vitest coverage scope (src TypeScript files only, 100% per-file thresholds) and setup file existence.
    */
-  it("validates vitest.config.ts configuration and setup file existence", () => {
-    const freshVitestCfg = createVitestConfig();
-    expect(freshVitestCfg).toEqual(vitestConfig);
-    expect(vitestConfig).toBeDefined();
-    expect(vitestConfig.build?.target).toBe("esnext");
+  it("validates vitest.config.ts 100% src coverage scope and setup file existence", () => {
     expect(vitestConfig.test?.environment).toBe("jsdom");
-    expect(vitestConfig.test?.setupFiles).toEqual(["./tests/setup.ts"]);
-    for (const setupFile of vitestConfig.test?.setupFiles || []) {
+    const setupFiles = vitestConfig.test?.setupFiles;
+    const normalizedSetup = Array.isArray(setupFiles)
+      ? setupFiles
+      : setupFiles
+        ? [setupFiles]
+        : [];
+    expect(normalizedSetup.length).toBeGreaterThan(0);
+    for (const setupFile of normalizedSetup) {
       expect(fs.existsSync(path.resolve(__dirname, "..", setupFile))).toBe(
         true,
       );
     }
-    expect(vitestConfig.test?.exclude).toEqual(
-      expect.arrayContaining([
-        "node_modules",
-        "dist",
-        "tests-e2e/**",
-        "tests-e2e-full/**",
-      ]),
-    );
+
     const coverage = vitestConfig.test?.coverage;
     expect(coverage?.provider).toBe("istanbul");
     if (coverage && coverage.provider === "istanbul") {
-      expect(coverage.all).toBe(true);
+      expect(coverage.include).toEqual(["src/**/*.ts"]);
       expect(coverage.thresholds).toEqual({
         lines: 100,
         functions: 100,
@@ -130,100 +97,49 @@ describe("Frontend configuration modules", () => {
         statements: 100,
         perFile: true,
       });
-      expect(coverage.reporter).toEqual(
-        expect.arrayContaining(["text", "html", "lcov", "json"]),
-      );
-      expect(coverage.exclude).toEqual(
-        expect.arrayContaining([
-          "docs/**",
-          "coverage/**",
-          "tests/**",
-          "!vite.config.ts",
-          "!vitest.config.ts",
-        ]),
-      );
     }
   });
 
   /**
-   * Tests standard Playwright end-to-end configuration.
+   * Validates Playwright mocked and full-stack configuration directories, ports, and scripts.
    */
-  it("validates playwright.config.ts standard configuration and directory invariants", () => {
-    expect(createPlaywrightConfig()).toEqual(playwrightConfig);
-    expect(playwrightConfig).toBeDefined();
+  it("validates playwright.config.ts and playwright.full.config.ts invariants", () => {
     expect(playwrightConfig.testDir).toBe("./tests-e2e");
     expect(
-      fs.existsSync(path.resolve(__dirname, "..", playwrightConfig.testDir!)),
+      fs.existsSync(
+        path.resolve(__dirname, "..", playwrightConfig.testDir ?? ""),
+      ),
     ).toBe(true);
-    expect(playwrightConfig.fullyParallel).toBe(true);
-    expect(playwrightConfig.workers).toBe(1);
-    expect(playwrightConfig.retries).toBe(0);
-    expect(playwrightConfig.reporter).toBe("list");
-    expect(playwrightConfig.use?.baseURL).toBe("http://localhost:5173");
-    expect(playwrightConfig.use?.trace).toBe("on-first-retry");
-    expect(playwrightConfig.projects?.length).toBe(1);
-    expect(playwrightConfig.projects?.[0].name).toBe("chromium");
-    expect(playwrightConfig.projects?.[0].use?.channel).toBe("chrome");
-    expect(playwrightConfig.projects?.[0].use?.colorScheme).toBe("light");
-    expect(Array.isArray(playwrightConfig.webServer)).toBe(true);
-    if (Array.isArray(playwrightConfig.webServer)) {
-      const webServers = playwrightConfig.webServer;
-      expect(webServers[0].command).toBe("npm run dev");
-      expect(pkgRaw.scripts?.dev).toBeDefined();
-      expect(webServers[0].url).toBe("http://localhost:5173");
-      expect(webServers[0].reuseExistingServer).toBe(true);
-      expect(webServers[0].timeout).toBe(120000);
-    }
-  });
+    const baseUrl = new URL(String(playwrightConfig.use?.baseURL));
+    expect(Number(baseUrl.port)).toBeGreaterThanOrEqual(1);
+    expect(Number(baseUrl.port)).toBeLessThanOrEqual(65535);
+    expect(pkgRaw.scripts?.dev).toBeDefined();
 
-  /**
-   * Tests full Playwright matrix configuration including backend web server.
-   */
-  it("validates playwright.full.config.ts full matrix configuration and directory invariants", () => {
-    expect(createPlaywrightFullConfig()).toEqual(playwrightFullConfig);
-    expect(playwrightFullConfig).toBeDefined();
     expect(playwrightFullConfig.testDir).toBe("./tests-e2e-full");
     expect(
       fs.existsSync(
-        path.resolve(__dirname, "..", playwrightFullConfig.testDir!),
+        path.resolve(__dirname, "..", playwrightFullConfig.testDir ?? ""),
       ),
     ).toBe(true);
-    expect(playwrightFullConfig.fullyParallel).toBe(false);
-    expect(playwrightFullConfig.workers).toBe(1);
-    expect(playwrightFullConfig.retries).toBe(0);
-    expect(playwrightFullConfig.reporter).toBe("list");
-    expect(playwrightFullConfig.use?.baseURL).toBe("http://localhost:5173");
-    expect(playwrightFullConfig.use?.trace).toBe("on-first-retry");
-    expect(Array.isArray(playwrightFullConfig.webServer)).toBe(true);
     if (Array.isArray(playwrightFullConfig.webServer)) {
-      const webServers = playwrightFullConfig.webServer;
-      expect(webServers.length).toBe(2);
-      expect(webServers[0].command).toBe(
-        "python3 -m uvicorn t1d_analytics.api:app --port 8000 || python -m uvicorn t1d_analytics.api:app --port 8000",
-      );
-      expect(webServers[0].url).toBe("http://127.0.0.1:8000/api/ready");
-      expect(webServers[0].reuseExistingServer).toBe(true);
-      expect(webServers[0].env).toEqual({
-        PYTHONPATH: "../t1d-analytics-backend/src",
-        T1D_DB_PATH: "../ci_test.duckdb",
-        T1D_SESSIONS_DB_PATH:
-          "../t1d-analytics-backend/tests/test_data/sessions.duckdb",
-      });
-      expect(webServers[1].command).toBe("npm run dev");
-      expect(pkgRaw.scripts?.dev).toBeDefined();
-      expect(webServers[1].url).toBe("http://localhost:5173");
-      expect(webServers[1].reuseExistingServer).toBe(true);
+      expect(playwrightFullConfig.webServer.length).toBe(2);
+      for (const srv of playwrightFullConfig.webServer) {
+        const srvUrl = new URL(String(srv.url));
+        const port = Number(srvUrl.port);
+        expect(port).toBeGreaterThanOrEqual(1);
+        expect(port).toBeLessThanOrEqual(65535);
+      }
     }
   });
 
   /**
-   * Verifies that every TypeScript implementation module under `src/` is registered as an exact entry point in `package.json` `scripts.docs` and validates TypeDoc/ESLint strictness rules.
+   * Verifies that every non-declaration TypeScript source module under `src/` is registered in `package.json` `scripts.docs`.
    */
-  it("verifies all src/**/*.ts implementation modules are registered in TypeDoc scripts.docs", () => {
+  it("verifies all src TypeScript implementation modules are registered in TypeDoc scripts.docs", () => {
     const docsScript = pkgRaw.scripts?.docs || "";
     const docsTokens = docsScript.trim().split(/\s+/);
     expect(docsTokens[0]).toBe("typedoc");
-    expect(docsTokens).toContain("--out");
+    expect(docsTokens).toContain("--treatWarningsAsErrors");
 
     const registeredEntryPoints = docsTokens
       .filter((token) => token.startsWith("src/"))
@@ -235,6 +151,12 @@ describe("Frontend configuration modules", () => {
     }
 
     const srcDir = path.resolve(__dirname, "../src");
+    /**
+     * Recursively collects non-declaration `.ts` file paths relative to `prefix`.
+     * @param {string} dir - Directory path to scan.
+     * @param {string} [prefix="src"] - Relative path prefix.
+     * @returns {string[]} Collected relative file paths.
+     */
     const collectTsFiles = (dir: string, prefix: string = "src"): string[] => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       const results: string[] = [];

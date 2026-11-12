@@ -1,72 +1,152 @@
 /**
  * @file sql-highlight.ts
  * @module sql-highlight
- * SQL statement classification and live syntax highlighting synchronization.
+ * Strict quote-aware SQL statement tokenizer/classifier and live syntax highlighting synchronization.
  */
 
-import hljs from "highlight.js";
-import sql from "highlight.js/lib/languages/sql";
-import markdown from "highlight.js/lib/languages/markdown";
+import { hljs } from "./syntax-highlighter";
 
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("markdown", markdown);
+const SQL_COMMENT_OR_QUOTED_RE =
+  /'(?:''|[^'])*'|"(?:""|[^"])*"|--[^\r\n]*|\/\*(?:(?!\*\/|\/\*).)*\*\//gs;
+
+const SQL_QUOTED_LITERAL_RE = /'(?:''|[^'])*'|"(?:""|[^"])*"/g;
+
+const FORBIDDEN_WRITE_KEYWORD_RE =
+  /\b(?:insert\s+into|update\s+\S+\s+set|delete\s+from|drop\s+(?:table|view|index|schema)|alter\s+(?:table|view)|create\s+(?:or\s+replace\s+)?(?:temp(?:orary)?\s+)?(?:table|view|index|schema)|truncate\b|copy\b|attach\b|detach\b)\b/i;
 
 /**
- * Checks whether a user input string is a valid read-only SQL query statement.
- * Strips SQL comments and outer parentheses before verifying the leading keyword.
+ * Replaces single-quoted string literals and double-quoted identifiers with empty placeholders.
+ * @param {string} query - SQL candidate string.
+ * @returns {string} Masked SQL string with neutral literal/identifier placeholders.
+ */
+export function maskSqlLiteralsAndIdentifiers(query: string): string {
+  return query.replace(SQL_QUOTED_LITERAL_RE, (tok) =>
+    tok.startsWith('"') ? '""' : "''",
+  );
+}
+
+/**
+ * Checks whether `text[0] === "("` and `text[text.length - 1] === ")"` form one enclosing balanced pair.
+ * Prevents corrupting compound queries such as `(SELECT 1) UNION ALL (SELECT 2)`.
+ * @param {string} text - Trimmed SQL candidate string.
+ * @returns {boolean} True only when index `0` closes at `text.length - 1`.
+ */
+export function hasEnclosingOuterParens(text: string): boolean {
+  if (text.length < 2 || !text.startsWith("(") || !text.endsWith(")")) {
+    return false;
+  }
+  const masked = maskSqlLiteralsAndIdentifiers(text);
+  let depth = 0;
+  const lastIdx = masked.length - 1;
+  for (let idx = 0; idx <= lastIdx; idx += 1) {
+    const ch = masked[idx];
+    if (ch === "(") {
+      depth += 1;
+    } else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0 && idx < lastIdx) {
+        return false;
+      }
+    }
+  }
+  return depth === 0;
+}
+
+/**
+ * Verifies that all parentheses outside quoted SQL literals/identifiers are balanced.
+ * @param {string} masked - Literal-masked SQL string.
+ * @returns {boolean} True if parenthesis depth never goes negative and ends at zero.
+ */
+function hasBalancedParens(masked: string): boolean {
+  let depth = 0;
+  for (let idx = 0; idx < masked.length; idx += 1) {
+    const ch = masked[idx];
+    if (ch === "(") {
+      depth += 1;
+    } else if (ch === ")") {
+      depth -= 1;
+      if (depth < 0) {
+        return false;
+      }
+    }
+  }
+  return depth === 0;
+}
+
+/**
+ * Strips SQL line/block comments outside quoted literals and unwraps balanced enclosing parentheses.
+ * @param {string} text - Raw user input string.
+ * @returns {string} Normalized SQL candidate preserving compound parenthesized queries.
+ */
+export function stripSqlCommentsAndEnclosingParens(text: string): string {
+  let cleaned = text;
+  let prev = "";
+  while (prev !== cleaned) {
+    prev = cleaned;
+    cleaned = cleaned.replace(SQL_COMMENT_OR_QUOTED_RE, (tok) =>
+      tok.startsWith("'") || tok.startsWith('"') ? tok : " ",
+    );
+  }
+  cleaned = cleaned.trim();
+  while (hasEnclosingOuterParens(cleaned)) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
+
+/**
+ * Checks whether a user input string is a valid single-statement read-only SQL query.
+ * Uses quote-aware comment stripping, balanced outer-parenthesis unwrapping (preserving
+ * `(SELECT 1) UNION ALL (SELECT 2)`), parenthesis balance validation, and write-clause rejection.
+ * @param {string} text - Raw input string from the chat textarea.
+ * @returns {boolean} True if the input is a read-only SQL statement.
+ */
+/** Non-SELECT read-only SQL statement prefix patterns. */
+const READ_ONLY_VERB_PATTERNS: readonly RegExp[] = [
+  /^with\s+(?:recursive\s+)?["a-zA-Z_]["a-zA-Z0-9_]*\s+as\s*\(/i,
+  /^show\s+(?:all\s+)?(?:tables|databases|schemas|variables|columns)\b/i,
+  /^(?:describe|summarize)\s+(?:table\s+|select\b|["a-zA-Z_]["a-zA-Z0-9_.]*\s*;?$)/i,
+  /^explain\s+(?:analyze\s+)?(?:select|with|from|show|describe|summarize|values|table)\b/i,
+  /^pragma\s+[a-zA-Z_]/i,
+  /^values\s*\(/i,
+];
+
+/**
+ * Classifies whether a user input string is an unambiguous read-only DuckDB SQL query.
  * @param {string} text - Raw input string from the chat textarea.
  * @returns {boolean} True if the input is a read-only SQL statement.
  */
 export function isReadOnlySqlStatement(text: string): boolean {
-  let cleaned = text
-    .replace(/--.*$/gm, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .trim();
-  while (cleaned.startsWith("(") && cleaned.endsWith(")")) {
-    cleaned = cleaned.slice(1, -1).trim();
-  }
-  if (!cleaned) return false;
-  if (cleaned.endsWith("?") || cleaned.endsWith(".")) {
+  const cleaned = stripSqlCommentsAndEnclosingParens(text);
+  if (!cleaned || cleaned.endsWith("?") || cleaned.endsWith(".")) {
     return false;
   }
-  if (/^select\b/i.test(cleaned)) {
+
+  const masked = maskSqlLiteralsAndIdentifiers(cleaned);
+  if (!hasBalancedParens(masked)) {
+    return false;
+  }
+  const statements = masked
+    .split(";")
+    .map((seg) => seg.trim())
+    .filter((seg) => seg.length > 0);
+  if (statements.length !== 1 || FORBIDDEN_WRITE_KEYWORD_RE.test(masked)) {
+    return false;
+  }
+
+  const core = cleaned.replace(/^\(+/, "").trim();
+  if (/^select\b/i.test(core)) {
     if (
       /^select\s+(?:the|a|an|all\s+patients|patients\b|subjects\b|participants\b|which\b|who\b)/i.test(
-        cleaned,
+        core,
       ) &&
-      !/\bfrom\b/i.test(cleaned)
+      !/\bfrom\b/i.test(core)
     ) {
       return false;
     }
-    return /^select\s+.+/i.test(cleaned);
+    return /^select\s+.+/i.test(core);
   }
-  if (/^with\b/i.test(cleaned)) {
-    return /^with\s+(?:recursive\s+)?["a-zA-Z_]["a-zA-Z0-9_]*\s+as\s*\(/i.test(
-      cleaned,
-    );
-  }
-  if (/^show\b/i.test(cleaned)) {
-    return /^show\s+(?:all\s+)?(?:tables|databases|schemas|variables)\b/i.test(
-      cleaned,
-    );
-  }
-  if (/^(?:describe|summarize)\b/i.test(cleaned)) {
-    return /^(?:describe|summarize)\s+(?:table\s+|select\b|["a-zA-Z_]["a-zA-Z0-9_.]*\s*;?$)/i.test(
-      cleaned,
-    );
-  }
-  if (/^explain\b/i.test(cleaned)) {
-    return /^explain\s+(?:analyze\s+)?(?:select|with|from|show|describe|summarize|values|table)\b/i.test(
-      cleaned,
-    );
-  }
-  if (/^pragma\b/i.test(cleaned)) {
-    return /^pragma\s+[a-zA-Z_]/i.test(cleaned);
-  }
-  if (/^values\b/i.test(cleaned)) {
-    return /^values\s*\(/i.test(cleaned);
-  }
-  return false;
+  return READ_ONLY_VERB_PATTERNS.some((pattern) => pattern.test(core));
 }
 
 /** Maximum pixel height for the auto-resizing chat composer textarea. */

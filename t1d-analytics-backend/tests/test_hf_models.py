@@ -12,7 +12,7 @@ from t1d_analytics.dataset_loader import prepare_torch_dataset
 from t1d_analytics.hf_models import (
     HuggingFaceCausalLMFactory,
     TinyCausalLMFactory,
-    _extract_output_logits,
+    extract_output_logits,
     resolve_causal_lm_factory,
     resolve_device_telemetry,
 )
@@ -48,15 +48,15 @@ def test_prepare_dataset_success(tmp_path: Path) -> None:
 def test_count_dataset_samples_unsupported_suffix_and_duckdb_error(
     tmp_path: Path,
 ) -> None:
-    """Test _count_dataset_samples returns 0 for unsupported suffixes and unreadable parquet."""
+    """Test count_dataset_samples returns 0 for unsupported suffixes and unreadable parquet."""
     runner = LocalCpuRunner()
     txt_file = tmp_path / "data.txt"
     txt_file.write_text("hello world")
-    assert runner._count_dataset_samples(txt_file) == 0
+    assert runner.count_dataset_samples(txt_file) == 0
 
     bad_pq = tmp_path / "corrupt.parquet"
     bad_pq.write_text("not a parquet")
-    assert runner._count_dataset_samples(bad_pq) == 0
+    assert runner.count_dataset_samples(bad_pq) == 0
 
 
 def test_hf_factory_direct_coverage() -> None:
@@ -207,7 +207,7 @@ def test_resolve_device_telemetry_branches() -> None:
             assert name_err == "NVIDIA CUDA Device"
 
     mock_sysctl = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="Apple M2 Max" + chr(10), stderr=""
+        args=[], returncode=0, stdout="Apple M2 Max" + "\n", stderr=""
     )
     with patch("subprocess.run", return_value=mock_sysctl):
         name_mps, mem_mps = resolve_device_telemetry("mps")
@@ -313,7 +313,7 @@ def test_domain_invariants_prompt_masking_and_lora_freezing(tmp_path: Path) -> N
     )
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
     out = model(input_ids.unsqueeze(0))
-    logits = _extract_output_logits(out)
+    logits = extract_output_logits(out)
     loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
     loss.backward()
     optimizer.step()
@@ -321,7 +321,7 @@ def test_domain_invariants_prompt_masking_and_lora_freezing(tmp_path: Path) -> N
     assert torch.equal(params_list[0].detach(), frozen_before)
     assert any(
         not torch.equal(p.detach(), before)
-        for p, before in zip(params_list[1:], trainable_before)
+        for p, before in zip(params_list[1:], trainable_before, strict=False)
     )
 
 

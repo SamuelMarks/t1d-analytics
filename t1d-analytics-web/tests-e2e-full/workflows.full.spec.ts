@@ -67,7 +67,7 @@ test.describe("App Workflows Full E2E", () => {
     await page.waitForFunction(() => {
       const items = document.querySelectorAll(".chat-item");
       return (
-        items.length > 0 && items[0].querySelector(".chat-item-title") !== null
+        items.length > 0 && items[0]?.querySelector(".chat-item-title") !== null
       );
     });
 
@@ -76,7 +76,7 @@ test.describe("App Workflows Full E2E", () => {
 
     // Prepare for prompt dialog
     page.once("dialog", (dialog) => {
-      dialog.accept("My Custom Chat");
+      void dialog.accept("My Custom Chat");
     });
 
     // Rename
@@ -380,7 +380,7 @@ test.describe("App Workflows Full E2E", () => {
 
     const previewSql = await page.locator("#cohort-sql-preview").textContent();
     expect(previewSql).toContain('FROM "patients"');
-    expect(previewSql).toContain("age >= 20");
+    expect(previewSql).toContain('"age" >= 20');
 
     await page.click("#cohort-execute-btn");
     await expect(cohortModal).toBeHidden();
@@ -474,18 +474,7 @@ test.describe("App Workflows Full E2E", () => {
     expect(profileJson.total_rows).toBeGreaterThan(0);
     expect(profileJson.columns.length).toBeGreaterThan(0);
 
-    // 2. Open Table Preview Modal on tiny and trigger full CSV, Excel, and Parquet server exports
-    await page.evaluate(() => {
-      const openedUrls: string[] = [];
-      (
-        window as Window & { __openedExportUrls?: string[] }
-      ).__openedExportUrls = openedUrls;
-      window.open = (url?: string | URL): WindowProxy | null => {
-        if (url) openedUrls.push(String(url));
-        return null;
-      };
-    });
-
+    // 2. Open Table Preview Modal on tiny and trigger full CSV, Excel, and Parquet server exports via authenticated fetch + Blob download
     const schemaTable = page
       .locator(".schema-table")
       .filter({ hasText: "tiny" })
@@ -495,22 +484,27 @@ test.describe("App Workflows Full E2E", () => {
     await expect(page.locator("#table-modal")).toBeVisible();
     await expect(page.locator("#modal-export-full-csv-btn")).toBeEnabled();
 
+    const csvDownloadPromise = page.waitForEvent("download");
     await page.click("#modal-export-full-csv-btn");
-    await page.click("#modal-export-excel-btn");
-    await page.click("#modal-export-parquet-btn");
+    const csvDownload = await csvDownloadPromise;
+    expect(csvDownload.suggestedFilename()).toBe("tiny.csv");
 
-    const openedUrls = await page.evaluate(
-      () =>
-        (window as Window & { __openedExportUrls?: string[] })
-          .__openedExportUrls || [],
-    );
-    expect(openedUrls.length).toBe(3);
-    expect(openedUrls[0]).toContain("/api/export/csv?table_name=tiny");
-    expect(openedUrls[1]).toContain("/api/export/excel?table_name=tiny");
-    expect(openedUrls[2]).toContain("/api/export/parquet?table_name=tiny");
+    const excelDownloadPromise = page.waitForEvent("download");
+    await page.click("#modal-export-excel-btn");
+    const excelDownload = await excelDownloadPromise;
+    expect(excelDownload.suggestedFilename()).toBe("tiny.xlsx");
+
+    const parquetDownloadPromise = page.waitForEvent("download");
+    await page.click("#modal-export-parquet-btn");
+    const parquetDownload = await parquetDownloadPromise;
+    expect(parquetDownload.suggestedFilename()).toBe("tiny.parquet");
 
     // Verify each export URL returns HTTP 200 with non-empty content from the live FastAPI backend
-    for (const exportUrl of openedUrls) {
+    for (const exportUrl of [
+      "/api/export/csv?table_name=tiny",
+      "/api/export/excel?table_name=tiny",
+      "/api/export/parquet?table_name=tiny",
+    ]) {
       const exportResp = await page.request.get(exportUrl);
       expect(exportResp.ok()).toBe(true);
       const bodyBytes = await exportResp.body();
@@ -598,10 +592,10 @@ test.describe("App Workflows Full E2E", () => {
     await expect(preview).toContainText('FROM "patients"');
     await expect(preview).toContainText('INNER JOIN "cgm_readings"');
     await expect(preview).toContainText(
-      'ON "patients".subject_id = "cgm_readings".subject_id',
+      'ON "patients"."subject_id" = "cgm_readings"."subject_id"',
     );
     await expect(preview).toContainText(
-      "\"patients\".txgroup ILIKE '%Closed-Loop%'",
+      '"patients"."TxGroup" ILIKE \'%Closed-Loop%\'',
     );
 
     // Execute cohort query directly against live DuckDB

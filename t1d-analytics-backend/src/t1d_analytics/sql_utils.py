@@ -1,12 +1,14 @@
 """Shared SQL sanitization, extraction, normalization, and DuckDB connection utilities."""
 
+import atexit
 import datetime
 import decimal
 import math
 import re
 import threading
 import uuid
-from typing import Optional, Protocol, Sequence, Union, runtime_checkable
+from collections.abc import Sequence
+from typing import Literal, Protocol, runtime_checkable
 
 import duckdb
 
@@ -16,14 +18,11 @@ from t1d_analytics.duckdb_pool import (
     PoolSqlValue,
     ReadOnlyDuckDbCursorProxy,
     ReadOnlyDuckDBPool,
-    _attach_jaeb_read_only_if_present,
-    _create_read_only_cursor_proxy,
-    _is_duckdb_lock_error,
-    _resolve_jaeb_attach_path,
     close_read_only_duckdb_pool,
     connect_duckdb_read_only_cursor,
     connect_duckdb_read_only_pooled,
     connect_duckdb_with_retry,
+    create_read_only_cursor_proxy,
     execute_duckdb_batch_write_with_retry,
     execute_duckdb_write_with_retry,
     global_read_only_duckdb_pool,
@@ -35,21 +34,21 @@ from t1d_analytics.errors import (
     ReadOnlyViolationError,
 )
 
-SqlValue = Union[str, int, float, bool, None]
-SqlRawInputValue = Union[
-    str,
-    int,
-    float,
-    bool,
-    None,
-    decimal.Decimal,
-    datetime.date,
-    datetime.datetime,
-    datetime.time,
-    uuid.UUID,
-    bytes,
-    Sequence[SqlValue],
-]
+SqlValue = str | int | float | bool | None
+SqlRawInputValue = (
+    str
+    | int
+    | float
+    | bool
+    | None
+    | decimal.Decimal
+    | datetime.date
+    | datetime.datetime
+    | datetime.time
+    | uuid.UUID
+    | bytes
+    | Sequence[SqlValue]
+)
 
 READ_ONLY_SQL_PREFIXES = (
     "select",
@@ -83,7 +82,7 @@ ALL_SQL_KEYWORDS = (
 )
 
 _PARSER_LOCK = threading.Lock()
-_CACHED_MEMORY_CONN: Optional[duckdb.DuckDBPyConnection] = None
+_CACHED_MEMORY_CONN: duckdb.DuckDBPyConnection | None = None
 _REAL_DUCKDB_CONNECT = duckdb.connect
 
 
@@ -91,8 +90,9 @@ def _get_cached_parser_conn() -> duckdb.DuckDBPyConnection:
     """
     Return a cached in-memory DuckDB connection for lightweight SQL statement parsing.
 
-    Returns
-    -------
+    Caller must hold `_PARSER_LOCK` or allow this helper to initialize safely under lock.
+
+    Returns:
         duckdb.DuckDBPyConnection: Cached `:memory:` DuckDB connection.
 
     """
@@ -102,16 +102,32 @@ def _get_cached_parser_conn() -> duckdb.DuckDBPyConnection:
     return _CACHED_MEMORY_CONN
 
 
+def close_cached_parser_conn() -> None:
+    """
+    Close and clear the cached in-memory SQL parser DuckDB connection.
+
+    Returns:
+        None
+
+    """
+    global _CACHED_MEMORY_CONN
+    with _PARSER_LOCK:
+        if _CACHED_MEMORY_CONN is not None:
+            _CACHED_MEMORY_CONN.close()
+            _CACHED_MEMORY_CONN = None
+
+
+atexit.register(close_cached_parser_conn)
+
+
 def escape_sql_identifier(identifier: str) -> str:
     """
     Escape double quotes inside a SQL identifier for safe ANSI double-quoted interpolation.
 
     Args:
-    ----
         identifier: Raw table or column identifier string.
 
     Returns:
-    -------
         str: Escaped identifier string with internal double quotes doubled.
 
     """
@@ -123,11 +139,9 @@ def escape_sql_literal(literal: str) -> str:
     Escape single quotes inside a SQL string literal for safe ANSI single-quoted interpolation.
 
     Args:
-    ----
         literal: Raw string value to embed inside single quotes.
 
     Returns:
-    -------
         str: Escaped string value with internal single quotes doubled.
 
     """
@@ -139,11 +153,9 @@ def normalize_sql(sql: str) -> str:
     Normalize a SQL query string for exact-match comparison.
 
     Args:
-    ----
         sql: Raw SQL query string.
 
     Returns:
-    -------
         str: Lowercase, whitespace-normalized SQL string without trailing semicolons.
 
     """
@@ -208,11 +220,9 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
     before rewriting so literal text is never mutated.
 
     Args:
-    ----
         query: Original SQL query string.
 
     Returns:
-    -------
         str: SQL query with numeric aggregate column arguments wrapped in ``TRY_CAST(... AS DOUBLE)``.
 
     """
@@ -223,11 +233,9 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
         Replace a matched string literal or comment with an indexed placeholder token.
 
         Args:
-        ----
             match: Regex match for a SQL literal or comment.
 
         Returns:
-        -------
             str: Placeholder token string.
 
         """
@@ -240,11 +248,9 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
         Format a matched numeric aggregate containing COALESCE/IFNULL/NULLIF with TRY_CAST.
 
         Args:
-        ----
             match: Regex match for aggregate wrapping COALESCE/IFNULL/NULLIF.
 
         Returns:
-        -------
             str: Rewritten SQL aggregate expression.
 
         """
@@ -263,11 +269,9 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
         Format a matched numeric aggregate call with TRY_CAST around the identifier.
 
         Args:
-        ----
             match: Regex match containing function name, optional DISTINCT, and column identifier.
 
         Returns:
-        -------
             str: Rewritten SQL aggregate expression.
 
         """
@@ -281,11 +285,9 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
         Format a matched QUANTILE_CONT/QUANTILE_DISC call with TRY_CAST around the identifier.
 
         Args:
-        ----
             match: Regex match containing quantile function name, column identifier, and quantile literal.
 
         Returns:
-        -------
             str: Rewritten SQL quantile expression.
 
         """
@@ -299,11 +301,9 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
         Rewrite a strict CAST(ident AS <numeric_type>) into TRY_CAST(ident AS <numeric_type>).
 
         Args:
-        ----
             match: Regex match containing column identifier and target numeric SQL type.
 
         Returns:
-        -------
             str: Safe TRY_CAST SQL expression.
 
         """
@@ -324,29 +324,100 @@ def coerce_numeric_aggregates_in_sql(query: str) -> str:
 rewrite_varchar_numeric_aggregates = coerce_numeric_aggregates_in_sql
 
 
-def strip_sql_comments_and_parens(query: str) -> str:
+_SQL_COMMENT_OR_QUOTED_RE = re.compile(
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\n]*|/\*(?:(?!\*/|/\*).)*\*/",
+    re.DOTALL,
+)
+
+
+def _has_enclosing_outer_parens(text: str) -> bool:
     """
-    Strip SQL line/block comments (including nested block comments) and outer parentheses from a query string.
+    Check whether index `0` `'('` and index `-1` `')'` form a single balanced pair enclosing `text`.
+
+    Prevents stripping outer parentheses on compound queries such as `(SELECT 1) UNION ALL (SELECT 2)`.
 
     Args:
-    ----
+        text: Trimmed SQL candidate string.
+
+    Returns:
+        bool: True only when `text[0]` closes at `text[-1]` with balanced parentheses.
+
+    """
+    if len(text) < 2 or text[0] != "(" or text[-1] != ")":
+        return False
+    masked = strip_sql_literals_and_identifiers(text)
+    depth = 0
+    last_idx = len(masked) - 1
+    for idx, ch in enumerate(masked):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0 and idx < last_idx:
+                return False
+    return depth == 0
+
+
+def strip_sql_comments_and_parens(query: str) -> str:
+    """
+    Strip SQL line/block comments outside quoted literals and unwrap balanced enclosing parentheses.
+
+    Args:
         query: Raw SQL or user input string.
 
     Returns:
-    -------
-        str: Cleaned query string.
+        str: Cleaned query string preserving compound parenthesized set operations.
 
     """
-    cleaned = re.sub(r"--.*$", " ", query, flags=re.MULTILINE)
+
+    def _replace_comment(match: re.Match[str]) -> str:
+        """
+        Preserve quoted SQL literals/identifiers while replacing comment tokens with a single space.
+
+        Args:
+            match: Regex match object for a quoted token or SQL comment.
+
+        Returns:
+            str: Unchanged quoted token or `' '` for comments.
+
+        """
+        token = match.group(0)
+        if token[0] in ("'", '"'):
+            return token
+        return " "
+
+    cleaned = query
     prev = None
     while prev != cleaned:
         prev = cleaned
-        cleaned = re.sub(r"/\*(?:(?!\*/|/\*).)*\*/", " ", cleaned, flags=re.DOTALL)
+        cleaned = _SQL_COMMENT_OR_QUOTED_RE.sub(_replace_comment, cleaned)
     cleaned = cleaned.strip()
-    while cleaned.startswith("(") and cleaned.endswith(")"):
+    while _has_enclosing_outer_parens(cleaned):
         cleaned = cleaned[1:-1].strip()
     return cleaned
 
+
+_SAFE_READ_ONLY_PRAGMAS = frozenset(
+    {
+        "collations",
+        "database_list",
+        "database_size",
+        "functions",
+        "metadata_info",
+        "platform",
+        "show_tables",
+        "show_tables_expanded",
+        "storage_info",
+        "table_info",
+        "types",
+        "user_agent",
+        "version",
+    }
+)
+
+_PRAGMA_NAME_RE = re.compile(
+    r"^pragma\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*\([^;]*\))?\s*;?$", re.IGNORECASE
+)
 
 _FORBIDDEN_WRITE_STATEMENT_RE = re.compile(
     r"\b(?:"
@@ -358,9 +429,16 @@ _FORBIDDEN_WRITE_STATEMENT_RE = re.compile(
     r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:TABLE|VIEW|INDEX|SCHEMA|SEQUENCE|MACRO|TYPE)|"
     r"REPLACE\s+INTO|"
     r"TRUNCATE(?:\s+TABLE)?|"
-    r"COPY\s+\S+\s+TO|"
+    r"COPY\b|"
     r"ATTACH\b|"
     r"DETACH\b|"
+    r"EXPORT\s+DATABASE\b|"
+    r"IMPORT\s+DATABASE\b|"
+    r"(?:FORCE\s+)?INSTALL\s+\S+|"
+    r"LOAD\s+\S+|"
+    r"SET\s+(?:GLOBAL\s+|SESSION\s+|LOCAL\s+)?[A-Za-z_][A-Za-z0-9_]*\s*(?:=|TO\b)|"
+    r"RESET\s+[A-Za-z_][A-Za-z0-9_]*|"
+    r"CALL\s+[A-Za-z_]|"
     r"VACUUM\b|"
     r"GRANT\b|"
     r"REVOKE\b|"
@@ -383,11 +461,9 @@ def strip_sql_literals_and_identifiers(query: str) -> str:
     Replace single-quoted string literals, dollar-quoted strings, and double-quoted identifiers with empty placeholders.
 
     Args:
-    ----
         query: SQL query string.
 
     Returns:
-    -------
         str: SQL query with quoted literals and identifiers neutralized.
 
     """
@@ -407,18 +483,17 @@ def is_read_only_sql_query(query: str) -> bool:
     and embedded write/DDL clauses (e.g., ``WITH d AS (DELETE FROM t) SELECT * FROM d``) are rejected.
 
     Args:
-    ----
         query: SQL query string to inspect.
 
     Returns:
-    -------
         bool: True if the statement is a single read-only SQL query, False otherwise.
 
     """
     unwrapped = strip_sql_comments_and_parens(query)
-    if not unwrapped:
+    core = unwrapped.lstrip("(").strip()
+    if not core:
         return False
-    first_word = unwrapped.split()[0].lower().rstrip(";").strip()
+    first_word = core.split()[0].lower().rstrip(";").strip()
     if first_word not in READ_ONLY_SQL_PREFIXES:
         return False
 
@@ -426,6 +501,14 @@ def is_read_only_sql_query(query: str) -> bool:
     segments = [seg.strip() for seg in without_literals.split(";") if seg.strip()]
     if len(segments) > 1:
         return False
+
+    if first_word == "pragma":
+        pragma_match = _PRAGMA_NAME_RE.match(without_literals.strip())
+        if (
+            pragma_match is None
+            or pragma_match.group(1).lower() not in _SAFE_READ_ONLY_PRAGMAS
+        ):
+            return False
 
     return _FORBIDDEN_WRITE_STATEMENT_RE.search(without_literals) is None
 
@@ -435,15 +518,12 @@ def validate_read_only_sql(query: str) -> str:
     Validate that a SQL query is non-empty, contains a single statement, and is read-only.
 
     Args:
-    ----
         query: SQL query string to validate.
 
     Returns:
-    -------
         str: Stripped, validated SQL query string.
 
     Raises:
-    ------
         EmptyQueryError: If the query is empty or contains only comments/whitespace.
         MultipleStatementsError: If the query contains multiple semicolon-separated statements.
         ReadOnlyViolationError: If the query is not a read-only SQL statement.
@@ -484,7 +564,7 @@ _SHOW_NL_INDICATORS = {
     "datasets",
 }
 
-_VALID_SHOW_SECOND_TOKENS = {
+VALID_SHOW_SECOND_TOKENS = {
     "tables",
     "databases",
     "schemas",
@@ -536,13 +616,11 @@ def _is_disqualified_describe_or_summarize(
     Determine whether a `DESCRIBE` or `SUMMARIZE` candidate is natural-language prose.
 
     Args:
-    ----
         first_word: Lowercased first token (`"describe"` or `"summarize"`).
         second_word: Lowercased second token without trailing semicolons.
         tokens: Whitespace-split tokens of the input query.
 
     Returns:
-    -------
         bool: True if the input is natural language rather than a valid `DESCRIBE` or `SUMMARIZE` query.
 
     """
@@ -562,13 +640,11 @@ def _is_disqualified_from_clause(
     Determine whether a `FROM` candidate is natural-language prose rather than DuckDB `FROM` shorthand.
 
     Args:
-    ----
         unwrapped: Comment-stripped input query string.
         second_word: Lowercased second token without trailing semicolons.
         tokens: Whitespace-split tokens of `unwrapped`.
 
     Returns:
-    -------
         bool: True if the input is natural language rather than a valid DuckDB `FROM` query.
 
     """
@@ -584,7 +660,7 @@ def _is_disqualified_from_clause(
     return False
 
 
-def _has_natural_language_sql_disqualifier(
+def has_natural_language_sql_disqualifier(
     unwrapped: str,
     first_word: str,
     tokens: Sequence[str],
@@ -593,13 +669,11 @@ def _has_natural_language_sql_disqualifier(
     Check if a string starting with a SQL keyword exhibits natural-language English prose patterns.
 
     Args:
-    ----
         unwrapped: Comment-stripped input query string.
         first_word: Lowercased first token without trailing semicolons.
         tokens: Whitespace-split tokens of `unwrapped`.
 
     Returns:
-    -------
         bool: True if the input matches a natural-language disqualifier and cannot be literal SQL.
 
     """
@@ -607,7 +681,7 @@ def _has_natural_language_sql_disqualifier(
     third_word = tokens[2].lower().rstrip(";").strip() if len(tokens) > 2 else ""
 
     if first_word == "show":
-        if not second_word or second_word not in _VALID_SHOW_SECOND_TOKENS:
+        if not second_word or second_word not in VALID_SHOW_SECOND_TOKENS:
             return True
         return second_word == "all" and third_word != "tables"
 
@@ -641,33 +715,29 @@ class SqlSyntaxValidatorProtocol(Protocol):
         Parse a SQL string into DuckDB statement AST objects.
 
         Args:
-        ----
             query: Raw SQL query string.
 
         Returns:
-        -------
             Sequence[duckdb.Statement]: Parsed statement list.
 
         """
         ...
 
 
-def _check_sql_syntax_with_conn(
+def check_sql_syntax_with_conn(
     unwrapped: str,
     first_word: str,
-    conn: Optional[SqlSyntaxValidatorProtocol] = None,
+    conn: SqlSyntaxValidatorProtocol | None = None,
 ) -> bool:
     """
     Validate SQL syntax using either the provided `conn` or a cached `:memory:` DuckDB parser connection.
 
     Args:
-    ----
         unwrapped: Comment-stripped SQL string.
         first_word: Lowercased first token of `unwrapped`.
         conn: Optional explicit DuckDB connection implementing `SqlSyntaxValidatorProtocol`.
 
     Returns:
-    -------
         bool: True if DuckDB parses the statement without a `ParserException`.
 
     """
@@ -676,7 +746,7 @@ def _check_sql_syntax_with_conn(
         if isinstance(conn, duckdb.DuckDBPyConnection):
             return len(conn.extract_statements(unwrapped)) > 0
 
-        if conn is not None and type(conn).__module__ != "unittest.mock":
+        if isinstance(conn, SqlSyntaxValidatorProtocol):
             return len(conn.extract_statements(unwrapped)) > 0
 
         with _PARSER_LOCK:
@@ -688,33 +758,96 @@ def _check_sql_syntax_with_conn(
         return True
 
 
-def is_sql_query(query: str, conn: Optional[SqlSyntaxValidatorProtocol] = None) -> bool:
+SqlInputKind = Literal[
+    "natural_language",
+    "valid_read_only_sql",
+    "malformed_read_only_sql",
+    "non_read_only_sql",
+]
+
+
+def classify_sql_input(
+    query: str,
+    conn: SqlSyntaxValidatorProtocol | None = None,
+) -> SqlInputKind:
     """
-    Determine whether a user input string is a SQL query rather than natural language.
+    Classify raw user input into natural language vs. AST-verified read-only/malformed/mutating SQL.
+
+    Consolidates lexical comment/paren normalization, English prose disqualifiers,
+    read-only policy guards, and DuckDB AST syntax parsing into one authoritative classifier.
 
     Args:
-    ----
+        query: Raw input string entered by the user.
+        conn: Optional DuckDB connection or `SqlSyntaxValidatorProtocol` implementation.
+
+    Returns:
+        SqlInputKind: One of `'natural_language'`, `'valid_read_only_sql'`,
+            `'malformed_read_only_sql'`, or `'non_read_only_sql'`.
+
+    """
+    unwrapped = strip_sql_comments_and_parens(query)
+    core = unwrapped.lstrip("(").strip()
+    if not core:
+        return "natural_language"
+
+    tokens = core.split()
+    first_word = tokens[0].lower().rstrip(";").strip()
+    if first_word not in ALL_SQL_KEYWORDS:
+        return "natural_language"
+
+    if has_natural_language_sql_disqualifier(core, first_word, tokens):
+        return "natural_language"
+
+    is_ast_valid = check_sql_syntax_with_conn(unwrapped, first_word, conn)
+    if first_word in READ_ONLY_SQL_PREFIXES and is_read_only_sql_query(unwrapped):
+        return "valid_read_only_sql" if is_ast_valid else "malformed_read_only_sql"
+
+    if is_ast_valid or first_word in READ_ONLY_SQL_PREFIXES:
+        return "non_read_only_sql"
+
+    return "natural_language"
+
+
+def is_valid_read_only_sql(
+    query: str,
+    conn: SqlSyntaxValidatorProtocol | None = None,
+) -> bool:
+    """
+    Return True when `query` is an AST-valid, single-statement read-only SQL query.
+
+    Args:
+        query: Raw user query string.
+        conn: Optional DuckDB syntax validator connection.
+
+    Returns:
+        bool: True iff `classify_sql_input(query, conn)` equals `'valid_read_only_sql'`.
+
+    """
+    return classify_sql_input(query, conn=conn) == "valid_read_only_sql"
+
+
+def is_sql_query(query: str, conn: SqlSyntaxValidatorProtocol | None = None) -> bool:
+    """
+    Determine whether a user input string is an AST-valid SQL statement rather than natural language.
+
+    Args:
         query: The raw query string entered by the user.
         conn: Optional DuckDB connection to assist in query syntax verification.
 
     Returns:
-    -------
-        bool: True if the query appears to be a SQL statement, False if natural language.
+        bool: True if the query is an AST-valid SQL statement, False otherwise.
 
     """
-    unwrapped = strip_sql_comments_and_parens(query)
-    if not unwrapped:
-        return False
-
-    words = unwrapped.lower().split()
-    first_word = words[0].rstrip(";").strip()
-    if first_word not in ALL_SQL_KEYWORDS:
-        return False
-
-    if _has_natural_language_sql_disqualifier(unwrapped, first_word, words):
-        return False
-
-    return _check_sql_syntax_with_conn(unwrapped, first_word, conn)
+    kind = classify_sql_input(query, conn=conn)
+    if kind == "valid_read_only_sql":
+        return True
+    if kind == "non_read_only_sql":
+        unwrapped = strip_sql_comments_and_parens(query)
+        first_word = (
+            unwrapped.lstrip("(").strip().split()[0].lower().rstrip(";").strip()
+        )
+        return check_sql_syntax_with_conn(unwrapped, first_word, conn)
+    return False
 
 
 def _clean_extracted_sql_candidate(raw_sql: str) -> str:
@@ -722,11 +855,9 @@ def _clean_extracted_sql_candidate(raw_sql: str) -> str:
     Strip leading markdown language markers (`sql`, `duckdb`, `sql ...`, `...`) and DDL preambles when followed by SELECT/WITH.
 
     Args:
-    ----
         raw_sql: Candidate SQL block text.
 
     Returns:
-    -------
         str: Cleaned SQL query string.
 
     """
@@ -737,7 +868,7 @@ def _clean_extracted_sql_candidate(raw_sql: str) -> str:
             for line in cleaned.splitlines()
             if not line.strip().startswith("-- Synthesized schema-guided fallback SQL")
         ]
-        cleaned = chr(10).join(non_comment_lines).strip()
+        cleaned = "\n".join(non_comment_lines).strip()
     cleaned = re.sub(
         r"^(?:(?:sql|duckdb)(?:[ \t]+\.{2,})?|\.{2,})(?:[ \t]*[\r\n]+|[ \t]+)",
         "",
@@ -759,11 +890,9 @@ def extract_sql_from_response(full_response: SqlValue) -> str:
     Extract a SQL query from markdown code blocks or plain text in an LLM completion.
 
     Args:
-    ----
         full_response: Raw text response or scalar value from the LLM.
 
     Returns:
-    -------
         str: Extracted SQL query string.
 
     """
@@ -814,11 +943,9 @@ def sanitize_sql_value(val: SqlRawInputValue) -> SqlValue:
     Sanitize an arbitrary database column value into a JSON-compliant SqlValue.
 
     Args:
-    ----
         val: The raw value returned from the database driver.
 
     Returns:
-    -------
         SqlValue: A JSON-compliant and Pydantic-compatible value.
 
     """
@@ -839,19 +966,21 @@ def sanitize_sql_value(val: SqlRawInputValue) -> SqlValue:
     return str(val)
 
 
+_SAFE_SIGNED_DECIMAL_RE = re.compile(r"^[+-](?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+
+
 def sanitize_spreadsheet_cell(val: SqlRawInputValue) -> SqlValue:
     """
     Sanitize a cell value against spreadsheet formula injection (CSV/XLSX).
 
-    Leading characters '=', '+', '-', '@', tab, and carriage-return on non-numeric strings
-    are prefixed with a single quote so spreadsheet engines treat them as text.
+    Leading characters '=', '+', '-', '@', tab, carriage-return, and line-feed
+    (even after leading spaces) on non-numeric strings are prefixed with a single
+    quote so spreadsheet engines treat them as text.
 
     Args:
-    ----
         val: Raw database value.
 
     Returns:
-    -------
         SqlValue: Safe cell value for spreadsheet export.
 
     """
@@ -862,25 +991,17 @@ def sanitize_spreadsheet_cell(val: SqlRawInputValue) -> SqlValue:
     s_val = str(val)
     if not s_val:
         return s_val
-    first_char = s_val[0]
-    stripped_leading = s_val.lstrip(" ")
+    first_code = ord(s_val[0])
+    stripped_leading = s_val.lstrip(" \u00a0")
     trigger_char = stripped_leading[0] if stripped_leading else ""
-    if first_char in (chr(9), chr(13), chr(10)) or trigger_char in (
-        "=",
-        "+",
-        "-",
-        "@",
-        chr(9),
-        chr(13),
-        chr(10),
-    ):
+    trigger_code = ord(trigger_char) if trigger_char else 32
+    if first_code < 32 or trigger_code < 32 or trigger_char in ("=", "+", "-", "@"):
         is_numeric = False
-        if trigger_char in ("+", "-"):
-            try:
-                float(stripped_leading)
-                is_numeric = True
-            except ValueError:
-                is_numeric = False
+        if trigger_char in ("+", "-") and _SAFE_SIGNED_DECIMAL_RE.match(
+            stripped_leading
+        ):
+            parsed_num = float(stripped_leading)
+            is_numeric = math.isfinite(parsed_num)
         if not is_numeric:
             s_val = f"'{s_val}"
     return s_val
@@ -895,12 +1016,10 @@ def is_internal_table(table_name: str, exclude_training_tables: bool = True) -> 
     Check if a DuckDB table is an internal manifest, session, or training artifact table.
 
     Args:
-    ----
         table_name: Name of the table to inspect.
         exclude_training_tables: Whether to also exclude chat_sessions and sft/dpo/pretrain tables.
 
     Returns:
-    -------
         bool: True if the table is an internal system table, False otherwise.
 
     """
@@ -915,7 +1034,7 @@ def is_internal_table(table_name: str, exclude_training_tables: bool = True) -> 
 
 
 def extract_table_columns_map(
-    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
+    conn: duckdb.DuckDBPyConnection | ReadOnlyDuckDbCursorProxy,
     exclude_internal: bool = False,
     exclude_training_tables: bool = False,
 ) -> dict[str, list[tuple[str, str]]]:
@@ -923,20 +1042,18 @@ def extract_table_columns_map(
     Extract ordered `(column_name, column_type)` tuples per table from an active DuckDB connection or cursor.
 
     Args:
-    ----
         conn: Active DuckDB connection or read-only cursor proxy.
         exclude_internal: Whether to exclude `_t1d_` internal tables.
         exclude_training_tables: Whether to also exclude `chat_sessions` and training tables.
 
     Returns:
-    -------
         dict[str, list[tuple[str, str]]]: Mapping from table name to list of `(column_name, column_type)` pairs.
 
     """
     cursor_proxy = (
         conn
         if isinstance(conn, ReadOnlyDuckDbCursorProxy)
-        else _create_read_only_cursor_proxy(conn)
+        else create_read_only_cursor_proxy(conn)
     )
     should_close_proxy = not isinstance(conn, ReadOnlyDuckDbCursorProxy)
     try:
@@ -958,19 +1075,17 @@ def extract_table_columns_map(
 
 
 def extract_table_schemas(
-    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
+    conn: duckdb.DuckDBPyConnection | ReadOnlyDuckDbCursorProxy,
     exclude_training_tables: bool = True,
 ) -> dict[str, str]:
     """
     Extract per-table textual schema descriptions from an active DuckDB connection or cursor.
 
     Args:
-    ----
         conn: Active DuckDB connection or read-only cursor proxy.
         exclude_training_tables: Whether to exclude internal chat_sessions and training tables.
 
     Returns:
-    -------
         dict[str, str]: Mapping from table name to formatted column listing.
 
     """
@@ -980,11 +1095,10 @@ def extract_table_schemas(
         exclude_internal=True,
         exclude_training_tables=exclude_training_tables,
     )
-    nl = chr(10)
     for table_name, columns in cols_map.items():
-        schema_desc = f"Table: {table_name}{nl}Columns:{nl}"
+        schema_desc = f"Table: {table_name}\nColumns:\n"
         for col_name, col_type in columns:
-            schema_desc += f"- {col_name} ({col_type}){nl}"
+            schema_desc += f"- {col_name} ({col_type})\n"
         schema[table_name] = schema_desc
     return schema
 
@@ -1004,7 +1118,6 @@ def _append_parsed_column_specs(
     Parse comma-separated column descriptors (`col (TYPE)` or `col`) and append unique `(name, type)` pairs.
 
     Args:
-    ----
         cols_list: Target list of `(column_name, column_type)` pairs to mutate.
         cols_str: Raw comma-separated column specifications.
 
@@ -1030,11 +1143,9 @@ def _extract_ddl_column_pairs(
     Extract table-to-`(column_name, column_type)` pairs from `CREATE TABLE` DDL statements.
 
     Args:
-    ----
         schema_text: Raw SQL DDL string.
 
     Returns:
-    -------
         dict[str, list[tuple[str, str]]]: Mapping of table names to `(column_name, column_type)` lists.
 
     """
@@ -1059,17 +1170,15 @@ def _extract_ddl_column_pairs(
 def _parse_table_header_line(
     after_table: str,
     schema_pairs: dict[str, list[tuple[str, str]]],
-) -> Optional[str]:
+) -> str | None:
     """
     Parse a `Table: ...` line and update `schema_pairs`, returning the active multi-line table name if any.
 
     Args:
-    ----
         after_table: Substring following `Table:`.
         schema_pairs: Mutable mapping of table names to `(column_name, column_type)` lists.
 
     Returns:
-    -------
         Optional[str]: Active multi-line table name, or `None` for inline `Table: t | Columns: ...` lines.
 
     """
@@ -1096,16 +1205,14 @@ def parse_schema_text_to_column_pairs(
     Parse a formatted `Table: ... / Columns: ...` or `CREATE TABLE` DDL string into `(column_name, column_type)` pairs.
 
     Args:
-    ----
         schema_text: Formatted database schema or SQL DDL string.
 
     Returns:
-    -------
         dict[str, list[tuple[str, str]]]: Mapping of table names to `(column_name, column_type)` lists.
 
     """
     schema_pairs: dict[str, list[tuple[str, str]]] = {}
-    current_table: Optional[str] = None
+    current_table: str | None = None
     for raw_line in schema_text.splitlines():
         line = raw_line.strip()
         if line.startswith("--"):
@@ -1131,11 +1238,9 @@ def parse_schema_text_to_map(schema_text: str) -> dict[str, list[str]]:
     Parse a formatted schema string or SQL DDL into a mapping of table names to column names.
 
     Args:
-    ----
         schema_text: Formatted database schema or SQL DDL string.
 
     Returns:
-    -------
         dict[str, list[str]]: Mapping of table names to ordered column name lists.
 
     """
@@ -1151,23 +1256,18 @@ __all__ = [
     "INTERNAL_TABLE_PREFIXES",
     "JAEB_ATTACH_CANDIDATES",
     "READ_ONLY_SQL_PREFIXES",
-    "_VALID_SHOW_SECOND_TOKENS",
+    "VALID_SHOW_SECOND_TOKENS",
     "PoolSqlRawInputValue",
     "PoolSqlValue",
     "ReadOnlyDuckDBPool",
     "ReadOnlyDuckDbCursorProxy",
+    "SqlInputKind",
     "SqlRawInputValue",
+    "SqlSyntaxValidatorProtocol",
     "SqlValue",
-    "_append_parsed_column_specs",
-    "_attach_jaeb_read_only_if_present",
-    "_check_sql_syntax_with_conn",
-    "_create_read_only_cursor_proxy",
-    "_get_cached_parser_conn",
-    "_has_natural_language_sql_disqualifier",
-    "_is_disqualified_describe_or_summarize",
-    "_is_disqualified_from_clause",
-    "_is_duckdb_lock_error",
-    "_resolve_jaeb_attach_path",
+    "check_sql_syntax_with_conn",
+    "classify_sql_input",
+    "close_cached_parser_conn",
     "close_read_only_duckdb_pool",
     "coerce_numeric_aggregates_in_sql",
     "connect_duckdb_read_only_cursor",
@@ -1181,9 +1281,11 @@ __all__ = [
     "extract_table_columns_map",
     "extract_table_schemas",
     "global_read_only_duckdb_pool",
+    "has_natural_language_sql_disqualifier",
     "is_internal_table",
     "is_read_only_sql_query",
     "is_sql_query",
+    "is_valid_read_only_sql",
     "normalize_sql",
     "open_sandboxed_duckdb",
     "parse_schema_text_to_column_pairs",

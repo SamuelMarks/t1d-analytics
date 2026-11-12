@@ -6,11 +6,20 @@
  */
 
 import i18next from "i18next";
-import { fetchWithBackendError, parseResponseJson } from "../api-client";
+import {
+  fetchWithBackendError,
+  parseResponseJson,
+  withBearerAuth,
+} from "../api-client";
+import { type AppEventBus } from "../event-bus";
 import { formatNumber } from "../formatters";
 import { createSchemaDiagnosticCard, createSvgIcon } from "../message-renderer";
 import { requireElementById } from "../modal-utils";
-import { DEFAULT_DB_NAME, type ChatState } from "../state";
+import {
+  DEFAULT_DB_NAME,
+  type ChatState,
+  type SchemaTableMetadata,
+} from "../state";
 import {
   isDbStatusCode,
   type SystemStatusDbPayload,
@@ -59,44 +68,29 @@ export interface DatabasesListApiResponse {
 }
 
 /**
- * Host contract required by `SchemaExplorerController`.
+ * Narrow injected dependencies for `SchemaExplorerController`.
  */
-export interface SchemaExplorerHost {
+export interface SchemaExplorerDeps {
   /** Global application state store. */
   state: ChatState;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
   /** Chat composer textarea element for click-to-insert column/table identifiers. */
   chatInput: HTMLTextAreaElement;
-  /** Syntax highlight synchronization callback. */
-  syncHighlight(): void;
-  /** Checks system health and updates UI indicators accordingly. */
-  checkSystemStatus(isManualRetry?: boolean, dbPath?: string): Promise<void>;
-  /** Opens the Table Preview modal for the specified table name. */
-  openTablePreview(tableName: string): Promise<void>;
-  /** Shows the system status alert banner with the specified severity and messaging. */
-  showStatusBanner(
-    severity: "danger" | "warning" | "info",
-    title: string,
-    desc: string,
-    icon?: string,
-    showRetry?: boolean,
-  ): void;
-  /** Hides the system status alert banner. */
-  hideStatusBanner(): void;
-  /** Updates the status chip in the top header. */
-  updateStatusChip(
-    level: "healthy" | "degraded" | "error" | "offline",
-    text: string,
-  ): void;
-  /** Announces a message to screen readers. */
-  announce(message: string, isAssertive?: boolean): void;
 }
 
 /**
  * Composable sub-controller for the Schema Explorer sidebar and database selector.
  */
 export class SchemaExplorerController {
-  /** Host UI reference. */
-  private readonly ui: SchemaExplorerHost;
+  /** Shared application state store. */
+  private readonly state: ChatState;
+  /** Domain event bus. */
+  private readonly events: AppEventBus;
+  /** Chat composer textarea element. */
+  private readonly chatInput: HTMLTextAreaElement;
+  /** Persistent AbortController for DOM and bus listeners. */
+  private readonly listenerController = new AbortController();
   /** Dropdown select element for choosing the active DuckDB database file. */
   public readonly dbSelect: HTMLSelectElement;
   /** Schema explorer sidebar container element. */
@@ -108,10 +102,12 @@ export class SchemaExplorerController {
 
   /**
    * Creates a new `SchemaExplorerController`.
-   * @param {SchemaExplorerHost} ui - Host UI instance.
+   * @param {SchemaExplorerDeps} deps - Narrow state, event bus, and composer dependencies.
    */
-  constructor(ui: SchemaExplorerHost) {
-    this.ui = ui;
+  constructor(deps: SchemaExplorerDeps) {
+    this.state = deps.state;
+    this.events = deps.events;
+    this.chatInput = deps.chatInput;
     this.dbSelect = requireElementById<HTMLSelectElement>("db-select");
     this.schemaExplorer = requireElementById<HTMLElement>("schema-explorer");
     this.toggleSchemaBtn =
@@ -122,20 +118,43 @@ export class SchemaExplorerController {
   }
 
   /**
-   * Binds DOM event listeners for database selection and schema explorer toggling.
+   * Emits a screen-reader announcement via the domain event bus.
+   * @param {string} message - Message string to announce.
+   * @param {boolean} [isAssertive=false] - Whether to use assertive politeness.
+   * @returns {void}
+   */
+  private announce(message: string, isAssertive: boolean = false): void {
+    this.events.emit("announce", { message, isAssertive });
+  }
+
+  /**
+   * Binds DOM event listeners for database selection, schema toggling, and bus reload events.
    * @returns {void}
    */
   private bindEvents(): void {
-    this.dbSelect.addEventListener("change", () => {
-      const selectedDb = this.dbSelect.value;
-      if (selectedDb) {
-        this.ui.state.setCurrentDb(selectedDb);
-        void this.loadSchema(selectedDb);
-        void this.ui.checkSystemStatus(true, selectedDb);
-        this.ui.announce(i18next.t("ui.databaseSwitched", { db: selectedDb }));
-      }
-    });
+    const signal = this.listenerController.signal;
 
+    this.dbSelect.addEventListener(
+      "change",
+      () => {
+        const selectedDb = this.dbSelect.value;
+        if (selectedDb) {
+          this.state.setCurrentDb(selectedDb);
+          void this.loadSchema(selectedDb);
+          this.events.emit("systemStatusCheckRequested", {
+            isManualRetry: true,
+            dbPath: selectedDb,
+          });
+          this.announce(i18next.t("ui.databaseSwitched", { db: selectedDb }));
+        }
+      },
+      { signal },
+    );
+
+    /**
+     * Toggles the collapsed state of the schema explorer sidebar panel.
+     * @returns {void}
+     */
     const toggleFn = (): void => {
       const isCollapsed = this.schemaExplorer.classList.toggle("collapsed");
       this.toggleSchemaBtn.setAttribute(
@@ -147,10 +166,18 @@ export class SchemaExplorerController {
     this.toggleSchemaBtn.setAttribute("aria-expanded", "true");
     const schemaHeader = this.schemaExplorer.querySelector(".schema-header");
     if (schemaHeader) {
-      schemaHeader.addEventListener("click", toggleFn);
+      schemaHeader.addEventListener("click", toggleFn, { signal });
     } else {
-      this.toggleSchemaBtn.addEventListener("click", toggleFn);
+      this.toggleSchemaBtn.addEventListener("click", toggleFn, { signal });
     }
+
+    this.events.on(
+      "schemaReloadRequested",
+      ({ dbPath }) => {
+        void this.loadSchema(dbPath);
+      },
+      signal,
+    );
   }
 
   /**
@@ -163,12 +190,14 @@ export class SchemaExplorerController {
     cmd: string,
     btn: HTMLButtonElement,
   ): Promise<void> {
-    if (!navigator?.clipboard) return;
+    if (!Boolean(navigator.clipboard)) {
+      return;
+    }
     try {
       await navigator.clipboard.writeText(cmd);
       const copiedMsg = i18next.t("status.commandCopied");
       btn.textContent = copiedMsg;
-      this.ui.announce(copiedMsg);
+      this.announce(copiedMsg);
       setTimeout(() => {
         btn.textContent = i18next.t("status.copyCommand");
       }, 2000);
@@ -187,15 +216,17 @@ export class SchemaExplorerController {
       .querySelectorAll<HTMLButtonElement>(".copy-cmd-btn[data-cmd]")
       .forEach((btn) => {
         btn.addEventListener("click", () => {
-          const cmd = btn.getAttribute("data-cmd")!;
-          void this.copyCommandToClipboard(cmd, btn);
+          void this.copyCommandToClipboard(
+            String(btn.getAttribute("data-cmd")),
+            btn,
+          );
         });
       });
 
     container.querySelectorAll(".reload-schema-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
         void this.loadSchema();
-        void this.ui.checkSystemStatus(true);
+        this.events.emit("systemStatusCheckRequested", { isManualRetry: true });
       });
     });
   }
@@ -206,11 +237,14 @@ export class SchemaExplorerController {
    */
   public async fetchDatabases(): Promise<void> {
     try {
-      const resp = await fetch("/api/databases");
+      const authInit = withBearerAuth();
+      const resp = authInit
+        ? await fetch("/api/databases", authInit)
+        : await fetch("/api/databases");
       if (!resp.ok) return;
       const data = await parseResponseJson<DatabasesListApiResponse>(resp);
-      const dbs = data.databases || [];
-      this.ui.state.setAvailableDbs(dbs, data.current_db);
+      const dbs = data.databases ?? [];
+      this.state.setAvailableDbs(dbs, data.current_db);
       this.renderDatabaseDropdown();
     } catch {
       // Ignore network failures fetching database list
@@ -223,14 +257,14 @@ export class SchemaExplorerController {
    */
   public renderDatabaseDropdown(): void {
     this.dbSelect.replaceChildren();
-    if (this.ui.state.availableDbs.length === 0) {
+    if (this.state.availableDbs.length === 0) {
       const opt = document.createElement("option");
-      opt.value = this.ui.state.currentDb || DEFAULT_DB_NAME;
+      opt.value = this.state.currentDb || DEFAULT_DB_NAME;
       opt.textContent = opt.value;
       this.dbSelect.appendChild(opt);
       return;
     }
-    for (const db of this.ui.state.availableDbs) {
+    for (const db of this.state.availableDbs) {
       const opt = document.createElement("option");
       opt.value = db.name;
       const kbSize = formatNumber(Math.round(db.size_bytes / 1024));
@@ -240,8 +274,8 @@ export class SchemaExplorerController {
         defaultValue: `${db.name} (${kbSize} KB)`,
       });
       if (
-        db.name === this.ui.state.currentDb ||
-        db.path === this.ui.state.currentDb
+        db.name === this.state.currentDb ||
+        db.path === this.state.currentDb
       ) {
         opt.selected = true;
       }
@@ -256,7 +290,11 @@ export class SchemaExplorerController {
    */
   private applySchemaDbStatus(dbStatus: SystemStatusDbPayload): void {
     const isHealthy = dbStatus.status_code === "healthy";
-    this.ui.state.setSystemStatus({
+    const recPath = String(
+      dbStatus.recommended_jaeb_db_path ||
+        this.state.systemStatus.recommendedJaebDbPath,
+    );
+    this.state.setSystemStatus({
       backendOnline: true,
       status: isHealthy ? "healthy" : "degraded",
       dbConfigured: Boolean(dbStatus.exists),
@@ -268,44 +306,53 @@ export class SchemaExplorerController {
       dbMessage: dbStatus.message || null,
       tableCount: Number(dbStatus.table_count) || 0,
       hasInitialData: Boolean(dbStatus.has_initial_data),
-      recommendedJaebDbPath:
-        dbStatus.recommended_jaeb_db_path ||
-        this.ui.state.systemStatus.recommendedJaebDbPath,
+      recommendedJaebDbPath: recPath,
     });
 
     if (dbStatus.status_code === "missing_file") {
-      this.ui.showStatusBanner(
-        "warning",
-        i18next.t("status.dbMissingTitle"),
-        i18next.t("status.dbMissingDesc", { path: dbStatus.configured_path }),
-        "📁",
-        true,
-      );
-      this.ui.updateStatusChip("error", i18next.t("status.dbMissingTitle"));
+      this.events.emit("statusBannerShow", {
+        severity: "warning",
+        title: i18next.t("status.dbMissingTitle"),
+        desc: i18next.t("status.dbMissingDesc", {
+          path: dbStatus.configured_path,
+        }),
+        icon: "📁",
+        showRetry: true,
+      });
+      this.events.emit("statusChipUpdate", {
+        statusClass: "error",
+        text: i18next.t("status.dbMissingTitle"),
+      });
     } else if (dbStatus.status_code === "empty_db") {
-      this.ui.showStatusBanner(
-        "warning",
-        i18next.t("status.dbEmptyTitle"),
-        i18next.t("status.dbEmptyDesc"),
-        "🗄️",
-        true,
-      );
-      this.ui.updateStatusChip("degraded", i18next.t("status.dbEmptyTitle"));
+      this.events.emit("statusBannerShow", {
+        severity: "warning",
+        title: i18next.t("status.dbEmptyTitle"),
+        desc: i18next.t("status.dbEmptyDesc"),
+        icon: "🗄️",
+        showRetry: true,
+      });
+      this.events.emit("statusChipUpdate", {
+        statusClass: "degraded",
+        text: i18next.t("status.dbEmptyTitle"),
+      });
     } else if (dbStatus.status_code === "missing_initial_data") {
-      this.ui.showStatusBanner(
-        "warning",
-        i18next.t("status.dbMissingDataTitle"),
-        i18next.t("status.dbMissingDataDesc"),
-        "📊",
-        true,
-      );
-      this.ui.updateStatusChip(
-        "degraded",
-        i18next.t("status.dbMissingDataTitle"),
-      );
+      this.events.emit("statusBannerShow", {
+        severity: "warning",
+        title: i18next.t("status.dbMissingDataTitle"),
+        desc: i18next.t("status.dbMissingDataDesc"),
+        icon: "📊",
+        showRetry: true,
+      });
+      this.events.emit("statusChipUpdate", {
+        statusClass: "degraded",
+        text: i18next.t("status.dbMissingDataTitle"),
+      });
     } else {
-      this.ui.hideStatusBanner();
-      this.ui.updateStatusChip("healthy", i18next.t("status.systemHealthy"));
+      this.events.emit("statusBannerHide", undefined);
+      this.events.emit("statusChipUpdate", {
+        statusClass: "healthy",
+        text: i18next.t("status.systemHealthy"),
+      });
     }
   }
 
@@ -325,7 +372,7 @@ export class SchemaExplorerController {
           description: i18next.t("status.dbMissingDesc", {
             path: dbStatus.configured_path,
           }),
-          command: `t1d-analytics load --db ${dbStatus.configured_path}`,
+          command: `t1d-analytics load --db ${dbStatus.configured_path ?? ""}`,
           showReload: true,
           isAlert: true,
         }),
@@ -422,7 +469,7 @@ export class SchemaExplorerController {
 
     viewBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      void this.ui.openTablePreview(table.name);
+      this.events.emit("openTablePreview", { tableName: table.name });
     });
 
     const columnsList = document.createElement("ul");
@@ -469,7 +516,7 @@ export class SchemaExplorerController {
    * @returns {void}
    */
   public insertIdentifierIntoComposer(identifier: string): void {
-    const input = this.ui.chatInput;
+    const input = this.chatInput;
     const start = input.selectionStart;
     const end = input.selectionEnd;
     const before = input.value.slice(0, start);
@@ -481,7 +528,7 @@ export class SchemaExplorerController {
     const newCursor = before.length + inserted.length;
     input.focus();
     input.setSelectionRange(newCursor, newCursor);
-    this.ui.syncHighlight();
+    this.events.emit("composerSyncRequested", {});
   }
 
   /**
@@ -491,7 +538,7 @@ export class SchemaExplorerController {
    */
   public async loadSchema(dbPath?: string): Promise<void> {
     try {
-      const targetDb = dbPath || this.ui.state.currentDb;
+      const targetDb = dbPath || this.state.currentDb;
       const url =
         targetDb !== DEFAULT_DB_NAME
           ? `/api/schema?db_path=${encodeURIComponent(targetDb)}`
@@ -506,9 +553,19 @@ export class SchemaExplorerController {
       }
 
       if (!data.tables || data.tables.length === 0) {
+        this.state.setSchemaTables([]);
         this.renderEmptyTablesState(data.database);
         return;
       }
+
+      const normalizedTables: SchemaTableMetadata[] = data.tables.map((t) => ({
+        name: t.name,
+        columns: t.columns.map((c) => ({
+          name: c.name,
+          type: c.type,
+        })),
+      }));
+      this.state.setSchemaTables(normalizedTables);
 
       data.tables.forEach((table) => {
         this.schemaContent.appendChild(this.buildTableElement(table));
@@ -516,7 +573,7 @@ export class SchemaExplorerController {
     } catch (error) {
       console.error("Failed to load schema:", error);
       const errMsg = i18next.t("ui.failedSchema");
-      this.ui.announce(errMsg, true);
+      this.announce(errMsg, true);
       const backendUrl = window.location.origin;
       this.schemaContent.replaceChildren(
         createSchemaDiagnosticCard({
@@ -528,18 +585,29 @@ export class SchemaExplorerController {
         }),
       );
       this.bindSchemaDiagnosticButtons(this.schemaContent);
-      this.ui.state.setSystemStatus({
+      this.state.setSystemStatus({
         backendOnline: false,
         status: "offline",
       });
-      this.ui.showStatusBanner(
-        "danger",
-        i18next.t("status.offlineTitle"),
-        i18next.t("status.offlineDesc", { url: backendUrl }),
-        "⚠️",
-        true,
-      );
-      this.ui.updateStatusChip("offline", i18next.t("status.systemOffline"));
+      this.events.emit("statusBannerShow", {
+        severity: "danger",
+        title: i18next.t("status.offlineTitle"),
+        desc: i18next.t("status.offlineDesc", { url: backendUrl }),
+        icon: "⚠️",
+        showRetry: true,
+      });
+      this.events.emit("statusChipUpdate", {
+        statusClass: "offline",
+        text: i18next.t("status.systemOffline"),
+      });
     }
+  }
+
+  /**
+   * Disposes registered DOM and bus listeners.
+   * @returns {void}
+   */
+  public dispose(): void {
+    this.listenerController.abort();
   }
 }

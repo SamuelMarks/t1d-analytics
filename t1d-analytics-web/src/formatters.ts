@@ -103,17 +103,18 @@ export type ClassifiedSqlResult =
 export function classifySqlResult(
   rows: ReadonlyArray<Record<string, SqlCellValue>> | undefined,
 ): ClassifiedSqlResult {
-  if (!rows || rows.length === 0) {
+  const firstRow = rows?.[0];
+  if (!rows || !firstRow) {
     return { kind: "empty" };
   }
-  const keys = Object.keys(rows[0]);
-  if (rows.length === 1 && keys.length === 1) {
-    const column = keys[0];
-    const value = rows[0][column] ?? null;
+  const keys = Object.keys(firstRow);
+  const firstKey = keys[0];
+  if (rows.length === 1 && keys.length === 1 && firstKey !== undefined) {
+    const value = firstRow[firstKey] ?? null;
     const formattedValue = value === null ? "NULL" : String(value);
     return {
       kind: "scalar",
-      column,
+      column: firstKey,
       value,
       formattedValue,
     };

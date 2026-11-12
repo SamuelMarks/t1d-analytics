@@ -1,55 +1,28 @@
 /**
  * @file ui.ts
  * @module ui
- * Main Chat UI coordinator delegating modal, schema, status, sidebar, model selection,
- * and message rendering operations to composable sub-controllers.
+ * Main Chat UI coordinator wiring unidirectional domain events (`TypedEventTarget<AppEvents>`)
+ * and narrow injected dependencies across composable sub-controllers.
  */
 
 import "highlight.js/styles/github-dark.css";
-import { parseResponseJson } from "./api-client";
-import { buildCohortSql, normalizeJoinType } from "./cohort-sql";
+import { CohortBuilderModalController } from "./controllers/cohort-modal-controller";
+import { ModelSelectorController } from "./controllers/model-selector-controller";
+import { ProviderSettingsModalController } from "./controllers/provider-modal-controller";
+import { SchemaExplorerController } from "./controllers/schema-explorer-controller";
+import { SidebarController } from "./controllers/sidebar-controller";
+import { SystemStatusController } from "./controllers/system-status-controller";
+import { TablePreviewModalController } from "./controllers/table-modal-controller";
+import { TemplatePickerController } from "./controllers/template-picker-controller";
 import {
-  type CohortBuilderHost,
-  CohortBuilderModalController,
-} from "./controllers/cohort-modal-controller";
-import {
-  type ModelApiItem,
-  type ModelSelectorHost,
-  ModelSelectorController,
-} from "./controllers/model-selector-controller";
-import {
-  type ProviderSettingsHost,
-  ProviderSettingsModalController,
-} from "./controllers/provider-modal-controller";
-import {
-  type SchemaExplorerHost,
-  SchemaExplorerController,
-} from "./controllers/schema-explorer-controller";
-import {
-  type SidebarHost,
-  SidebarController,
-} from "./controllers/sidebar-controller";
-import {
-  type SystemStatusHost,
-  SystemStatusController,
-  isDbStatusCode,
-} from "./controllers/system-status-controller";
-import {
-  type TablePreviewHost,
-  TablePreviewModalController,
-} from "./controllers/table-modal-controller";
-import {
-  type TemplatePickerHost,
-  TemplatePickerController,
-} from "./controllers/template-picker-controller";
+  TypedEventTarget,
+  type AppEventBus,
+  type AppEvents,
+} from "./event-bus";
 import { getBuildTimestampUtc } from "./formatters";
 import i18next, { setLanguage } from "./i18n";
-import { type MessageRendererHost, MessageRenderer } from "./message-renderer";
-import {
-  optionalElementById,
-  requireElementById,
-  trapModalFocus,
-} from "./modal-utils";
+import { MessageRenderer } from "./message-renderer";
+import { optionalElementById, requireElementById } from "./modal-utils";
 import { isReadOnlySqlStatement, updateInputHighlight } from "./sql-highlight";
 import { dispatchChatRequest } from "./sse-stream";
 import {
@@ -60,47 +33,26 @@ import {
   safeStorageSet,
 } from "./state";
 
-export {
-  buildChatPath,
-  buildCohortSql,
-  CohortBuilderModalController,
-  extractChatIdFromLocation,
-  isDbStatusCode,
-  ModelSelectorController,
-  normalizeJoinType,
-  optionalElementById,
-  parseResponseJson,
-  ProviderSettingsModalController,
-  requireElementById,
-  SchemaExplorerController,
-  SidebarController,
-  SystemStatusController,
-  TablePreviewModalController,
-  TemplatePickerController,
-  trapModalFocus,
-};
-
-/** Active ChatUI instance so re-instantiation in tests automatically disposes previous listeners/timers. */
-let activeChatUIInstance: ChatUI | null = null;
+/**
+ * Optional startup configuration for `ChatUI`.
+ */
+export interface ChatUIOptions {
+  /** Whether to trigger an initial `/api/status` health check on construction. */
+  checkStatusOnInit?: boolean;
+  /** Optional background `/api/status` polling interval in milliseconds. */
+  statusPollIntervalMs?: number;
+}
 
 /**
- * Lean application coordinator wiring `ChatState` and composable UI sub-controllers.
+ * Lean application coordinator wiring `ChatState`, `TypedEventTarget<AppEvents>`,
+ * and composable UI sub-controllers without circular host interfaces or module singletons.
  */
-export class ChatUI
-  implements
-    CohortBuilderHost,
-    ModelSelectorHost,
-    ProviderSettingsHost,
-    SystemStatusHost,
-    TablePreviewHost,
-    TemplatePickerHost,
-    SchemaExplorerHost,
-    SidebarHost,
-    MessageRendererHost
-{
+export class ChatUI {
   /** Global application state store. */
   public state: ChatState;
-  /** AbortController for global document/window listeners bound by this ChatUI instance. */
+  /** Unidirectional domain event bus decoupling sub-controllers from `ChatUI`. */
+  public readonly events: AppEventBus;
+  /** AbortController for global document/window/bus listeners bound by this `ChatUI` instance. */
   private readonly globalListenerController: AbortController;
   /** Sub-controller for the Table Preview Modal. */
   public readonly tableModalController: TablePreviewModalController;
@@ -138,6 +90,12 @@ export class ChatUI
   public readonly autoExecuteToggleBtn: HTMLButtonElement | null;
   /** Active AbortController for an in-flight chat request, or null when idle. */
   private activeRequestController: AbortController | null = null;
+  /** Active history navigation index in `getTypedMessageHistory()`, or null when not browsing history. */
+  public inputHistoryIndex: number | null = null;
+  /** Saved draft text that was in `chatInput` prior to starting `ArrowUp` history navigation. */
+  public savedInputDraft: string | null = null;
+  /** Ordered list of user-submitted messages recorded during the current UI session. */
+  public sessionTypedHistory: string[] = [];
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   public readonly modelSelect: HTMLSelectElement;
   /** Button element to manually trigger server session synchronization. */
@@ -156,15 +114,13 @@ export class ChatUI
   public readonly themeToggleBtn: HTMLButtonElement;
 
   /**
-   * Initializes the ChatUI coordinator and its composable sub-controllers.
+   * Initializes the `ChatUI` coordinator and its composable sub-controllers.
    * @param {ChatState} state - The global state store.
+   * @param {ChatUIOptions} [options] - Optional startup health-check and polling settings.
    */
-  constructor(state: ChatState) {
-    if (activeChatUIInstance) {
-      activeChatUIInstance.dispose();
-    }
+  constructor(state: ChatState, options?: ChatUIOptions) {
     this.globalListenerController = new AbortController();
-    activeChatUIInstance = this;
+    this.events = new TypedEventTarget<AppEvents>();
     this.state = state;
 
     this.messagesContainer =
@@ -191,19 +147,68 @@ export class ChatUI
     this.themeToggleBtn =
       requireElementById<HTMLButtonElement>("theme-toggle-btn");
 
-    this.modelSelectorController = new ModelSelectorController(this);
+    this.wireEventBusSubscriptions();
+
+    this.modelSelectorController = new ModelSelectorController({
+      state: this.state,
+      events: this.events,
+    });
     this.modelSelect = this.modelSelectorController.modelSelect;
-    this.tableModalController = new TablePreviewModalController(this);
-    this.cohortModalController = new CohortBuilderModalController(this);
-    this.providerModalController = new ProviderSettingsModalController(this);
-    this.systemStatusController = new SystemStatusController(this);
-    this.schemaExplorerController = new SchemaExplorerController(this);
-    this.sidebarController = new SidebarController(
-      this,
-      this.globalListenerController.signal,
-    );
-    this.templatePickerController = new TemplatePickerController(this);
-    this.messageRenderer = new MessageRenderer(this);
+    this.tableModalController = new TablePreviewModalController({
+      state: this.state,
+      events: this.events,
+    });
+    this.cohortModalController = new CohortBuilderModalController({
+      state: this.state,
+      events: this.events,
+    });
+    this.providerModalController = new ProviderSettingsModalController({
+      state: this.state,
+      events: this.events,
+      modelSelect: this.modelSelect,
+      reloadModels: () => this.modelSelectorController.loadModels(),
+    });
+    this.systemStatusController = new SystemStatusController({
+      state: this.state,
+      events: this.events,
+      modelSelect: this.modelSelect,
+    });
+    this.schemaExplorerController = new SchemaExplorerController({
+      state: this.state,
+      events: this.events,
+      chatInput: this.chatInput,
+    });
+    this.sidebarController = new SidebarController({
+      state: this.state,
+      events: this.events,
+      chatInput: this.chatInput,
+      signal: this.globalListenerController.signal,
+    });
+    this.templatePickerController = new TemplatePickerController({
+      state: this.state,
+      events: this.events,
+      modelSelect: this.modelSelect,
+      onSendBenchmark: (question, model, goldSql) =>
+        this.handleSendMessage(question, model, goldSql),
+    });
+    this.messageRenderer = new MessageRenderer({
+      state: this.state,
+      events: this.events,
+      messagesContainer: this.messagesContainer,
+      chatInputWrapper: this.chatInputWrapper,
+      chatInput: this.chatInput,
+      sendBtn: this.sendBtn,
+      modelSelect: this.modelSelect,
+      onOpenProviderSettings: () => {
+        this.events.emit("openProviderSettings", undefined);
+      },
+      onOpenTableExplorer: (tableName) => {
+        void this.tableModalController.open(tableName);
+      },
+      onBindDiagnosticButtons: (container) => {
+        this.schemaExplorerController.bindSchemaDiagnosticButtons(container);
+      },
+    });
 
     const savedTheme = safeStorageGet("t1d_theme");
     if (savedTheme === "light") {
@@ -228,10 +233,23 @@ export class ChatUI
     }
 
     this.bindEvents();
+    if (options?.checkStatusOnInit === true) {
+      void this.systemStatusController.check();
+    }
+    if (
+      options?.statusPollIntervalMs !== undefined &&
+      options.statusPollIntervalMs > 0
+    ) {
+      this.systemStatusController.startPolling(options.statusPollIntervalMs);
+    }
     void this.modelSelectorController.loadModels();
     void this.schemaExplorerController.loadSchema();
     this.render();
 
+    /**
+     * Synchronizes active chat state with browser history `popstate` / `hashchange` events.
+     * @returns {void}
+     */
     const onRouteChange = (): void => {
       this.handleLocationChange();
     };
@@ -241,6 +259,72 @@ export class ChatUI
     window.addEventListener("hashchange", onRouteChange, {
       signal: this.globalListenerController.signal,
     });
+  }
+
+  /**
+   * Wires unidirectional domain event bus subscriptions owned by the coordinator.
+   * @returns {void}
+   */
+  private wireEventBusSubscriptions(): void {
+    const signal = this.globalListenerController.signal;
+
+    this.events.on(
+      "announce",
+      ({ message, isAssertive }) => {
+        this.announce(message, Boolean(isAssertive));
+      },
+      signal,
+    );
+
+    this.events.on(
+      "renderRequested",
+      () => {
+        this.render();
+      },
+      signal,
+    );
+
+    this.events.on(
+      "composerSyncRequested",
+      ({ focus }) => {
+        if (focus === true) {
+          this.chatInput.focus();
+        }
+        this.syncHighlight();
+      },
+      signal,
+    );
+
+    this.events.on(
+      "cancelActiveRequest",
+      () => {
+        this.cancelActiveRequest();
+      },
+      signal,
+    );
+
+    this.events.on(
+      "templateSelected",
+      (selection) => {
+        if (selection.targetModel !== "keep") {
+          this.modelSelect.value = selection.targetModel;
+          this.state.setActiveChatModel(selection.targetModel);
+        }
+        this.state.setActiveGoldSql(selection.goldSql);
+        if (selection.autoSend === true) {
+          void this.handleSendMessage(
+            selection.promptText,
+            this.modelSelect.value,
+            selection.goldSql ?? undefined,
+          );
+          return;
+        }
+        this.chatInput.value = selection.promptText;
+        this.chatInput.focus();
+        this.syncHighlight();
+      },
+      signal,
+    );
   }
 
   /**
@@ -276,20 +360,19 @@ export class ChatUI
   }
 
   /**
-   * Disposes global event listeners, modal listeners, and active status polling timers.
+   * Disposes global event listeners, modal listeners, sub-controllers, and active status polling timers.
    * @returns {void}
    */
   public dispose(): void {
     this.cancelActiveRequest();
-    this.systemStatusController.stopPolling();
     this.globalListenerController.abort();
-    this.tableModalController.abortListeners();
+    this.systemStatusController.dispose();
+    this.modelSelectorController.dispose();
+    this.schemaExplorerController.dispose();
+    this.tableModalController.dispose();
     this.cohortModalController.dispose();
     this.providerModalController.dispose();
     this.templatePickerController.dispose();
-    if (activeChatUIInstance === this) {
-      activeChatUIInstance = null;
-    }
   }
 
   /**
@@ -365,62 +448,129 @@ export class ChatUI
    * @returns {void}
    */
   private bindEvents(): void {
-    this.streamingToggleBtn.addEventListener("click", () => {
-      this.streamingEnabled = !this.streamingEnabled;
-      this.state.streamingMode = this.streamingEnabled;
-      this.state.saveToLocalStorage();
-      this.updateStreamingToggleUi();
-    });
+    const signal = this.globalListenerController.signal;
 
-    this.autoExecuteToggleBtn?.addEventListener("click", () => {
-      this.state.setAutoExecuteSql(!this.state.autoExecuteSql);
-      this.updateAutoExecuteToggleUi();
-    });
+    this.streamingToggleBtn.addEventListener(
+      "click",
+      () => {
+        this.streamingEnabled = !this.streamingEnabled;
+        this.state.streamingMode = this.streamingEnabled;
+        this.state.saveToLocalStorage();
+        this.updateStreamingToggleUi();
+      },
+      { signal },
+    );
 
-    this.stopBtn?.addEventListener("click", () => {
-      this.cancelActiveRequest();
-    });
+    this.autoExecuteToggleBtn?.addEventListener(
+      "click",
+      () => {
+        this.state.setAutoExecuteSql(!this.state.autoExecuteSql);
+        this.updateAutoExecuteToggleUi();
+      },
+      { signal },
+    );
 
-    this.chatForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      void this.handleSendMessage();
-    });
+    this.stopBtn?.addEventListener(
+      "click",
+      () => {
+        this.cancelActiveRequest();
+      },
+      { signal },
+    );
 
-    this.chatInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
+    this.chatForm.addEventListener(
+      "submit",
+      (e) => {
         e.preventDefault();
-        this.chatForm.dispatchEvent(
-          new Event("submit", { cancelable: true, bubbles: true }),
-        );
-      }
-    });
+        void this.handleSendMessage();
+      },
+      { signal },
+    );
 
-    this.chatInput.addEventListener("input", () => {
-      this.syncHighlight();
-    });
+    this.chatInput.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          this.chatForm.dispatchEvent(
+            new Event("submit", { cancelable: true, bubbles: true }),
+          );
+          return;
+        }
+        if (
+          e.key === "ArrowUp" &&
+          !e.shiftKey &&
+          !e.altKey &&
+          !e.ctrlKey &&
+          !e.metaKey
+        ) {
+          this.handleInputArrowUp(e);
+          return;
+        }
+        if (
+          e.key === "ArrowDown" &&
+          !e.shiftKey &&
+          !e.altKey &&
+          !e.ctrlKey &&
+          !e.metaKey
+        ) {
+          this.handleInputArrowDown(e);
+        }
+      },
+      { signal },
+    );
 
-    this.chatInput.addEventListener("scroll", () => {
-      this.chatInputHighlight.parentElement!.scrollTop =
-        this.chatInput.scrollTop;
-    });
+    this.chatInput.addEventListener(
+      "input",
+      () => {
+        this.inputHistoryIndex = null;
+        this.savedInputDraft = null;
+        if (this.state.activeGoldSql !== null) {
+          this.state.setActiveGoldSql(null);
+        }
+        this.syncHighlight();
+      },
+      { signal },
+    );
 
-    this.syncSessionsBtn.addEventListener("click", () => {
-      void this.syncAllChatsWithServer();
-    });
+    this.chatInput.addEventListener(
+      "scroll",
+      () => {
+        const highlightPre = this.chatInputHighlight.parentElement;
+        if (highlightPre) {
+          highlightPre.scrollTop = this.chatInput.scrollTop;
+        }
+      },
+      { signal },
+    );
+
+    this.syncSessionsBtn.addEventListener(
+      "click",
+      () => {
+        void this.syncAllChatsWithServer();
+      },
+      { signal },
+    );
 
     this.langSelect.value = i18next.language;
-    this.langSelect.addEventListener("change", async () => {
-      await setLanguage(this.langSelect.value);
-      this.updateThemeButtonLabel();
-      this.updateStreamingToggleUi();
-      this.updateAutoExecuteToggleUi();
-      this.providerModalController.updateProviderBadgeStatus();
-      this.schemaExplorerController.renderDatabaseDropdown();
-      this.providerModalController.updateModalBadgesFromLocal();
-      await this.tableModalController.refreshIfOpen();
-      void this.systemStatusController.check();
-      this.render();
-    });
+    this.langSelect.addEventListener(
+      "change",
+      () => {
+        void (async (): Promise<void> => {
+          await setLanguage(this.langSelect.value);
+          this.updateThemeButtonLabel();
+          this.updateStreamingToggleUi();
+          this.updateAutoExecuteToggleUi();
+          this.providerModalController.updateProviderBadgeStatus();
+          this.schemaExplorerController.renderDatabaseDropdown();
+          this.providerModalController.updateModalBadgesFromLocal();
+          await this.tableModalController.refreshIfOpen();
+          void this.systemStatusController.check();
+          this.render();
+        })();
+      },
+      { signal },
+    );
 
     this.updateThemeButtonLabel();
     this.themeToggleBtn.addEventListener(
@@ -430,8 +580,115 @@ export class ChatUI
         safeStorageSet("t1d_theme", isLight ? "light" : "dark");
         this.updateThemeButtonLabel();
       },
-      { signal: this.globalListenerController.signal },
+      { signal },
     );
+  }
+
+  /**
+   * Collects all user messages from the active chat and session history, deduplicating entries.
+   * @returns {string[]} Ordered list of user-typed messages.
+   */
+  public getTypedMessageHistory(): string[] {
+    const combined: string[] = [];
+    const activeMessages = this.state.getActiveChat()?.messages ?? [];
+    for (const msg of activeMessages) {
+      if (msg.role === "user" && msg.content.trim().length > 0) {
+        if (
+          combined.length === 0 ||
+          combined[combined.length - 1] !== msg.content
+        ) {
+          combined.push(msg.content);
+        }
+      }
+    }
+    for (const item of this.sessionTypedHistory) {
+      if (!combined.includes(item)) {
+        combined.push(item);
+      }
+    }
+    return combined;
+  }
+
+  /**
+   * Checks whether the textarea caret is collapsed at the very top line of the input box.
+   * @param {HTMLTextAreaElement} textarea - Target textarea element.
+   * @returns {boolean} True when the caret is at the very top line.
+   */
+  public isCaretAtVeryTop(textarea: HTMLTextAreaElement): boolean {
+    return (
+      textarea.selectionStart === textarea.selectionEnd &&
+      !textarea.value.slice(0, textarea.selectionStart).includes(`\n`)
+    );
+  }
+
+  /**
+   * Checks whether the textarea caret is collapsed at the very bottom line of the input box.
+   * @param {HTMLTextAreaElement} textarea - Target textarea element.
+   * @returns {boolean} True when the caret is at the very bottom line.
+   */
+  public isCaretAtVeryBottom(textarea: HTMLTextAreaElement): boolean {
+    return (
+      textarea.selectionStart === textarea.selectionEnd &&
+      !textarea.value.slice(textarea.selectionEnd).includes(`\n`)
+    );
+  }
+
+  /**
+   * Handles `ArrowUp` key navigation at the very top of `#chat-input` to recall previous messages.
+   * @param {KeyboardEvent} e - Keyboard event triggered on `chatInput`.
+   * @returns {void}
+   */
+  private handleInputArrowUp(e: KeyboardEvent): void {
+    if (!this.isCaretAtVeryTop(this.chatInput)) return;
+    const history = this.getTypedMessageHistory();
+    if (history.length === 0) return;
+
+    if (this.inputHistoryIndex === null) {
+      this.savedInputDraft = this.chatInput.value;
+      this.inputHistoryIndex = history.length - 1;
+    } else if (this.inputHistoryIndex > 0) {
+      this.inputHistoryIndex--;
+    }
+    e.preventDefault();
+    this.chatInput.value = String(history[this.inputHistoryIndex]);
+    this.chatInput.setSelectionRange(0, 0);
+    this.syncHighlight();
+  }
+
+  /**
+   * Handles `ArrowDown` key navigation at the very bottom of `#chat-input` to step forward or restore a prior draft.
+   * @param {KeyboardEvent} e - Keyboard event triggered on `chatInput`.
+   * @returns {void}
+   */
+  private handleInputArrowDown(e: KeyboardEvent): void {
+    if (
+      this.inputHistoryIndex === null ||
+      !this.isCaretAtVeryBottom(this.chatInput)
+    ) {
+      return;
+    }
+    const history = this.getTypedMessageHistory();
+    if (this.inputHistoryIndex < history.length - 1) {
+      this.inputHistoryIndex++;
+      e.preventDefault();
+      this.chatInput.value = String(history[this.inputHistoryIndex]);
+      const len = this.chatInput.value.length;
+      this.chatInput.setSelectionRange(len, len);
+      this.syncHighlight();
+      return;
+    }
+    if (this.savedInputDraft !== null && this.savedInputDraft.length > 0) {
+      e.preventDefault();
+      this.chatInput.value = this.savedInputDraft;
+      const len = this.chatInput.value.length;
+      this.chatInput.setSelectionRange(len, len);
+      this.inputHistoryIndex = null;
+      this.savedInputDraft = null;
+      this.syncHighlight();
+    } else {
+      this.inputHistoryIndex = null;
+      this.savedInputDraft = null;
+    }
   }
 
   /**
@@ -444,117 +701,6 @@ export class ChatUI
       this.chatInputHighlight,
       this.modelSelect.value,
     );
-  }
-
-  /**
-   * Updates the provider badge status indicator for the active model.
-   * @returns {void}
-   */
-  public updateProviderBadgeStatus(): void {
-    this.providerModalController.updateProviderBadgeStatus();
-  }
-
-  /**
-   * Populates the multi-select model configuration list in the provider modal.
-   * @param {ModelApiItem[]} modelsList - Discovered and configured models list.
-   * @returns {void}
-   */
-  public populateMultiSelectModels(modelsList: ModelApiItem[]): void {
-    this.providerModalController.populateMultiSelectModels(modelsList);
-  }
-
-  /**
-   * Reloads available models in the model selector.
-   * @returns {Promise<void>}
-   */
-  public async reloadModels(): Promise<void> {
-    await this.modelSelectorController.loadModels();
-  }
-
-  /**
-   * Reloads the database schema in the schema explorer.
-   * @param {string} [dbPath] - Optional custom database path.
-   * @returns {Promise<void>}
-   */
-  public async reloadSchema(dbPath?: string): Promise<void> {
-    await this.schemaExplorerController.loadSchema(dbPath);
-  }
-
-  /**
-   * Checks system health and updates UI indicators accordingly.
-   * @param {boolean} [isManualRetry] - Whether this is a manual user retry.
-   * @param {string} [dbPath] - Optional custom database path.
-   * @returns {Promise<void>}
-   */
-  public async checkSystemStatus(
-    isManualRetry?: boolean,
-    dbPath?: string,
-  ): Promise<void> {
-    await this.systemStatusController.check(isManualRetry, dbPath);
-  }
-
-  /**
-   * Opens the Table Preview modal for the specified table name.
-   * @param {string} tableName - Table identifier to preview.
-   * @returns {Promise<void>}
-   */
-  public async openTablePreview(tableName: string): Promise<void> {
-    await this.tableModalController.open(tableName);
-  }
-
-  /**
-   * Shows the system status alert banner with the specified severity and messaging.
-   * @param {"danger" | "warning" | "info"} severity - The alert level.
-   * @param {string} title - The title to display.
-   * @param {string} desc - The description message.
-   * @param {string} [icon] - The icon to render.
-   * @param {boolean} [showRetry] - Whether to show the retry button.
-   * @returns {void}
-   */
-  public showStatusBanner(
-    severity: "danger" | "warning" | "info",
-    title: string,
-    desc: string,
-    icon?: string,
-    showRetry?: boolean,
-  ): void {
-    this.systemStatusController.showBanner(
-      severity,
-      title,
-      desc,
-      icon,
-      showRetry,
-    );
-  }
-
-  /**
-   * Hides the system status alert banner.
-   * @returns {void}
-   */
-  public hideStatusBanner(): void {
-    this.systemStatusController.hideBanner();
-  }
-
-  /**
-   * Updates the status chip in the top header.
-   * @param {"healthy" | "degraded" | "error" | "offline"} level - The status severity.
-   * @param {string} text - The status text.
-   * @returns {void}
-   */
-  public updateStatusChip(
-    level: "healthy" | "degraded" | "error" | "offline",
-    text: string,
-  ): void {
-    this.systemStatusController.updateStatusChip(level, text);
-  }
-
-  /**
-   * Binds interaction events to action buttons inside diagnostic cards.
-   * @param {HTMLElement} container - The container holding diagnostic cards.
-   * @returns {void}
-   */
-  public bindSchemaDiagnosticButtons(container: HTMLElement): void {
-    this.schemaExplorerController.bindSchemaDiagnosticButtons(container);
   }
 
   /**
@@ -574,69 +720,58 @@ export class ChatUI
   }
 
   /**
-   * Handles sending a user message and processing the streaming or batch response.
-   * @param {string} [text] - Optional message text override (used when executing SQL directly).
-   * @param {string} [modelOverride] - Optional model identifier override (e.g. 'sql').
-   * @param {string} [goldSqlOverride] - Optional gold-standard SQL reference override for NL-to-SQL benchmarking.
-   * @returns {Promise<void>}
+   * Toggles composer input/button disabled states while a chat request is in flight.
+   * @param {boolean} busy - True to disable inputs and show `#stop-btn`, false to re-enable.
+   * @returns {void}
    */
-  public async handleSendMessage(
-    text?: string,
-    modelOverride?: string,
-    goldSqlOverride?: string,
-  ): Promise<void> {
-    const content = text ?? this.chatInput.value.trim();
-    if (!content) return;
-
-    const model =
-      modelOverride ??
-      (this.modelSelect.value === "sql" || isReadOnlySqlStatement(content)
-        ? "sql"
-        : this.modelSelect.value);
-
-    const effectiveGoldSql =
-      goldSqlOverride ??
-      (model !== "sql" ? (this.state.activeGoldSql ?? undefined) : undefined);
-    this.state.setActiveGoldSql(null);
-
-    this.state.addMessageToActiveChat({
-      role: "user",
-      content,
-      model,
-      ...(effectiveGoldSql ? { goldSql: effectiveGoldSql } : {}),
-    });
-
-    if (text === undefined) {
-      this.state.setActiveChatModel(this.modelSelect.value);
-      this.chatInput.value = "";
-      this.syncHighlight();
+  private setComposerBusyState(busy: boolean): void {
+    this.chatInput.disabled = busy;
+    this.chatInputWrapper.classList.toggle("disabled", busy);
+    this.sendBtn.disabled = busy;
+    this.modelSelect.disabled = busy;
+    if (busy) {
+      this.stopBtn?.classList.remove("hidden");
+    } else {
+      this.stopBtn?.classList.add("hidden");
+      this.chatInput.focus();
     }
+  }
 
-    this.sidebarController.renderSidebar();
-    this.messageRenderer.renderMessages();
-    this.scrollToBottom();
+  /**
+   * Resolves provider and Bearer authentication headers for a chat turn.
+   * @param {string | undefined} provider - Resolved provider identifier.
+   * @returns {Record<string, string>} HTTP request header map.
+   */
+  private buildChatAuthHeaders(
+    provider: string | undefined,
+  ): Record<string, string> {
+    const apiKey = provider ? this.state.getApiKey(provider) : undefined;
+    const backendToken = this.state.credentialsStore.getBackendApiKey();
+    return {
+      "Content-Type": "application/json",
+      ...(backendToken ? { Authorization: `Bearer ${backendToken}` } : {}),
+      ...(provider ? { "x-provider": provider } : {}),
+      ...(apiKey ? { "x-provider-api-key": apiKey } : {}),
+    };
+  }
 
-    this.chatInput.disabled = true;
-    this.chatInputWrapper.classList.add("disabled");
-    this.sendBtn.disabled = true;
-    this.modelSelect.disabled = true;
-    this.stopBtn?.classList.remove("hidden");
-
-    const loadingDiv = this.messageRenderer.createLoadingIndicator();
-    this.messagesContainer.appendChild(loadingDiv);
-    this.scrollToBottom();
-
+  /**
+   * Builds HTTP request headers and JSON body for a `/api/chat` or `/api/chat/stream` turn.
+   * @param {string} content - User prompt or SQL statement.
+   * @param {string} model - Target model identifier.
+   * @param {string | undefined} effectiveGoldSql - Optional gold-standard SQL reference.
+   * @returns {{ requestHeaders: Record<string, string>; bodyJson: string }} Serialized headers and payload.
+   */
+  private buildChatRequestEnvelope(
+    content: string,
+    model: string,
+    effectiveGoldSql: string | undefined,
+  ): { requestHeaders: Record<string, string>; bodyJson: string } {
     const selectedOption = this.modelSelect.selectedOptions?.[0];
     const provider =
       selectedOption?.getAttribute("data-provider") ||
       (model.includes("/") ? model.split("/")[0] : undefined);
-    const apiKey = provider ? this.state.getApiKey(provider) : undefined;
-
-    const requestHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-      ...(provider ? { "x-provider": provider } : {}),
-      ...(apiKey ? { "x-provider-api-key": apiKey } : {}),
-    };
+    const requestHeaders = this.buildChatAuthHeaders(provider);
 
     const activeChat = this.state.getActiveChat();
     const history = (activeChat?.messages ?? []).slice(0, -1).map((m) => ({
@@ -662,9 +797,117 @@ export class ChatUI
       ...(effectiveGoldSql ? { gold_sql: effectiveGoldSql } : {}),
     });
 
-    this.activeRequestController = new AbortController();
-    const reqSignal = this.activeRequestController.signal;
+    return { requestHeaders, bodyJson };
+  }
 
+  /**
+   * Updates synthetic-data and rule-based SQL alert banners after a completed chat turn.
+   * @param {boolean | undefined} isSyntheticData - Synthetic seed flag from backend.
+   * @param {boolean | undefined} isRuleBasedSql - Rule-based SQL synthesis flag from backend.
+   * @param {string} model - Executed model identifier.
+   * @returns {void}
+   */
+  private applyTurnProvenanceAlerts(
+    isSyntheticData: boolean | undefined,
+    isRuleBasedSql: boolean | undefined,
+    model: string,
+  ): void {
+    if (isSyntheticData === true) {
+      this.systemStatusController.showSyntheticDataAlert();
+    } else if (isSyntheticData === false) {
+      this.systemStatusController.hideSyntheticDataAlert();
+    }
+    if (isRuleBasedSql === true) {
+      this.systemStatusController.showRuleBasedSqlAlert();
+    } else if (isRuleBasedSql === false && model !== "sql") {
+      this.systemStatusController.hideRuleBasedSqlAlert();
+    }
+  }
+
+  /**
+   * Resolves the effective model and gold-SQL reference for an outgoing turn and appends the user message.
+   * @param {string} content - Non-empty prompt or SQL statement.
+   * @param {boolean} clearComposer - Whether to clear `chatInput` after recording the user turn.
+   * @param {string} [modelOverride] - Optional explicit model override.
+   * @param {string} [goldSqlOverride] - Optional explicit gold-SQL override.
+   * @returns {{ model: string; effectiveGoldSql: string | undefined }} Resolved model and gold SQL.
+   */
+  private recordOutgoingUserTurn(
+    content: string,
+    clearComposer: boolean,
+    modelOverride?: string,
+    goldSqlOverride?: string,
+  ): { model: string; effectiveGoldSql: string | undefined } {
+    const model =
+      modelOverride ??
+      (this.modelSelect.value === "sql" || isReadOnlySqlStatement(content)
+        ? "sql"
+        : this.modelSelect.value);
+    const effectiveGoldSql =
+      goldSqlOverride ??
+      (model !== "sql" ? (this.state.activeGoldSql ?? undefined) : undefined);
+    this.state.setActiveGoldSql(null);
+
+    this.state.addMessageToActiveChat({
+      role: "user",
+      content,
+      model,
+      ...(effectiveGoldSql ? { goldSql: effectiveGoldSql } : {}),
+    });
+    if (
+      this.sessionTypedHistory[this.sessionTypedHistory.length - 1] !== content
+    ) {
+      this.sessionTypedHistory.push(content);
+    }
+    this.inputHistoryIndex = null;
+    this.savedInputDraft = null;
+
+    if (clearComposer) {
+      this.state.setActiveChatModel(this.modelSelect.value);
+      this.chatInput.value = "";
+      this.syncHighlight();
+    }
+    return { model, effectiveGoldSql };
+  }
+
+  /**
+   * Handles sending a user message and processing the streaming or batch response.
+   * @param {string} [text] - Optional message text override (used when executing SQL directly).
+   * @param {string} [modelOverride] - Optional model identifier override (e.g. 'sql').
+   * @param {string} [goldSqlOverride] - Optional gold-standard SQL reference override for NL-to-SQL benchmarking.
+   * @returns {Promise<void>}
+   */
+  public async handleSendMessage(
+    text?: string,
+    modelOverride?: string,
+    goldSqlOverride?: string,
+  ): Promise<void> {
+    const content = text ?? this.chatInput.value.trim();
+    if (!content) return;
+
+    const { model, effectiveGoldSql } = this.recordOutgoingUserTurn(
+      content,
+      text === undefined,
+      modelOverride,
+      goldSqlOverride,
+    );
+
+    this.sidebarController.renderSidebar();
+    this.messageRenderer.renderMessages();
+    this.scrollToBottom();
+    this.setComposerBusyState(true);
+
+    const loadingDiv = this.messageRenderer.createLoadingIndicator();
+    this.messagesContainer.appendChild(loadingDiv);
+    this.scrollToBottom();
+
+    const { requestHeaders, bodyJson } = this.buildChatRequestEnvelope(
+      content,
+      model,
+      effectiveGoldSql,
+    );
+
+    this.activeRequestController = new AbortController();
     try {
       const outcome = await dispatchChatRequest({
         bodyJson,
@@ -672,21 +915,16 @@ export class ChatUI
         streamingEnabled: this.streamingEnabled,
         loadingDiv,
         onTokenScroll: () => this.scrollToBottom(),
-        signal: reqSignal,
+        signal: this.activeRequestController.signal,
         useAsyncJobEndpoint: this.asyncJobPollingEnabled && model !== "sql",
         pollIntervalMs: this.pollIntervalMs,
       });
       loadingDiv.remove();
-      if (outcome.data.is_synthetic_data === true) {
-        this.systemStatusController.showSyntheticDataAlert();
-      } else if (outcome.data.is_synthetic_data === false) {
-        this.systemStatusController.hideSyntheticDataAlert();
-      }
-      if (outcome.data.is_rule_based_sql === true) {
-        this.systemStatusController.showRuleBasedSqlAlert();
-      } else if (outcome.data.is_rule_based_sql === false && model !== "sql") {
-        this.systemStatusController.hideRuleBasedSqlAlert();
-      }
+      this.applyTurnProvenanceAlerts(
+        outcome.data.is_synthetic_data,
+        outcome.data.is_rule_based_sql,
+        model,
+      );
       this.messageRenderer.finalizeAssistantResponse(
         outcome.data,
         model,
@@ -705,18 +943,12 @@ export class ChatUI
       });
     } finally {
       this.activeRequestController = null;
-      this.stopBtn?.classList.add("hidden");
+      this.setComposerBusyState(false);
     }
 
     if (this.state.serverSyncEnabled) {
       void this.syncAllChatsWithServer();
     }
-
-    this.chatInput.disabled = false;
-    this.chatInputWrapper.classList.remove("disabled");
-    this.sendBtn.disabled = false;
-    this.modelSelect.disabled = false;
-    this.chatInput.focus();
 
     this.announce(i18next.t("aria.messageReceived", "Message received"));
     this.sidebarController.renderSidebar();

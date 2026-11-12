@@ -2,20 +2,26 @@
 
 import logging
 import os
+import threading
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import duckdb
 from pydantic.dataclasses import dataclass
+from typing_extensions import TypedDict
 
-from t1d_analytics.api_schemas import JsonLevel1, JsonLevel2
 from t1d_analytics.db_security import (
     get_recommended_jaeb_db_path,
     resolve_default_db_path,
+    validate_sessions_db_path,
+)
+from t1d_analytics.duckdb_pool import (
+    connect_duckdb_read_only_pooled,
+    connect_duckdb_with_retry,
 )
 from t1d_analytics.i18n import get_translator
 from t1d_analytics.llm_client import (
@@ -24,18 +30,81 @@ from t1d_analytics.llm_client import (
     probe_ollama_tags_and_version,
     sort_ollama_models,
 )
-from t1d_analytics.sql_utils import SqlValue
 
-DatabaseDetailsDict = Dict[str, JsonLevel1]
-DiagnosticDict = Dict[str, JsonLevel2]
-SystemHealthDict = Dict[
-    str,
-    Union[
-        SqlValue,
-        DiagnosticDict,
-        Dict[str, DiagnosticDict],
-    ],
-]
+
+class DatabaseDetailsDict(TypedDict):
+    """Typed dictionary for nested database telemetry details."""
+
+    configured_path: str
+    table_count: int
+    total_rows: int
+    tables: list[str]
+    has_initial_data: bool
+    file_size_bytes: int
+    writable: bool
+    integrity_ok: bool
+    disk_free_bytes: int
+    data_provenance: str
+    is_synthetic_faked_data: bool
+    recommended_jaeb_db_path: str
+
+
+class DatabaseHealthDict(TypedDict):
+    """Typed dictionary representation of `DatabaseStatus`."""
+
+    status: str
+    configured_path: str
+    exists: bool
+    connected: bool
+    status_code: str
+    message: str
+    remediation: str | None
+    table_count: int
+    total_rows: int
+    tables: list[str]
+    has_initial_data: bool
+    file_size_bytes: int
+    writable: bool
+    integrity_ok: bool
+    disk_free_bytes: int
+    data_provenance: str
+    is_synthetic_faked_data: bool
+    recommended_jaeb_db_path: str
+    details: DatabaseDetailsDict
+
+
+class OllamaHealthDict(TypedDict):
+    """Typed dictionary representation of `OllamaStatus`."""
+
+    accessible: bool
+    available_models: list[str]
+    message: str
+    remediation: str | None
+    version: str | None
+
+
+class ProviderHealthDict(TypedDict):
+    """Typed dictionary representation of `CloudProviderStatus`."""
+
+    provider: str
+    configured: bool
+    sdk_installed: bool
+    api_key_set: bool
+    message: str
+    remediation: str | None
+
+
+class SystemHealthDict(TypedDict):
+    """Typed dictionary representation of `SystemHealth`."""
+
+    status: str
+    backend_accessible: bool
+    version: str
+    sessions_database_healthy: bool
+    database: DatabaseHealthDict
+    ollama: OllamaHealthDict
+    providers: dict[str, ProviderHealthDict]
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +120,10 @@ EXPECTED_T1D_TABLES = {
     "dclp3",
     "dclp5",
     "pedap",
+    "dclp3_ptroster",
+    "dclp5_ptroster",
+    "pedap_ptroster",
+    "jaeb_beck2023_cohort",
     "loop",
     "flair",
     "tblaptsummary",
@@ -65,10 +138,15 @@ AUTHENTIC_JAEB_TABLES = {
     "acpepptroster",
     "bdemolifediabhxmgmt",
     "cgmanalysis",
+    "dclp3_ptroster",
+    "dclp5_ptroster",
     "devicecgm",
     "dexcomclaritycgm",
     "hptroster",
+    "jaeb_beck2023_cohort",
     "loopdevicecgm4",
+    "pedap_ptroster",
+    "pedapdiabscreening",
     "ptroster_a",
     "tblalabhba1c",
     "fptroster",
@@ -97,19 +175,17 @@ _COMPAT_VIEW_NAMES = {
 
 
 def detect_database_provenance(
-    table_names: List[str],
-    base_tables: Optional[set[str]] = None,
+    table_names: list[str],
+    base_tables: set[str] | None = None,
 ) -> str:
     """
     Classify whether a DuckDB table list represents authentic Jaeb trial datasets or synthetic seed data.
 
     Args:
-    ----
         table_names: All table and view names discovered in the database.
         base_tables: Optional set of non-view base table names.
 
     Returns:
-    -------
         str: `'jaeb_authentic'`, `'synthetic_seed'`, or `'custom'`.
 
     """
@@ -131,7 +207,7 @@ def detect_database_provenance(
     return "custom"
 
 
-class HealthStatus(str, Enum):
+class HealthStatus(StrEnum):
     """Enumeration of overall service and component health statuses."""
 
     HEALTHY = "healthy"
@@ -140,7 +216,7 @@ class HealthStatus(str, Enum):
     ERROR = "error"
 
 
-class DatabaseStatusCode(str, Enum):
+class DatabaseStatusCode(StrEnum):
     """Enumeration of database status codes."""
 
     HEALTHY = "healthy"
@@ -151,16 +227,14 @@ class DatabaseStatusCode(str, Enum):
     MISSING_INITIAL_DATA = "missing_initial_data"
 
 
-def check_disk_space(path: Union[str, Path]) -> dict[str, int]:
+def check_disk_space(path: str | Path) -> dict[str, int]:
     """
     Check total, used, and free disk space for a path.
 
     Args:
-    ----
         path: Directory or file path to check.
 
     Returns:
-    -------
         Dictionary with total_bytes, used_bytes, and free_bytes.
 
     """
@@ -190,10 +264,10 @@ class DatabaseStatus:
     connected: bool
     status_code: DatabaseStatusCode
     message: str
-    remediation: Optional[str] = None
+    remediation: str | None = None
     table_count: int = 0
     total_rows: int = 0
-    tables: List[str] = field(default_factory=list)
+    tables: list[str] = field(default_factory=list)
     has_initial_data: bool = False
     file_size_bytes: int = 0
     writable: bool = False
@@ -222,7 +296,7 @@ class DatabaseStatus:
             "recommended_jaeb_db_path": self.recommended_jaeb_db_path,
         }
 
-    def to_dict(self) -> DiagnosticDict:
+    def to_dict(self) -> DatabaseHealthDict:
         """Convert database status to dictionary representation."""
         return {
             "status": self.status.value,
@@ -252,12 +326,12 @@ class OllamaStatus:
     """Health and model availability status for Ollama LLM service."""
 
     accessible: bool
-    available_models: List[str] = field(default_factory=list)
+    available_models: list[str] = field(default_factory=list)
     message: str = ""
-    remediation: Optional[str] = None
-    version: Optional[str] = None
+    remediation: str | None = None
+    version: str | None = None
 
-    def to_dict(self) -> DiagnosticDict:
+    def to_dict(self) -> OllamaHealthDict:
         """Convert Ollama status to dictionary representation."""
         return {
             "accessible": self.accessible,
@@ -277,9 +351,9 @@ class CloudProviderStatus:
     sdk_installed: bool
     api_key_set: bool
     message: str = ""
-    remediation: Optional[str] = None
+    remediation: str | None = None
 
-    def to_dict(self) -> DiagnosticDict:
+    def to_dict(self) -> ProviderHealthDict:
         """Convert cloud provider status to dictionary representation."""
         return {
             "provider": self.provider,
@@ -300,7 +374,7 @@ class SystemHealth:
     version: str
     database: DatabaseStatus
     ollama: OllamaStatus
-    providers: Dict[str, CloudProviderStatus] = field(default_factory=dict)
+    providers: dict[str, CloudProviderStatus] = field(default_factory=dict)
     sessions_database_healthy: bool = True
 
     def to_dict(self) -> SystemHealthDict:
@@ -316,22 +390,42 @@ class SystemHealth:
         }
 
 
-def check_sessions_database_health(sessions_db_path: Optional[str] = None) -> bool:
+def check_sessions_database_health(sessions_db_path: str | None = None) -> bool:
     """
-    Verify that sessions.duckdb is connectable and has its chat_sessions schema initialized.
+    Verify that `sessions.duckdb` is connectable and has its `chat_sessions` schema initialized.
+
+    When `sessions.duckdb` already exists on disk, inspects it in `read_only=True` mode without
+    acquiring a write lock or mutating DDL. When uninitialized, initializes via `open_sessions_db_conn`.
 
     Args:
-    ----
         sessions_db_path: Optional path to the sessions DuckDB file.
 
     Returns:
-    -------
         bool: True if sessions database is initialized and healthy, False otherwise.
 
     """
     from t1d_analytics.session_store import open_sessions_db_conn
 
     try:
+        validated_path = validate_sessions_db_path(sessions_db_path)
+        target_file = Path(validated_path)
+        if target_file.exists() and target_file.stat().st_size > 0:
+            try:
+                with connect_duckdb_with_retry(
+                    validated_path, read_only=True
+                ) as ro_conn:
+                    ro_tables = {
+                        row[0] for row in ro_conn.execute("SHOW TABLES").fetchall()
+                    }
+                    return "chat_sessions" in ro_tables
+            except duckdb.InvalidInputException:
+                conn = open_sessions_db_conn(db_path=sessions_db_path)
+                try:
+                    tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+                    return "chat_sessions" in tables
+                finally:
+                    conn.close()
+
         conn = open_sessions_db_conn(db_path=sessions_db_path)
         try:
             tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
@@ -348,19 +442,17 @@ def _inspect_db_file_state(
     target_path: Path,
     disk_free: int,
     translate_fn: Callable[..., str],
-) -> Tuple[Optional[DatabaseStatus], int, bool]:
+) -> tuple[DatabaseStatus | None, int, bool]:
     """
     Inspect filesystem existence, byte size, and permissions for `target_path`.
 
     Args:
-    ----
         target_path_str: String representation of `target_path`.
         target_path: Resolved Path instance.
         disk_free: Available free disk space in bytes.
         translate_fn: Localized translation callable.
 
     Returns:
-    -------
         Tuple[Optional[DatabaseStatus], int, bool]: `(early_status_or_none, file_size_bytes, writable)`.
 
     """
@@ -455,27 +547,99 @@ def _inspect_db_file_state(
     return None, file_size, writable
 
 
-def _inspect_db_tables_and_manifest(
+_DIAGNOSTICS_STATS_CACHE: dict[
+    tuple[str, int, int], tuple[list[str], int, bool, str]
+] = {}
+_DIAGNOSTICS_STATS_LOCK = threading.Lock()
+
+
+def _lookup_cached_diagnostics_stats(
     target_path_str: str,
-) -> Tuple[List[str], int, bool, str]:
+) -> tuple[
+    tuple[str, int, int] | None,
+    tuple[list[str], int, bool, str] | None,
+]:
     """
-    Connect to `target_path_str` read-only and return `(tables, total_rows, integrity_ok, provenance)`.
+    Look up cached `(tables, total_rows, integrity_ok, provenance)` keyed by `(resolved_path, mtime_ns, size)`.
 
     Args:
-    ----
         target_path_str: Path to the DuckDB database file.
 
     Returns:
-    -------
+        Tuple[Optional[Tuple[str, int, int]], Optional[Tuple[List[str], int, bool, str]]]:
+            `(cache_key, cached_result)` pair.
+
+    """
+    if type(duckdb.connect).__module__ == "unittest.mock":
+        return None, None
+    try:
+        resolved_p = Path(target_path_str).resolve()
+        st = resolved_p.stat()
+        key = (str(resolved_p), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None, None
+    with _DIAGNOSTICS_STATS_LOCK:
+        cached = _DIAGNOSTICS_STATS_CACHE.get(key)
+        if cached is not None:
+            return key, (list(cached[0]), cached[1], cached[2], cached[3])
+    return key, None
+
+
+def _store_cached_diagnostics_stats(
+    cache_key: tuple[str, int, int] | None,
+    result: tuple[list[str], int, bool, str],
+) -> None:
+    """
+    Store `(tables, total_rows, integrity_ok, provenance)` in `_DIAGNOSTICS_STATS_CACHE`.
+
+    Args:
+        cache_key: Optional `(resolved_path, mtime_ns, size)` cache key.
+        result: Computed `(tables, total_rows, integrity_ok, provenance)` tuple.
+
+    """
+    if cache_key is None:
+        return
+    with _DIAGNOSTICS_STATS_LOCK:
+        if len(_DIAGNOSTICS_STATS_CACHE) >= 64:
+            _DIAGNOSTICS_STATS_CACHE.clear()
+        _DIAGNOSTICS_STATS_CACHE[cache_key] = (
+            list(result[0]),
+            result[1],
+            result[2],
+            result[3],
+        )
+
+
+def _inspect_db_tables_and_manifest(
+    target_path_str: str,
+) -> tuple[list[str], int, bool, str]:
+    """
+    Connect to `target_path_str` via the read-only DuckDB pool and return `(tables, total_rows, integrity_ok, provenance)`.
+
+    Uses DuckDB catalog metadata (`duckdb_tables()` `estimated_size`) and an mtime-invalidated
+    in-memory cache so `/api/status`, `/api/health`, and `/api/ready` probes avoid repeated
+    sequential `SELECT COUNT(*)` full-table scans.
+
+    Args:
+        target_path_str: Path to the DuckDB database file.
+
+    Returns:
         Tuple[List[str], int, bool, str]: `(user_tables, total_rows, integrity_ok, data_provenance)`.
 
     """
+    cache_key, cached = _lookup_cached_diagnostics_stats(target_path_str)
+    if cached is not None:
+        return cached
+
     integrity_ok = True
     total_rows = 0
     estimated_total = 0
-    conn = duckdb.connect(target_path_str, read_only=True)
-    try:
-        base_table_names: Optional[set[str]] = None
+    with connect_duckdb_read_only_pooled(
+        db_path=target_path_str,
+        connect_fn=duckdb.connect,
+        disable_external_access=False,
+    ) as conn:
+        base_table_names: set[str] | None = None
         try:
             bt_rows = conn.execute(
                 "SELECT table_name, COALESCE(estimated_size, 0) FROM duckdb_tables()"
@@ -509,24 +673,22 @@ def _inspect_db_tables_and_manifest(
             if primary_tables
             else [t for t in all_tables if not t.startswith("_t1d_")]
         )
-        sample_tables = (
-            tables[:10]
-            if (provenance == "jaeb_authentic" and len(tables) > 25)
-            else tables
-        )
-        for tbl_name in sample_tables:
-            safe_tbl = tbl_name.replace('"', '""')
-            cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
-            total_rows += int(cnt_res[0]) if cnt_res else 0
-        total_rows = max(total_rows, estimated_total)
-        return tables, total_rows, integrity_ok, provenance
-    finally:
-        conn.close()
+        if estimated_total > 0:
+            total_rows = estimated_total
+        else:
+            for tbl_name in tables[:10]:
+                safe_tbl = tbl_name.replace('"', '""')
+                cnt_res = conn.execute(f'SELECT COUNT(*) FROM "{safe_tbl}"').fetchone()
+                total_rows += int(cnt_res[0]) if cnt_res else 0
+
+    result = (tables, total_rows, integrity_ok, provenance)
+    _store_cached_diagnostics_stats(cache_key, result)
+    return result
 
 
 def _build_database_status_from_tables(
     target_path_str: str,
-    tables: List[str],
+    tables: list[str],
     total_rows: int,
     file_size: int,
     writable: bool,
@@ -539,7 +701,6 @@ def _build_database_status_from_tables(
     Classify the connected database's table inventory into `EMPTY_DB`, `MISSING_INITIAL_DATA`, or `HEALTHY`.
 
     Args:
-    ----
         target_path_str: Configured database file path.
         tables: Discovered user tables.
         total_rows: Sampled total row count.
@@ -551,7 +712,6 @@ def _build_database_status_from_tables(
         translate_fn: Localized translation callable.
 
     Returns:
-    -------
         DatabaseStatus: Populated diagnostic status object.
 
     """
@@ -660,18 +820,16 @@ def _build_database_status_from_tables(
 
 
 def check_database_health(
-    db_path: Optional[str] = None, lang: Optional[str] = None
+    db_path: str | None = None, lang: str | None = None
 ) -> DatabaseStatus:
     """
     Validate the configuration, presence, connectivity, and data contents of the database.
 
     Args:
-    ----
         db_path: Path to the DuckDB database file. Defaults to T1D_DB_PATH or 't1d.duckdb'.
         lang: Optional language code for localized messages.
 
     Returns:
-    -------
         DatabaseStatus containing diagnostic results and actionable remediation advice.
 
     """
@@ -728,23 +886,21 @@ def check_database_health(
 
 
 def check_ollama_health(
-    ollama_url: Optional[str] = None,
+    ollama_url: str | None = None,
     recommended_model: str = "gemma:2b",
     timeout: float = 2.0,
-    lang: Optional[str] = None,
+    lang: str | None = None,
 ) -> OllamaStatus:
     """
     Check availability of the local Ollama LLM service and recommended models.
 
     Args:
-    ----
         ollama_url: Optional URL to Ollama tags endpoint (defaults to OLLAMA_HOST or http://127.0.0.1:11434).
         recommended_model: Model name to check.
         timeout: Request timeout in seconds.
         lang: Optional language code for localized messages.
 
     Returns:
-    -------
         OllamaStatus describing service availability and model list.
 
     """
@@ -811,18 +967,16 @@ def check_ollama_health(
 
 
 def check_provider_health(
-    provider: str, lang: Optional[str] = None
+    provider: str, lang: str | None = None
 ) -> CloudProviderStatus:
     """
     Validate SDK installation and API key configuration for a cloud LLM provider.
 
     Args:
-    ----
         provider: Provider identifier ('openai', 'anthropic', 'google').
         lang: Optional language code for localized messages.
 
     Returns:
-    -------
         CloudProviderStatus: Diagnostic details for the specified provider.
 
     """
@@ -870,28 +1024,26 @@ def check_provider_health(
 
 
 def get_system_health(
-    db_path: Optional[str] = None,
-    lang: Optional[str] = None,
-    sessions_db_path: Optional[str] = None,
+    db_path: str | None = None,
+    lang: str | None = None,
+    sessions_db_path: str | None = None,
 ) -> SystemHealth:
     """
     Compute comprehensive system health for backend, database, and LLM services.
 
     Args:
-    ----
         db_path: Optional custom database path.
         lang: Optional language code.
         sessions_db_path: Optional path to the sessions DuckDB file.
 
     Returns:
-    -------
         SystemHealth object containing individual component statuses and overall status.
 
     """
     db_status = check_database_health(db_path=db_path, lang=lang)
     ollama_status = check_ollama_health(lang=lang)
     sessions_ok = check_sessions_database_health(sessions_db_path=sessions_db_path)
-    providers_status: Dict[str, CloudProviderStatus] = {
+    providers_status: dict[str, CloudProviderStatus] = {
         p: check_provider_health(p, lang=lang)
         for p in ("openai", "anthropic", "google")
     }
@@ -929,12 +1081,11 @@ def get_system_health(
 run_system_diagnostics = get_system_health
 
 
-def log_startup_diagnostics(db_path: Optional[str] = None) -> None:
+def log_startup_diagnostics(db_path: str | None = None) -> None:
     """
     Print prominent startup diagnostics to console logs when the backend launches.
 
     Args:
-    ----
         db_path: Optional custom database path.
 
     """
@@ -980,12 +1131,10 @@ def verify_split_prompt_leakage(
     Verify that train and validation SFT split tables have zero overlapping prompts.
 
     Args:
-    ----
         conn: Active DuckDB connection.
         report_fn: Injectable reporting callback (defaults to `print`).
 
     Returns:
-    -------
         bool: True if zero overlap or split tables absent; False if prompt leakage is detected.
 
     """

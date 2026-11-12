@@ -3,8 +3,8 @@
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Optional, Sequence, Union
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,7 +31,7 @@ from t1d_analytics.ollama_discovery import normalize_ollama_host
 class _EmptyChunk:
     """Chunk object implementing GeminiStreamChunkProtocol with no candidates, delta, choices, or text."""
 
-    candidates: Optional[Sequence[_CandidateProtocol]] = None
+    candidates: Sequence[_CandidateProtocol] | None = None
 
 
 def test_normalize_ollama_host() -> None:
@@ -44,7 +44,7 @@ def test_normalize_ollama_host() -> None:
 
     with patch.dict(os.environ, {"OLLAMA_HOST": "0.0.0.0:11434/v1/"}):
         assert normalize_ollama_host() == "http://127.0.0.1:11434"
-        assert os.environ["OLLAMA_HOST"] == "http://127.0.0.1:11434"
+        assert os.environ["OLLAMA_HOST"] == "0.0.0.0:11434/v1/"
         assert (
             resolve_ollama_base_url("custom.ollama:11434/api")
             == "http://custom.ollama:11434"
@@ -129,7 +129,7 @@ def test_parse_and_discover_configured_any_llm_models() -> None:
         assert "together/meta-llama/Llama-3-70b" in names
 
         def _fake_list_models(
-            provider: str, api_key: Optional[str] = None
+            provider: str, api_key: str | None = None
         ) -> Sequence[_AnyLlmModelProtocol]:
             """Return fake SDK models for testing."""
             assert provider == "groq"
@@ -147,7 +147,7 @@ def test_parse_and_discover_configured_any_llm_models() -> None:
         assert "groq/llama3-groq-tool-use" in sdk_names
 
         def _failing_list_models(
-            provider: str, api_key: Optional[str] = None
+            provider: str, api_key: str | None = None
         ) -> Sequence[_AnyLlmModelProtocol]:
             """Raise RuntimeError to test fallback."""
             raise RuntimeError(f"sdk err for {provider}")
@@ -282,7 +282,7 @@ def test_build_clinical_sql_prompt() -> None:
 
 def test_complete_llm_prompt_and_stream_llm_factory() -> None:
     """Test complete_llm_prompt and stream_llm_completion_tokens with custom llm_factory and non-choice responses."""
-    from typing import Mapping
+    from collections.abc import Mapping
 
     from t1d_analytics.chat_service import stream_llm_completion_tokens
     from t1d_analytics.llm_client import (
@@ -305,7 +305,7 @@ def test_complete_llm_prompt_and_stream_llm_factory() -> None:
             return "  SELECT 1;  "
 
     def _make_transport(
-        provider: str, api_key: Optional[str] = None
+        provider: str, api_key: str | None = None
     ) -> LlmTransportProtocol:
         """Create a _DirectTextTransport instance."""
         _ = (provider, api_key)
@@ -341,7 +341,7 @@ def test_complete_llm_prompt_and_stream_llm_factory() -> None:
 
 def test_llm_client_protocol_stubs() -> None:
     """Verify protocol-compliant URL responses and transports integrate with fetch_available_models, probe_providers_status, and complete_llm_prompt."""
-    from typing import Mapping, Union
+    from collections.abc import Mapping
 
     from t1d_analytics.llm_client import (
         LlmTransportProtocol,
@@ -365,10 +365,10 @@ def test_llm_client_protocol_stubs() -> None:
 
         def __exit__(
             self,
-            exc_type: Optional[type],
-            exc_val: Optional[BaseException],
-            exc_tb: Optional[Union[str, int, float, bool]],
-        ) -> Optional[bool]:
+            exc_type: type | None,
+            exc_val: BaseException | None,
+            exc_tb: str | int | float | bool | None,
+        ) -> bool | None:
             """Exit context."""
             return None
 
@@ -538,10 +538,10 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
 
         def __exit__(
             self,
-            exc_type: Optional[type],
-            exc_val: Optional[BaseException],
-            exc_tb: Optional[Union[str, int, float, bool]],
-        ) -> Optional[bool]:
+            exc_type: type | None,
+            exc_val: BaseException | None,
+            exc_tb: str | int | float | bool | None,
+        ) -> bool | None:
             """Exit context."""
             return None
 
@@ -571,7 +571,7 @@ def test_ollama_model_sorting_path_filtering_and_compaction(
     assert by_name_empty["unpulled:7b"].error_code == "MODEL_NOT_PULLED"
 
     def _fail_urlopen(
-        req: Union[str, urllib.request.Request], timeout: float = 5.0
+        req: str | urllib.request.Request, timeout: float = 5.0
     ) -> _OnlineTagsResp:
         """Raise URLError to simulate offline Ollama."""
         _ = (req, timeout)
@@ -644,10 +644,10 @@ def test_build_safe_ollama_options_and_text_completion_fallback(
 
         def __exit__(
             self,
-            exc_type: Optional[type],
-            exc_val: Optional[BaseException],
-            exc_tb: Optional[Union[str, int, float, bool]],
-        ) -> Optional[bool]:
+            exc_type: type | None,
+            exc_val: BaseException | None,
+            exc_tb: str | int | float | bool | None,
+        ) -> bool | None:
             """Exit context."""
             return None
 
@@ -718,6 +718,16 @@ def test_build_safe_ollama_options_and_text_completion_fallback(
         )
         assert recovered == "SELECT 42;"
 
+    from t1d_analytics.errors import (
+        LlmAuthenticationError,
+        LlmConnectionError,
+        LlmQuotaExceededError,
+        LlmRateLimitError,
+        LlmTranslationError,
+    )
+    from t1d_analytics.llm_client import classify_llm_transport_error
+    from t1d_analytics.sql_fallback_synthesizer import format_llm_failure_reason
+
     with (
         patch(
             "t1d_analytics.llm_client.create_any_llm_transport",
@@ -727,7 +737,7 @@ def test_build_safe_ollama_options_and_text_completion_fallback(
             "t1d_analytics.llm_client.generate_ollama_text_completion",
             side_effect=RuntimeError("native generate also failed"),
         ),
-        pytest.raises(_CustomAnyLlm500Error, match="llama-server segfault"),
+        pytest.raises(LlmTranslationError, match="llama-server segfault"),
     ):
         complete_llm_prompt(
             prompt="Count",
@@ -740,10 +750,102 @@ def test_build_safe_ollama_options_and_text_completion_fallback(
             "t1d_analytics.llm_client.create_any_llm_transport",
             return_value=_FailingAnyLlmTransport(),
         ),
-        pytest.raises(_CustomAnyLlm500Error, match="llama-server segfault"),
+        pytest.raises(LlmTranslationError, match="llama-server segfault"),
     ):
         complete_llm_prompt(
             prompt="Count",
             model_name="openai/gpt-4o",
             api_key="sk-test",
         )
+
+    with (
+        patch(
+            "t1d_analytics.llm_client.call_local_ollama_generate",
+            side_effect=ConnectionRefusedError("connection refused"),
+        ),
+        pytest.raises(LlmConnectionError),
+    ):
+        complete_llm_prompt(
+            prompt="Count",
+            model_name="gemma:2b",
+            provider="ollama",
+            use_direct_ollama=True,
+        )
+
+    existing_rl = LlmRateLimitError("already typed")
+    assert classify_llm_transport_error(existing_rl, "openai", "gpt-4o") is existing_rl
+
+    class _FakeSdkStatusError(Exception):
+        """SDK error carrying an integer status_code attribute."""
+
+        def __init__(self, status_code: int, message: str) -> None:
+            """Initialize with HTTP status code and message."""
+            super().__init__(message)
+            self.status_code = status_code
+
+    err_429 = classify_llm_transport_error(
+        _FakeSdkStatusError(429, "Too Many Requests"), "openai", "gpt-4o"
+    )
+    assert isinstance(err_429, LlmRateLimitError)
+    assert (
+        format_llm_failure_reason(err_429, provider="openai", model="gpt-4o")[1]
+        == "backend.llmRateLimit"
+    )
+
+    err_401 = classify_llm_transport_error(
+        _FakeSdkStatusError(401, "Invalid API key"), "openai", "gpt-4o"
+    )
+    assert isinstance(err_401, LlmAuthenticationError)
+    assert (
+        format_llm_failure_reason(err_401, provider="openai", model="gpt-4o")[1]
+        == "backend.llmAuthFailed"
+    )
+
+    err_402 = classify_llm_transport_error(
+        _FakeSdkStatusError(402, "insufficient_quota"), "openai", "gpt-4o"
+    )
+    assert isinstance(err_402, LlmQuotaExceededError)
+    assert (
+        format_llm_failure_reason(err_402, provider="openai", model="gpt-4o")[1]
+        == "backend.llmQuotaExceeded"
+    )
+
+    import io
+    import urllib.error
+    from email.message import Message
+
+    http_429 = urllib.error.HTTPError(
+        "https://api.openai.com/v1/chat/completions",
+        429,
+        "Too Many Requests",
+        Message(),
+        io.BytesIO(b""),
+    )
+    assert isinstance(
+        classify_llm_transport_error(http_429, "openai", "gpt-4o"), LlmRateLimitError
+    )
+    http_429.close()
+
+    err_conn = classify_llm_transport_error(
+        ConnectionError("connection refused"), "ollama", "gemma:2b"
+    )
+    assert isinstance(err_conn, LlmConnectionError)
+    assert (
+        format_llm_failure_reason(err_conn, provider="ollama", model="gemma:2b")[1]
+        == "backend.llmConnectionFailed"
+    )
+
+    err_oom_conn = LlmConnectionError(
+        "llama-server process has terminated: insufficient memory"
+    )
+    assert (
+        format_llm_failure_reason(err_oom_conn, provider="ollama", model="gemma:2b")[1]
+        == "backend.llmMemoryCrash"
+    )
+    from t1d_analytics.sql_fallback_synthesizer import is_recoverable_local_ollama_crash
+
+    assert is_recoverable_local_ollama_crash("ollama", err_oom_conn) is True
+    assert (
+        is_recoverable_local_ollama_crash("ollama", RuntimeError("unrelated logic bug"))
+        is False
+    )

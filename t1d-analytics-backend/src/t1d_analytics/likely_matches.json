@@ -91,6 +91,8 @@
     "DeliveryMethod",
     "CSII_MDI",
     "insulin_delivery_modality",
+    "prestudy_insulin_delivery",
+    "InsModPump",
     "InsulinModality",
     "InsulinDelivMethod",
     "Pt_InsulinRecMethod",
@@ -104,6 +106,8 @@
     "SensorWearPct",
     "ValidCGMDays",
     "cgm_active_wear_pct",
+    "prestudy_cgm_use",
+    "CGMUseStat",
     "CGMUsed",
     "PtCGMUsed",
     "Pt_CGMUse",
@@ -223,11 +227,14 @@
   ],
   "edulevel": [
     "EduLevel",
+    "EducationLevel",
     "Pt_EduLevel",
     "edulevel"
   ],
   "annualinc": [
     "AnnualInc",
+    "AnnualIncome",
+    "annual_income",
     "Pt_AnnualInc",
     "annualinc"
   ],

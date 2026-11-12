@@ -19,7 +19,7 @@ export type ClinicalDateInput = ClinicalRowValue | Record<string, never>;
  * Parsed clinical date structure containing day identifier, minute of day, and epoch milliseconds.
  */
 export interface ParsedClinicalDate {
-  /** Calendar day key formatted as YYYY-M-D. */
+  /** Calendar day key formatted with 1-indexed month as `YYYY-M-D`. */
   dayKey: string;
   /** Minute offset from midnight (0 to 1439). */
   minuteOfDay: number;
@@ -28,22 +28,161 @@ export interface ParsedClinicalDate {
 }
 
 /**
- * Lookup mapping 3-letter lowercase English month abbreviations to 0-indexed month numbers (0-11).
+ * Lookup mapping 3-letter lowercase English month abbreviations to 1-indexed month numbers (1-12).
  */
 const MONTH_NAMES: Record<string, number> = {
-  jan: 0,
-  feb: 1,
-  mar: 2,
-  apr: 3,
-  may: 4,
-  jun: 5,
-  jul: 6,
-  aug: 7,
-  sep: 8,
-  oct: 9,
-  nov: 10,
-  dec: 11,
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12,
 };
+
+/**
+ * Formats a 1-indexed calendar `(year, month1Based, day)` tuple into a `YYYY-M-D` day key.
+ * @param {number} year - Four-digit calendar year.
+ * @param {number} month1Based - 1-indexed calendar month (1 = January, 12 = December).
+ * @param {number} day - Day of month.
+ * @returns {string} Canonical `YYYY-M-D` day key.
+ */
+function formatDayKey(year: number, month1Based: number, day: number): string {
+  return `${year}-${month1Based}-${day}`;
+}
+
+/**
+ * Builds a `ParsedClinicalDate` preserving wall-clock `dayKey` and `minuteOfDay` while resolving `epochMs` with optional timezone offset.
+ * @param {number} year - Four-digit year.
+ * @param {number} month1Based - 1-indexed month (1-12).
+ * @param {number} day - Day of month (1-31).
+ * @param {number} hours - Hours (0-23).
+ * @param {number} minutes - Minutes (0-59).
+ * @param {number} seconds - Seconds (0-59).
+ * @param {string | undefined} tz - Optional ISO timezone suffix (`Z` or `±HH:MM`).
+ * @returns {ParsedClinicalDate} Constructed clinical date record.
+ */
+function buildWallClockClinicalDate(
+  year: number,
+  month1Based: number,
+  day: number,
+  hours: number,
+  minutes: number,
+  seconds: number,
+  tz: string | undefined,
+): ParsedClinicalDate {
+  const dayKey = formatDayKey(year, month1Based, day);
+  const minuteOfDay = hours * 60 + minutes;
+  if (tz && tz.toUpperCase() !== "Z") {
+    const isoStr = `${year}-${String(month1Based).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${tz}`;
+    const parsedTzDate = new Date(isoStr);
+    if (!isNaN(parsedTzDate.getTime())) {
+      return { dayKey, minuteOfDay, epochMs: parsedTzDate.getTime() };
+    }
+  }
+  return {
+    dayKey,
+    minuteOfDay,
+    epochMs: Date.UTC(year, month1Based - 1, day, hours, minutes, seconds),
+  };
+}
+
+/**
+ * Extracts a UTC-based `ParsedClinicalDate` from a validated `Date` instance.
+ * @param {Date} d - Validated JavaScript Date object.
+ * @returns {ParsedClinicalDate} UTC-normalized clinical date record.
+ */
+function buildUtcClinicalDate(d: Date): ParsedClinicalDate {
+  return {
+    dayKey: formatDayKey(
+      d.getUTCFullYear(),
+      d.getUTCMonth() + 1,
+      d.getUTCDate(),
+    ),
+    minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
+    epochMs: d.getTime(),
+  };
+}
+
+/**
+ * Parses an ISO or CDISC clinical date string into `ParsedClinicalDate`, or returns null.
+ * @param {string} trimmed - Trimmed raw date string.
+ * @returns {ParsedClinicalDate | null} Parsed date or null if neither ISO nor CDISC matched.
+ */
+function parseIsoOrCdiscString(trimmed: string): ParsedClinicalDate | null {
+  const isoMatch = trimmed.match(
+    /^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i,
+  );
+  if (isoMatch) {
+    return buildWallClockClinicalDate(
+      parseInt(String(isoMatch[1]), 10),
+      parseInt(String(isoMatch[2]), 10),
+      parseInt(String(isoMatch[3]), 10),
+      isoMatch[4] ? parseInt(isoMatch[4], 10) : 0,
+      isoMatch[5] ? parseInt(isoMatch[5], 10) : 0,
+      isoMatch[6] ? parseInt(isoMatch[6], 10) : 0,
+      isoMatch[7],
+    );
+  }
+
+  const cdiscMatch = trimmed.match(
+    /^(\d{1,2})[-/]([a-zA-Z]{3})[-/](\d{4})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i,
+  );
+  if (cdiscMatch) {
+    const month1Based = MONTH_NAMES[String(cdiscMatch[2]).toLowerCase()] ?? 1;
+    return buildWallClockClinicalDate(
+      parseInt(String(cdiscMatch[3]), 10),
+      month1Based,
+      parseInt(String(cdiscMatch[1]), 10),
+      cdiscMatch[4] ? parseInt(cdiscMatch[4], 10) : 0,
+      cdiscMatch[5] ? parseInt(cdiscMatch[5], 10) : 0,
+      cdiscMatch[6] ? parseInt(cdiscMatch[6], 10) : 0,
+      cdiscMatch[7],
+    );
+  }
+  return null;
+}
+
+/**
+ * Parses a slash-separated (`MM/DD/YYYY` or `DD/MM/YYYY`) or UTC fallback string into `ParsedClinicalDate`.
+ * @param {string} trimmed - Trimmed raw date string.
+ * @returns {ParsedClinicalDate | null} Parsed clinical date or null if unparseable.
+ */
+function parseSlashOrFallbackString(
+  trimmed: string,
+): ParsedClinicalDate | null {
+  const slashMatch = trimmed.match(
+    /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i,
+  );
+  if (slashMatch) {
+    const part1 = parseInt(String(slashMatch[1]), 10);
+    const part2 = parseInt(String(slashMatch[2]), 10);
+    const isEuOrder = part1 > 12 && part2 <= 12;
+    const month1Based = isEuOrder ? part2 : part1;
+    const day = isEuOrder ? part1 : part2;
+    return buildWallClockClinicalDate(
+      parseInt(String(slashMatch[3]), 10),
+      month1Based,
+      day,
+      slashMatch[4] ? parseInt(slashMatch[4], 10) : 0,
+      slashMatch[5] ? parseInt(slashMatch[5], 10) : 0,
+      slashMatch[6] ? parseInt(slashMatch[6], 10) : 0,
+      slashMatch[7],
+    );
+  }
+
+  const hasExplicitTz =
+    /(?:GMT|UTC)?[+-]\d{2}:?\d{2}$/i.test(trimmed) ||
+    /(?:GMT|UTC|Z)$/i.test(trimmed);
+  const fallbackInput = hasExplicitTz ? trimmed : `${trimmed} UTC`;
+  const dUtc = new Date(fallbackInput);
+  return !isNaN(dUtc.getTime()) ? buildUtcClinicalDate(dUtc) : null;
+}
 
 /**
  * Parse a raw timestamp value into date day key and minute of the day without timezone shifts.
@@ -54,144 +193,20 @@ export function parseDateAndMinuteOfDay(
   rawTime: ClinicalDateInput,
 ): ParsedClinicalDate | null {
   if (rawTime instanceof Date) {
-    const epochMs = rawTime.getTime();
-    if (isNaN(epochMs)) return null;
-    const dayKey = `${rawTime.getUTCFullYear()}-${rawTime.getUTCMonth()}-${rawTime.getUTCDate()}`;
-    const minuteOfDay = rawTime.getUTCHours() * 60 + rawTime.getUTCMinutes();
-    return { dayKey, minuteOfDay, epochMs };
+    return isNaN(rawTime.getTime()) ? null : buildUtcClinicalDate(rawTime);
   }
 
   if (typeof rawTime === "string") {
     const trimmed = rawTime.trim();
-
-    // 1. ISO format: YYYY-MM-DD or YYYY/MM/DD with optional HH:mm[:ss]
-    const isoMatch = trimmed.match(
-      /^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i,
+    return (
+      parseIsoOrCdiscString(trimmed) ?? parseSlashOrFallbackString(trimmed)
     );
-    if (isoMatch) {
-      const year = parseInt(isoMatch[1], 10);
-      const month = parseInt(isoMatch[2], 10) - 1;
-      const day = parseInt(isoMatch[3], 10);
-      const hours = isoMatch[4] ? parseInt(isoMatch[4], 10) : 0;
-      const minutes = isoMatch[5] ? parseInt(isoMatch[5], 10) : 0;
-      const seconds = isoMatch[6] ? parseInt(isoMatch[6], 10) : 0;
-      const tz = isoMatch[7];
-
-      if (tz && tz.toUpperCase() !== "Z") {
-        const d = new Date(trimmed);
-        if (!isNaN(d.getTime())) {
-          return {
-            dayKey: `${year}-${month}-${day}`,
-            minuteOfDay: hours * 60 + minutes,
-            epochMs: d.getTime(),
-          };
-        }
-      }
-      return {
-        dayKey: `${year}-${month}-${day}`,
-        minuteOfDay: hours * 60 + minutes,
-        epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
-      };
-    }
-
-    // 2. CDISC / SAS clinical format: DD-Mon-YYYY with optional HH:mm[:ss]
-    const cdiscMatch = trimmed.match(
-      /^(\d{1,2})[-/]([a-zA-Z]{3})[-/](\d{4})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i,
-    );
-    if (cdiscMatch) {
-      const day = parseInt(cdiscMatch[1], 10);
-      const monthStr = cdiscMatch[2].toLowerCase();
-      const month = MONTH_NAMES[monthStr] ?? 0;
-      const year = parseInt(cdiscMatch[3], 10);
-      const hours = cdiscMatch[4] ? parseInt(cdiscMatch[4], 10) : 0;
-      const minutes = cdiscMatch[5] ? parseInt(cdiscMatch[5], 10) : 0;
-      const seconds = cdiscMatch[6] ? parseInt(cdiscMatch[6], 10) : 0;
-      const tz = cdiscMatch[7];
-
-      if (tz && tz.toUpperCase() !== "Z") {
-        const isoStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${tz}`;
-        const d = new Date(isoStr);
-        if (!isNaN(d.getTime())) {
-          return {
-            dayKey: `${year}-${month}-${day}`,
-            minuteOfDay: hours * 60 + minutes,
-            epochMs: d.getTime(),
-          };
-        }
-      }
-      return {
-        dayKey: `${year}-${month}-${day}`,
-        minuteOfDay: hours * 60 + minutes,
-        epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
-      };
-    }
-
-    // 3. US (MM/DD/YYYY) or European (DD/MM/YYYY) format
-    const slashMatch = trimmed.match(
-      /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[T\s](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i,
-    );
-    if (slashMatch) {
-      const part1 = parseInt(slashMatch[1], 10);
-      const part2 = parseInt(slashMatch[2], 10);
-      const year = parseInt(slashMatch[3], 10);
-      const hours = slashMatch[4] ? parseInt(slashMatch[4], 10) : 0;
-      const minutes = slashMatch[5] ? parseInt(slashMatch[5], 10) : 0;
-      const seconds = slashMatch[6] ? parseInt(slashMatch[6], 10) : 0;
-      const tz = slashMatch[7];
-
-      let month: number;
-      let day: number;
-      if (part1 > 12 && part2 <= 12) {
-        day = part1;
-        month = part2 - 1;
-      } else {
-        month = part1 - 1;
-        day = part2;
-      }
-
-      if (tz && tz.toUpperCase() !== "Z") {
-        const isoStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}${tz}`;
-        const d = new Date(isoStr);
-        if (!isNaN(d.getTime())) {
-          return {
-            dayKey: `${year}-${month}-${day}`,
-            minuteOfDay: hours * 60 + minutes,
-            epochMs: d.getTime(),
-          };
-        }
-      }
-      return {
-        dayKey: `${year}-${month}-${day}`,
-        minuteOfDay: hours * 60 + minutes,
-        epochMs: Date.UTC(year, month, day, hours, minutes, seconds),
-      };
-    }
-
-    const d = new Date(trimmed);
-    if (!isNaN(d.getTime())) {
-      const hasTz = /[Z+-]\d{2}:?\d{2}$/i.test(trimmed) || /Z$/i.test(trimmed);
-      return {
-        dayKey: hasTz
-          ? `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`
-          : `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`,
-        minuteOfDay: hasTz
-          ? d.getUTCHours() * 60 + d.getUTCMinutes()
-          : d.getHours() * 60 + d.getMinutes(),
-        epochMs: d.getTime(),
-      };
-    }
   }
 
   if (typeof rawTime === "number") {
     const epoch = rawTime < 1e11 ? rawTime * 1000 : rawTime;
     const d = new Date(epoch);
-    if (!isNaN(d.getTime())) {
-      return {
-        dayKey: `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`,
-        minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes(),
-        epochMs: d.getTime(),
-      };
-    }
+    return !isNaN(d.getTime()) ? buildUtcClinicalDate(d) : null;
   }
 
   return null;

@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: auto-format
         name: Auto Format
-        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi && npx --prefix t1d-analytics-web prettier --write t1d-analytics-web"
+        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi && cd t1d-analytics-web && ([ -d node_modules ] || npm ci --no-audit --no-fund --silent) && ./node_modules/.bin/prettier --write ."
         language: system
         pass_filenames: false
       - id: backend-lint
@@ -28,12 +28,12 @@ repos:
         pass_filenames: false
       - id: frontend-lint
         name: Frontend Lint
-        entry: /bin/sh -c "cd t1d-analytics-web && ([ -d node_modules ] || npm install --no-audit --no-fund --silent) && npm run lint"
+        entry: /bin/sh -c "cd t1d-analytics-web && ([ -d node_modules ] || npm ci --no-audit --no-fund --silent) && npm run lint"
         language: system
         pass_filenames: false
       - id: frontend-format
         name: Frontend Format
-        entry: /bin/sh -c "cd t1d-analytics-web && npm run format"
+        entry: /bin/sh -c "cd t1d-analytics-web && ([ -d node_modules ] || npm ci --no-audit --no-fund --silent) && npm run format:check"
         language: system
         pass_filenames: false
       - id: frontend-test
@@ -48,16 +48,18 @@ repos:
         pass_filenames: false
       - id: update-coverage-badges
         name: Update Coverage Badges
-        entry: /bin/sh -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; else interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; fi"
+        entry: /bin/sh -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; else interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; fi && tmp_sphinx=$(mktemp -d) && (if [ -x .venv/bin/python ]; then .venv/bin/python -m sphinx -W --keep-going -q -b html t1d-analytics-backend/docs_src \"$tmp_sphinx\"; else python3 -m sphinx -W --keep-going -q -b html t1d-analytics-backend/docs_src \"$tmp_sphinx\"; fi); rc=$?; rm -rf \"$tmp_sphinx\"; exit $rc"
         language: system
         pass_filenames: false
       - id: libscript-audit-standards
         name: LibScript Audit Standards
-        entry: /bin/sh -c "if [ -f ../../libscript/devtools/audit/audit_standards.sh ]; then /bin/sh ../../libscript/devtools/audit/audit_standards.sh libscript.json make.sh make.bat test.sh test.cmd; else /bin/sh ../../../libscript/devtools/audit/audit_standards.sh libscript.json make.sh make.bat test.sh test.cmd; fi"
+        entry: >-
+          /bin/sh -c 'for cand in "${LIBSCRIPT_ROOT:-}" "${LIBSCRIPT_ROOT_DIR:-}" ../libscript ../../libscript ../../../libscript ../../../../libscript; do if [ -n "$cand" ] && [ -f "$cand/devtools/audit/audit_standards.sh" ]; then exec /bin/sh "$cand/devtools/audit/audit_standards.sh" libscript.json make.sh make.bat test.sh test.cmd; fi; done; echo "Skipping libscript-audit-standards: libscript devtools not present outside standalone checkout."; exit 0'
         language: system
         pass_filenames: false
       - id: libscript-doc-coverage
         name: LibScript Doc Coverage
-        entry: /bin/sh -c "if [ -f ../../libscript/devtools/audit/doc_coverage.sh ]; then /bin/sh ../../libscript/devtools/audit/doc_coverage.sh --repo-root . --strict; else /bin/sh ../../../libscript/devtools/audit/doc_coverage.sh --repo-root . --strict; fi"
+        entry: >-
+          /bin/sh -c 'for cand in "${LIBSCRIPT_ROOT:-}" "${LIBSCRIPT_ROOT_DIR:-}" ../libscript ../../libscript ../../../libscript ../../../../libscript; do if [ -n "$cand" ] && [ -f "$cand/devtools/audit/doc_coverage.sh" ]; then exec /bin/sh "$cand/devtools/audit/doc_coverage.sh" --repo-root . --strict; fi; done; echo "Skipping libscript-doc-coverage: libscript devtools not present outside standalone checkout."; exit 0'
         language: system
         pass_filenames: false

@@ -2,94 +2,88 @@
  * @file provider-modal-controller.ts
  * @module controllers/provider-modal-controller
  * Composable sub-controller managing the Cloud Provider & API Key Settings modal,
- * local and remote credential status badges, and API key persistence.
+ * local and remote credential status badges, and API key persistence via `ModalDialogController`.
  */
 
 import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
-import { requireElementById, trapModalFocus } from "../modal-utils";
+import {
+  type ModelCatalogEntryPayload,
+  type ProvidersStatusResponsePayload,
+} from "../api-types";
+import { type AppEventBus } from "../event-bus";
+import { ModalDialogController, requireElementById } from "../modal-utils";
 import { type ChatState } from "../state";
 import {
   DEFAULT_CHOICE_OLLAMA_MODELS,
   resolveModelProvider,
-  type ModelApiItem,
 } from "./model-selector-controller";
 
-/**
- * Status metadata for a single LLM provider in `ProvidersStatusPayload`.
- */
-export interface ProviderStatusEntry {
-  /** Whether API credentials are configured on the server. */
-  configured?: boolean;
-  /** Whether the provider is available for inference. */
-  available?: boolean;
-  /** Whether the provider endpoint is reachable. */
-  reachable?: boolean;
-  /** Optional machine-readable error code. */
-  error_code?: string;
-}
+export { type ProvidersStatusResponsePayload as ProvidersStatusPayload };
 
 /**
- * Response payload returned by `/api/providers/status`.
+ * Narrow injected dependencies for `ProviderSettingsModalController`.
  */
-export interface ProvidersStatusPayload {
-  /** Map of provider identifiers to configuration/availability status. */
-  providers?: Record<string, ProviderStatusEntry>;
-}
-
-/**
- * Host contract required by `ProviderSettingsModalController`.
- */
-export interface ProviderSettingsHost {
-  /** Global application state store. */
+export interface ProviderSettingsModalDeps {
+  /** Shared application state store. */
   state: ChatState;
-  /** Dropdown select element for choosing the active LLM or SQL engine. */
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
+  /** Model selector dropdown inspected to compute the active provider badge. */
   modelSelect: HTMLSelectElement;
-  /** Reloads available models in the model selector. */
-  reloadModels(): Promise<void>;
-  /** Announces a message to screen readers. */
-  announce(message: string, isAssertive?: boolean): void;
+  /** Async callback reloading the `/api/models` catalog after saving/clearing keys. */
+  reloadModels: () => Promise<void>;
 }
 
 /**
- * Controller managing the Cloud LLM Providers & API Keys configuration modal.
+ * Controller managing `#provider-modal` and active provider badge status.
  */
 export class ProviderSettingsModalController {
-  /** Host UI reference. */
-  private readonly ui: ProviderSettingsHost;
-  /** Header button to open the Cloud LLM Providers & API Keys modal. */
+  /** Shared application state store. */
+  private readonly state: ChatState;
+  /** Domain event bus. */
+  private readonly events: AppEventBus;
+  /** Model selector dropdown. */
+  private readonly modelSelect: HTMLSelectElement;
+  /** Callback reloading `/api/models`. */
+  private readonly reloadModelsFn: () => Promise<void>;
+  /** Composable modal dialog lifecycle controller. */
+  private readonly dialog: ModalDialogController;
+  /** Persistent AbortController for modal action buttons and event bus subscriptions. */
+  private readonly listenerController = new AbortController();
+  /** Button to open the Cloud LLM Providers & API Keys modal. */
   public readonly providerSettingsBtn: HTMLButtonElement;
-  /** Indicator dot displaying the configuration status of the active provider. */
+  /** Status dot indicator next to the model selector showing active provider readiness. */
   public readonly providerStatusDot: HTMLElement;
-  /** Modal dialog container for Cloud LLM Providers & API Keys settings. */
+  /** Modal overlay container for Cloud LLM Providers & API Keys. */
   public readonly providerModal: HTMLElement;
-  /** Button to close the Cloud LLM Providers modal. */
+  /** Button to close the provider settings modal. */
   public readonly closeProviderModalBtn: HTMLButtonElement;
-  /** Password input for the OpenAI API key. */
+  /** Input for OpenAI API Key. */
   public readonly providerKeyOpenAI: HTMLInputElement;
-  /** Password input for the Anthropic API key. */
+  /** Input for Anthropic API Key. */
   public readonly providerKeyAnthropic: HTMLInputElement;
-  /** Password input for the Google Gemini API key. */
+  /** Input for Google Gemini API Key. */
   public readonly providerKeyGoogle: HTMLInputElement;
-  /** Multi-select element for choosing enabled any-llm and SQL models. */
+  /** Multi-select box for configured models. */
   public readonly providerModelsMultiSelect: HTMLSelectElement;
-  /** Checkbox input for user consent to store API keys in localStorage. */
+  /** Checkbox consenting to localStorage storage of API keys. */
   public readonly providerStoreConsent: HTMLInputElement;
-  /** Button to save configured provider API keys. */
+  /** Button to save provider API keys and model configuration. */
   public readonly providerSaveBtn: HTMLButtonElement;
   /** Button to clear all stored provider API keys. */
   public readonly providerClearBtn: HTMLButtonElement;
-  /** Element that held focus prior to opening the provider settings modal. */
-  private previousFocusProvider: Element | null = null;
-  /** Keydown listener for focus trapping inside the provider modal. */
-  private onProviderModalKeyDown: ((e: KeyboardEvent) => void) | null = null;
 
   /**
    * Creates a new `ProviderSettingsModalController`.
-   * @param {ProviderSettingsHost} ui - Host UI instance.
+   * @param {ProviderSettingsModalDeps} deps - Narrow state, event bus, and model reload dependencies.
    */
-  constructor(ui: ProviderSettingsHost) {
-    this.ui = ui;
+  constructor(deps: ProviderSettingsModalDeps) {
+    this.state = deps.state;
+    this.events = deps.events;
+    this.modelSelect = deps.modelSelect;
+    this.reloadModelsFn = deps.reloadModels;
+
     this.providerSettingsBtn = requireElementById<HTMLButtonElement>(
       "provider-settings-btn",
     );
@@ -120,35 +114,110 @@ export class ProviderSettingsModalController {
     this.providerClearBtn =
       requireElementById<HTMLButtonElement>("provider-clear-btn");
 
+    this.dialog = new ModalDialogController({
+      modalEl: this.providerModal,
+      closeBtn: this.closeProviderModalBtn,
+      initialFocusEl: this.closeProviderModalBtn,
+    });
+
     this.bindEvents();
   }
 
   /**
-   * Binds DOM event listeners for the Cloud LLM Providers & API Keys modal.
+   * Binds DOM event listeners and domain event bus subscriptions.
    * @returns {void}
    */
   private bindEvents(): void {
-    this.providerSettingsBtn.addEventListener("click", () => {
-      void this.open();
-    });
+    const signal = this.listenerController.signal;
 
-    this.closeProviderModalBtn.addEventListener("click", () => {
-      this.close();
-    });
+    this.providerSettingsBtn.addEventListener(
+      "click",
+      () => {
+        void this.open();
+      },
+      { signal },
+    );
 
-    this.providerSaveBtn.addEventListener("click", () => {
-      void this.saveSettings();
-    });
+    this.providerSaveBtn.addEventListener(
+      "click",
+      () => {
+        void this.saveSettings();
+      },
+      { signal },
+    );
 
-    this.providerClearBtn.addEventListener("click", () => {
-      void this.clearSettings();
-    });
+    this.providerClearBtn.addEventListener(
+      "click",
+      () => {
+        void this.clearSettings();
+      },
+      { signal },
+    );
 
-    this.providerModal.addEventListener("click", (e) => {
-      if (e.target === this.providerModal) {
-        this.close();
-      }
-    });
+    this.events.on(
+      "openProviderSettings",
+      () => {
+        void this.open();
+      },
+      signal,
+    );
+
+    this.events.on(
+      "providerBadgeUpdateRequested",
+      () => {
+        this.updateProviderBadgeStatus();
+      },
+      signal,
+    );
+
+    this.events.on(
+      "modelsLoaded",
+      ({ models }) => {
+        this.populateMultiSelectModels(models);
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Applies CSS class, tooltip, and `aria-label` to `providerStatusDot`.
+   * @param {string} className - CSS class string.
+   * @param {string} label - Localized tooltip and ARIA label.
+   * @returns {void}
+   */
+  private applyBadgeDot(className: string, label: string): void {
+    this.providerStatusDot.className = className;
+    this.providerStatusDot.title = label;
+    this.providerStatusDot.setAttribute("aria-label", label);
+  }
+
+  /**
+   * Updates `providerStatusDot` when the active provider is local Ollama.
+   * @param {HTMLOptionElement | undefined} selectedOpt - Currently selected `<option>`.
+   * @returns {void}
+   */
+  private applyOllamaBadgeStatus(
+    selectedOpt: HTMLOptionElement | undefined,
+  ): void {
+    const hasExplicitReachable =
+      selectedOpt?.hasAttribute("data-reachable") === true;
+    const explicitlyOffline =
+      selectedOpt?.getAttribute("data-reachable") === "false" ||
+      Boolean(selectedOpt?.disabled);
+    const isHealthy =
+      !explicitlyOffline &&
+      (!hasExplicitReachable || this.state.systemStatus.ollamaOnline !== false);
+    this.applyBadgeDot(
+      isHealthy
+        ? "provider-status-dot active"
+        : "provider-status-dot warning unconfigured",
+      isHealthy
+        ? i18next.t("provider.localActive", "Local Ollama Active")
+        : i18next.t(
+            "provider.localOffline",
+            "Local Ollama Offline (Fallback SQL will be used)",
+          ),
+    );
   }
 
   /**
@@ -156,89 +225,54 @@ export class ProviderSettingsModalController {
    * @returns {void}
    */
   public updateProviderBadgeStatus(): void {
-    const val = this.ui.modelSelect.value;
+    const val = this.modelSelect.value;
     if (val === "sql") {
-      this.providerStatusDot.className = "provider-status-dot active";
-      this.providerStatusDot.title = i18next.t(
-        "provider.duckdbReady",
-        "DuckDB SQL Engine Ready",
-      );
-      this.providerStatusDot.setAttribute(
-        "aria-label",
-        this.providerStatusDot.title,
+      this.applyBadgeDot(
+        "provider-status-dot active",
+        i18next.t("provider.duckdbReady", "DuckDB SQL Engine Ready"),
       );
       return;
     }
 
-    const selectedOpt = this.ui.modelSelect.selectedOptions?.[0];
+    const selectedOpt = this.modelSelect.selectedOptions?.[0];
     const prov = resolveModelProvider(
       val,
       selectedOpt?.getAttribute("data-provider") || undefined,
     );
-    const isConfigured =
-      selectedOpt?.getAttribute("data-configured") === "true" ||
-      Boolean(this.ui.state.getApiKey(prov));
 
     if (prov === "ollama") {
-      const hasExplicitReachableAttr =
-        selectedOpt?.hasAttribute("data-reachable") === true;
-      const optionExplicitlyOffline =
-        selectedOpt?.getAttribute("data-reachable") === "false" ||
-        Boolean(selectedOpt?.disabled);
-      const isOllamaHealthy =
-        !optionExplicitlyOffline &&
-        (!hasExplicitReachableAttr ||
-          this.ui.state.systemStatus.ollamaOnline !== false);
-      if (isOllamaHealthy) {
-        this.providerStatusDot.className = "provider-status-dot active";
-        this.providerStatusDot.title = i18next.t(
-          "provider.localActive",
-          "Local Ollama Active",
-        );
-      } else {
-        this.providerStatusDot.className =
-          "provider-status-dot warning unconfigured";
-        this.providerStatusDot.title = i18next.t(
-          "provider.localOffline",
-          "Local Ollama Offline (Fallback SQL will be used)",
-        );
-      }
-      this.providerStatusDot.setAttribute(
-        "aria-label",
-        this.providerStatusDot.title,
-      );
-    } else if (isConfigured) {
-      this.providerStatusDot.className =
-        "provider-status-dot active configured";
-      this.providerStatusDot.title = i18next.t("provider.cloudKeyReady", {
-        provider: prov,
-        defaultValue: `${prov} API Key Configured`,
-      });
-      this.providerStatusDot.setAttribute(
-        "aria-label",
-        this.providerStatusDot.title,
-      );
-    } else {
-      this.providerStatusDot.className =
-        "provider-status-dot warning unconfigured";
-      this.providerStatusDot.title = i18next.t("provider.cloudKeyMissing", {
-        provider: prov,
-        defaultValue: `${prov} API Key Missing (Click ⚙️ to configure)`,
-      });
-      this.providerStatusDot.setAttribute(
-        "aria-label",
-        this.providerStatusDot.title,
-      );
+      this.applyOllamaBadgeStatus(selectedOpt);
+      return;
     }
+
+    const isConfigured =
+      selectedOpt?.getAttribute("data-configured") === "true" ||
+      Boolean(this.state.getApiKey(prov));
+    this.applyBadgeDot(
+      isConfigured
+        ? "provider-status-dot active configured"
+        : "provider-status-dot warning unconfigured",
+      isConfigured
+        ? i18next.t("provider.cloudKeyReady", {
+            provider: prov,
+            defaultValue: `${prov} API Key Configured`,
+          })
+        : i18next.t("provider.cloudKeyMissing", {
+            provider: prov,
+            defaultValue: `${prov} API Key Missing (Click ⚙️ to configure)`,
+          }),
+    );
   }
 
   /**
    * Populates the multi-select model selector with `'sql'`, the 3 default choice models, and discovered `any-llm` models.
-   * @param {ModelApiItem[]} modelsList - Discovered and configured models list.
+   * @param {ModelCatalogEntryPayload[]} modelsList - Discovered and configured models list.
    * @returns {void}
    */
-  public populateMultiSelectModels(modelsList: ModelApiItem[]): void {
-    const configuredSet = new Set(this.ui.state.getConfiguredModels());
+  public populateMultiSelectModels(
+    modelsList: ModelCatalogEntryPayload[],
+  ): void {
+    const configuredSet = new Set(this.state.getConfiguredModels());
     const sqlOpt = document.createElement("option");
     sqlOpt.value = "sql";
     sqlOpt.setAttribute("data-i18n", "app.literalSql");
@@ -271,31 +305,13 @@ export class ProviderSettingsModalController {
    * @returns {Promise<void>}
    */
   public async open(): Promise<void> {
-    if (this.providerModal.classList.contains("hidden")) {
-      this.previousFocusProvider = document.activeElement;
-    }
-    this.providerKeyOpenAI.value = this.ui.state.getApiKey("openai") || "";
-    this.providerKeyAnthropic.value =
-      this.ui.state.getApiKey("anthropic") || "";
-    this.providerKeyGoogle.value = this.ui.state.getApiKey("google") || "";
+    this.dialog.captureOpenerFocus();
+    this.providerKeyOpenAI.value = this.state.getApiKey("openai") || "";
+    this.providerKeyAnthropic.value = this.state.getApiKey("anthropic") || "";
+    this.providerKeyGoogle.value = this.state.getApiKey("google") || "";
 
     await this.refreshModalBadges();
-
-    this.providerModal.classList.remove("hidden");
-    this.providerModal.setAttribute("aria-hidden", "false");
-
-    if (this.onProviderModalKeyDown) {
-      this.providerModal.removeEventListener(
-        "keydown",
-        this.onProviderModalKeyDown,
-      );
-    }
-    this.onProviderModalKeyDown = (e: KeyboardEvent): void => {
-      trapModalFocus(e, this.providerModal, () => this.close());
-    };
-    this.providerModal.addEventListener("keydown", this.onProviderModalKeyDown);
-
-    this.closeProviderModalBtn.focus();
+    this.dialog.open(this.closeProviderModalBtn);
   }
 
   /**
@@ -305,11 +321,12 @@ export class ProviderSettingsModalController {
   public async refreshModalBadges(): Promise<void> {
     try {
       const resp = await fetchWithBackendError("/api/providers/status");
-      const data = await parseResponseJson<ProvidersStatusPayload>(resp);
-      const provs = data.providers || {};
+      const data =
+        await parseResponseJson<ProvidersStatusResponsePayload>(resp);
+      const provs = data.providers ?? {};
 
       for (const p of ["openai", "anthropic", "google"]) {
-        const localKey = Boolean(this.ui.state.getApiKey(p));
+        const localKey = Boolean(this.state.getApiKey(p));
         const remoteConfig = Boolean(provs[p]?.configured);
         this.updateModalBadge(p, localKey || remoteConfig);
       }
@@ -324,7 +341,7 @@ export class ProviderSettingsModalController {
    */
   public updateModalBadgesFromLocal(): void {
     for (const p of ["openai", "anthropic", "google"]) {
-      this.updateModalBadge(p, Boolean(this.ui.state.getApiKey(p)));
+      this.updateModalBadge(p, Boolean(this.state.getApiKey(p)));
     }
   }
 
@@ -351,22 +368,11 @@ export class ProviderSettingsModalController {
    * @returns {void}
    */
   public close(): void {
-    this.providerModal.classList.add("hidden");
-    this.providerModal.setAttribute("aria-hidden", "true");
-    if (this.onProviderModalKeyDown) {
-      this.providerModal.removeEventListener(
-        "keydown",
-        this.onProviderModalKeyDown,
-      );
-      this.onProviderModalKeyDown = null;
-    }
-    if (this.previousFocusProvider instanceof HTMLElement) {
-      this.previousFocusProvider.focus();
-    }
+    this.dialog.close();
   }
 
   /**
-   * Saves provider API keys and multi-select model configuration from the modal into localStorage.
+   * Saves provider API keys and multi-select model configuration from the modal into storage.
    * @returns {Promise<void>}
    */
   public async saveSettings(): Promise<void> {
@@ -376,14 +382,14 @@ export class ProviderSettingsModalController {
       const an = this.providerKeyAnthropic.value.trim();
       const go = this.providerKeyGoogle.value.trim();
 
-      if (oa) this.ui.state.setApiKey("openai", oa);
-      else this.ui.state.removeApiKey("openai");
+      if (oa) this.state.setApiKey("openai", oa);
+      else this.state.removeApiKey("openai");
 
-      if (an) this.ui.state.setApiKey("anthropic", an);
-      else this.ui.state.removeApiKey("anthropic");
+      if (an) this.state.setApiKey("anthropic", an);
+      else this.state.removeApiKey("anthropic");
 
-      if (go) this.ui.state.setApiKey("google", go);
-      else this.ui.state.removeApiKey("google");
+      if (go) this.state.setApiKey("google", go);
+      else this.state.removeApiKey("google");
 
       const selectedModels = Array.from(this.providerModelsMultiSelect.options)
         .filter((opt) => opt.selected && opt.value !== "sql")
@@ -392,46 +398,45 @@ export class ProviderSettingsModalController {
         selectedModels.length === DEFAULT_CHOICE_OLLAMA_MODELS.length &&
         selectedModels.every((m) => DEFAULT_CHOICE_OLLAMA_MODELS.includes(m));
       if (selectedModels.length > 0 && !isDefaultSelection) {
-        this.ui.state.setConfiguredModels(selectedModels.join(","));
+        this.state.setConfiguredModels(selectedModels.join(","));
       }
     }
 
     this.updateModalBadgesFromLocal();
-    await this.ui.reloadModels();
+    await this.reloadModelsFn();
     this.updateProviderBadgeStatus();
     this.close();
-    this.ui.announce(i18next.t("provider.saved", "Provider settings saved"));
+    this.events.emit("announce", {
+      message: i18next.t("provider.saved", "Provider settings saved"),
+    });
   }
 
   /**
-   * Clears stored custom provider API keys from localStorage.
+   * Clears stored custom provider API keys from storage.
    * @returns {Promise<void>}
    */
   public async clearSettings(): Promise<void> {
     for (const p of ["openai", "anthropic", "google"]) {
-      this.ui.state.removeApiKey(p);
+      this.state.removeApiKey(p);
     }
-    this.ui.state.removeConfiguredModels();
+    this.state.removeConfiguredModels();
     this.providerKeyOpenAI.value = "";
     this.providerKeyAnthropic.value = "";
     this.providerKeyGoogle.value = "";
     this.updateModalBadgesFromLocal();
-    await this.ui.reloadModels();
+    await this.reloadModelsFn();
     this.updateProviderBadgeStatus();
-    this.ui.announce(i18next.t("provider.cleared", "Stored API keys cleared"));
+    this.events.emit("announce", {
+      message: i18next.t("provider.cleared", "Stored API keys cleared"),
+    });
   }
 
   /**
-   * Removes any active modal keydown listeners when disposing the UI.
+   * Disposes modal and bus listeners when tearing down the UI.
    * @returns {void}
    */
   public dispose(): void {
-    if (this.onProviderModalKeyDown) {
-      this.providerModal.removeEventListener(
-        "keydown",
-        this.onProviderModalKeyDown,
-      );
-      this.onProviderModalKeyDown = null;
-    }
+    this.dialog.dispose();
+    this.listenerController.abort();
   }
 }

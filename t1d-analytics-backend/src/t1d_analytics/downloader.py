@@ -9,9 +9,10 @@ import sys
 import threading
 import time
 import urllib.parse
+import weakref
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from typing_extensions import TypedDict
@@ -30,28 +31,131 @@ class DownloadSummaryDict(TypedDict):
     errors: list[dict[str, str]]
 
 
-_file_locks: dict[str, threading.Lock] = {}
+_file_locks: weakref.WeakValueDictionary[str, threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
 _file_locks_guard = threading.Lock()
+_REDIRECT_STATUS_CODES = (301, 302, 303, 307, 308)
+_MAX_REDIRECT_HOPS = 10
 
 
 def _get_file_lock(target_path: Path) -> threading.Lock:
     """
-    Get or create a thread lock for a given destination file path to prevent concurrent writes.
+    Get or create a weakly-referenced thread lock for a destination file path.
+
+    Unused locks are automatically garbage-collected from `_file_locks` once all
+    concurrent download callers release their strong reference.
 
     Args:
-    ----
         target_path: Destination file path.
 
     Returns:
-    -------
         threading.Lock: Mutex for synchronizing operations on this file path.
 
     """
     resolved = str(target_path.resolve())
     with _file_locks_guard:
-        if resolved not in _file_locks:
-            _file_locks[resolved] = threading.Lock()
-        return _file_locks[resolved]
+        lock = _file_locks.get(resolved)
+        if lock is None:
+            lock = threading.Lock()
+            _file_locks[resolved] = lock
+        return lock
+
+
+def validate_download_url(url: str) -> urllib.parse.ParseResult:
+    """
+    Validate that `url` uses an explicit `http://` or `https://` scheme and non-empty host.
+
+    Args:
+        url: Candidate download URL string.
+
+    Returns:
+        urllib.parse.ParseResult: Parsed URL components.
+
+    Raises:
+        DownloadError: If the URL scheme is missing or outside `('http', 'https')`, or host is empty.
+
+    """
+    parsed = urlparse(url.strip())
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise DownloadError(
+            f"Unsupported or invalid download URL scheme for '{url}': only 'http://' and 'https://' are permitted.",
+            params={"url": url},
+        )
+    return parsed
+
+
+def _get_with_safe_redirects(
+    url: str,
+    headers: dict[str, str],
+    auth: tuple[str, str] | None,
+    cookies: dict[str, str] | None,
+    timeout: int = 30,
+) -> requests.Response:
+    """
+    Perform a streaming HTTP GET while stripping credentials across cross-origin redirects.
+
+    Validates every redirect target's URL scheme (`http` / `https`) and strips
+    `Authorization`, `Cookie` headers, `auth`, and `cookies` whenever a redirect
+    crosses `(scheme, host:port)` origin boundaries.
+
+    Args:
+        url: Validated initial HTTP/HTTPS URL.
+        headers: Request header dictionary.
+        auth: Optional HTTP Basic auth credentials.
+        cookies: Optional session cookie dictionary.
+        timeout: Per-request socket timeout in seconds.
+
+    Returns:
+        requests.Response: Final streaming HTTP response.
+
+    Raises:
+        DownloadError: If redirect hops exceed `_MAX_REDIRECT_HOPS` or redirect target scheme is invalid.
+
+    """
+    origin_parsed = validate_download_url(url)
+    origin_key = (origin_parsed.scheme.lower(), origin_parsed.netloc.lower())
+    current_url = url
+    current_headers = dict(headers)
+    current_auth = auth
+    current_cookies = cookies
+
+    for _ in range(_MAX_REDIRECT_HOPS):
+        resp = requests.get(
+            current_url,
+            stream=True,
+            headers=current_headers,
+            auth=current_auth,
+            cookies=current_cookies,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        status = resp.status_code
+        if not (isinstance(status, int) and status in _REDIRECT_STATUS_CODES):
+            return resp
+
+        location = (resp.headers.get("location") or "").strip()
+        if not location:
+            return resp
+
+        resp.close()
+        next_url = urljoin(current_url, location)
+        next_parsed = validate_download_url(next_url)
+        next_key = (next_parsed.scheme.lower(), next_parsed.netloc.lower())
+        if next_key != origin_key:
+            current_headers = {
+                k: v
+                for k, v in current_headers.items()
+                if k.lower() not in ("authorization", "cookie")
+            }
+            current_auth = None
+            current_cookies = None
+        current_url = next_url
+
+    raise DownloadError(
+        f"Exceeded maximum redirects ({_MAX_REDIRECT_HOPS}) while downloading '{url}'.",
+        params={"url": url},
+    )
 
 
 def sanitize_filename(name: str) -> str:
@@ -59,11 +163,9 @@ def sanitize_filename(name: str) -> str:
     Sanitize a string to be used as a safe filename or directory name.
 
     Args:
-    ----
         name: The original string.
 
     Returns:
-    -------
         A sanitized string safe for file systems.
 
     """
@@ -77,12 +179,10 @@ def mask_credential(val: str, visible_chars: int = 4) -> str:
     Securely mask credentials, bearer tokens, and session secrets for logs and display.
 
     Args:
-    ----
         val: The raw secret string to mask.
         visible_chars: Number of prefix and suffix characters to leave unmasked.
 
     Returns:
-    -------
         str: Masked string with asterisks replacing sensitive characters.
 
     """
@@ -93,16 +193,14 @@ def mask_credential(val: str, visible_chars: int = 4) -> str:
     return f"{val[:visible_chars]}{'*' * (len(val) - visible_chars * 2)}{val[-visible_chars:]}"
 
 
-def parse_content_disposition(header: str) -> Optional[str]:
+def parse_content_disposition(header: str) -> str | None:
     """
     Parse filename from Content-Disposition header according to RFC 5987 and RFC 6266.
 
     Args:
-    ----
         header: The Content-Disposition header value.
 
     Returns:
-    -------
         Optional[str]: Extracted filename if found, otherwise None.
 
     """
@@ -141,11 +239,9 @@ def parse_headers_file(file_path: Path) -> dict[str, str]:
     Parse a custom headers file in JSON or colon-separated key-value format.
 
     Args:
-    ----
         file_path: Path to the headers file.
 
     Returns:
-    -------
         dict[str, str]: Dictionary of parsed header key-value pairs.
 
     """
@@ -176,20 +272,18 @@ def _verify_and_finalize_download(
     tmp_path: Path,
     dest_path: Path,
     filename: str,
-    expected_sha256: Optional[str] = None,
+    expected_sha256: str | None = None,
 ) -> None:
     """
     Verify optional SHA-256 digest of a temporary download file and atomically move to destination.
 
     Args:
-    ----
         tmp_path: Temporary file path written during download.
         dest_path: Final destination path for the downloaded file.
         filename: Display filename for error reporting.
         expected_sha256: Optional expected SHA-256 hex digest.
 
     Raises:
-    ------
         ValueError: If the computed SHA-256 digest does not match expected_sha256.
 
     """
@@ -216,11 +310,9 @@ def _resolve_url_filename(url: str) -> str:
     Resolve a safe local filename from a URL path or query parameters.
 
     Args:
-    ----
         url: Source download URL.
 
     Returns:
-    -------
         str: Resolved filename string.
 
     """
@@ -250,13 +342,12 @@ def _stream_response_to_file(
     tmp_path: Path,
     filename: str,
     existing_bytes: int,
-    progress_callback: Optional[Callable[[int, Optional[int]], None]],
+    progress_callback: Callable[[int, int | None], None] | None,
 ) -> None:
     """
     Stream HTTP response chunks into `tmp_path` while updating progress callbacks or TTY progress.
 
     Args:
-    ----
         response: Active `requests.Response` object.
         tmp_path: Temporary destination file path.
         filename: Display filename for TTY progress reporting.
@@ -270,7 +361,7 @@ def _stream_response_to_file(
         existing_bytes = 0
 
     total_size_header = response.headers.get("content-length")
-    total_size: Optional[int] = (
+    total_size: int | None = (
         int(total_size_header)
         if total_size_header and total_size_header.isdigit()
         else None
@@ -312,7 +403,6 @@ def _apply_content_disposition_paths(
     Update `(filename, dest_path, tmp_path)` if `Content-Disposition` specifies a target filename.
 
     Args:
-    ----
         response: Active `requests.Response` object.
         dest_dir: Destination directory path.
         filename: Current resolved filename.
@@ -320,7 +410,6 @@ def _apply_content_disposition_paths(
         tmp_path: Current temporary file path.
 
     Returns:
-    -------
         tuple[str, Path, Path, bool]: `(filename, dest_path, tmp_path, already_exists)`.
 
     """
@@ -348,15 +437,15 @@ def _apply_content_disposition_paths(
 def download_file(
     url: str,
     dest_dir: Path,
-    expected_sha256: Optional[str] = None,
-    token: Optional[str] = None,
-    auth: Optional[tuple[str, str]] = None,
-    headers: Optional[dict[str, str]] = None,
-    cookies: Optional[dict[str, str]] = None,
+    expected_sha256: str | None = None,
+    token: str | None = None,
+    auth: tuple[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
     resume: bool = True,
     keep_partial: bool = False,
-    progress_callback: Optional[Callable[[int, Optional[int]], None]] = None,
-    token_refresh_callback: Optional[Callable[[], str]] = None,
+    progress_callback: Callable[[int, int | None], None] | None = None,
+    token_refresh_callback: Callable[[], str] | None = None,
 ) -> None:
     """
     Download a file from a URL or save a DOI link safely, resiliently, and atomically.
@@ -365,7 +454,6 @@ def download_file(
     token refresh callback, and progress tracking.
 
     Args:
-    ----
         url: The URL to download.
         dest_dir: The directory to save the file.
         expected_sha256: Optional expected SHA-256 hex digest for integrity verification.
@@ -380,6 +468,7 @@ def download_file(
 
     """
     _ = get_translator()
+    validate_download_url(url)
     if url.startswith(
         (
             "https://doi.org/",
@@ -418,9 +507,8 @@ def download_file(
             req_headers["Range"] = f"bytes={existing_bytes}-"
 
         try:
-            response = requests.get(
+            response = _get_with_safe_redirects(
                 url,
-                stream=True,
                 headers=req_headers,
                 auth=auth,
                 cookies=cookies,
@@ -431,9 +519,8 @@ def download_file(
                     response.close()
                     effective_token = token_refresh_callback()
                     req_headers["Authorization"] = f"Bearer {effective_token}"
-                    response = requests.get(
+                    response = _get_with_safe_redirects(
                         url,
-                        stream=True,
                         headers=req_headers,
                         auth=auth,
                         cookies=cookies,
@@ -445,9 +532,8 @@ def download_file(
                     tmp_path.unlink(missing_ok=True)
                     existing_bytes = 0
                     req_headers.pop("Range", None)
-                    response = requests.get(
+                    response = _get_with_safe_redirects(
                         url,
-                        stream=True,
                         headers=req_headers,
                         auth=auth,
                         cookies=cookies,
@@ -488,11 +574,11 @@ def download_aspnet_postback_file(
     event_target: str,
     event_argument: str,
     dest_dir: Path,
-    session: Optional[requests.Session] = None,
-    form_data: Optional[dict[str, str]] = None,
-    extra_headers: Optional[dict[str, str]] = None,
-    expected_sha256: Optional[str] = None,
-    progress_callback: Optional[Callable[[int, Optional[int]], None]] = None,
+    session: requests.Session | None = None,
+    form_data: dict[str, str] | None = None,
+    extra_headers: dict[str, str] | None = None,
+    expected_sha256: str | None = None,
+    progress_callback: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     """
     Simulate ASP.NET __doPostBack submission to download exported dataset files.
@@ -500,7 +586,6 @@ def download_aspnet_postback_file(
     Maintains session state and cookies across simulated POST submissions.
 
     Args:
-    ----
         page_url: The URL of the ASP.NET page containing the form and GridView.
         event_target: Target control identifier (__EVENTTARGET, e.g. ctl00$CphMain$GridView).
         event_argument: Argument passed to event (__EVENTARGUMENT, e.g. Select$0).
@@ -512,17 +597,16 @@ def download_aspnet_postback_file(
         progress_callback: Optional progress callback function.
 
     Returns:
-    -------
         Path: The path to the downloaded file.
 
     Raises:
-    ------
         ValueError: If SHA-256 checksum verification fails.
         RuntimeError: If download fails or HTTP status is erroneous.
 
     """
     from t1d_analytics.parser import extract_aspnet_form_data
 
+    validate_download_url(page_url)
     dest_dir.mkdir(parents=True, exist_ok=True)
     sess = session or requests.Session()
 
@@ -582,18 +666,17 @@ def process_datasets(
     datasets: list[DatasetInfo],
     output_dir: str,
     concurrency: int = 4,
-    token: Optional[str] = None,
-    auth: Optional[tuple[str, str]] = None,
-    headers: Optional[dict[str, str]] = None,
-    cookies: Optional[dict[str, str]] = None,
-    page_url: Optional[str] = None,
-    token_refresh_callback: Optional[Callable[[], str]] = None,
+    token: str | None = None,
+    auth: tuple[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    page_url: str | None = None,
+    token_refresh_callback: Callable[[], str] | None = None,
 ) -> DownloadSummaryDict:
     """
     Process and download all given datasets in parallel without halting on single file failures.
 
     Args:
-    ----
         datasets: List of DatasetInfo objects.
         output_dir: Base directory to save downloads.
         concurrency: Maximum number of concurrent downloads (default: 4).
@@ -605,7 +688,6 @@ def process_datasets(
         token_refresh_callback: Optional callback to refresh Bearer token on 401.
 
     Returns:
-    -------
         DownloadSummaryDict: Metrics containing total, succeeded, failed counts, and error list.
 
     """
@@ -621,7 +703,6 @@ def process_datasets(
         Download a single dataset or document item.
 
         Args:
-        ----
             dataset: DatasetInfo metadata object.
             is_doc: Whether this download task represents a document link.
 

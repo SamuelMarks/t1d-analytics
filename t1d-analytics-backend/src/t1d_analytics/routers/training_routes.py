@@ -1,8 +1,6 @@
 """Background model training job CRUD endpoints (`/api/training/jobs`)."""
 
-from typing import Dict, List
-
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 
 from t1d_analytics.api_dependencies import AppServices, get_app_services
 from t1d_analytics.api_schemas import TrainingJobRequest
@@ -23,11 +21,9 @@ def _resolve_job_manager_dependency(
     Resolve the active `TrainingJobManager` via injected `AppServices`.
 
     Args:
-    ----
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         TrainingJobManager: Active background training job manager.
 
     """
@@ -37,7 +33,6 @@ def _resolve_job_manager_dependency(
 @training_router.post("/api/training/jobs")
 def submit_training_job(
     job_req: TrainingJobRequest,
-    req: Request,
     job_manager: TrainingJobManager = Depends(_resolve_job_manager_dependency),
     svc: AppServices = Depends(get_app_services),
 ) -> TrainingJobDict:
@@ -45,22 +40,17 @@ def submit_training_job(
     Submit a background training job using the configured accelerator backend.
 
     Args:
-    ----
         job_req: Training job specification.
-        req: Incoming FastAPI request.
         job_manager: Injected TrainingJobManager dependency.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         TrainingJobDict: Job ID and initial status.
 
     Raises:
-    ------
         InvalidTrainingBackendError: If requested training backend is unsupported.
 
     """
-    _ = req
     validated_dataset_path = svc.validate_workspace_artifact_path(job_req.dataset_path)
     validated_output_dir = svc.validate_workspace_artifact_path(job_req.output_dir)
 
@@ -93,51 +83,40 @@ def submit_training_job(
 
 @training_router.get("/api/training/jobs")
 def list_training_jobs(
-    req: Request,
     job_manager: TrainingJobManager = Depends(_resolve_job_manager_dependency),
-) -> Dict[str, List[TrainingJobDict]]:
+) -> dict[str, list[TrainingJobDict]]:
     """
     List all tracked background training jobs.
 
     Args:
-    ----
-        req: Incoming FastAPI request.
         job_manager: Injected TrainingJobManager dependency.
 
     Returns:
-    -------
         Dict[str, List[TrainingJobDict]]: Dictionary containing list of training jobs.
 
     """
-    _ = req
     return {"jobs": job_manager.list_jobs()}
 
 
 @training_router.get("/api/training/jobs/{job_id}")
 def get_training_job(
     job_id: str,
-    req: Request,
     job_manager: TrainingJobManager = Depends(_resolve_job_manager_dependency),
 ) -> TrainingJobDict:
     """
     Retrieve details and execution metrics for a specific background training job.
 
     Args:
-    ----
         job_id: Unique job identifier string.
-        req: Incoming FastAPI request.
         job_manager: Injected TrainingJobManager dependency.
 
     Returns:
-    -------
         TrainingJobDict: Job status and execution results.
 
     Raises:
-    ------
         TrainingJobNotFoundError: 404 if the job ID is not found.
 
     """
-    _ = req
     job = job_manager.get_job(job_id)
     if not job:
         raise TrainingJobNotFoundError(params={"job_id": job_id})
@@ -147,28 +126,22 @@ def get_training_job(
 @training_router.delete("/api/training/jobs/{job_id}")
 def cancel_training_job(
     job_id: str,
-    req: Request,
     job_manager: TrainingJobManager = Depends(_resolve_job_manager_dependency),
 ) -> TrainingJobDict:
     """
     Request cancellation of a running background training job.
 
     Args:
-    ----
         job_id: Unique job identifier string.
-        req: Incoming FastAPI request.
         job_manager: Injected TrainingJobManager dependency.
 
     Returns:
-    -------
         TrainingJobDict: Cancellation outcome.
 
     Raises:
-    ------
         TrainingJobNotFoundError: 404 if the job ID is not found.
 
     """
-    _ = req
     cancelled = job_manager.cancel_job(job_id)
     if not cancelled:
         raise TrainingJobNotFoundError(params={"job_id": job_id})

@@ -25,7 +25,7 @@ describe("SchemaExplorerController & Database Switcher", () => {
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
@@ -243,10 +243,8 @@ describe("SchemaExplorerController & Database Switcher", () => {
     await flushPromises();
     expect(
       document.getElementById("table-modal")?.getAttribute("aria-hidden"),
-    ).toBeNull();
-    document.getElementById("close-modal-btn")?.click();
+    ).toBe("false");
 
-    // Schema explorer collapse/expand
     const toggleBtn = getTestElement("toggle-schema-btn");
     const header = document.querySelector(".schema-header");
     const explorer = document.getElementById("schema-explorer");
@@ -255,6 +253,7 @@ describe("SchemaExplorerController & Database Switcher", () => {
     header?.dispatchEvent(new MouseEvent("click"));
     expect(explorer?.classList.contains("collapsed")).toBe(false);
 
+    ui.dispose();
     explorer?.classList.remove("collapsed");
     header?.remove();
     explorer?.prepend(toggleBtn);
@@ -404,6 +403,23 @@ describe("SchemaExplorerController & Database Switcher", () => {
       json: async () => ({ content: "Hello custom db" }),
     });
     await ui.handleSendMessage("Hi", "sql");
+
+    sessionStorage.setItem("t1d_backend_api_key", "secret-token");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ databases: [], current_db: "t1d.duckdb" }),
+    });
+    await ui.schemaExplorerController.fetchDatabases();
+    sessionStorage.removeItem("t1d_backend_api_key");
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        tables: [],
+        database: { status_code: "missing_file" },
+      }),
+    });
+    await ui.schemaExplorerController.loadSchema();
 
     const triggerBtn = document.createElement("button");
     const msgCountBefore = state.getActiveChat()?.messages.length ?? 0;

@@ -8,34 +8,14 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit",
+    "lint": "eslint . && tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "docs": "typedoc --out ../docs/web src/main.ts src/ui.ts src/message-renderer.ts src/empty-state-builder.ts src/table1-queries.ts src/state.ts src/chart.ts src/cgm-metrics.ts src/i18n.ts src/formatters.ts src/clinical-dates.ts src/sql-highlight.ts src/modal-utils.ts src/cohort-sql.ts src/api-client.ts src/exporters.ts src/sse-stream.ts src/controllers/system-status-controller.ts src/controllers/cohort-modal-controller.ts src/controllers/provider-modal-controller.ts src/controllers/table-modal-controller.ts src/controllers/schema-explorer-controller.ts src/controllers/sidebar-controller.ts src/controllers/model-selector-controller.ts src/controllers/template-picker-controller.ts",
+    "docs": "typedoc --treatWarningsAsErrors --out ../docs/web src/agp-svg-renderer.ts src/api-client.ts src/api-types.ts src/bar-line-svg-renderer.ts src/cgm-metrics.ts src/chart-data-detector.ts src/chart.ts src/clinical-dates.ts src/cohort-sql.ts src/empty-state-builder.ts src/event-bus.ts src/exporters.ts src/formatters.ts src/i18n.ts src/main.ts src/message-renderer.ts src/modal-utils.ts src/sql-highlight.ts src/sse-stream.ts src/state.ts src/syntax-highlighter.ts src/table1-queries.ts src/ui.ts src/controllers/cohort-modal-controller.ts src/controllers/model-selector-controller.ts src/controllers/provider-modal-controller.ts src/controllers/schema-explorer-controller.ts src/controllers/sidebar-controller.ts src/controllers/system-status-controller.ts src/controllers/table-modal-controller.ts src/controllers/template-picker-controller.ts",
     "test:e2e": "playwright test --config=playwright.config.ts",
     "test:e2e:full": "playwright test --config=playwright.full.config.ts",
     "test:e2e:all": "npm run test:e2e && npm run test:e2e:full"
-  },
-  "eslintConfig": {
-    "rules": {
-      "complexity": [
-        "error",
-        15
-      ],
-      "max-lines-per-function": [
-        "error",
-        {
-          "max": 120,
-          "skipBlankLines": true,
-          "skipComments": true
-        }
-      ],
-      "no-restricted-syntax": [
-        "error",
-        "TSAsExpression > TSUnknownKeyword"
-      ]
-    }
   },
   "typedocOptions": {
     "treatWarningsAsErrors": true,
@@ -67,8 +47,12 @@
     "@types/highlight.js": "^9.12.4",
     "@types/marked": "^5.0.2",
     "@types/node": "^25.6.0",
+    "@typescript-eslint/eslint-plugin": "^8.72.2",
+    "@typescript-eslint/parser": "^8.72.2",
     "@vitest/coverage-istanbul": "^1.6.1",
     "@vitest/coverage-v8": "^1.4.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-jsdoc": "^50.8.0",
     "jsdom": "^24.0.0",
     "monocart-reporter": "^2.12.4",
     "nyc": "^18.0.0",

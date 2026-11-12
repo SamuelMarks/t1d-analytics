@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import i18next from "i18next";
+import { _computeAgpPercentiles } from "../src/cgm-metrics";
 import {
   detectCgmColumns,
   calculateTIR,
@@ -73,9 +74,9 @@ describe("CGM Charting Module", () => {
       { time: "2024-01-02T12:15:00Z", glucose: 160 },
     ];
     const agp = calculateAGP(rows, "time", "glucose", 30);
-    expect(agp).not.toBeNull();
+    if (!agp) throw new Error("Expected agp");
 
-    const svg = renderAGPSvg(agp!);
+    const svg = renderAGPSvg(agp);
     expect(svg.tagName.toLowerCase()).toBe("svg");
     expect(svg.getAttribute("role")).toBe("img");
     expect(svg.getAttribute("aria-label")).toContain(
@@ -230,8 +231,8 @@ describe("CGM Charting Module", () => {
 
     const filtered = filter14DayWindow(rows, "time");
     expect(filtered.length).toBe(3);
-    expect(filtered[0].glucose).toBe(120);
-    expect(filtered[2].glucose).toBe(140);
+    expect(filtered[0]?.glucose).toBe(120);
+    expect(filtered[2]?.glucose).toBe(140);
   });
 
   it("renderCgmCard displays valid wear badge when compliance >= 70%", () => {
@@ -275,9 +276,9 @@ describe("CGM Charting Module", () => {
       { time: "2024-01-20T12:00:00Z", glucose: 120 },
     ];
     const card = renderCgmCard(sampleRows);
-    expect(card).not.toBeNull();
-    expect(card?.getAttribute("dir")).toBe("rtl");
-    parent.appendChild(card!);
+    if (!card) throw new Error("Expected card");
+    expect(card.getAttribute("dir")).toBe("rtl");
+    parent.appendChild(card);
 
     const select = card?.querySelector<HTMLSelectElement>(".agp-window-select");
     expect(select).not.toBeNull();
@@ -321,7 +322,11 @@ describe("CGM Charting Module", () => {
     ];
     const noonAgp = calculateAGP(noonRows, "time", "glucose", 60);
     expect(noonAgp).not.toBeNull();
-    expect(noonAgp?.intervals[0].p50).toBe(125); // Interpolated from nextIdx
+    expect(noonAgp?.intervals[0]?.p50).toBe(125); // Interpolated from nextIdx
+
+    expect(
+      _computeAgpPercentiles([[], []], 30).every((item) => item.count === 0),
+    ).toBe(true);
 
     // 3. renderAGPSvg with activeIntervals.length <= 1
     const singleIntervalAgp = {
@@ -361,7 +366,7 @@ describe("CGM Charting Module", () => {
 
     // 7. parseDateAndMinuteOfDay with invalid offset date string falling back to literal
     expect(parseDateAndMinuteOfDay("1000-00-00T00:00:00+00:00")).toMatchObject({
-      dayKey: "1000--1-0",
+      dayKey: "1000-0-0",
       minuteOfDay: 0,
     });
 
@@ -431,19 +436,19 @@ describe("CGM Charting Module", () => {
     // US Format: MM/DD/YYYY HH:mm:ss
     const usDate = parseDateAndMinuteOfDay("03/15/2024 14:30:00");
     expect(usDate).not.toBeNull();
-    expect(usDate?.dayKey).toBe("2024-2-15");
+    expect(usDate?.dayKey).toBe("2024-3-15");
     expect(usDate?.minuteOfDay).toBe(14 * 60 + 30);
 
     // European Format: DD/MM/YYYY HH:mm:ss
     const euDate = parseDateAndMinuteOfDay("25/03/2024 09:15:00");
     expect(euDate).not.toBeNull();
-    expect(euDate?.dayKey).toBe("2024-2-25");
+    expect(euDate?.dayKey).toBe("2024-3-25");
     expect(euDate?.minuteOfDay).toBe(9 * 60 + 15);
 
     // CDISC / SAS Format: DD-Mon-YYYY HH:mm:ss
     const cdiscDate = parseDateAndMinuteOfDay("15-Mar-2024 18:45:00");
     expect(cdiscDate).not.toBeNull();
-    expect(cdiscDate?.dayKey).toBe("2024-2-15");
+    expect(cdiscDate?.dayKey).toBe("2024-3-15");
     expect(cdiscDate?.minuteOfDay).toBe(18 * 60 + 45);
 
     // CDISC with offset
@@ -852,28 +857,30 @@ describe("CGM Charting Module", () => {
     // 2. Leap year date (February 29, 2024)
     const leapYearCdisc = parseDateAndMinuteOfDay("29-FEB-2024 12:00:00");
     expect(leapYearCdisc).not.toBeNull();
-    expect(leapYearCdisc?.dayKey).toBe("2024-1-29");
+    expect(leapYearCdisc?.dayKey).toBe("2024-2-29");
 
     const leapYearIso = parseDateAndMinuteOfDay("2024-02-29T15:30:00Z");
     expect(leapYearIso).not.toBeNull();
-    expect(leapYearIso?.dayKey).toBe("2024-1-29");
+    expect(leapYearIso?.dayKey).toBe("2024-2-29");
 
-    // 3. Day/Night boundary crossing (Day: 06:00:00 - 21:59:59; Night: 22:00:00 - 05:59:59)
+    // 3. Day/Night boundary crossing and anti-double-normalization when night subset < 25 mg/dL
     const boundaryRows = [
-      { time: "2024-01-01 06:00:00", glucose: 100 }, // Exactly 06:00:00 -> minute 360 -> Day
-      { time: "2024-01-01 21:59:00", glucose: 110 }, // 21:59 -> Day
-      { time: "2024-01-01 22:00:00", glucose: 120 }, // Exactly 22:00:00 -> minute 1320 -> Night
-      { time: "2024-01-01 05:59:00", glucose: 130 }, // 05:59 -> Night
+      { time: "2024-01-01 06:00:00", glucose: 120 }, // Exactly 06:00:00 -> minute 360 -> Day
+      { time: "2024-01-01 21:59:00", glucose: 140 }, // 21:59 -> Day
+      { time: "2024-01-01 22:00:00", glucose: 22 }, // Extreme low < 25 mg/dL in mg/dL dataset -> Night (must NOT be re-multiplied by 18.0182!)
+      { time: "2024-01-01 05:59:00", glucose: 24 }, // 05:59 -> Night
     ];
     const dn = calculateDayNightTIR(boundaryRows, "time", "glucose");
     expect(dn.day.count).toBe(2);
     expect(dn.night.count).toBe(2);
+    expect(dn.night.mean).toBe(23);
+    expect(dn.night.veryLow).toBe(100);
 
     // 4. Daylight saving transition timezone strings preserve local wall-clock minuteOfDay
     const dst1 = parseDateAndMinuteOfDay("2024-03-10T01:59:00-05:00");
     expect(dst1).not.toBeNull();
     expect(dst1?.minuteOfDay).toBe(1 * 60 + 59);
-    expect(dst1?.dayKey).toBe("2024-2-10");
+    expect(dst1?.dayKey).toBe("2024-3-10");
     expect(dst1?.epochMs).toBeGreaterThan(0);
 
     const dst2 = parseDateAndMinuteOfDay("2024-03-10T03:00:00-04:00");
@@ -909,17 +916,17 @@ describe("CGM Charting Module", () => {
     for (const lang of ["en", "ja", "ar", "he"]) {
       await i18next.changeLanguage(lang);
       const card = renderCgmCard(rows);
-      expect(card).not.toBeNull();
+      if (!card) throw new Error("Expected card");
 
       const windowSelect =
-        card!.querySelector<HTMLSelectElement>(".agp-window-select")!;
-      expect(windowSelect).not.toBeNull();
+        card.querySelector<HTMLSelectElement>(".agp-window-select");
+      if (!windowSelect) throw new Error("Expected windowSelect");
       expect(windowSelect.getAttribute("aria-label")).toBe(
         i18next.t("cgm.obsWindow"),
       );
 
       // Verify Day/Night badge uses localized cgm.dayNight key
-      const badgesText = card!.querySelector(
+      const badgesText = card.querySelector(
         ".cgm-clinical-badges",
       )?.textContent;
       expect(badgesText).toContain(
@@ -934,23 +941,23 @@ describe("CGM Charting Module", () => {
       );
 
       if (lang === "ar" || lang === "he") {
-        expect(card!.getAttribute("dir")).toBe("rtl");
+        expect(card.getAttribute("dir")).toBe("rtl");
       } else {
-        expect(card!.getAttribute("dir")).toBeNull();
+        expect(card.getAttribute("dir")).toBeNull();
       }
 
-      const svgs = card!.querySelectorAll("svg");
+      const svgs = card.querySelectorAll("svg");
       expect(svgs.length).toBeGreaterThanOrEqual(3);
-      expect(svgs[0].getAttribute("aria-labelledby")).toBe(
+      expect(svgs[0]?.getAttribute("aria-labelledby")).toBe(
         "tir-svg-title tir-svg-desc",
       );
-      expect(svgs[1].getAttribute("aria-labelledby")).toBe(
+      expect(svgs[1]?.getAttribute("aria-labelledby")).toBe(
         "agp-svg-title agp-svg-desc",
       );
-      expect(svgs[2].getAttribute("aria-labelledby")).toBe(
+      expect(svgs[2]?.getAttribute("aria-labelledby")).toBe(
         "hist-svg-title hist-svg-desc",
       );
-      const histRects = svgs[2].querySelectorAll('rect[tabindex="0"]');
+      const histRects = svgs[2]?.querySelectorAll('rect[tabindex="0"]') ?? [];
       expect(histRects.length).toBeGreaterThan(0);
     }
 

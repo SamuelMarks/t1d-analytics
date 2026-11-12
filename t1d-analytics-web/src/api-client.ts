@@ -5,45 +5,13 @@
  */
 
 import i18next from "./i18n";
-import { type SqlCellValue } from "./formatters";
-import { type SqlGoldComparisonPayload } from "./state";
+import {
+  type ApiErrorInput,
+  type ApiErrorPayload,
+  type ChatTurnResponse,
+} from "./api-types";
 
-/**
- * Structured API error detail object returned by the backend.
- */
-export interface ApiErrorPayload {
-  /** Internationalization error code key. */
-  error_code: string;
-  /** Optional interpolation parameters. */
-  params?: Record<string, SqlCellValue>;
-}
-
-/**
- * Input value accepted by parseApiError.
- */
-export type ApiErrorInput =
-  | string
-  | number
-  | boolean
-  | null
-  | undefined
-  | ApiErrorPayload
-  | Record<string, never>;
-
-/**
- * Collapses repeated `"Internal server error: "` prefixes in formatted error messages.
- * @param {string} message - Raw formatted error message.
- * @returns {string} Error message with duplicate `"Internal server error: "` prefixes collapsed.
- */
-export function deduplicateErrorPrefix(message: string): string {
-  const prefix = "Internal server error: ";
-  const doublePrefix = `${prefix}${prefix}`;
-  let cleaned = message;
-  while (cleaned.toLowerCase().startsWith(doublePrefix.toLowerCase())) {
-    cleaned = `${prefix}${cleaned.slice(doublePrefix.length).trimStart()}`;
-  }
-  return cleaned;
-}
+export { type ApiErrorInput, type ApiErrorPayload, type ChatTurnResponse };
 
 /**
  * Parses a backend error string or detail object into a translated string.
@@ -52,20 +20,21 @@ export function deduplicateErrorPrefix(message: string): string {
  */
 export function parseApiError(errorObj: ApiErrorInput): string {
   if (typeof errorObj === "string") {
-    const resolved = i18next.exists(errorObj)
-      ? String(i18next.t(errorObj))
-      : errorObj;
-    return deduplicateErrorPrefix(resolved);
+    return i18next.exists(errorObj) ? String(i18next.t(errorObj)) : errorObj;
   }
-  if (errorObj && typeof errorObj === "object" && "error_code" in errorObj) {
+  if (
+    errorObj !== null &&
+    typeof errorObj === "object" &&
+    "error_code" in errorObj
+  ) {
     const key = errorObj.error_code;
     const params = errorObj.params;
-    const resolved = i18next.exists(key)
-      ? String(i18next.t(key, params))
-      : `${key}: ${JSON.stringify(params)}`;
-    return deduplicateErrorPrefix(resolved);
+    if (!i18next.exists(key)) {
+      return `${key}: ${JSON.stringify(params)}`;
+    }
+    return params ? String(i18next.t(key, params)) : String(i18next.t(key));
   }
-  return deduplicateErrorPrefix(String(errorObj));
+  return String(errorObj);
 }
 
 /**
@@ -91,7 +60,7 @@ export async function parseResponseJson<T>(response: Response): Promise<T> {
  * Remote chat session record returned by `/api/sessions`.
  * @template TMsg - Message item type.
  */
-export interface RemoteSessionPayload<TMsg = unknown> {
+export interface RemoteSessionPayload<TMsg> {
   /** Session identifier. */
   session_id: string;
   /** Session display title. */
@@ -105,6 +74,64 @@ export interface RemoteSessionPayload<TMsg = unknown> {
 }
 
 /**
+ * Reads any configured `T1D_API_KEY` Bearer token from `sessionStorage` or `localStorage`.
+ * @returns {string | null} Trimmed Bearer token if configured, otherwise null.
+ */
+export function getStoredBackendApiKey(): string | null {
+  try {
+    if (typeof sessionStorage !== "undefined") {
+      const sessVal = sessionStorage.getItem("t1d_backend_api_key")?.trim();
+      if (sessVal) {
+        return sessVal;
+      }
+    }
+    if (typeof localStorage !== "undefined") {
+      const localVal = localStorage.getItem("t1d_backend_api_key")?.trim();
+      if (localVal) {
+        return localVal;
+      }
+    }
+  } catch {
+    // Ignore storage access errors in restricted contexts
+  }
+  return null;
+}
+
+/**
+ * Merges an `Authorization: Bearer <token>` header into `options` when a backend API key is configured.
+ * Leaves `options` untouched when no backend API key is configured.
+ * @param {RequestInit} [options] - Optional Fetch API RequestInit options.
+ * @returns {RequestInit | undefined} RequestInit augmented with Authorization header when configured.
+ */
+export function withBearerAuth(options?: RequestInit): RequestInit | undefined {
+  const token = getStoredBackendApiKey();
+  if (!token) {
+    return options;
+  }
+  const mergedHeaders: Record<string, string> = {};
+  if (options?.headers) {
+    if (options.headers instanceof Headers) {
+      options.headers.forEach((val, key) => {
+        mergedHeaders[key] = val;
+      });
+    } else if (Array.isArray(options.headers)) {
+      for (const [key, val] of options.headers) {
+        mergedHeaders[key] = val;
+      }
+    } else {
+      Object.assign(mergedHeaders, options.headers);
+    }
+  }
+  if (!mergedHeaders.Authorization && !mergedHeaders.authorization) {
+    mergedHeaders.Authorization = `Bearer ${token}`;
+  }
+  return {
+    ...(options ?? {}),
+    headers: mergedHeaders,
+  };
+}
+
+/**
  * Fetches persisted chat sessions from `/api/sessions`.
  * @template TMsg - Message item type.
  * @returns {Promise<Array<RemoteSessionPayload<TMsg>>>} Normalized list of remote sessions.
@@ -112,7 +139,10 @@ export interface RemoteSessionPayload<TMsg = unknown> {
 export async function fetchRemoteSessions<TMsg>(): Promise<
   Array<RemoteSessionPayload<TMsg>>
 > {
-  const resp = await fetch("/api/sessions");
+  const authInit = withBearerAuth();
+  const resp = authInit
+    ? await fetch("/api/sessions", authInit)
+    : await fetch("/api/sessions");
   if (!resp.ok) {
     throw new Error(`Server returned status ${resp.status}`);
   }
@@ -136,7 +166,9 @@ export async function fetchRemoteSessions<TMsg>(): Promise<
 export async function fetchRemoteSessionById<TMsg>(
   sessionId: string,
 ): Promise<RemoteSessionPayload<TMsg> | null> {
-  const resp = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+  const authInit = withBearerAuth();
+  const url = `/api/sessions/${encodeURIComponent(sessionId)}`;
+  const resp = authInit ? await fetch(url, authInit) : await fetch(url);
   if (!resp.ok) {
     return null;
   }
@@ -157,19 +189,23 @@ export async function pushRemoteSession<TMsg>(
   title: string,
   messages: TMsg[],
 ): Promise<Response> {
-  return fetch("/api/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: sessionId,
-      title,
-      messages,
+  return fetch(
+    "/api/sessions",
+    withBearerAuth({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId,
+        title,
+        messages,
+      }),
     }),
-  });
+  );
 }
 
 /**
  * Helper to fetch and automatically throw parsed backend errors.
+ * Automatically attaches `Authorization: Bearer <token>` when `t1d_backend_api_key` is configured.
  * @param {string} url - The URL to fetch.
  * @param {RequestInit} [options] - Fetch options.
  * @returns {Promise<Response>} The fetch response.
@@ -178,12 +214,16 @@ export async function fetchWithBackendError(
   url: string,
   options?: RequestInit,
 ): Promise<Response> {
-  const response = await fetch(url, options);
+  const response = await fetch(url, withBearerAuth(options));
   if (!response.ok) {
     let errorMsg = `HTTP ${response.status}`;
     try {
       const errData = await parseResponseJson<BackendErrorResponse>(response);
-      if (errData.detail) {
+      if (
+        errData.detail !== undefined &&
+        errData.detail !== null &&
+        errData.detail !== ""
+      ) {
         errorMsg = parseApiError(errData.detail);
       }
     } catch {
@@ -202,47 +242,12 @@ export async function fetchWithBackendError(
 export async function deleteRemoteSession(
   sessionId: string,
 ): Promise<Response> {
-  return fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "DELETE",
-  });
-}
-
-/**
- * Payload returned by `POST /api/chat/jobs` or `GET /api/chat/jobs/{jobId}`.
- */
-export interface PollableChatJobData {
-  /** Optional SSE event discriminator. */
-  event?: string;
-  /** Optional streamed token delta. */
-  token?: string;
-  /** Async job identifier (`chatjob-...`). */
-  job_id?: string | null;
-  /** Lifecycle status (`"pending"`, `"complete"`, `"failed"`). */
-  status?: "pending" | "complete" | "failed" | string;
-  /** Live accumulated partial text while `"pending"`. */
-  partial_content?: string;
-  /** Final assistant text or i18n key. */
-  content?: string;
-  /** Executed SQL result rows. */
-  sqlResult?: Record<string, SqlCellValue>[];
-  /** Generated or executed SQL query string. */
-  sqlQuery?: string;
-  /** Structured API error detail when execution or translation fails. */
-  error?: ApiErrorInput;
-  /** Whether the queried DuckDB database uses synthetic seed data rather than authentic Jaeb trial data. */
-  is_synthetic_data?: boolean;
-  /** Whether the SQL was generated via deterministic rule-based templates instead of an LLM. */
-  is_rule_based_sql?: boolean;
-  /** SQL generation mode ('llm', 'rule_based_fallback', 'literal_sql'). */
-  generation_mode?: string;
-  /** Optional human-readable diagnostic reason why LLM inference failed prior to fallback synthesis. */
-  llm_error?: string | null;
-  /** Optional structured error code for the underlying LLM failure. */
-  llm_error_code?: string | null;
-  /** Database provenance classification ('jaeb_authentic', 'synthetic_seed', 'custom'). */
-  data_provenance?: string;
-  /** Optional gold-standard SQL comparison metrics returned by the backend. */
-  gold_comparison?: SqlGoldComparisonPayload | null;
+  return fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+    withBearerAuth({
+      method: "DELETE",
+    }),
+  );
 }
 
 /**
@@ -266,10 +271,14 @@ export interface PollChatJobOptions {
  * @returns {Promise<void>} Promise resolving after `ms` milliseconds.
  */
 function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
+  if (signal?.aborted === true) {
     return Promise.reject(new Error("Request aborted by user"));
   }
   return new Promise<void>((resolve, reject) => {
+    /**
+     * Clears the pending timeout and rejects when `signal` aborts.
+     * @returns {void}
+     */
     const onAbort = (): void => {
       clearTimeout(timer);
       reject(new Error("Request aborted by user"));
@@ -287,46 +296,51 @@ function delayWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
  * @param {string} bodyJson - Serialized JSON request payload.
  * @param {Record<string, string>} headers - Request headers.
  * @param {AbortSignal} [signal] - Optional abort signal.
- * @returns {Promise<PollableChatJobData>} Initial job ticket or immediate response.
+ * @returns {Promise<ChatTurnResponse>} Initial job ticket or immediate response.
  */
 export async function submitChatJob(
   bodyJson: string,
   headers: Record<string, string>,
   signal?: AbortSignal,
-): Promise<PollableChatJobData> {
-  const response = await fetchWithBackendError("/api/chat/jobs", {
+): Promise<ChatTurnResponse> {
+  const reqInit: RequestInit = {
     method: "POST",
     headers,
     body: bodyJson,
-    signal,
-  });
-  return parseResponseJson<PollableChatJobData>(response);
+    ...(signal ? { signal } : {}),
+  };
+  const response = await fetchWithBackendError("/api/chat/jobs", reqInit);
+  return parseResponseJson<ChatTurnResponse>(response);
 }
 
 /**
  * Polls `GET /api/chat/jobs/{jobId}` until `status !== "pending"` and returns the completed record.
  * @param {string} jobId - Job identifier returned by `submitChatJob` or `POST /api/chat`.
  * @param {PollChatJobOptions} [options] - Polling interval, timeout, progress callback, and abort signal.
- * @returns {Promise<PollableChatJobData>} Completed chat response record.
+ * @returns {Promise<ChatTurnResponse>} Completed chat response record.
  */
 export async function pollChatJobUntilComplete(
   jobId: string,
   options: PollChatJobOptions = {},
-): Promise<PollableChatJobData> {
+): Promise<ChatTurnResponse> {
   const intervalMs = options.intervalMs ?? 800;
   const timeoutMs = options.timeoutMs ?? 120000;
   const startMs = Date.now();
   const encodedId = encodeURIComponent(jobId);
 
   while (true) {
-    if (options.signal?.aborted) {
+    if (options.signal?.aborted === true) {
       throw new Error("Request aborted by user");
     }
-    const resp = await fetchWithBackendError(`/api/chat/jobs/${encodedId}`, {
+    const reqInit: RequestInit = {
       method: "GET",
-      signal: options.signal,
-    });
-    const record = await parseResponseJson<PollableChatJobData>(resp);
+      ...(options.signal ? { signal: options.signal } : {}),
+    };
+    const resp = await fetchWithBackendError(
+      `/api/chat/jobs/${encodedId}`,
+      reqInit,
+    );
+    const record = await parseResponseJson<ChatTurnResponse>(resp);
     if (record.status === "pending") {
       const partial = record.partial_content || record.content || "";
       if (partial && options.onProgress) {

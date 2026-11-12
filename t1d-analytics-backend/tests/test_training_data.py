@@ -1,8 +1,8 @@
 """Tests for the training_data module."""
 
 import json
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -16,8 +16,7 @@ def mock_db() -> Generator[duckdb.DuckDBPyConnection, None, None]:
     """
     Provide an in-memory DuckDB connection pre-populated with a dummy schema.
 
-    Yields
-    ------
+    Yields:
         A DuckDB connection with a dummy `demographics` table.
 
     """
@@ -38,7 +37,7 @@ def mock_db() -> Generator[duckdb.DuckDBPyConnection, None, None]:
 def test_extract_schema(mock_db: duckdb.DuckDBPyConnection) -> None:
     """Test extracting the schema from the DuckDB connection."""
     generator = TrainingDataGenerator(mock_db, "gemma4")
-    schema = generator._extract_schema()
+    schema = generator.extract_schema()
 
     assert "demographics" in schema
     desc = schema["demographics"]
@@ -60,7 +59,7 @@ def test_extract_schema_ignores_internal_tables(
     mock_db.execute("CREATE TABLE pretrain_train (text VARCHAR)")
 
     generator = TrainingDataGenerator(mock_db, "gemma4")
-    schema = generator._extract_schema()
+    schema = generator.extract_schema()
 
     assert "demographics" in schema
     assert "_t1d_ingestion_manifest" not in schema
@@ -117,7 +116,7 @@ def test_generate_pairs_failure_malformed(
     mock_urlopen.return_value.__enter__.return_value = mock_response
 
     generator = TrainingDataGenerator(mock_db, "gemma4")
-    pairs = generator._generate_pairs("dummy_schema", 1)
+    pairs = generator.generate_pairs("dummy_schema", 1)
 
     # Since it failed validation, no pairs should be returned
     assert len(pairs) == 0
@@ -133,7 +132,7 @@ def test_generate_pairs_http_error(
     mock_urlopen.side_effect = urllib.error.URLError("HTTP Error")
 
     generator = TrainingDataGenerator(mock_db, "gemma4")
-    pairs = generator._generate_pairs("dummy_schema", 1)
+    pairs = generator.generate_pairs("dummy_schema", 1)
 
     # Exception should be caught and empty list returned
     assert len(pairs) == 0
@@ -174,9 +173,9 @@ def test_write_to_db(mock_db: duckdb.DuckDBPyConnection) -> None:
 def test_is_valid_sql(mock_db: duckdb.DuckDBPyConnection) -> None:
     """Test _is_valid_sql with valid and invalid queries."""
     generator = TrainingDataGenerator(mock_db, "gemma4")
-    assert generator._is_valid_sql("SELECT * FROM demographics")
-    assert not generator._is_valid_sql("SELECT * FROM nonexistent_table")
-    assert not generator._is_valid_sql("MALFORMED SQL QUERY !!!")
+    assert generator.is_valid_sql("SELECT * FROM demographics")
+    assert not generator.is_valid_sql("SELECT * FROM nonexistent_table")
+    assert not generator.is_valid_sql("MALFORMED SQL QUERY !!!")
 
 
 @patch("urllib.request.urlopen")
@@ -198,7 +197,7 @@ def test_generate_pairs_sql_validation_discard(
     mock_urlopen.return_value.__enter__.return_value = mock_response
 
     generator = TrainingDataGenerator(mock_db, "gemma4")
-    pairs = generator._generate_pairs("dummy_schema", 1, validate_sql=True)
+    pairs = generator.generate_pairs("dummy_schema", 1, validate_sql=True)
     assert len(pairs) == 0
 
 
@@ -246,7 +245,7 @@ def test_generate_pairs_ollama_host_without_http(
 
     with patch.dict(os.environ, {"OLLAMA_HOST": "localhost:11434"}):
         generator = TrainingDataGenerator(mock_db, "gemma4")
-        pairs = generator._generate_pairs("dummy", 1, validate_sql=False)
+        pairs = generator.generate_pairs("dummy", 1, validate_sql=False)
         assert len(pairs) == 1
 
 
@@ -272,7 +271,7 @@ def test_validate_provider_readiness_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test error handling in validate_provider_readiness."""
-    from t1d_analytics.training_data import validate_provider_readiness
+    from t1d_analytics.llm_client import validate_provider_readiness
 
     # 1. Missing API key
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -294,7 +293,7 @@ def test_validate_provider_readiness_errors(
     with patch("any_llm.AnyLLM.create", side_effect=RuntimeError("API failure")):
         gen = TrainingDataGenerator(mock_db, "openai/gpt-4o")
         with pytest.raises(RuntimeError, match="Failed to initialize any-llm"):
-            gen._generate_pairs("schema", 1)
+            gen.generate_pairs("schema", 1)
 
 
 @patch("any_llm.AnyLLM.create")
@@ -317,7 +316,7 @@ def test_generate_pairs_any_llm_success(
     mock_create.return_value = mock_llm
 
     gen = TrainingDataGenerator(mock_db, "gemma4", provider="ollama")
-    pairs = gen._generate_pairs("schema_text", 1, validate_sql=True)
+    pairs = gen.generate_pairs("schema_text", 1, validate_sql=True)
     assert len(pairs) == 1
     assert pairs[0][0] == "What is patient age?"
     assert pairs[0][1] == "SELECT age FROM demographics;"
@@ -349,7 +348,7 @@ def test_generate_pairs_any_llm_fallback_to_urllib(
     mock_urlopen.return_value.__enter__.return_value = mock_response
 
     gen = TrainingDataGenerator(mock_db, "gemma4")
-    pairs = gen._generate_pairs("schema_text", 1, validate_sql=True)
+    pairs = gen.generate_pairs("schema_text", 1, validate_sql=True)
     assert len(pairs) == 1
     assert pairs[0][0] == "Fallback question?"
 
@@ -394,7 +393,7 @@ def test_write_to_db_with_stratified_split_ratios(
 
 def test_normalize_sql() -> None:
     """Test SQL query normalization utility."""
-    from t1d_analytics.training_data import normalize_sql
+    from t1d_analytics.sql_utils import normalize_sql
 
     assert normalize_sql("  SELECT  *  FROM  users ; ") == "select * from users"
 
@@ -478,36 +477,36 @@ def test_generate_pairs_any_llm_create_failure_fallback(
     mock_urlopen.return_value.__enter__.return_value = mock_response
 
     gen = TrainingDataGenerator(mock_db, "gemma4")
-    pairs = gen._generate_pairs("schema_text", 1, validate_sql=True)
+    pairs = gen.generate_pairs("schema_text", 1, validate_sql=True)
     assert len(pairs) == 1
     assert pairs[0][0] == "Fallback Q?"
 
 
 def test_parse_llm_json_array() -> None:
-    """Test _parse_llm_json_array handles markdown code blocks and fallback parsing."""
-    from t1d_analytics.training_data import _parse_llm_json_array
+    """Test parse_llm_json_array handles markdown code blocks and fallback parsing."""
+    from t1d_analytics.training_data import parse_llm_json_array
 
     # Markdown wrapped
     md_text = '```json\n["Question", "SELECT 1;", "SELECT 2;"]\n```'
-    assert _parse_llm_json_array(md_text) == ["Question", "SELECT 1;", "SELECT 2;"]
+    assert parse_llm_json_array(md_text) == ["Question", "SELECT 1;", "SELECT 2;"]
 
     # Fallback search in conversational preamble
     convo = (
         'Sure, here is your data:\n["Q", "SELECT a;", "SELECT b;"]\nHope this helps!'
     )
-    assert _parse_llm_json_array(convo) == ["Q", "SELECT a;", "SELECT b;"]
+    assert parse_llm_json_array(convo) == ["Q", "SELECT a;", "SELECT b;"]
 
     # Non-list JSON with list inside regex match
-    assert _parse_llm_json_array('{"key": ["q", "c", "r"]}') == ["q", "c", "r"]
+    assert parse_llm_json_array('{"key": ["q", "c", "r"]}') == ["q", "c", "r"]
 
     # Non-list JSON with no regex match
-    assert _parse_llm_json_array('{"key": "value"}') is None
+    assert parse_llm_json_array('{"key": "value"}') is None
 
     # Invalid JSON in brackets
-    assert _parse_llm_json_array("Invalid [brackets that cannot be json] text") is None
+    assert parse_llm_json_array("Invalid [brackets that cannot be json] text") is None
 
     # Invalid JSON
-    assert _parse_llm_json_array("This is not JSON at all.") is None
+    assert parse_llm_json_array("This is not JSON at all.") is None
 
 
 def test_evaluate_text_to_sql_order_by_and_multiset(
@@ -568,20 +567,20 @@ def test_evaluate_text_to_sql_order_by_and_multiset(
 
 
 def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> None:
-    """Test error handling in _parse_llm_json_array, _is_valid_sql, and evaluate_text_to_sql with malformed inputs and DB errors."""
+    """Test error handling in parse_llm_json_array, _is_valid_sql, and evaluate_text_to_sql with malformed inputs and DB errors."""
     import duckdb
 
     from t1d_analytics.sql_fallback_synthesizer import TranslationResult
     from t1d_analytics.training_data import (
         TrainingDataGenerator,
-        _parse_llm_json_array,
         evaluate_text_to_sql,
+        parse_llm_json_array,
     )
 
     _ = mocker
-    # 1. _parse_llm_json_array with nested non-SqlValue objects triggering ValidationError
-    assert _parse_llm_json_array('[{"nested": "dict"}]') is None
-    assert _parse_llm_json_array('preamble [{"nested": "dict"}] suffix') is None
+    # 1. parse_llm_json_array with nested non-SqlValue objects triggering ValidationError
+    assert parse_llm_json_array('[{"nested": "dict"}]') is None
+    assert parse_llm_json_array('preamble [{"nested": "dict"}] suffix') is None
 
     # 2. _is_valid_sql with duckdb.Error and RuntimeError
     db_file = tmp_path / "test.duckdb"
@@ -591,7 +590,7 @@ def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> 
         "duckdb.DuckDBPyConnection.execute",
         side_effect=duckdb.Error("Mock DuckDB Error"),
     ):
-        assert gen._is_valid_sql("SELECT 1") is False
+        assert gen.is_valid_sql("SELECT 1") is False
     conn.close()
 
     # 3. evaluate_text_to_sql when query execution raises duckdb.Error
@@ -612,8 +611,8 @@ def test_training_data_generic_exceptions(tmp_path: Path, mocker: MagicMock) -> 
 
 
 def test_make_hashable() -> None:
-    """Test _make_hashable converts nested unhashable structures into hashable immutable tuples."""
-    from t1d_analytics.training_data import HashableInput, _make_hashable
+    """Test make_hashable converts nested unhashable structures into hashable immutable tuples."""
+    from t1d_analytics.training_data import HashableInput, make_hashable
 
     data: HashableInput = {
         "a": [1, 2, {"k": "v"}],
@@ -621,12 +620,12 @@ def test_make_hashable() -> None:
         "c": (5, [6, 7]),
         "d": 42,
     }
-    hashable = _make_hashable(data)
+    hashable = make_hashable(data)
     assert isinstance(hashable, tuple)
     # Verify it can be hashed and stored in set/Counter
     hash_set = {hashable}
     assert hashable in hash_set
-    assert _make_hashable([1, 2]) == (1, 2)
+    assert make_hashable([1, 2]) == (1, 2)
 
 
 def test_evaluate_text_to_sql_nested_complex_types(
@@ -672,7 +671,7 @@ def test_write_pairs_to_tables_empty_and_error(tmp_path: Path) -> None:
 
     gen = TrainingDataGenerator(conn, "gemma4")
     # Empty pairs returns early
-    gen._write_pairs_to_tables([], suffix="_empty")
+    gen.write_pairs_to_tables([], suffix="_empty")
 
     # Error inside transaction triggers rollback
     mock_conn = MagicMock()
@@ -680,7 +679,7 @@ def test_write_pairs_to_tables_empty_and_error(tmp_path: Path) -> None:
     gen.conn = mock_conn
 
     with pytest.raises(RuntimeError, match="Disk full"):
-        gen._write_pairs_to_tables([("q", "c", "r")], suffix="_err")
+        gen.write_pairs_to_tables([("q", "c", "r")], suffix="_err")
     mock_conn.execute.assert_any_call("ROLLBACK")
     conn.close()
 
@@ -708,7 +707,7 @@ def test_generate_pairs_checkpointing_and_custom_template(
             ]
         )
     )
-    cached_pairs = gen._generate_pairs("schema", count=1, checkpoint_path=ckpt_file)
+    cached_pairs = gen.generate_pairs("schema", count=1, checkpoint_path=ckpt_file)
     assert len(cached_pairs) == 1
     assert cached_pairs[0][0] == "Count users"
 
@@ -722,9 +721,7 @@ def test_generate_pairs_checkpointing_and_custom_template(
 
     # 1b. Partial checkpoint with count=2 (resumes generation)
     with patch("any_llm.AnyLLM.create", return_value=mock_llm):
-        resumed_pairs = gen._generate_pairs(
-            "schema", count=2, checkpoint_path=ckpt_file
-        )
+        resumed_pairs = gen.generate_pairs("schema", count=2, checkpoint_path=ckpt_file)
         assert len(resumed_pairs) == 2
 
     # 2. Corrupt checkpoint file recovers gracefully
@@ -734,11 +731,11 @@ def test_generate_pairs_checkpointing_and_custom_template(
     # 2b. Checkpoint containing non-list JSON root
     dict_file = tmp_path / "dict_root.json"
     dict_file.write_text('{"key": "value"}')
-    gen._generate_pairs("schema", count=1, checkpoint_path=dict_file)
+    gen.generate_pairs("schema", count=1, checkpoint_path=dict_file)
 
     with patch("any_llm.AnyLLM.create", return_value=mock_llm):
         out_ckpt = tmp_path / "new_ckpt.json"
-        pairs = gen._generate_pairs(
+        pairs = gen.generate_pairs(
             "schema",
             count=1,
             checkpoint_path=out_ckpt,
@@ -756,7 +753,7 @@ def test_generate_pairs_checkpointing_and_custom_template(
         bad_ckpt = (
             bad_dir  # Writing text to a directory raises IsADirectoryError / OSError
         )
-        pairs_write_err = gen._generate_pairs(
+        pairs_write_err = gen.generate_pairs(
             "schema", count=1, checkpoint_path=bad_ckpt
         )
         assert len(pairs_write_err) == 1
@@ -785,7 +782,7 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
     )
 
     suite = get_table_1_benchmark_suite()
-    assert len(suite) == 7
+    assert len(suite) == 8
     gold_lookup = {item["question"]: item["gold_sql"] for item in suite}
 
     from t1d_analytics.sql_fallback_synthesizer import TranslationResult
@@ -805,7 +802,7 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
         model="gemma4",
         translate_fn=_oracle_translate,
     )
-    assert report["total_samples"] == 7
+    assert report["total_samples"] == 8
     assert report["exact_match_rate"] == 100.0
     assert report["execution_accuracy"] == 100.0
     assert report["syntax_failure_rate"] == 0.0
@@ -833,7 +830,7 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
     assert ts_questions == [item["question"] for item in suite]
     conn_parity = duckdb.connect(str(db_path), read_only=True)
     try:
-        for ts_sql, item in zip(ts_sqls, suite):
+        for ts_sql, item in zip(ts_sqls, suite, strict=False):
             assert (
                 conn_parity.execute(ts_sql).fetchall()
                 == conn_parity.execute(item["gold_sql"]).fetchall()
@@ -843,22 +840,22 @@ def test_table_1_benchmark_suite_evaluation(tmp_path: Path) -> None:
 
 
 def test_gold_sql_comparison_and_overlap_helpers(tmp_path: Path) -> None:
-    """Test _canonicalize_cell_for_overlap, compute_result_value_overlap_pct, _rows_to_tuples_and_columns, and compare_predicted_and_gold_sql."""
+    """Test canonicalize_cell_for_overlap, compute_result_value_overlap_pct, rows_to_tuples_and_columns, and compare_predicted_and_gold_sql."""
     from t1d_analytics.sql_executor import execute_duckdb_query
     from t1d_analytics.training_data import (
-        _canonicalize_cell_for_overlap,
-        _rows_to_tuples_and_columns,
+        canonicalize_cell_for_overlap,
         compare_predicted_and_gold_sql,
         compute_result_value_overlap_pct,
+        rows_to_tuples_and_columns,
     )
 
-    assert _canonicalize_cell_for_overlap(None) == "NULL"
-    assert _canonicalize_cell_for_overlap(True) == "TRUE"
-    assert _canonicalize_cell_for_overlap(False) == "FALSE"
-    assert _canonicalize_cell_for_overlap(42) == "42.0"
-    assert _canonicalize_cell_for_overlap(3.14159) == "3.1"
-    assert _canonicalize_cell_for_overlap("  12.34 ") == "12.3"
-    assert _canonicalize_cell_for_overlap("  Mean   Age ") == "mean age"
+    assert canonicalize_cell_for_overlap(None) == "NULL"
+    assert canonicalize_cell_for_overlap(True) == "TRUE"
+    assert canonicalize_cell_for_overlap(False) == "FALSE"
+    assert canonicalize_cell_for_overlap(42) == "42.0"
+    assert canonicalize_cell_for_overlap(3.14159) == "3.1"
+    assert canonicalize_cell_for_overlap("  12.34 ") == "12.3"
+    assert canonicalize_cell_for_overlap("  Mean   Age ") == "mean age"
 
     assert compute_result_value_overlap_pct([], []) == 100.0
     assert compute_result_value_overlap_pct([{"a": 1}], []) == 0.0
@@ -870,8 +867,8 @@ def test_gold_sql_comparison_and_overlap_helpers(tmp_path: Path) -> None:
     )
     assert overlap > 0.0
 
-    assert _rows_to_tuples_and_columns([]) == ([], [])
-    assert _rows_to_tuples_and_columns([{"x": 1, "y": "a"}]) == (
+    assert rows_to_tuples_and_columns([]) == ([], [])
+    assert rows_to_tuples_and_columns([{"x": 1, "y": "a"}]) == (
         [(1, "a")],
         ["x", "y"],
     )
@@ -935,3 +932,15 @@ def test_gold_sql_comparison_and_overlap_helpers(tmp_path: Path) -> None:
     )
     assert comp_live_err.syntax_error is True
     assert comp_live_err.gold_row_count == 0
+
+    from t1d_analytics.training_dpo_miner import mine_dpo_rejected_sql_perturbation
+
+    assert "SUM(" in mine_dpo_rejected_sql_perturbation(
+        "SELECT AVG(age) FROM patients;"
+    )
+    assert "nonexistent_col" in mine_dpo_rejected_sql_perturbation(
+        "SELECT COUNT(*) FROM patients;"
+    )
+    assert "WHERE 1 = 0;" in mine_dpo_rejected_sql_perturbation(
+        "SELECT age FROM patients;"
+    )

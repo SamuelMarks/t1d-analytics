@@ -7,6 +7,7 @@
 
 import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
+import { type AppEventBus } from "../event-bus";
 import { formatNumber } from "../formatters";
 import { requireElementById } from "../modal-utils";
 import { DEFAULT_RECOMMENDED_JAEB_DB_PATH, type ChatState } from "../state";
@@ -103,27 +104,29 @@ export interface SystemStatusApiResponse {
 }
 
 /**
- * Host contract required by `SystemStatusController`.
+ * Narrow injected dependencies for `SystemStatusController`.
  */
-export interface SystemStatusHost {
+export interface SystemStatusDeps {
   /** Global application state store. */
   state: ChatState;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   modelSelect: HTMLSelectElement;
-  /** Reloads available models in the model selector. */
-  reloadModels(): Promise<void>;
-  /** Reloads the database schema in the schema explorer. */
-  reloadSchema(dbPath?: string): Promise<void>;
-  /** Re-renders the host UI. */
-  render(): void;
 }
 
 /**
  * Composable sub-controller for System Status & Diagnostics.
  */
 export class SystemStatusController {
-  /** Host UI reference. */
-  private readonly ui: SystemStatusHost;
+  /** Shared application state store. */
+  private readonly state: ChatState;
+  /** Domain event bus. */
+  private readonly events: AppEventBus;
+  /** Model selector dropdown. */
+  private readonly modelSelect: HTMLSelectElement;
+  /** Persistent AbortController for DOM and bus listeners. */
+  private readonly listenerController = new AbortController();
   /** Header status chip button displaying system health. */
   public readonly systemStatusChip: HTMLButtonElement;
   /** Text span inside the system status chip. */
@@ -156,13 +159,17 @@ export class SystemStatusController {
   public readonly ruleBasedSqlAlertDismissBtn: HTMLButtonElement;
   /** Interval timer ID for periodic system status polling, or null when inactive. */
   private statusPollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Bound `i18next` language-change listener unregistered during `dispose()`. */
+  private readonly onLanguageChanged: () => void;
 
   /**
    * Creates a new `SystemStatusController`.
-   * @param {SystemStatusHost} ui - Host UI instance.
+   * @param {SystemStatusDeps} deps - Narrow state, event bus, and modelSelect dependencies.
    */
-  constructor(ui: SystemStatusHost) {
-    this.ui = ui;
+  constructor(deps: SystemStatusDeps) {
+    this.state = deps.state;
+    this.events = deps.events;
+    this.modelSelect = deps.modelSelect;
     this.systemStatusChip =
       requireElementById<HTMLButtonElement>("system-status-chip");
     this.statusChipText = requireElementById<HTMLElement>("status-chip-text");
@@ -197,66 +204,134 @@ export class SystemStatusController {
     this.ruleBasedSqlAlertDismissBtn = requireElementById<HTMLButtonElement>(
       "rule-based-sql-alert-dismiss",
     );
-
-    this.bindEvents();
-  }
-
-  /**
-   * Binds DOM event listeners for the status chip and diagnostic alert banner.
-   * @returns {void}
-   */
-  private bindEvents(): void {
-    this.bannerRetryBtn.addEventListener("click", () => {
-      void this.check(true);
-      void this.ui.reloadModels();
-      void this.ui.reloadSchema();
-    });
-
-    this.bannerInstructionsBtn.addEventListener("click", () => {
-      const isHidden = this.bannerInstructionsDrawer.classList.toggle("hidden");
-      this.bannerInstructionsBtn.setAttribute(
-        "aria-expanded",
-        isHidden ? "false" : "true",
-      );
-    });
-
-    this.bannerDismissBtn.addEventListener("click", () => {
-      this.hideBanner();
-    });
-
-    this.jaebProvenanceAlertDismissBtn.addEventListener("click", () => {
-      this.hideSyntheticDataAlert();
-    });
-
-    this.jaebProvenanceAlert.addEventListener("keydown", (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        this.hideSyntheticDataAlert();
-      }
-    });
-
-    this.ruleBasedSqlAlertDismissBtn.addEventListener("click", () => {
-      this.hideRuleBasedSqlAlert();
-    });
-
-    this.ruleBasedSqlAlert.addEventListener("keydown", (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        this.hideRuleBasedSqlAlert();
-      }
-    });
-
-    this.systemStatusChip.addEventListener("click", () => {
-      void this.check(true);
-    });
-
-    i18next.on("languageChanged", () => {
+    this.onLanguageChanged = () => {
       const jaebPath =
-        this.ui.state.systemStatus.recommendedJaebDbPath ||
+        this.state.systemStatus.recommendedJaebDbPath ||
         DEFAULT_RECOMMENDED_JAEB_DB_PATH;
       this.jaebProvenanceAlertDesc.textContent = i18next.t(
         "status.syntheticDataAlertDesc",
         { jaebPath },
       );
-    });
+    };
+
+    this.bindEvents();
+  }
+
+  /**
+   * Binds DOM event listeners and domain event bus subscriptions.
+   * @returns {void}
+   */
+  private bindEvents(): void {
+    const signal = this.listenerController.signal;
+
+    this.bannerRetryBtn.addEventListener(
+      "click",
+      () => {
+        void this.check(true);
+        this.events.emit("modelsReloadRequested", undefined);
+        this.events.emit("schemaReloadRequested", {});
+      },
+      { signal },
+    );
+
+    this.bannerInstructionsBtn.addEventListener(
+      "click",
+      () => {
+        const isHidden =
+          this.bannerInstructionsDrawer.classList.toggle("hidden");
+        this.bannerInstructionsBtn.setAttribute(
+          "aria-expanded",
+          isHidden ? "false" : "true",
+        );
+      },
+      { signal },
+    );
+
+    this.bannerDismissBtn.addEventListener(
+      "click",
+      () => {
+        this.hideBanner();
+      },
+      { signal },
+    );
+
+    this.jaebProvenanceAlertDismissBtn.addEventListener(
+      "click",
+      () => {
+        this.hideSyntheticDataAlert();
+      },
+      { signal },
+    );
+
+    this.jaebProvenanceAlert.addEventListener(
+      "keydown",
+      (e: KeyboardEvent) => {
+        if (e.key === "Escape") {
+          this.hideSyntheticDataAlert();
+        }
+      },
+      { signal },
+    );
+
+    this.ruleBasedSqlAlertDismissBtn.addEventListener(
+      "click",
+      () => {
+        this.hideRuleBasedSqlAlert();
+      },
+      { signal },
+    );
+
+    this.ruleBasedSqlAlert.addEventListener(
+      "keydown",
+      (e: KeyboardEvent) => {
+        if (e.key === "Escape") {
+          this.hideRuleBasedSqlAlert();
+        }
+      },
+      { signal },
+    );
+
+    this.systemStatusChip.addEventListener(
+      "click",
+      () => {
+        void this.check(true);
+      },
+      { signal },
+    );
+
+    this.events.on(
+      "systemStatusCheckRequested",
+      ({ isManualRetry, dbPath }) => {
+        void this.check(Boolean(isManualRetry), dbPath);
+      },
+      signal,
+    );
+
+    this.events.on(
+      "statusBannerShow",
+      ({ severity, title, desc, icon, showRetry }) => {
+        this.showBanner(severity, title, desc, icon, showRetry);
+      },
+      signal,
+    );
+
+    this.events.on(
+      "statusBannerHide",
+      () => {
+        this.hideBanner();
+      },
+      signal,
+    );
+
+    this.events.on(
+      "statusChipUpdate",
+      ({ statusClass, text }) => {
+        this.updateStatusChip(statusClass, text);
+      },
+      signal,
+    );
+
+    i18next.on("languageChanged", this.onLanguageChanged);
   }
 
   /**
@@ -267,7 +342,7 @@ export class SystemStatusController {
   public showSyntheticDataAlert(recommendedPath?: string): void {
     const jaebPath =
       recommendedPath ||
-      this.ui.state.systemStatus.recommendedJaebDbPath ||
+      this.state.systemStatus.recommendedJaebDbPath ||
       DEFAULT_RECOMMENDED_JAEB_DB_PATH;
     this.jaebProvenanceAlertDesc.textContent = i18next.t(
       "status.syntheticDataAlertDesc",
@@ -328,6 +403,16 @@ export class SystemStatusController {
   }
 
   /**
+   * Disposes active status polling timers, DOM/bus listeners, and global `i18next` listeners.
+   * @returns {void}
+   */
+  public dispose(): void {
+    this.stopPolling();
+    this.listenerController.abort();
+    i18next.off("languageChanged", this.onLanguageChanged);
+  }
+
+  /**
    * Shows the system status alert banner with the specified severity and messaging.
    * @param {"danger" | "warning" | "info"} severity - The alert level.
    * @param {string} title - The title to display.
@@ -379,13 +464,14 @@ export class SystemStatusController {
   ): void {
     this.systemStatusChip.className = `status-chip status-${level}`;
     let tooltip: string;
-    if (this.ui.state.systemStatus.dbFileSizeBytes) {
-      const mbNum = this.ui.state.systemStatus.dbFileSizeBytes / (1024 * 1024);
+    const sizeBytes = this.state.systemStatus.dbFileSizeBytes;
+    if (sizeBytes !== undefined && sizeBytes > 0) {
+      const mbNum = sizeBytes / (1024 * 1024);
       const mb = formatNumber(mbNum, {
         minimumFractionDigits: 1,
         maximumFractionDigits: 1,
       });
-      const tables = formatNumber(this.ui.state.systemStatus.tableCount);
+      const tables = formatNumber(this.state.systemStatus.tableCount);
       tooltip = i18next.t("status.chipTooltipDb", {
         status: text,
         mb,
@@ -404,59 +490,72 @@ export class SystemStatusController {
   }
 
   /**
-   * Applies banner and status chip updates for a parsed `SystemStatusApiResponse`.
+   * Updates provenance and rule-based SQL sub-navbar alerts from `health`.
    * @param {SystemStatusApiResponse} health - Parsed `/api/status` response.
    * @returns {void}
    */
-  public applyHealthPayload(health: SystemStatusApiResponse): void {
+  private applyProvenanceAndSqlModeAlerts(
+    health: SystemStatusApiResponse,
+  ): void {
     if (
       health.database?.is_synthetic_faked_data === false ||
       health.database?.data_provenance === "jaeb_authentic"
     ) {
       this.hideSyntheticDataAlert();
     } else if (health.database?.is_synthetic_faked_data === true) {
-      const jaebPath =
-        health.database?.recommended_jaeb_db_path ||
-        DEFAULT_RECOMMENDED_JAEB_DB_PATH;
-      this.showSyntheticDataAlert(jaebPath);
+      this.showSyntheticDataAlert(
+        health.database.recommended_jaeb_db_path ||
+          DEFAULT_RECOMMENDED_JAEB_DB_PATH,
+      );
     }
 
-    if (!health.ollama?.accessible || this.ui.modelSelect.value === "sql") {
+    if (
+      health.ollama?.accessible !== true ||
+      this.modelSelect.value === "sql"
+    ) {
       this.showRuleBasedSqlAlert();
     } else {
       this.hideRuleBasedSqlAlert();
     }
+  }
 
-    if (health.database?.status_code === "missing_file") {
+  /**
+   * Applies banner and status chip updates for a parsed `SystemStatusApiResponse`.
+   * @param {SystemStatusApiResponse} health - Parsed `/api/status` response.
+   * @returns {void}
+   */
+  public applyHealthPayload(health: SystemStatusApiResponse): void {
+    this.applyProvenanceAndSqlModeAlerts(health);
+    const dbCode = health.database?.status_code;
+
+    if (dbCode === "missing_file") {
       this.showBanner(
         "warning",
         i18next.t("status.dbMissingTitle"),
         i18next.t("status.dbMissingDesc", {
-          path: health.database.configured_path,
+          path: health.database?.configured_path,
         }),
         "📁",
         true,
       );
       this.updateStatusChip("error", i18next.t("status.dbMissingTitle"));
-    } else if (health.database?.status_code === "empty_db") {
+    } else if (dbCode === "empty_db" || dbCode === "missing_initial_data") {
+      const isEmpty = dbCode === "empty_db";
+      const titleKey = isEmpty
+        ? "status.dbEmptyTitle"
+        : "status.dbMissingDataTitle";
+      const descKey = isEmpty
+        ? "status.dbEmptyDesc"
+        : "status.dbMissingDataDesc";
       this.showBanner(
         "warning",
-        i18next.t("status.dbEmptyTitle"),
-        i18next.t("status.dbEmptyDesc"),
-        "🗄️",
+        i18next.t(titleKey),
+        i18next.t(descKey),
+        isEmpty ? "🗄️" : "📊",
         true,
       );
-      this.updateStatusChip("degraded", i18next.t("status.dbEmptyTitle"));
-    } else if (health.database?.status_code === "missing_initial_data") {
-      this.showBanner(
-        "warning",
-        i18next.t("status.dbMissingDataTitle"),
-        i18next.t("status.dbMissingDataDesc"),
-        "📊",
-        true,
-      );
-      this.updateStatusChip("degraded", i18next.t("status.dbMissingDataTitle"));
-    } else if (!health.ollama?.accessible) {
+      this.updateStatusChip("degraded", i18next.t(titleKey));
+    } else if (health.ollama?.accessible !== true) {
       this.showBanner(
         "info",
         i18next.t("status.ollamaOfflineTitle"),
@@ -465,17 +564,60 @@ export class SystemStatusController {
         false,
       );
       this.updateStatusChip("degraded", i18next.t("status.ollamaOfflineTitle"));
-      if (this.ui.modelSelect.value !== "sql") {
-        this.ui.modelSelect.value = "sql";
-        const currentChat = this.ui.state.getActiveChat();
+      if (this.modelSelect.value !== "sql") {
+        this.modelSelect.value = "sql";
+        const currentChat = this.state.getActiveChat();
         if (currentChat && currentChat.messages.length === 0) {
-          this.ui.state.setActiveChatModel("sql");
+          this.state.setActiveChatModel("sql");
         }
       }
     } else {
       this.hideBanner();
       this.updateStatusChip("healthy", i18next.t("status.systemHealthy"));
     }
+  }
+
+  /**
+   * Synchronizes database fields of `ChatState.systemStatus` from `rawDb`.
+   * @param {SystemStatusDbPayload | undefined} rawDb - Database diagnostics block.
+   * @returns {void}
+   */
+  private syncDbHealthToState(rawDb: SystemStatusDbPayload | undefined): void {
+    const db: SystemStatusDbPayload = rawDb ?? {};
+    this.state.setSystemStatus({
+      dbConfigured: Boolean(db.exists),
+      dbExists: Boolean(db.exists),
+      dbConnected: Boolean(db.connected),
+      dbStatusCode: isDbStatusCode(db.status_code) ? db.status_code : "unknown",
+      dbMessage: db.message || null,
+      dbRemediation: db.remediation || null,
+      tableCount: Number(db.table_count) || 0,
+      hasInitialData: Boolean(db.has_initial_data),
+      dbFileSizeBytes: Number(db.file_size_bytes) || 0,
+      dbWritable: Boolean(db.writable),
+      dbIntegrityOk: db.integrity_ok !== false,
+      diskFreeBytes: Number(db.disk_free_bytes) || 0,
+      recommendedJaebDbPath:
+        db.recommended_jaeb_db_path || DEFAULT_RECOMMENDED_JAEB_DB_PATH,
+    });
+  }
+
+  /**
+   * Synchronizes `ChatState.systemStatus` fields from a `/api/status` payload.
+   * @param {SystemStatusApiResponse} health - Parsed `/api/status` response.
+   * @returns {void}
+   */
+  private syncStateFromHealth(health: SystemStatusApiResponse): void {
+    const ol = health.ollama;
+    this.state.setSystemStatus({
+      backendOnline: true,
+      status: health.status,
+      ollamaOnline: Boolean(ol?.accessible),
+      ollamaMessage: ol?.message || null,
+      ollamaRemediation: ol?.remediation || null,
+      ollamaVersion: ol?.version || null,
+    });
+    this.syncDbHealthToState(health.database);
   }
 
   /**
@@ -493,7 +635,7 @@ export class SystemStatusController {
     }
 
     try {
-      const targetDb = dbPath || this.ui.state.currentDb;
+      const targetDb = dbPath || this.state.currentDb;
       const url =
         targetDb !== "t1d.duckdb"
           ? `/api/status?db_path=${encodeURIComponent(targetDb)}`
@@ -501,36 +643,11 @@ export class SystemStatusController {
       const response = await fetchWithBackendError(url);
       const health = await parseResponseJson<SystemStatusApiResponse>(response);
 
-      this.ui.state.setSystemStatus({
-        backendOnline: true,
-        status: health.status,
-        dbConfigured: Boolean(health.database?.exists),
-        dbExists: Boolean(health.database?.exists),
-        dbConnected: Boolean(health.database?.connected),
-        dbStatusCode: isDbStatusCode(health.database?.status_code)
-          ? health.database.status_code
-          : "unknown",
-        dbMessage: health.database?.message || null,
-        dbRemediation: health.database?.remediation || null,
-        tableCount: Number(health.database?.table_count) || 0,
-        hasInitialData: Boolean(health.database?.has_initial_data),
-        ollamaOnline: Boolean(health.ollama?.accessible),
-        ollamaMessage: health.ollama?.message || null,
-        ollamaRemediation: health.ollama?.remediation || null,
-        dbFileSizeBytes: Number(health.database?.file_size_bytes) || 0,
-        dbWritable: Boolean(health.database?.writable),
-        dbIntegrityOk: health.database?.integrity_ok !== false,
-        diskFreeBytes: Number(health.database?.disk_free_bytes) || 0,
-        ollamaVersion: health.ollama?.version || null,
-        recommendedJaebDbPath:
-          health.database?.recommended_jaeb_db_path ||
-          DEFAULT_RECOMMENDED_JAEB_DB_PATH,
-      });
-
+      this.syncStateFromHealth(health);
       this.applyHealthPayload(health);
-      this.ui.render();
+      this.events.emit("renderRequested", undefined);
     } catch {
-      this.ui.state.setSystemStatus({
+      this.state.setSystemStatus({
         backendOnline: false,
         status: "offline",
       });
@@ -543,7 +660,7 @@ export class SystemStatusController {
         true,
       );
       this.updateStatusChip("offline", i18next.t("status.systemOffline"));
-      this.ui.render();
+      this.events.emit("renderRequested", undefined);
     } finally {
       this.bannerRetryBtn.textContent = i18next.t("status.retry");
     }

@@ -139,6 +139,8 @@ test.describe("Live Backend API, Security Sandboxing & Default Chat Resilience E
       "UPDATE patients SET age = 99 WHERE subject_id = 1;",
       "ALTER TABLE patients DROP COLUMN age;",
       "CREATE TABLE hacked (id INT);",
+      "ATTACH ':memory:' AS rogue;",
+      "PRAGMA enable_profiling;",
     ]) {
       const execResp = await page.request.post("/api/execute-sql", {
         data: { query: forbiddenSql },
@@ -147,8 +149,37 @@ test.describe("Live Backend API, Security Sandboxing & Default Chat Resilience E
       const execJson = (await execResp.json()) as {
         error?: { error_code: string };
       };
-      expect(execJson.error?.error_code).toBe("backend.sqlExecution");
+      expect(execJson.error?.error_code).toBe("backend.sqlReadOnlyViolation");
     }
+
+    // 1b. Multi-statement queries rejected with backend.sqlMultipleStatements across /api/execute-sql, /api/chat, and /api/chat/stream
+    const multiExecResp = await page.request.post("/api/execute-sql", {
+      data: { query: "SELECT 1; SELECT 2;" },
+    });
+    expect(multiExecResp.status()).toBe(200);
+    const multiExecJson = (await multiExecResp.json()) as {
+      error?: { error_code: string };
+    };
+    expect(multiExecJson.error?.error_code).toBe(
+      "backend.sqlMultipleStatements",
+    );
+
+    const multiChatResp = await page.request.post("/api/chat", {
+      data: { message: "SELECT 1; SELECT 2;", model: "sql" },
+    });
+    expect(multiChatResp.status()).toBe(200);
+    const multiChatJson = (await multiChatResp.json()) as {
+      error?: { error_code: string };
+    };
+    expect(multiChatJson.error?.error_code).toBe(
+      "backend.sqlMultipleStatements",
+    );
+
+    const roStreamResp = await page.request.post("/api/chat/stream", {
+      data: { message: "DROP TABLE patients;", model: "sql" },
+    });
+    expect(roStreamResp.status()).toBe(200);
+    expect(await roStreamResp.text()).toContain("backend.sqlReadOnlyViolation");
 
     // 2. External file system read via read_csv('/etc/passwd') rejected
     const extReadResp = await page.request.post("/api/execute-sql", {
@@ -158,9 +189,9 @@ test.describe("Live Backend API, Security Sandboxing & Default Chat Resilience E
     const extReadJson = (await extReadResp.json()) as {
       error?: { error_code: string };
     };
-    expect(extReadJson.error?.error_code).toBe("backend.sqlExecution");
+    expect(extReadJson.error?.error_code).toBe("backend.sqlReadOnlyViolation");
 
-    // 3. Path traversal in db_path rejected with 400
+    // 3. Path traversal in db_path rejected with 400 across /api/chat and /api/sessions
     const traversalResp = await page.request.post("/api/chat", {
       data: {
         message: "SELECT 1;",
@@ -169,6 +200,11 @@ test.describe("Live Backend API, Security Sandboxing & Default Chat Resilience E
       },
     });
     expect(traversalResp.status()).toBe(400);
+
+    const sessionTraversalResp = await page.request.get(
+      "/api/sessions?db_path=../../outside.duckdb",
+    );
+    expect(sessionTraversalResp.status()).toBe(400);
   });
 
   /**

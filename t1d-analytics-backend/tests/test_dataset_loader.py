@@ -1,7 +1,7 @@
 """Unit tests for dataset loading, tokenization, prompt masking, and dataset containers."""
 
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator, List
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -28,7 +28,7 @@ def mock_huggingface_tokenizer() -> Generator[None, None, None]:
 
         def encode(
             self, text: str, add_special_tokens: bool = False, **kwargs: SqlValue
-        ) -> List[int]:
+        ) -> list[int]:
             """Encode text characters into integer IDs."""
             _ = add_special_tokens
             return [ord(c) % 50 for c in text] if text else []
@@ -87,7 +87,7 @@ not a json
 
         pad_token_id: int = 0
 
-        def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
             """Encode text characters."""
             _ = add_special_tokens
             return [ord(c) % 50 for c in text]
@@ -99,7 +99,7 @@ not a json
     assert len(streamed_items) == 2
 
     empty_file = tmp_path / "empty.jsonl"
-    empty_file.write_text(chr(10) * 2)
+    empty_file.write_text("\n" * 2)
     with pytest.raises(ValueError, match="no valid training pairs"):
         prepare_torch_dataset(empty_file, tokenizer_name="mock")
     with pytest.raises(ValueError, match="contains no valid training pairs"):
@@ -142,7 +142,7 @@ def test_prepare_torch_dataset_edge_cases(tmp_path: Path) -> None:
     class _UnitTok:
         """Minimal tokenizer returning single token ID."""
 
-        def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
             """Return single token."""
             _ = (text, add_special_tokens)
             return [1]
@@ -186,7 +186,7 @@ def test_prepare_torch_dataset_with_tokenizer(tmp_path: Path) -> None:
 
         pad_token_id: int = 0
 
-        def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
             """Encode text into integer token ids."""
             _ = add_special_tokens
             return [ord(c) % 50 for c in text]
@@ -231,11 +231,11 @@ def test_table_1_clinical_variable_mappings_and_numeric_coercion(
 ) -> None:
     """Verify Table 1 clinical variable mappings in likely_matches.json and numeric column coercion."""
     from t1d_analytics.ingestion import (
-        _CLINICAL_NUMERIC_COLUMNS,
+        CLINICAL_NUMERIC_COLUMNS,
         get_clinical_variable_mappings,
         load_data_to_duckdb,
     )
-    from t1d_analytics.seed import _BASE_TABLE_NUMERIC_COLUMNS
+    from t1d_analytics.seed import BASE_TABLE_NUMERIC_COLUMNS
 
     mappings = get_clinical_variable_mappings()
     for required_concept in (
@@ -255,8 +255,8 @@ def test_table_1_clinical_variable_mappings_and_numeric_coercion(
         "total_daily_insulin",
         "cgm_active_wear_pct",
     ):
-        assert numeric_col in _CLINICAL_NUMERIC_COLUMNS
-        assert numeric_col in _BASE_TABLE_NUMERIC_COLUMNS
+        assert numeric_col in CLINICAL_NUMERIC_COLUMNS
+        assert numeric_col in BASE_TABLE_NUMERIC_COLUMNS
 
     csv_file = tmp_path / "trial_table1.csv"
     csv_file.write_text(

@@ -42,6 +42,9 @@ export function createPlaywrightConfig(): PlaywrightTestConfig {
         url: "http://localhost:5173",
         reuseExistingServer: true,
         timeout: 120000,
+        env: {
+          VITE_COVERAGE: "true",
+        },
       },
     ],
   });

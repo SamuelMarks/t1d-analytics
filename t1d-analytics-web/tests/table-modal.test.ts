@@ -8,7 +8,8 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { exportRowsToCsv, exportRowsToJson } from "../src/exporters";
 import { ChatState } from "../src/state";
-import { ChatUI, TablePreviewModalController } from "../src/ui";
+import { TablePreviewModalController } from "../src/controllers/table-modal-controller";
+import { ChatUI } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 
 describe("TablePreviewModalController & Data Exports", () => {
@@ -58,6 +59,10 @@ describe("TablePreviewModalController & Data Exports", () => {
     });
 
     await ui.tableModalController.open("test_table");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/table/test_table?limit=25&offset=0&db_path=custom_table.duckdb",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     state.setCurrentDb("t1d.duckdb");
 
     // Clicking prevBtn on page 1 does nothing
@@ -481,41 +486,77 @@ describe("TablePreviewModalController & Data Exports", () => {
     ui.tableModalController.jsonBtn.click();
     expect(createObjectURL).toHaveBeenCalledTimes(4);
 
-    const windowOpenSpy = vi
-      .spyOn(window, "open")
-      .mockImplementation(() => null);
-
+    createObjectURL.mockClear();
+    state.credentialsStore.setBackendApiKey("secret-bearer-123");
     state.setCurrentDb("my_custom.duckdb");
-    ui.tableModalController.fullCsvBtn.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/csv?table_name=patients&db_path=my_custom.duckdb",
-    );
-    ui.tableModalController.excelBtn.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/excel?table_name=patients&db_path=my_custom.duckdb",
-    );
-    ui.tableModalController.parquetBtn.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/parquet?table_name=patients&db_path=my_custom.duckdb",
-    );
 
+    for (const expectedUrl of [
+      "/api/export/csv?table_name=patients&db_path=my_custom.duckdb",
+      "/api/export/excel?table_name=patients&db_path=my_custom.duckdb",
+      "/api/export/parquet?table_name=patients&db_path=my_custom.duckdb",
+    ]) {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        blob: async () => new Blob(["export-bytes"]),
+      });
+      if (expectedUrl.includes("/csv")) {
+        ui.tableModalController.fullCsvBtn.click();
+      } else if (expectedUrl.includes("/excel")) {
+        ui.tableModalController.excelBtn.click();
+      } else {
+        ui.tableModalController.parquetBtn.click();
+      }
+      await flushPromises();
+      expect(mockFetch).toHaveBeenLastCalledWith(
+        expectedUrl,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer secret-bearer-123",
+          }),
+        }),
+      );
+    }
+    expect(createObjectURL).toHaveBeenCalledTimes(3);
+
+    state.credentialsStore.removeBackendApiKey();
     state.setCurrentDb("t1d.duckdb");
-    ui.tableModalController.fullCsvBtn.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/csv?table_name=patients",
+    for (const btn of [
+      ui.tableModalController.fullCsvBtn,
+      ui.tableModalController.excelBtn,
+      ui.tableModalController.parquetBtn,
+    ]) {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        blob: async () => new Blob(["export-bytes"]),
+      });
+      btn.click();
+      await flushPromises();
+    }
+    expect(createObjectURL).toHaveBeenCalledTimes(6);
+
+    // Server export HTTP failure announces error cleanly without throwing
+    const announceSpy = vi.spyOn(ui, "announce");
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ detail: "Unauthorized export" }),
+    });
+    await ui.tableModalController.triggerServerExport("csv");
+    expect(announceSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Unauthorized export"),
+      true,
     );
-    ui.tableModalController.excelBtn.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/excel?table_name=patients",
-    );
-    ui.tableModalController.parquetBtn.click();
-    expect(windowOpenSpy).toHaveBeenCalledWith(
-      "/api/export/parquet?table_name=patients",
-    );
+    announceSpy.mockRestore();
+
+    // Closing modal while a search debounce timer is pending clears the timer
+    vi.useFakeTimers();
+    ui.tableModalController.searchInput.value = "cancelled_query";
+    ui.tableModalController.searchInput.dispatchEvent(new Event("input"));
     ui.tableModalController.closeBtn.click();
+    await vi.advanceTimersByTimeAsync(300);
+    vi.useRealTimers();
     expect(ui.tableModalController.modal.getAttribute("aria-hidden")).toBe(
       "true",
     );
-    windowOpenSpy.mockRestore();
   });
 });

@@ -6,6 +6,7 @@
 
 import { test, expect } from "./base-test";
 import AxeBuilder from "@axe-core/playwright";
+import { type IstanbulFileCoverage } from "../src/vite-env";
 
 test.describe("i18n and RTL E2E", () => {
   test.beforeEach(async ({ page }) => {
@@ -31,31 +32,29 @@ test.describe("i18n and RTL E2E", () => {
     });
     await frPage.goto("/");
     await expect(frPage.locator("html")).toHaveAttribute("lang", "en");
-    const cov = await frPage.evaluate(() => window.__coverage__);
+    const cov: Record<string, IstanbulFileCoverage> | undefined =
+      await frPage.evaluate(() => window.__coverage__);
     if (cov) {
-      await page.evaluate(
-        (
-          frCov: Record<string, import("../src/vite-env").IstanbulFileCoverage>,
-        ) => {
-          if (!window.__coverage__) return;
-          for (const [k, v] of Object.entries(frCov)) {
-            const target = window.__coverage__[k];
-            if (!target) continue;
-            for (const [sk, sv] of Object.entries(v.s)) {
-              target.s[sk] = (target.s[sk] || 0) + sv;
-            }
-            for (const [fk, fv] of Object.entries(v.f)) {
-              target.f[fk] = (target.f[fk] || 0) + fv;
-            }
-            for (const [bk, bv] of Object.entries(v.b)) {
-              target.b[bk] = bv.map(
-                (cnt: number, idx: number) => (target.b[bk]?.[idx] || 0) + cnt,
-              );
-            }
+      await page.evaluate((frCov: Record<string, IstanbulFileCoverage>) => {
+        const winCov: Record<string, IstanbulFileCoverage> | undefined =
+          window.__coverage__;
+        if (winCov === undefined) return;
+        for (const [k, v] of Object.entries(frCov)) {
+          const target = winCov[k];
+          if (!target) continue;
+          for (const [sk, sv] of Object.entries(v.s)) {
+            target.s[sk] = (target.s[sk] ?? 0) + sv;
           }
-        },
-        cov,
-      );
+          for (const [fk, fv] of Object.entries(v.f)) {
+            target.f[fk] = (target.f[fk] ?? 0) + fv;
+          }
+          for (const [bk, bv] of Object.entries(v.b)) {
+            target.b[bk] = bv.map(
+              (cnt: number, idx: number) => (target.b[bk]?.[idx] ?? 0) + cnt,
+            );
+          }
+        }
+      }, cov);
     }
     await frContext.close();
   });
@@ -79,12 +78,11 @@ test.describe("i18n and RTL E2E", () => {
     const sidebarBox = await sidebar.boundingBox();
     const mainBox = await mainPane.boundingBox();
 
-    expect(sidebarBox).not.toBeNull();
-    expect(mainBox).not.toBeNull();
+    if (!sidebarBox || !mainBox) throw new Error("Expected layout boxes");
 
     // Sidebar should be to the right of main pane in RTL
     // i.e., sidebar's x position should be greater than main pane's x position
-    expect(sidebarBox!.x).toBeGreaterThan(mainBox!.x);
+    expect(sidebarBox.x).toBeGreaterThan(mainBox.x);
 
     // Verify chat input text alignment is right or start in RTL
     const chatInput = page.locator("#chat-input");
@@ -118,11 +116,11 @@ test.describe("i18n and RTL E2E", () => {
       await expect(page.locator("html")).toHaveAttribute("lang", lang);
 
       // Verify language chooser and topbar controls remain strictly within the viewport in every locale
-      const vp = page.viewportSize()!;
+      const vp = page.viewportSize();
       const langBox = await page.locator("#lang-select").boundingBox();
-      expect(langBox).not.toBeNull();
-      expect(langBox!.x).toBeGreaterThanOrEqual(0);
-      expect(langBox!.x + langBox!.width).toBeLessThanOrEqual(vp.width + 1);
+      if (!vp || !langBox) throw new Error("Expected viewport and langBox");
+      expect(langBox.x).toBeGreaterThanOrEqual(0);
+      expect(langBox.x + langBox.width).toBeLessThanOrEqual(vp.width + 1);
 
       // Run axe accessibility check on main view
       const mainScan = await new AxeBuilder({ page }).analyze();

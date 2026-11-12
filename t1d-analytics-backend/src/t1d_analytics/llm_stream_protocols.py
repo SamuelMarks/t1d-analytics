@@ -1,15 +1,13 @@
 """Streaming chunk structural protocols and delta token extraction across LLM providers."""
 
+from collections.abc import Mapping, Sequence
 from typing import (
-    Mapping,
-    Optional,
     Protocol,
-    Sequence,
-    Union,
+    TypeGuard,
     runtime_checkable,
 )
 
-from typing_extensions import TypedDict, TypeGuard
+from typing_extensions import TypedDict
 
 
 @runtime_checkable
@@ -17,7 +15,7 @@ class _TextPartProtocol(Protocol):
     """Protocol for a Google/Gemini content part containing text."""
 
     @property
-    def text(self) -> Optional[str]:
+    def text(self) -> str | None:
         """Return text fragment."""
         ...
 
@@ -27,7 +25,7 @@ class _CandidateContentProtocol(Protocol):
     """Protocol for a Google/Gemini candidate content block."""
 
     @property
-    def parts(self) -> Optional[Sequence[_TextPartProtocol]]:
+    def parts(self) -> Sequence[_TextPartProtocol] | None:
         """Return sequence of content parts."""
         ...
 
@@ -37,7 +35,7 @@ class _CandidateProtocol(Protocol):
     """Protocol for a Google/Gemini streaming candidate."""
 
     @property
-    def content(self) -> Optional[_CandidateContentProtocol]:
+    def content(self) -> _CandidateContentProtocol | None:
         """Return candidate content block."""
         ...
 
@@ -47,7 +45,7 @@ class _DeltaTextProtocol(Protocol):
     """Protocol for a streaming delta or choice item exposing `text`."""
 
     @property
-    def text(self) -> Optional[str]:
+    def text(self) -> str | None:
         """Return delta or choice text."""
         ...
 
@@ -57,12 +55,12 @@ class _DeltaContentProtocol(Protocol):
     """Protocol for a streaming delta or message item exposing `content`."""
 
     @property
-    def content(self) -> Optional[str]:
+    def content(self) -> str | None:
         """Return delta or message content."""
         ...
 
 
-_DeltaOrMessageProtocol = Union[_DeltaContentProtocol, _DeltaTextProtocol]
+_DeltaOrMessageProtocol = _DeltaContentProtocol | _DeltaTextProtocol
 
 
 @runtime_checkable
@@ -72,7 +70,7 @@ class _ChoiceWithDeltaProtocol(Protocol):
     @property
     def delta(
         self,
-    ) -> Optional[Union[_DeltaContentProtocol, _DeltaTextProtocol]]:
+    ) -> _DeltaContentProtocol | _DeltaTextProtocol | None:
         """Return choice delta."""
         ...
 
@@ -82,7 +80,7 @@ class _ChoiceWithMessageProtocol(Protocol):
     """Protocol for a streaming choice item exposing `message`."""
 
     @property
-    def message(self) -> Optional[_DeltaContentProtocol]:
+    def message(self) -> _DeltaContentProtocol | None:
         """Return choice message."""
         ...
 
@@ -94,15 +92,12 @@ class OpenAiChunkProtocol(Protocol):
     @property
     def choices(
         self,
-    ) -> Optional[
+    ) -> (
         Sequence[
-            Union[
-                _ChoiceWithDeltaProtocol,
-                _ChoiceWithMessageProtocol,
-                _DeltaTextProtocol,
-            ]
+            _ChoiceWithDeltaProtocol | _ChoiceWithMessageProtocol | _DeltaTextProtocol
         ]
-    ]:
+        | None
+    ):
         """Return sequence of streaming or completion choices."""
         ...
 
@@ -112,7 +107,7 @@ class GoogleChunkProtocol(Protocol):
     """Protocol for a Google/Gemini streaming chunk exposing `candidates`."""
 
     @property
-    def candidates(self) -> Optional[Sequence[_CandidateProtocol]]:
+    def candidates(self) -> Sequence[_CandidateProtocol] | None:
         """Return sequence of streaming candidates."""
         ...
 
@@ -124,7 +119,7 @@ class AnthropicChunkProtocol(Protocol):
     @property
     def delta(
         self,
-    ) -> Optional[Union[_DeltaTextProtocol, _DeltaContentProtocol]]:
+    ) -> _DeltaTextProtocol | _DeltaContentProtocol | None:
         """Return top-level streaming delta."""
         ...
 
@@ -139,15 +134,15 @@ LlmMessageChoicesContainerProtocol = OpenAiChunkProtocol
 GeminiCandidateChunkProtocol = GoogleChunkProtocol
 AnthropicDeltaChunkProtocol = AnthropicChunkProtocol
 
-StreamScalar = Union[str, int, float, bool, None]
+StreamScalar = str | int | float | bool | None
 
 
 class StreamDeltaMappingDict(TypedDict, total=False):
     """Typed dictionary for a nested `delta` or `message` mapping inside a stream chunk."""
 
-    content: Optional[str]
-    text: Optional[str]
-    role: Optional[str]
+    content: str | None
+    text: str | None
+    role: str | None
 
 
 class StreamChoiceMappingDict(TypedDict, total=False):
@@ -155,23 +150,19 @@ class StreamChoiceMappingDict(TypedDict, total=False):
 
     delta: StreamDeltaMappingDict
     message: StreamDeltaMappingDict
-    text: Optional[str]
+    text: str | None
     index: int
 
 
-StreamChoiceElement = Union[
-    StreamScalar,
-    StreamChoiceMappingDict,
-    Mapping[str, Union[StreamScalar, Mapping[str, StreamScalar]]],
-]
+StreamChoiceElement = (
+    StreamScalar
+    | StreamChoiceMappingDict
+    | Mapping[str, StreamScalar | Mapping[str, StreamScalar]]
+)
 
 StreamMappingChunk = Mapping[
     str,
-    Union[
-        StreamScalar,
-        Sequence[StreamChoiceElement],
-        Mapping[str, StreamScalar],
-    ],
+    StreamScalar | Sequence[StreamChoiceElement] | Mapping[str, StreamScalar],
 ]
 
 
@@ -180,7 +171,7 @@ class LlmCompletionMessageProtocol(Protocol):
     """Protocol for a message instance inside an LLM completion choice."""
 
     @property
-    def content(self) -> Optional[str]:
+    def content(self) -> str | None:
         """Return message text content."""
         ...
 
@@ -205,37 +196,27 @@ class LlmCompletionResponseProtocol(Protocol):
         ...
 
 
-ObjectChunkInput = Union[
-    LlmCompletionResponseProtocol,
-    OpenAiStreamChunkProtocol,
-    GeminiStreamChunkProtocol,
-    AnthropicStreamChunkProtocol,
-    DirectTextChunkProtocol,
-]
+ObjectChunkInput = (
+    LlmCompletionResponseProtocol
+    | OpenAiStreamChunkProtocol
+    | GeminiStreamChunkProtocol
+    | AnthropicStreamChunkProtocol
+    | DirectTextChunkProtocol
+)
 
-StreamChunkInput = Union[
-    str,
-    StreamMappingChunk,
-    ObjectChunkInput,
-]
+StreamChunkInput = str | StreamMappingChunk | ObjectChunkInput
 
 
 def is_mapping_chunk(
-    val: Union[
-        StreamChunkInput,
-        StreamChoiceElement,
-        Sequence[StreamChoiceElement],
-    ],
+    val: StreamChunkInput | StreamChoiceElement | Sequence[StreamChoiceElement],
 ) -> TypeGuard[StreamMappingChunk]:
     """
     Narrow a streaming chunk or nested element to a string-keyed Mapping.
 
     Args:
-    ----
         val: Candidate chunk or nested choice/delta value.
 
     Returns:
-    -------
         bool: True if `val` is a Mapping.
 
     """
@@ -243,25 +224,21 @@ def is_mapping_chunk(
 
 
 def is_sequence_of_choices(
-    val: Union[
-        str,
-        int,
-        float,
-        bool,
-        Sequence[StreamChoiceElement],
-        Mapping[str, Union[str, int, float, bool, None]],
-        None,
-    ],
+    val: str
+    | int
+    | float
+    | bool
+    | Sequence[StreamChoiceElement]
+    | Mapping[str, str | int | float | bool | None]
+    | None,
 ) -> TypeGuard[Sequence[StreamChoiceElement]]:
     """
     Narrow a mapping value to a non-string Sequence of choice elements.
 
     Args:
-    ----
         val: Raw `choices` field from a mapping chunk.
 
     Returns:
-    -------
         bool: True if `val` is a non-string Sequence.
 
     """
@@ -269,36 +246,29 @@ def is_sequence_of_choices(
 
 
 def _extract_delta_or_message_str(
-    item: Optional[
-        Union[
-            _DeltaContentProtocol,
-            _DeltaTextProtocol,
-            LlmCompletionMessageProtocol,
-        ]
-    ],
+    item: _DeltaContentProtocol
+    | _DeltaTextProtocol
+    | LlmCompletionMessageProtocol
+    | None,
     prefer_content: bool = True,
 ) -> str:
     """
     Extract a non-empty string from a delta or message protocol instance.
 
     Args:
-    ----
         item: Delta or message protocol instance.
         prefer_content: Whether to check `.content` before `.text`.
 
     Returns:
-    -------
         str: Extracted text or empty string.
 
     """
     if item is None:
         return ""
-    content_val: Optional[str] = (
+    content_val: str | None = (
         item.content if isinstance(item, _DeltaContentProtocol) else None
     )
-    text_val: Optional[str] = (
-        item.text if isinstance(item, _DeltaTextProtocol) else None
-    )
+    text_val: str | None = item.text if isinstance(item, _DeltaTextProtocol) else None
     primary = content_val if prefer_content else text_val
     secondary = text_val if prefer_content else content_val
     chosen = primary or secondary
@@ -306,23 +276,19 @@ def _extract_delta_or_message_str(
 
 
 def _extract_direct_text(
-    item: Union[
-        StreamChunkInput,
-        _CandidateProtocol,
-        _ChoiceWithDeltaProtocol,
-        _ChoiceWithMessageProtocol,
-        LlmCompletionChoiceProtocol,
-    ],
+    item: StreamChunkInput
+    | _CandidateProtocol
+    | _ChoiceWithDeltaProtocol
+    | _ChoiceWithMessageProtocol
+    | LlmCompletionChoiceProtocol,
 ) -> str:
     """
     Extract a non-empty `.text` string from a `DirectTextChunkProtocol` instance.
 
     Args:
-    ----
         item: Candidate chunk or choice instance.
 
     Returns:
-    -------
         str: Non-empty text string or empty string.
 
     """
@@ -338,11 +304,9 @@ def _extract_candidate_text(cand: _CandidateProtocol) -> str:
     Extract text from a single Google/Gemini candidate protocol instance.
 
     Args:
-    ----
         cand: Candidate instance from a Gemini chunk.
 
     Returns:
-    -------
         str: Extracted candidate text or empty string.
 
     """
@@ -364,11 +328,9 @@ def _extract_google_chunk_delta(chunk: StreamChunkInput) -> str:
     Extract text delta from a Google/Gemini streaming chunk instance.
 
     Args:
-    ----
         chunk: Streaming chunk protocol instance.
 
     Returns:
-    -------
         str: Extracted text or empty string.
 
     """
@@ -385,11 +347,9 @@ def _extract_anthropic_chunk_delta(chunk: StreamChunkInput) -> str:
     Extract text delta from an Anthropic streaming chunk instance.
 
     Args:
-    ----
         chunk: Streaming chunk protocol instance.
 
     Returns:
-    -------
         str: Extracted text or empty string.
 
     """
@@ -408,22 +368,18 @@ def _extract_anthropic_chunk_delta(chunk: StreamChunkInput) -> str:
 
 
 def _extract_single_openai_choice_delta(
-    choice: Union[
-        _ChoiceWithDeltaProtocol,
-        _ChoiceWithMessageProtocol,
-        _DeltaTextProtocol,
-        LlmCompletionChoiceProtocol,
-    ],
+    choice: _ChoiceWithDeltaProtocol
+    | _ChoiceWithMessageProtocol
+    | _DeltaTextProtocol
+    | LlmCompletionChoiceProtocol,
 ) -> str:
     """
     Extract text from a single OpenAI/Ollama choice item.
 
     Args:
-    ----
         choice: Single choice item from `chunk.choices`.
 
     Returns:
-    -------
         str: Extracted choice text or empty string.
 
     """
@@ -445,11 +401,9 @@ def _extract_openai_chunk_delta(chunk: StreamChunkInput) -> str:
     Extract text delta from an OpenAI/Ollama/any-llm streaming chunk instance.
 
     Args:
-    ----
         chunk: Streaming chunk protocol instance.
 
     Returns:
-    -------
         str: Extracted text or empty string.
 
     """
@@ -471,11 +425,9 @@ def _extract_mapping_chunk_delta(chunk: StreamMappingChunk) -> str:
     Extract token delta string from a dictionary/mapping streaming chunk.
 
     Args:
-    ----
         chunk: Mapping chunk payload.
 
     Returns:
-    -------
         str: Extracted token string or empty string.
 
     """
@@ -505,12 +457,10 @@ def extract_stream_delta(chunk: StreamChunkInput, provider: str = "ollama") -> s
     Accurately inspects delta instances across ollama, openai, anthropic, google, and other any-llm providers.
 
     Args:
-    ----
         chunk: Raw response chunk from any-llm or provider SDK.
         provider: Provider identifier ('ollama', 'openai', 'anthropic', 'google', etc.).
 
     Returns:
-    -------
         str: Extracted token content string, or empty string.
 
     """

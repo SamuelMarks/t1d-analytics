@@ -1,8 +1,8 @@
 """Integration tests for the CLI."""
 
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -12,16 +12,19 @@ from t1d_analytics.cli import main
 
 
 @pytest.fixture
-def temp_workspace() -> Generator[Path, None, None]:
+def temp_workspace(monkeypatch: pytest.MonkeyPatch) -> Generator[Path, None, None]:
     """
     Create a temporary workspace directory for integration tests.
 
-    Yields
-    ------
+    Args:
+        monkeypatch: Pytest monkeypatch fixture used to register temp_workspace in allowed DB roots.
+
+    Yields:
         Path: The temporary directory path.
 
     """
     with tempfile.TemporaryDirectory() as tmpdir:
+        monkeypatch.setenv("T1D_EXTRA_DB_ROOTS", tmpdir)
         yield Path(tmpdir)
 
 
@@ -166,7 +169,7 @@ def test_cli_generate_training_data_integration(
     conn.close()
 
     mocker.patch(
-        "t1d_analytics.training_data.TrainingDataGenerator._generate_pairs",
+        "t1d_analytics.training_data.TrainingDataGenerator.generate_pairs",
         return_value=[
             (
                 "How many patients?",

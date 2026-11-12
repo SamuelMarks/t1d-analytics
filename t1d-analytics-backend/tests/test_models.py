@@ -241,8 +241,14 @@ def test_maxtext_config_build_full_parameters() -> None:
 
 
 def test_status_response_model() -> None:
-    """Test StatusResponse model instantiation, defaults, and to_dict conversion."""
-    from t1d_analytics.models import ColumnInfo, StatusResponse, TableSchemaModel
+    """Test StatusResponse model instantiation, defaults, and model_dump conversion."""
+    from t1d_analytics.api_schemas import (
+        ColumnInfo,
+        DatabaseHealthSchema,
+        ExecuteSqlResponse,
+        StatusResponse,
+        TableSchemaModel,
+    )
 
     resp = StatusResponse(
         status="ready",
@@ -250,12 +256,17 @@ def test_status_response_model() -> None:
         total_rows=475,
         required_tables_present=True,
     )
-    d = resp.to_dict()
+    d = resp.model_dump()
     assert d["status"] == "ready"
     assert d["tables_count"] == 4
     assert d["total_rows"] == 475
     assert d["required_tables_present"] is True
-    assert d["database"] == {}
+    assert d["database"] == DatabaseHealthSchema().model_dump()
+
+    sql_resp_from_rows = ExecuteSqlResponse(rows=[{"x": 1}])
+    assert sql_resp_from_rows.sql_result == [{"x": 1}]
+    sql_resp_from_res = ExecuteSqlResponse(sqlResult=[{"x": 2}])
+    assert sql_resp_from_res.rows == [{"x": 2}]
 
     schema_model = TableSchemaModel(
         table_name="patients",

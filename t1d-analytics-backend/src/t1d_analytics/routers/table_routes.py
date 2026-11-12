@@ -1,14 +1,17 @@
 """Table preview, profiling, schema inspection, database discovery, and streaming export endpoints."""
 
 import logging
-from typing import Optional
 
 import duckdb
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from t1d_analytics.analytics import TableProfileResult
-from t1d_analytics.api_dependencies import AppServices, get_app_services
+from t1d_analytics.api_dependencies import (
+    AppServices,
+    get_app_services,
+    resolve_default_app_services,
+)
 from t1d_analytics.api_exports import (
     fetch_paginated_table_data,
     fetch_table_profile,
@@ -19,6 +22,7 @@ from t1d_analytics.api_exports import (
 )
 from t1d_analytics.api_schemas import (
     ColumnInfo,
+    DatabaseHealthSchema,
     DatabaseListResponse,
     SchemaResponse,
     TableDataResponse,
@@ -40,17 +44,16 @@ def get_table_data(
     table_name: str,
     limit: int = 25,
     offset: int = 0,
-    sort_by: Optional[str] = None,
-    order: Optional[str] = "asc",
-    search: Optional[str] = None,
-    db_path: Optional[str] = None,
+    sort_by: str | None = None,
+    order: str | None = "asc",
+    search: str | None = None,
+    db_path: str | None = None,
     svc: AppServices = Depends(get_app_services),
 ) -> TableDataResponse:
     """
     Return paginated rows from a specific table with optional sorting and searching.
 
     Args:
-    ----
         table_name: The table name.
         limit: The limit.
         offset: The offset.
@@ -61,7 +64,6 @@ def get_table_data(
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         TableDataResponse: The data with pagination metadata.
 
     """
@@ -80,20 +82,18 @@ def get_table_data(
 @tables_router.get("/api/table/{table_name}/profile")
 def get_table_profile(
     table_name: str,
-    db_path: Optional[str] = None,
+    db_path: str | None = None,
     svc: AppServices = Depends(get_app_services),
 ) -> TableProfileResult:
     """
     Profile a table to return data quality, completeness, and column statistics.
 
     Args:
-    ----
         table_name: The table name to profile.
         db_path: Optional path to the database file.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         TableProfileResult: Profiling summary dictionary.
 
     """
@@ -108,20 +108,18 @@ def get_table_profile(
 @tables_router.get("/api/export/excel")
 def export_excel(
     table_name: str,
-    db_path: Optional[str] = None,
+    db_path: str | None = None,
     svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a native OpenXML Excel (.xlsx) workbook.
 
     Args:
-    ----
         table_name: Table to export.
         db_path: Optional path to database file.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         StreamingResponse: Streamed XLSX file with spreadsheetml MIME type.
 
     """
@@ -135,20 +133,18 @@ def export_excel(
 @tables_router.get("/api/export/parquet")
 def export_parquet(
     table_name: str,
-    db_path: Optional[str] = None,
+    db_path: str | None = None,
     svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data in columnar Apache Parquet format.
 
     Args:
-    ----
         table_name: Table to export.
         db_path: Optional path to database file.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         StreamingResponse: Streamed Parquet file.
 
     """
@@ -162,20 +158,18 @@ def export_parquet(
 @tables_router.get("/api/export/csv")
 def export_csv(
     table_name: str,
-    db_path: Optional[str] = None,
+    db_path: str | None = None,
     svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a streaming CSV file with spreadsheet formula defense.
 
     Args:
-    ----
         table_name: Table to export.
         db_path: Optional path to database file.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         StreamingResponse: Streamed CSV file with text/csv MIME type.
 
     """
@@ -189,20 +183,18 @@ def export_csv(
 @tables_router.get("/api/export/json")
 def export_json(
     table_name: str,
-    db_path: Optional[str] = None,
+    db_path: str | None = None,
     svc: AppServices = Depends(get_app_services),
 ) -> StreamingResponse:
     """
     Export table data formatted as a streaming JSON array of row objects.
 
     Args:
-    ----
         table_name: Table to export.
         db_path: Optional path to database file.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         StreamingResponse: Streamed JSON file with application/json MIME type.
 
     """
@@ -216,23 +208,21 @@ def export_json(
 def _build_schema_response(
     target_db: str,
     lang: str = "en",
-    services: Optional[AppServices] = None,
+    services: AppServices | None = None,
 ) -> SchemaResponse:
     """
     Inspect a DuckDB database and build a SchemaResponse with table columns and health status.
 
     Args:
-    ----
         target_db: Validated path to the DuckDB database file.
         lang: Localization language code for database health messages.
         services: Optional injected AppServices dependency bundle.
 
     Returns:
-    -------
         SchemaResponse: Structured table and column metadata with database health dictionary.
 
     """
-    svc = services or get_app_services()
+    svc = services if services is not None else resolve_default_app_services()
     db_health = check_database_health(target_db, lang=lang)
 
     try:
@@ -254,35 +244,39 @@ def _build_schema_response(
             for table, columns in cols_map.items()
         ]
 
-        return SchemaResponse(tables=schema_data, database=db_health.to_dict())
+        return SchemaResponse(
+            tables=schema_data,
+            database=DatabaseHealthSchema.model_validate(db_health.to_dict()),
+        )
     except (duckdb.Error, OSError, RuntimeError, ValueError) as e:
         logger.error(f"Error fetching schema: {e}")
-        return SchemaResponse(tables=[], database=db_health.to_dict())
+        return SchemaResponse(
+            tables=[],
+            database=DatabaseHealthSchema.model_validate(db_health.to_dict()),
+        )
 
 
 @tables_router.get("/api/schema", response_model=SchemaResponse)
 def get_schema(
     request: Request,
-    db_path: Optional[str] = None,
+    db_path: str | None = None,
     svc: AppServices = Depends(get_app_services),
 ) -> SchemaResponse:
     """
     Return structured schema for the frontend Schema Explorer.
 
     Args:
-    ----
         request: FastAPI request.
         db_path: Optional target DuckDB database path.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         SchemaResponse: The structured schema response including database diagnostics.
 
     """
     target_db = svc.validate_db_path(db_path)
     lang = svc.get_request_locale(request)
-    return _build_schema_response(target_db=target_db, lang=lang, services=svc)
+    return svc.build_schema_response(target_db, lang)
 
 
 @tables_router.get("/api/databases", response_model=DatabaseListResponse)
@@ -293,11 +287,9 @@ def list_databases(
     Discover and list available DuckDB database files in the workspace.
 
     Args:
-    ----
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         DatabaseListResponse: Found databases and current default.
 
     """

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Downloader and analytics suite for T1D public datasets"
 authors = [{name = "Samuel"}]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dynamic = ["dependencies"]
 
 [project.optional-dependencies]
@@ -30,11 +30,14 @@ t1d-analytics = "t1d_analytics.cli:main"
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+target-version = "py312"
 src = ["src", "t1d-analytics-backend/src", "../scripts", "scripts"]
-lint.select = ["E", "F", "I", "D", "B", "UP", "SIM", "C4", "PIE", "RUF", "C901", "PTH"]
-lint.ignore = ["D203", "D212", "E501", "UP006", "UP007", "UP035", "UP037", "UP045", "SIM117", "B008", "RUF001", "RUF002", "PTH123"]
+lint.select = ["E", "F", "I", "D", "D417", "B", "UP", "SIM", "C4", "PIE", "RUF", "C901", "PTH"]
+lint.ignore = ["D203", "D212", "E501", "SIM117", "B008", "RUF001", "RUF002", "PTH123"]
 lint.mccabe.max-complexity = 12
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.mypy]
 strict = true

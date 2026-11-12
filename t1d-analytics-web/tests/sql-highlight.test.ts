@@ -11,8 +11,14 @@ import {
   isReadOnlySqlStatement,
   updateInputHighlight,
 } from "../src/sql-highlight";
-import { trapModalFocus } from "../src/modal-utils";
-import { ChatUI, optionalElementById, requireElementById } from "../src/ui";
+import {
+  ModalDialogController,
+  optionalElementById,
+  requireElementById,
+  trapModalFocus,
+} from "../src/modal-utils";
+import { TypedEventTarget } from "../src/event-bus";
+import { ChatUI } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 
 describe("SQL Highlight & Modal Focus Utilities", () => {
@@ -29,7 +35,7 @@ describe("SQL Highlight & Modal Focus Utilities", () => {
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
@@ -48,6 +54,23 @@ describe("SQL Highlight & Modal Focus Utilities", () => {
    `),
     ).toBe(false);
     expect(isReadOnlySqlStatement("((SELECT * FROM patients))")).toBe(true);
+    expect(isReadOnlySqlStatement("(SELECT 1) UNION ALL (SELECT 2)")).toBe(
+      true,
+    );
+    expect(
+      isReadOnlySqlStatement("SELECT '--keep' AS \"/*col*/\" FROM patients"),
+    ).toBe(true);
+    expect(isReadOnlySqlStatement("/* nested /* inner */ */ SELECT 1")).toBe(
+      true,
+    );
+    expect(isReadOnlySqlStatement("((SELECT 1)")).toBe(false);
+    expect(isReadOnlySqlStatement("SELECT 1)")).toBe(false);
+    expect(isReadOnlySqlStatement("SELECT 1; DROP TABLE patients")).toBe(false);
+    expect(
+      isReadOnlySqlStatement(
+        "WITH d AS (DELETE FROM patients) SELECT * FROM d",
+      ),
+    ).toBe(false);
     expect(isReadOnlySqlStatement("SELECT patients FROM cohort")).toBe(true);
     expect(
       isReadOnlySqlStatement("WITH cte AS (SELECT 1) SELECT * FROM cte"),
@@ -102,9 +125,10 @@ describe("SQL Highlight & Modal Focus Utilities", () => {
         error: null,
       }),
     });
-    await ui["handleSendMessage"]();
-    const sqlCallBody = JSON.parse(
-      mockFetch.mock.calls[mockFetch.mock.calls.length - 1][1].body,
+    await ui.handleSendMessage();
+    const lastCall = mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+    const sqlCallBody: { model?: string; auto_execute?: boolean } = JSON.parse(
+      String(lastCall?.[1]?.body ?? "{}"),
     );
     expect(sqlCallBody.model).toBe("sql");
     expect(sqlCallBody.auto_execute).toBe(true);
@@ -318,5 +342,74 @@ ${fence}`,
     expect(
       optionalElementById("nonexistent-optional-element", HTMLButtonElement),
     ).toBeNull();
+  });
+
+  it("manages TypedEventTarget subscriptions and ModalDialogController opener/fallback focus", () => {
+    const bus = new TypedEventTarget<{ ping: { count: number } }>();
+    const received: number[] = [];
+    const preAborted = new AbortController();
+    preAborted.abort();
+    const noopUnsub = bus.on(
+      "ping",
+      (p) => received.push(p.count),
+      preAborted.signal,
+    );
+    noopUnsub();
+    bus.emit("ping", { count: 0 });
+    expect(received).toEqual([]);
+
+    const activeSig = new AbortController();
+    const unsub = bus.on(
+      "ping",
+      (p) => received.push(p.count),
+      activeSig.signal,
+    );
+    bus.emit("ping", { count: 1 });
+    unsub();
+    bus.emit("ping", { count: 2 });
+    const unsub2 = bus.on(
+      "ping",
+      (p) => received.push(p.count),
+      activeSig.signal,
+    );
+    activeSig.abort();
+    bus.emit("ping", { count: 3 });
+    void unsub2;
+    expect(received).toEqual([1]);
+
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    const modal = document.createElement("div");
+    modal.className = "hidden";
+    modal.setAttribute("aria-hidden", "true");
+    const innerChild = document.createElement("span");
+    modal.appendChild(innerChild);
+    document.body.appendChild(modal);
+
+    let closedCount = 0;
+    const ctrl = new ModalDialogController({
+      modalEl: modal,
+      fallbackFocusId: "chat-input",
+      onClose: () => {
+        closedCount++;
+      },
+    });
+    expect(ctrl.isOpen()).toBe(false);
+    opener.focus();
+    ctrl.open(null);
+    expect(ctrl.isOpen()).toBe(true);
+    // Click on inner child should NOT close backdrop
+    innerChild.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(ctrl.isOpen()).toBe(true);
+    const chatInputEl = getTestElement<HTMLTextAreaElement>("chat-input");
+    chatInputEl.disabled = false;
+    // Detach opener so close falls back to #chat-input
+    opener.remove();
+    modal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(ctrl.isOpen()).toBe(false);
+    expect(closedCount).toBe(1);
+    expect(document.activeElement).toBe(chatInputEl);
+    ctrl.dispose();
+    modal.remove();
   });
 });

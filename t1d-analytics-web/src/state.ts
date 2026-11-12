@@ -46,7 +46,7 @@ export function extractChatIdFromLocation(
   }
   const pathMatch = /^\/chats\/([^/?#]+)\/?$/.exec(loc.pathname);
   if (pathMatch) {
-    return safeDecodeUriComponent(pathMatch[1]);
+    return safeDecodeUriComponent(String(pathMatch[1]));
   }
   return null;
 }
@@ -121,7 +121,7 @@ const LEGACY_HTML_ENTITY_MAP: Readonly<Record<string, string>> = {
 export function decodeLegacyHtmlEntities(text: string): string {
   return text.replace(
     /&(?:#39|#x27|apos|quot|#34|#x2[Ff]|#47|gt|lt|amp);/g,
-    (entity) => LEGACY_HTML_ENTITY_MAP[entity],
+    (entity) => String(LEGACY_HTML_ENTITY_MAP[entity]),
   );
 }
 
@@ -138,33 +138,6 @@ export function sanitizeMessageRecord(msg: Message): Message {
 }
 
 /**
- * Filters out legacy `sum(VARCHAR)` / `avg(VARCHAR)` Binder Error retry turns that were
- * immediately superseded by a subsequent turn in the same session transcript.
- * @param {Message[]} messages - Ordered list of chat messages in a session.
- * @returns {Message[]} Sanitized message list with superseded `sum(VARCHAR)` binder errors removed.
- */
-export function sanitizeLegacySessionMessages(messages: Message[]): Message[] {
-  const sanitized = messages.map((msg) => sanitizeMessageRecord(msg));
-  const cleaned: Message[] = [];
-  for (let i = 0; i < sanitized.length; i++) {
-    const msg = sanitized[i];
-    const lower = msg.content.toLowerCase();
-    const isLegacySumVarcharError =
-      msg.role === "assistant" &&
-      lower.includes("binder error") &&
-      (lower.includes("sum(varchar)") || lower.includes("avg(varchar)"));
-    if (isLegacySumVarcharError && i + 1 < sanitized.length) {
-      if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === "user") {
-        cleaned.pop();
-      }
-      continue;
-    }
-    cleaned.push(msg);
-  }
-  return cleaned;
-}
-
-/**
  * Sanitizes the messages of each chat in a stored chat list without mutating input chat objects in place.
  * @param {Chat[] | undefined} chats - Stored chats array.
  * @returns {Chat[]} Sanitized chats array.
@@ -177,39 +150,40 @@ export function parseStoredChatList(chats?: Chat[]): Chat[] {
     Array.isArray(chat.messages)
       ? {
           ...chat,
-          messages: sanitizeLegacySessionMessages(chat.messages),
+          messages: chat.messages.map((msg) => sanitizeMessageRecord(msg)),
         }
       : { ...chat },
   );
 }
 
 /**
- * Merges a remote session payload into the local `chats` array.
+ * Merges a remote session payload into the local `chats` array and returns the merged `Chat`.
  * @param {Chat[]} chats - Mutable local chats list.
  * @param {RemoteSessionPayload<Message>} remoteSession - Remote session payload from `/api/sessions`.
- * @returns {void}
+ * @returns {Chat} Merged local chat record.
  */
 export function mergeRemoteSessionIntoLocalChats(
   chats: Chat[],
   remoteSession: RemoteSessionPayload<Message>,
-): void {
+): Chat {
   const local = chats.find((c) => c.id === remoteSession.session_id);
   const remoteTime = remoteSession.updated_at
     ? new Date(remoteSession.updated_at).getTime()
     : 0;
-  const remoteMessages = sanitizeLegacySessionMessages(
-    remoteSession.messages || [],
-  );
+  const remoteMessages = (
+    Array.isArray(remoteSession.messages) ? remoteSession.messages : []
+  ).map((msg) => sanitizeMessageRecord(msg));
   if (!local) {
-    chats.push({
+    const created: Chat = {
       id: remoteSession.session_id,
       title: remoteSession.title,
       messages: remoteMessages,
       model: DEFAULT_CHAT_MODEL,
       isTemporary: false,
       updatedAt: remoteTime,
-    });
-    return;
+    };
+    chats.push(created);
+    return created;
   }
   if (remoteMessages.length > local.messages.length) {
     local.messages = remoteMessages;
@@ -223,6 +197,7 @@ export function mergeRemoteSessionIntoLocalChats(
     local.title = remoteSession.title;
     local.updatedAt = remoteTime;
   }
+  return local;
 }
 
 /**
@@ -411,6 +386,55 @@ export function safeStorageRemove(key: string): void {
 }
 
 /**
+ * Storage scope for sensitive API credentials (`"session"` for tab-scoped `sessionStorage`, `"local"` for `localStorage`).
+ */
+export type CredentialStorageScope = "session" | "local";
+
+/**
+ * Safely reads a string item from browser `sessionStorage`.
+ * @param {string} key - The storage key to read.
+ * @returns {string | null} Stored value or null if unavailable.
+ */
+export function safeSessionStorageGet(key: string): string | null {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+    return sessionStorage.getItem(key);
+  } catch (e) {
+    console.warn(`Could not read '${key}' from sessionStorage`, e);
+    return null;
+  }
+}
+
+/**
+ * Safely writes a string item to browser `sessionStorage`.
+ * @param {string} key - The storage key to write.
+ * @param {string} value - The string value to persist.
+ * @returns {void}
+ */
+export function safeSessionStorageSet(key: string, value: string): void {
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    sessionStorage.setItem(key, value);
+  } catch (e) {
+    console.warn(`Could not save '${key}' to sessionStorage`, e);
+  }
+}
+
+/**
+ * Safely removes an item from browser `sessionStorage`.
+ * @param {string} key - The storage key to remove.
+ * @returns {void}
+ */
+export function safeSessionStorageRemove(key: string): void {
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    sessionStorage.removeItem(key);
+  } catch (e) {
+    console.warn(`Could not remove '${key}' from sessionStorage`, e);
+  }
+}
+
+/**
  * Metadata for an available workspace DuckDB database file.
  */
 export interface AvailableDatabaseItem {
@@ -423,35 +447,145 @@ export interface AvailableDatabaseItem {
 }
 
 /**
- * Composable store managing cloud LLM provider API keys and custom model configurations in localStorage.
+ * Column metadata entry within a database table schema.
+ */
+export interface SchemaColumnMetadata {
+  /** Column identifier name. */
+  name: string;
+  /** DuckDB SQL data type name. */
+  type: string;
+}
+
+/**
+ * Table metadata entry stored in `ChatState` from `/api/schema`.
+ */
+export interface SchemaTableMetadata {
+  /** Table identifier name. */
+  name: string;
+  /** Ordered column definitions for the table. */
+  columns: SchemaColumnMetadata[];
+}
+
+/**
+ * Composable store managing cloud LLM provider API keys, backend `T1D_API_KEY` Bearer tokens,
+ * and custom model configurations across `sessionStorage` or `localStorage`.
  */
 export class ProviderCredentialsStore {
   /**
-   * Retrieves a stored custom API key for a cloud LLM provider from localStorage.
+   * Returns the configured storage scope (`"session"` or `"local"`) for API credentials.
+   * @returns {CredentialStorageScope} Active storage scope (defaults to `"local"` for backward compatibility unless set to `"session"`).
+   */
+  public getStorageScope(): CredentialStorageScope {
+    const scope =
+      safeSessionStorageGet("t1d_credential_storage_scope") ??
+      safeStorageGet("t1d_credential_storage_scope");
+    return scope === "session" ? "session" : "local";
+  }
+
+  /**
+   * Updates the credential storage scope (`"session"` or `"local"`).
+   * When switching to `"session"`, migrates existing keys out of `localStorage` into `sessionStorage`.
+   * @param {CredentialStorageScope} scope - Target storage scope.
+   * @returns {void}
+   */
+  public setStorageScope(scope: CredentialStorageScope): void {
+    if (scope === "session") {
+      safeSessionStorageSet("t1d_credential_storage_scope", "session");
+      safeStorageSet("t1d_credential_storage_scope", "session");
+      for (const p of ["openai", "anthropic", "google"]) {
+        const storageKey = `t1d_api_key_${p}`;
+        const existing = safeStorageGet(storageKey);
+        if (existing) {
+          safeSessionStorageSet(storageKey, existing);
+          safeStorageRemove(storageKey);
+        }
+      }
+      const backendKey = safeStorageGet("t1d_backend_api_key");
+      if (backendKey) {
+        safeSessionStorageSet("t1d_backend_api_key", backendKey);
+        safeStorageRemove("t1d_backend_api_key");
+      }
+    } else {
+      safeSessionStorageRemove("t1d_credential_storage_scope");
+      safeStorageSet("t1d_credential_storage_scope", "local");
+    }
+  }
+
+  /**
+   * Retrieves a stored custom API key for a cloud LLM provider from `sessionStorage` or `localStorage`.
    * @param {string} provider - The provider identifier (e.g. 'openai', 'anthropic', 'google').
    * @returns {string | null} The API key if stored, otherwise null.
    */
   public getApiKey(provider: string): string | null {
-    return safeStorageGet(`t1d_api_key_${provider.toLowerCase()}`);
+    const keyName = `t1d_api_key_${provider.toLowerCase()}`;
+    return safeSessionStorageGet(keyName) ?? safeStorageGet(keyName);
   }
 
   /**
-   * Stores a custom API key for a cloud LLM provider in localStorage.
+   * Stores a custom API key for a cloud LLM provider in the active storage scope (`sessionStorage` or `localStorage`).
    * @param {string} provider - The provider identifier.
    * @param {string} key - The API key to store.
    * @returns {void}
    */
   public setApiKey(provider: string, key: string): void {
-    safeStorageSet(`t1d_api_key_${provider.toLowerCase()}`, key.trim());
+    const keyName = `t1d_api_key_${provider.toLowerCase()}`;
+    const trimmed = key.trim();
+    if (this.getStorageScope() === "session") {
+      safeSessionStorageSet(keyName, trimmed);
+      safeStorageRemove(keyName);
+    } else {
+      safeStorageSet(keyName, trimmed);
+    }
   }
 
   /**
-   * Removes a stored custom API key for a cloud LLM provider from localStorage.
+   * Removes a stored custom API key for a cloud LLM provider from both `sessionStorage` and `localStorage`.
    * @param {string} provider - The provider identifier.
    * @returns {void}
    */
   public removeApiKey(provider: string): void {
-    safeStorageRemove(`t1d_api_key_${provider.toLowerCase()}`);
+    const keyName = `t1d_api_key_${provider.toLowerCase()}`;
+    safeSessionStorageRemove(keyName);
+    safeStorageRemove(keyName);
+  }
+
+  /**
+   * Retrieves the configured `T1D_API_KEY` backend Bearer authentication token, if present.
+   * @returns {string | null} Backend Bearer token or null.
+   */
+  public getBackendApiKey(): string | null {
+    return (
+      safeSessionStorageGet("t1d_backend_api_key") ??
+      safeStorageGet("t1d_backend_api_key")
+    );
+  }
+
+  /**
+   * Stores or clears the `T1D_API_KEY` backend Bearer authentication token in the active storage scope.
+   * @param {string} token - Bearer token string (empty string removes the stored token).
+   * @returns {void}
+   */
+  public setBackendApiKey(token: string): void {
+    const trimmed = token.trim();
+    if (!trimmed) {
+      this.removeBackendApiKey();
+      return;
+    }
+    if (this.getStorageScope() === "session") {
+      safeSessionStorageSet("t1d_backend_api_key", trimmed);
+      safeStorageRemove("t1d_backend_api_key");
+    } else {
+      safeStorageSet("t1d_backend_api_key", trimmed);
+    }
+  }
+
+  /**
+   * Removes the stored `T1D_API_KEY` backend Bearer authentication token from storage.
+   * @returns {void}
+   */
+  public removeBackendApiKey(): void {
+    safeSessionStorageRemove("t1d_backend_api_key");
+    safeStorageRemove("t1d_backend_api_key");
   }
 
   /**
@@ -515,6 +649,35 @@ export class ProviderCredentialsStore {
  */
 export class SessionSyncService {
   /**
+   * Pushes a single non-temporary local chat to `/api/sessions` if its messages or title changed.
+   * @param {Chat} localChat - Local chat session.
+   * @param {RemoteSessionPayload<Message> | undefined} remote - Matching remote session if present.
+   * @returns {Promise<void>}
+   */
+  private async pushModifiedLocalChat(
+    localChat: Chat,
+    remote: RemoteSessionPayload<Message> | undefined,
+  ): Promise<void> {
+    if (localChat.isTemporary === true) return;
+    const hasNewerMessages =
+      !remote || localChat.messages.length > remote.messages.length;
+    const hasModifiedTitle =
+      localChat.titleModified === true && localChat.title !== remote?.title;
+
+    if (hasNewerMessages || hasModifiedTitle) {
+      await pushRemoteSession(
+        localChat.id,
+        localChat.title,
+        localChat.messages,
+      );
+      if (remote) {
+        remote.title = localChat.title;
+      }
+      localChat.titleModified = false;
+    }
+  }
+
+  /**
    * Pushes modified local chats to `/api/sessions` and merges remote sessions into `chats`.
    * @param {Chat[]} chats - Mutable local chats list.
    * @param {Set<string>} deletedChatIds - Tombstone set of deleted chat IDs.
@@ -528,34 +691,17 @@ export class SessionSyncService {
 
     const serverMap = new Map<string, RemoteSessionPayload<Message>>();
     for (const s of sessionsList) {
-      if (s && s.session_id) {
+      if (Boolean(s?.session_id)) {
         serverMap.set(s.session_id, s);
       }
     }
 
     for (const localChat of chats) {
-      if (localChat.isTemporary) continue;
-      const remote = serverMap.get(localChat.id);
-      const hasNewerMessages =
-        !remote || localChat.messages.length > remote.messages.length;
-      const hasModifiedTitle =
-        Boolean(localChat.titleModified) && localChat.title !== remote?.title;
-
-      if (hasNewerMessages || hasModifiedTitle) {
-        await pushRemoteSession(
-          localChat.id,
-          localChat.title,
-          localChat.messages,
-        );
-        if (remote) {
-          remote.title = localChat.title;
-        }
-        localChat.titleModified = false;
-      }
+      await this.pushModifiedLocalChat(localChat, serverMap.get(localChat.id));
     }
 
     for (const s of sessionsList) {
-      if (!s || !s.session_id) continue;
+      if (!s?.session_id) continue;
       if (deletedChatIds.has(s.session_id)) {
         await deleteRemoteSession(s.session_id).catch(() => {});
         continue;
@@ -566,8 +712,7 @@ export class SessionSyncService {
 }
 
 /** Default recommended Jaeb T1D clinical trial database path. */
-export const DEFAULT_RECOMMENDED_JAEB_DB_PATH =
-  "/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb";
+export const DEFAULT_RECOMMENDED_JAEB_DB_PATH = "./data/jaeb/t1d.duckdb";
 
 /**
  * State manager for the Chat Application.
@@ -611,6 +756,8 @@ export class ChatState {
   public selectedModel: string = DEFAULT_CHAT_MODEL;
   /** List of discovered workspace DuckDB databases. */
   public availableDbs: AvailableDatabaseItem[] = [];
+  /** Typed table and column schema metadata loaded from `/api/schema` for the active database. */
+  public schemaTables: SchemaTableMetadata[] = [];
   /** Whether server-side chat session synchronization is enabled. */
   public serverSyncEnabled: boolean = false;
   /** Whether token-by-token SSE streaming mode is enabled. */
@@ -686,7 +833,10 @@ export class ChatState {
       const parsed = parsePersistedChatState(data);
       this.chats = parseStoredChatList(parsed.chats);
       this.activeChatId = parsed.activeChatId || null;
-      this.chatCounter = parsed.chatCounter || 1;
+      this.chatCounter =
+        parsed.chatCounter !== undefined && parsed.chatCounter > 0
+          ? parsed.chatCounter
+          : 1;
       if (parsed.currentDb) this.currentDb = parsed.currentDb;
       if (parsed.availableDbs) this.availableDbs = parsed.availableDbs;
       if (typeof parsed.serverSyncEnabled === "boolean") {
@@ -780,10 +930,11 @@ export class ChatState {
         typeof window !== "undefined"
           ? extractChatIdFromLocation(window.location)
           : null;
+      const firstChat = this.chats[0];
       if (routeChatId && this.chats.some((c) => c.id === routeChatId)) {
         this.activeChatId = routeChatId;
-      } else if (!this.activeChatId && this.chats.length > 0) {
-        this.activeChatId = this.chats[0].id;
+      } else if (!this.activeChatId && firstChat) {
+        this.activeChatId = firstChat.id;
       }
 
       this.serverSyncEnabled = true;
@@ -819,10 +970,10 @@ export class ChatState {
         return null;
       }
       this.deletedChatIds.delete(remote.session_id);
-      mergeRemoteSessionIntoLocalChats(this.chats, remote);
+      const merged = mergeRemoteSessionIntoLocalChats(this.chats, remote);
       this.activeChatId = remote.session_id;
       this.saveToLocalStorage();
-      return this.chats.find((c) => c.id === remote.session_id)!;
+      return merged;
     } catch {
       return null;
     }
@@ -886,8 +1037,8 @@ export class ChatState {
     }
     this.chats = this.chats.filter((c) => c.id !== id);
     if (this.activeChatId === id) {
-      this.activeChatId =
-        this.chats.length > 0 ? this.chats[this.chats.length - 1].id : null;
+      const lastChat = this.chats[this.chats.length - 1];
+      this.activeChatId = lastChat ? lastChat.id : null;
     }
 
     if (this.chats.length === 0) {
@@ -1004,7 +1155,11 @@ export class ChatState {
   setActiveChatProvider(provider?: string): void {
     const chat = this.getActiveChat();
     if (chat) {
-      chat.provider = provider;
+      if (provider !== undefined) {
+        chat.provider = provider;
+      } else {
+        delete chat.provider;
+      }
       this.saveToLocalStorage();
     }
   }
@@ -1071,7 +1226,35 @@ export class ChatState {
   }
 
   /**
-   * Updates the diagnostic health status of the system.
+   * Stores the loaded database table and column schema metadata for the active database.
+   * @param {SchemaTableMetadata[]} tables - Loaded schema table definitions.
+   * @returns {void}
+   */
+  setSchemaTables(tables: SchemaTableMetadata[]): void {
+    this.schemaTables = tables.map((t) => ({
+      name: t.name,
+      columns: [...t.columns],
+    }));
+  }
+
+  /**
+   * Returns column names for `tableName` from loaded `schemaTables`, or undefined when unknown.
+   * @param {string} tableName - Target table identifier.
+   * @returns {string[] | undefined} Ordered column names if the table is present in `schemaTables`.
+   */
+  getTableColumns(tableName: string): string[] | undefined {
+    const target = tableName.trim().toLowerCase();
+    if (!target) {
+      return undefined;
+    }
+    const found = this.schemaTables.find(
+      (t) => t.name.toLowerCase() === target,
+    );
+    return found ? found.columns.map((c) => c.name) : undefined;
+  }
+
+  /**
+   * Updates the diagnostic status of the system.
    * @param {Partial<SystemStatus>} status The partial status updates.
    * @returns {void}
    */

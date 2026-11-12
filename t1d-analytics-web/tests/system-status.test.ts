@@ -7,7 +7,11 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { ChatState } from "../src/state";
-import { ChatUI, SystemStatusController, isDbStatusCode } from "../src/ui";
+import {
+  SystemStatusController,
+  isDbStatusCode,
+} from "../src/controllers/system-status-controller";
+import { ChatUI } from "../src/ui";
 import {
   flushPromises,
   getTestElement,
@@ -277,14 +281,14 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
     });
     expect(
       ui.systemStatusController.jaebProvenanceAlertDesc.textContent,
-    ).toContain("/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb");
+    ).toContain("./data/jaeb/t1d.duckdb");
 
     state.systemStatus.recommendedJaebDbPath = "";
     await i18next.changeLanguage("en");
     ui.systemStatusController.showSyntheticDataAlert();
     expect(
       ui.systemStatusController.jaebProvenanceAlertDesc.textContent,
-    ).toContain("/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb");
+    ).toContain("./data/jaeb/t1d.duckdb");
 
     // 5b. authentic Jaeb database with LLM selected hides both alerts
     ui.modelSelect.value = "gemma4";
@@ -411,10 +415,10 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
 
     // Clipboard error and missing clipboard handling
     writeTextSpy.mockRejectedValueOnce(new Error("denied"));
-    await ui.schemaExplorerController.copyCommandToClipboard("test", copyBtn!);
+    await ui.schemaExplorerController.copyCommandToClipboard("test", copyBtn);
     const origClipboard = navigator.clipboard;
     Object.assign(navigator, { clipboard: null });
-    await ui.schemaExplorerController.copyCommandToClipboard("test", copyBtn!);
+    await ui.schemaExplorerController.copyCommandToClipboard("test", copyBtn);
     Object.assign(navigator, { clipboard: origClipboard });
 
     // 2. empty_db diagnostic card + reload button
@@ -510,5 +514,14 @@ describe("SystemStatusController & SchemaExplorerController Diagnostics", () => 
     await ui.schemaExplorerController.fetchDatabases();
     expect(state.availableDbs.length).toBe(2);
     expect(dbSelect.options.length).toBe(2);
+
+    ui.dispose();
+    const polledUi = new ChatUI(state, {
+      checkStatusOnInit: true,
+      statusPollIntervalMs: 60000,
+    });
+    await flushPromises();
+    polledUi.dispose();
+    ui = new ChatUI(state);
   });
 });

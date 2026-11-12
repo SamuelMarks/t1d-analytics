@@ -457,9 +457,9 @@ goto :eof
 :build_docs
 if not exist "%DOCS_DIR%" mkdir "%DOCS_DIR%"
 call :activate_venv
-interrogate -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics
+interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts
 if errorlevel 1 goto :eof
-python3 -m sphinx -b html t1d-analytics-backend/docs_src %DOCS_DIR%
+python3 -m sphinx -W --keep-going -b html t1d-analytics-backend/docs_src %DOCS_DIR%
 if errorlevel 1 goto :eof
 cd t1d-analytics-web
 call npm run docs

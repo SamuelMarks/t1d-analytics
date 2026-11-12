@@ -1,69 +1,63 @@
-"""Unit tests for Sphinx documentation configuration (docs_src/conf.py)."""
+"""Integration tests for Sphinx documentation build and module autodoc completeness."""
 
 import importlib
 import runpy
 from pathlib import Path
 
+from sphinx.cmd.build import build_main
 
-def test_docs_conf_variables_and_extensions() -> None:
-    """Test that docs_src/conf.py correctly defines Sphinx metadata, extensions, and napoleon flags."""
-    conf_path = Path(__file__).parent.parent / "docs_src" / "conf.py"
-    assert conf_path.exists()
+
+def test_sphinx_html_build_zero_warnings_and_module_completeness(
+    tmp_path: Path,
+) -> None:
+    """Execute a real Sphinx HTML build with -W --keep-going and verify every src module is documented."""
+    conf_path = Path(__file__).resolve().parent.parent / "docs_src" / "conf.py"
+    docs_src_dir = conf_path.parent
+    assert conf_path.is_file()
 
     importlib.import_module("docs_src.conf")
     mod_dict = runpy.run_path(str(conf_path))
-
-    # Core project metadata
-    assert mod_dict["project"] == "T1D Analytics"
-    assert mod_dict["author"] == "Samuel Marks"
-    assert "Samuel Marks" in mod_dict["copyright"]
-    assert mod_dict["release"] == "0.1.0"
-
-    # Sphinx extensions
-    extensions = mod_dict["extensions"]
-    assert "sphinx.ext.autodoc" in extensions
-    assert "sphinx.ext.napoleon" in extensions
-    assert "sphinx.ext.viewcode" in extensions
-
-    # Napoleon settings
-    assert mod_dict["napoleon_google_docstring"] is True
-    assert mod_dict["napoleon_numpy_docstring"] is True
-    assert mod_dict["napoleon_include_init_with_doc"] is True
-    assert mod_dict["napoleon_include_private_with_doc"] is False
-    assert mod_dict["napoleon_use_param"] is True
-    assert mod_dict["napoleon_use_rtype"] is True
-    assert mod_dict["napoleon_use_ivar"] is True
-
-    # Suppressed warnings
     suppressed = mod_dict["suppress_warnings"]
-    assert "autodoc" in suppressed
-    assert "docutils" in suppressed
+    assert "autodoc" not in suppressed
+    assert "docutils" not in suppressed
 
-    # Templates, paths, and theme
-    assert mod_dict["templates_path"] == ["_templates"]
-    assert "_build" in mod_dict["exclude_patterns"]
-    assert mod_dict["html_theme"] == "alabaster"
-    assert mod_dict["html_static_path"] == []
-
-    # Verify every automodule directive in docs_src/modules.rst is importable via conf.py's sys.path
-    modules_rst = (conf_path.parent / "modules.rst").read_text(encoding="utf-8")
+    modules_rst = (docs_src_dir / "modules.rst").read_text(encoding="utf-8")
     documented_modules = {
         line.split("::")[1].strip()
         for line in modules_rst.splitlines()
         if line.strip().startswith(".. automodule::")
     }
-    src_pkg_dir = conf_path.parent.parent / "src" / "t1d_analytics"
+    src_pkg_dir = docs_src_dir.parent / "src" / "t1d_analytics"
     expected_modules = {"t1d_analytics"}
-    for p in src_pkg_dir.rglob("*.py"):
-        rel = p.relative_to(src_pkg_dir)
-        if p.stem == "__init__":
+    for py_file in src_pkg_dir.rglob("*.py"):
+        rel = py_file.relative_to(src_pkg_dir)
+        if py_file.stem == "__init__":
             if rel.parent != Path():
                 expected_modules.add("t1d_analytics." + ".".join(rel.parent.parts))
         else:
             expected_modules.add(
-                "t1d_analytics." + ".".join((*rel.parent.parts, p.stem))
+                "t1d_analytics." + ".".join((*rel.parent.parts, py_file.stem))
             )
     assert documented_modules == expected_modules
     for mod_name in sorted(documented_modules):
         imported = importlib.import_module(mod_name)
         assert imported.__doc__ is not None and len(imported.__doc__.strip()) > 0
+
+    html_out_dir = tmp_path / "sphinx_html"
+    doctree_dir = tmp_path / "sphinx_doctrees"
+    exit_code = build_main(
+        [
+            "-W",
+            "--keep-going",
+            "-q",
+            "-b",
+            "html",
+            "-d",
+            str(doctree_dir),
+            str(docs_src_dir),
+            str(html_out_dir),
+        ]
+    )
+    assert exit_code == 0
+    assert (html_out_dir / "index.html").is_file()
+    assert (html_out_dir / "modules.html").is_file()

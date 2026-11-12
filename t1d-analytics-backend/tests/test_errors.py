@@ -1,14 +1,21 @@
-"""Tests for the T1DError domain exception hierarchy."""
+"""Tests for the T1DError domain exception hierarchy and production usage AST audit."""
+
+import ast
+import asyncio
+import inspect
+from pathlib import Path
 
 from fastapi import Request
 
-from t1d_analytics.api import parse_error, t1d_error_exception_handler
+from t1d_analytics import errors as errors_module
+from t1d_analytics.api import t1d_error_exception_handler
+from t1d_analytics.api_dependencies import parse_error
 from t1d_analytics.errors import (
     AuthPluginError,
+    ChatJobNotFoundError,
     ChecksumMismatchError,
     CliValidationError,
     ConfigFileNotFoundError,
-    ConfigurationError,
     DatabaseError,
     DatabaseLockedError,
     DatabaseNotFoundError,
@@ -16,15 +23,13 @@ from t1d_analytics.errors import (
     DownloadError,
     EmptyQueryError,
     ExportError,
+    FrontendBuildNotFoundError,
     GcsStorageError,
-    GcsSyncError,
     GemmaToolchainError,
     HardwareUnavailableError,
     InsufficientDataError,
-    InvalidColumnNameError,
     InvalidDatabasePathError,
     InvalidGcsUriError,
-    InvalidIdentifierError,
     InvalidPaginationError,
     InvalidSortColumnError,
     InvalidSortOrderError,
@@ -37,14 +42,12 @@ from t1d_analytics.errors import (
     LlmQuotaExceededError,
     LlmRateLimitError,
     LlmTranslationError,
-    MissingApiKeyError,
     MissingSdkError,
     MultipleStatementsError,
     PathAccessDeniedError,
     ProviderNotConfiguredError,
     RateLimitExceededError,
     ReadOnlyViolationError,
-    SchemaExtractionError,
     SchemaReadError,
     SeedVerificationError,
     SessionNotFoundError,
@@ -53,15 +56,15 @@ from t1d_analytics.errors import (
     SubprocessTimeoutError,
     T1DError,
     TableNotFoundError,
-    ToolchainNotFoundError,
     TpuOrchestrationError,
     TpuPollingTimeoutError,
     TpuPreemptionError,
-    TpuWorkloadError,
     TrainingError,
     TrainingExecutionError,
     TrainingJobNotFoundError,
+    UnauthorizedApiError,
     UnsupportedExportFormatError,
+    UnsupportedFileFormatError,
     exception_to_error_detail,
 )
 
@@ -97,249 +100,146 @@ def test_t1d_error_defaults_and_overrides() -> None:
     }
 
 
-def test_domain_error_subclasses() -> None:
-    """Test all domain error subclasses preserve expected status codes, error codes, and base types."""
-    db_err = DatabaseNotFoundError(params={"path": "missing.duckdb"})
-    assert isinstance(db_err, (T1DError, ValueError, FileNotFoundError))
-    assert db_err.error_code == "backend.dbNotFound"
-    assert db_err.status_code == 404
-
-    cfg_err = ConfigFileNotFoundError("Missing config.yml")
-    assert isinstance(cfg_err, (TrainingError, FileNotFoundError, ValueError))
-    assert cfg_err.error_code == "backend.configNotFound"
-    assert cfg_err.status_code == 404
-
-    gcs_uri_err = InvalidGcsUriError("Invalid gs:// URI")
-    assert isinstance(gcs_uri_err, (GcsStorageError, ValueError))
-    assert not isinstance(gcs_uri_err, ChecksumMismatchError)
-    assert gcs_uri_err.error_code == "backend.invalidGcsUri"
-    assert gcs_uri_err.status_code == 400
-
-    subproc_err = SubprocessTimeoutError("Subprocess timed out")
-    assert isinstance(subproc_err, (TrainingError, TimeoutError, RuntimeError))
-    assert not isinstance(subproc_err, TpuPollingTimeoutError)
-    assert subproc_err.error_code == "backend.subprocessTimeout"
-    assert subproc_err.status_code == 504
-
-    tbl_err = TableNotFoundError(params={"table": "patients"})
-    assert isinstance(tbl_err, (T1DError, ValueError))
-    assert tbl_err.error_code == "backend.tableNotFound"
-    assert tbl_err.status_code == 404
-
-    id_err = InvalidIdentifierError(params={"identifier": "bad;table"})
-    assert isinstance(id_err, (T1DError, ValueError))
-    assert id_err.error_code == "backend.invalidTableName"
-    assert id_err.status_code == 400
-
-    sql_err = SqlExecutionError(params={"error": "syntax error"})
-    assert isinstance(sql_err, (T1DError, ValueError))
-    assert sql_err.error_code == "backend.sqlExecution"
-    assert sql_err.status_code == 400
-
-    ro_err = ReadOnlyViolationError("DROP is not allowed")
-    assert isinstance(ro_err, (SqlExecutionError, T1DError, ValueError))
-    assert ro_err.error_code == "backend.sqlReadOnlyViolation"
-    assert ro_err.status_code == 400
-
-    schema_err = SchemaReadError(params={"error": "corrupt"})
-    assert isinstance(schema_err, (T1DError, ValueError))
-    assert schema_err.error_code == "backend.readSchemaFailed"
-    assert schema_err.status_code == 500
-
-    prov_err = ProviderNotConfiguredError(params={"provider": "openai"})
-    assert isinstance(prov_err, (T1DError, RuntimeError))
-    assert prov_err.error_code == "backend.missingApiKey"
-    assert prov_err.status_code == 400
-
-    sdk_err = MissingSdkError(params={"error": "any-llm-sdk[openai]"})
-    assert isinstance(sdk_err, (T1DError, RuntimeError))
-    assert sdk_err.error_code == "backend.missingSdk"
-    assert sdk_err.status_code == 500
-
-    llm_err = LlmTranslationError(params={"error": "rate limit"})
-    assert isinstance(llm_err, (T1DError, RuntimeError))
-    assert llm_err.error_code == "backend.llmTranslationError"
-    assert llm_err.status_code == 502
-
-    path_err = PathAccessDeniedError(params={"path": "/etc/passwd"})
-    assert isinstance(path_err, (T1DError, PermissionError))
-    assert path_err.error_code == "backend.accessDenied"
-    assert path_err.status_code == 403
-
-    db_path_err = InvalidDatabasePathError(params={"path": "../../etc/passwd"})
-    assert isinstance(db_path_err, (T1DError, ValueError))
-    assert db_path_err.error_code == "backend.invalidDatabasePath"
-    assert db_path_err.status_code == 400
-
-    sess_err = SessionNotFoundError(
-        "Session not found", params={"session_id": "sess-1"}
-    )
-    assert isinstance(sess_err, (T1DError, KeyError))
-    assert sess_err.error_code == "backend.sessionNotFound"
-    assert sess_err.status_code == 404
-
-    job_err = TrainingJobNotFoundError(params={"job_id": "job-1"})
-    assert isinstance(job_err, (T1DError, KeyError))
-    assert job_err.error_code == "backend.jobNotFound"
-    assert job_err.status_code == 404
-
-    train_err = TrainingError("Training failed")
-    assert isinstance(train_err, (T1DError, RuntimeError))
-    assert train_err.error_code == "backend.trainingFailed"
-    assert train_err.status_code == 500
-
-    db_base_err = DatabaseError("DB error")
-    assert db_base_err.status_code == 500
-    assert DatabaseLockedError("Locked").status_code == 503
-    assert InvalidTableNameError("Bad table").status_code == 400
-    assert InvalidColumnNameError("Bad col").status_code == 400
-    assert EmptyQueryError("Empty").status_code == 400
-    assert MultipleStatementsError("Multi").status_code == 400
-    assert LlmProviderError("Provider err").status_code == 502
-    assert MissingApiKeyError("Missing key").status_code == 400
-    assert LlmRateLimitError("Rate limit").status_code == 429
-    assert LlmAuthenticationError("Auth failed").status_code == 401
-    assert LlmQuotaExceededError("Quota").status_code == 402
-    assert LlmConnectionError("Conn").status_code == 502
-    assert InsufficientDataError("Too few rows").status_code == 400
-    assert HardwareUnavailableError("No TPU").status_code == 503
-    assert TrainingExecutionError("Exec failed").status_code == 500
-
-    dl_err = DownloadError("SHA-256 mismatch")
-    assert isinstance(dl_err, (T1DError, RuntimeError))
-    assert dl_err.error_code == "backend.downloadFailed"
-    assert dl_err.status_code == 502
-
-    pag_err = InvalidPaginationError(params={"limit": 0, "offset": -1})
-    assert isinstance(pag_err, (T1DError, ValueError))
-    assert pag_err.error_code == "backend.invalidPagination"
-    assert pag_err.status_code == 400
-
-    sort_ord_err = InvalidSortOrderError(params={"order": "invalid"})
-    assert isinstance(sort_ord_err, (T1DError, ValueError))
-    assert sort_ord_err.error_code == "backend.invalidSortOrder"
-    assert sort_ord_err.status_code == 400
-
-    sort_col_err = InvalidSortColumnError(params={"sort_by": "missing"})
-    assert isinstance(sort_col_err, (T1DError, ValueError))
-    assert sort_col_err.error_code == "backend.invalidSortColumn"
-    assert sort_col_err.status_code == 400
-
-    exp_err = ExportError(params={"error": "I/O failure"})
-    assert isinstance(exp_err, (T1DError, ValueError))
-    assert exp_err.error_code == "backend.serverError"
-    assert exp_err.status_code == 500
-
-    rl_err = RateLimitExceededError(retry_after=15, params={"limit": 10, "window": 60})
-    assert isinstance(rl_err, T1DError)
-    assert rl_err.error_code == "backend.rateLimitExceeded"
-    assert rl_err.status_code == 429
-    assert rl_err.retry_after == 15
-    assert rl_err.headers == {"Retry-After": "15"}
-
-    tc_err = ToolchainNotFoundError("gemma-4-sql missing")
-    assert isinstance(tc_err, (T1DError, RuntimeError))
-    assert tc_err.error_code == "backend.toolchainMissing"
-    assert tc_err.status_code == 503
-
-    gcs_err = GcsSyncError("GCS upload failed")
-    assert isinstance(gcs_err, (T1DError, RuntimeError))
-    assert gcs_err.error_code == "backend.gcsSyncFailed"
-    assert gcs_err.status_code == 502
-
-    tpu_err = TpuWorkloadError("TPU preempted")
-    assert isinstance(tpu_err, (T1DError, RuntimeError))
-    assert tpu_err.error_code == "backend.tpuWorkloadFailed"
-    assert tpu_err.status_code == 502
-
-    seed_err = SeedVerificationError("Missing clinical tables")
-    assert isinstance(seed_err, (T1DError, ValueError, RuntimeError))
-    assert seed_err.error_code == "backend.seedVerificationFailed"
-    assert seed_err.status_code == 500
-
-    cli_err = CliValidationError("Invalid learning rate")
-    assert isinstance(cli_err, (T1DError, ValueError))
-    assert cli_err.error_code == "backend.cliValidationFailed"
-    assert cli_err.status_code == 400
-
-    auth_err = AuthPluginError("Invalid plugin spec")
-    assert isinstance(auth_err, (T1DError, ValueError))
-    assert auth_err.error_code == "backend.authPluginFailed"
-    assert auth_err.status_code == 400
-
-    backend_err = InvalidTrainingBackendError(params={"backend": "bad"})
-    assert isinstance(backend_err, (TrainingError, T1DError, ValueError))
-    assert backend_err.error_code == "backend.invalidBackend"
-    assert backend_err.status_code == 400
-
-    gemma_err = GemmaToolchainError("gemma-4-sql failed")
-    assert isinstance(gemma_err, (ToolchainNotFoundError, T1DError, RuntimeError))
-    assert gemma_err.error_code == "backend.gemmaToolchainFailed"
-    assert gemma_err.status_code == 503
-
-    stage_err = InvalidStageError("Unsupported stage")
-    assert isinstance(stage_err, (TrainingError, T1DError, ValueError))
-    assert stage_err.error_code == "backend.invalidStage"
-    assert stage_err.status_code == 400
-
-    orch_err = TpuOrchestrationError("TPU dispatch error")
-    assert isinstance(orch_err, (TpuWorkloadError, T1DError, RuntimeError))
-    assert orch_err.error_code == "backend.tpuOrchestrationFailed"
-    assert orch_err.status_code == 502
-
-    preempt_err = TpuPreemptionError("Spot TPU preempted")
-    assert isinstance(preempt_err, (TpuOrchestrationError, T1DError, RuntimeError))
-    assert preempt_err.error_code == "backend.tpuPreempted"
-    assert preempt_err.status_code == 503
-
-    timeout_err = TpuPollingTimeoutError("TPU poll timed out")
-    assert isinstance(timeout_err, (TpuOrchestrationError, T1DError, TimeoutError))
-    assert timeout_err.error_code == "backend.tpuPollingTimeout"
-    assert timeout_err.status_code == 504
-
-    gcs_store_err = GcsStorageError("Bucket unreachable")
-    assert isinstance(gcs_store_err, (GcsSyncError, T1DError, RuntimeError))
-    assert gcs_store_err.error_code == "backend.gcsStorageFailed"
-    assert gcs_store_err.status_code == 502
-
-    checksum_err = ChecksumMismatchError("MD5 mismatch")
-    assert isinstance(checksum_err, (GcsStorageError, T1DError, ValueError))
-    assert checksum_err.error_code == "backend.checksumMismatch"
-    assert checksum_err.status_code == 502
-
-    schema_ext_err = SchemaExtractionError("Failed to extract schema")
-    assert isinstance(schema_ext_err, (DatabaseError, T1DError, RuntimeError))
-    assert schema_ext_err.error_code == "backend.schemaExtractionFailed"
-    assert schema_ext_err.status_code == 500
-
-
-def test_t1d_error_fastapi_exception_handler() -> None:
-    """Test FastAPI exception handler for T1DError."""
-    import asyncio
-
+def test_domain_error_subclasses_serialization_and_http_mapping() -> None:
+    """Verify every T1DError subclass serializes cleanly and maps through FastAPI t1d_error_exception_handler."""
     scope = {"type": "http", "method": "GET", "path": "/api/test", "headers": []}
     req = Request(scope)
-    exc = DatabaseNotFoundError(params={"path": "missing.duckdb"})
-    resp = asyncio.run(t1d_error_exception_handler(req, exc))
-    assert resp.status_code == 404
-    assert b"backend.dbNotFound" in resp.body
 
-    api_err = parse_error(exc)
-    assert api_err.error_code == "backend.dbNotFound"
-    assert api_err.params == {"path": "missing.duckdb"}
+    expected_specs: list[tuple[type[T1DError], str, int]] = [
+        (DatabaseError, "backend.errorDbExecution", 500),
+        (DatabaseLockedError, "backend.databaseLocked", 503),
+        (DatabaseNotFoundError, "backend.dbNotFound", 404),
+        (TableNotFoundError, "backend.tableNotFound", 404),
+        (InvalidTableNameError, "backend.invalidTable", 400),
+        (InvalidSortColumnError, "backend.invalidSortColumn", 400),
+        (InvalidPaginationError, "backend.invalidPagination", 400),
+        (InvalidSortOrderError, "backend.invalidSortOrder", 400),
+        (ExportError, "backend.serverError", 500),
+        (RateLimitExceededError, "backend.rateLimitExceeded", 429),
+        (SqlExecutionError, "backend.sqlExecution", 400),
+        (ReadOnlyViolationError, "backend.sqlReadOnlyViolation", 400),
+        (EmptyQueryError, "backend.emptyMessage", 400),
+        (MultipleStatementsError, "backend.sqlMultipleStatements", 400),
+        (SchemaReadError, "backend.readSchemaFailed", 500),
+        (LlmProviderError, "backend.llmTranslationError", 502),
+        (ProviderNotConfiguredError, "backend.missingApiKey", 400),
+        (LlmRateLimitError, "backend.llmRateLimit", 429),
+        (LlmAuthenticationError, "backend.llmAuthFailed", 401),
+        (LlmQuotaExceededError, "backend.llmQuotaExceeded", 402),
+        (LlmConnectionError, "backend.llmConnectionFailed", 502),
+        (MissingSdkError, "backend.missingSdk", 500),
+        (LlmTranslationError, "backend.llmTranslationError", 502),
+        (PathAccessDeniedError, "backend.accessDenied", 403),
+        (FrontendBuildNotFoundError, "backend.frontendBuildNotFound", 404),
+        (UnauthorizedApiError, "backend.unauthorized", 401),
+        (InvalidDatabasePathError, "backend.invalidDatabasePath", 400),
+        (SessionNotFoundError, "backend.sessionNotFound", 404),
+        (TrainingJobNotFoundError, "backend.jobNotFound", 404),
+        (ChatJobNotFoundError, "backend.chatJobNotFound", 404),
+        (TrainingError, "backend.trainingFailed", 500),
+        (InsufficientDataError, "backend.insufficientData", 400),
+        (HardwareUnavailableError, "backend.hardwareUnavailable", 503),
+        (TrainingExecutionError, "backend.trainingExecutionFailed", 500),
+        (SeedVerificationError, "backend.seedVerificationFailed", 500),
+        (DownloadError, "backend.downloadFailed", 502),
+        (CliValidationError, "backend.cliValidationFailed", 400),
+        (AuthPluginError, "backend.authPluginFailed", 400),
+        (InvalidTrainingBackendError, "backend.invalidBackend", 400),
+        (GemmaToolchainError, "backend.gemmaToolchainFailed", 503),
+        (InvalidStageError, "backend.invalidStage", 400),
+        (TpuOrchestrationError, "backend.tpuOrchestrationFailed", 502),
+        (TpuPreemptionError, "backend.tpuPreempted", 503),
+        (TpuPollingTimeoutError, "backend.tpuPollingTimeout", 504),
+        (GcsStorageError, "backend.gcsStorageFailed", 502),
+        (ChecksumMismatchError, "backend.checksumMismatch", 502),
+        (InvalidGcsUriError, "backend.invalidGcsUri", 400),
+        (ConfigFileNotFoundError, "backend.configNotFound", 404),
+        (DatasetNotFoundError, "backend.datasetNotFound", 404),
+        (SqlTimeoutError, "backend.queryTimeout", 504),
+        (UnsupportedExportFormatError, "backend.unsupportedExportFormat", 400),
+        (UnsupportedFileFormatError, "backend.unsupportedFileFormat", 400),
+        (SubprocessTimeoutError, "backend.subprocessTimeout", 504),
+    ]
 
-    from t1d_analytics import cli
-
-    assert cli.TrainingExecutionError is TrainingExecutionError
-    assert ConfigurationError("bad cfg").status_code == 400
-    assert DatasetNotFoundError("no ds").status_code == 404
-    assert SqlTimeoutError("timeout").status_code == 504
-    assert UnsupportedExportFormatError("bad fmt").status_code == 400
-    assert exception_to_error_detail(exc) == {
-        "error_code": "backend.dbNotFound",
-        "params": {"path": "missing.duckdb"},
+    discovered_subclasses = {
+        cls
+        for _, cls in inspect.getmembers(errors_module, inspect.isclass)
+        if issubclass(cls, T1DError) and cls is not T1DError
     }
+    assert {cls for cls, _, _ in expected_specs} == discovered_subclasses
+
+    fallback_resp = asyncio.run(
+        t1d_error_exception_handler(req, RuntimeError("unexpected plain error"))
+    )
+    assert fallback_resp.status_code == 500
+    assert b"backend.errorUnexpected" in fallback_resp.body
+
+    for err_cls, expected_code, expected_status in expected_specs:
+        instance = (
+            RateLimitExceededError(
+                "Rate limited", retry_after=15, params={"limit": 10, "window": 60}
+            )
+            if err_cls is RateLimitExceededError
+            else err_cls("Diagnostic message")
+        )
+        assert instance.error_code == expected_code
+        assert instance.status_code == expected_status
+        serialized = exception_to_error_detail(instance)
+        assert serialized["error_code"] == expected_code
+        api_err = parse_error(instance)
+        assert api_err.error_code == expected_code
+
+        http_resp = asyncio.run(t1d_error_exception_handler(req, instance))
+        assert http_resp.status_code == expected_status
+        assert expected_code.encode("utf-8") in http_resp.body
+        if isinstance(instance, RateLimitExceededError):
+            assert instance.retry_after == 15
+            assert http_resp.headers.get("retry-after") == "15"
+
+    resp_fallback = asyncio.run(t1d_error_exception_handler(req, RuntimeError("raw")))
+    assert resp_fallback.status_code == 500
+    assert b"backend.errorUnexpected" in resp_fallback.body
     assert exception_to_error_detail(RuntimeError("boom")) == {
         "error_code": "backend.errorUnexpected",
         "params": {"error": "boom"},
     }
+
+
+def test_every_defined_domain_error_is_raised_in_production() -> None:
+    """AST-verify every concrete T1DError subclass in errors.py is raised or constructed in src/t1d_analytics/."""
+    src_dir = Path(errors_module.__file__).resolve().parent
+    category_base_classes = {
+        "T1DError",
+        "DatabaseError",
+        "LlmProviderError",
+        "TrainingError",
+    }
+    defined_concrete_errors = {
+        name
+        for name, cls in inspect.getmembers(errors_module, inspect.isclass)
+        if issubclass(cls, T1DError) and name not in category_base_classes
+    }
+
+    production_instantiated: set[str] = set()
+    for py_file in src_dir.rglob("*.py"):
+        if py_file.name == "errors.py":
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Raise) and node.exc is not None:
+                target = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                if isinstance(target, ast.Name):
+                    production_instantiated.add(target.id)
+                elif isinstance(target, ast.Attribute):
+                    production_instantiated.add(target.attr)
+            elif isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Name) and fn.id in defined_concrete_errors:
+                    production_instantiated.add(fn.id)
+                elif (
+                    isinstance(fn, ast.Attribute) and fn.attr in defined_concrete_errors
+                ):
+                    production_instantiated.add(fn.attr)
+
+    missing_in_production = sorted(defined_concrete_errors - production_instantiated)
+    assert missing_in_production == []

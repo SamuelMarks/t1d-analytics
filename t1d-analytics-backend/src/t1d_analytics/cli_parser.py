@@ -1,9 +1,9 @@
-"""CLI argument parser construction and strongly-typed option models for T1D Analytics."""
+"""CLI argument parser construction and per-subcommand discriminated-union option models."""
 
 import argparse
-from typing import List, Optional
+from typing import Annotated, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, TypeAdapter
 from typing_extensions import TypedDict
 
 
@@ -11,96 +11,94 @@ class ManifestStageDict(TypedDict):
     """Metadata for an exported synthetic training stage."""
 
     rows: int
-    files: List[str]
+    files: list[str]
 
 
-class CliNamespace(argparse.Namespace):
-    """Strongly-typed argparse Namespace with explicit default attributes for all CLI subcommands."""
-
-    lang: Optional[str] = None
-    command: str = ""
-    url: str = "https://public.t1d.org/datasets/diabetes"
-    output: str = "./data"
-    concurrency: int = 4
-    token: Optional[str] = None
-    user: Optional[str] = None
-    password: Optional[str] = None
-    headers: Optional[str] = None
-    auth_plugin: Optional[str] = None
-    data_dir: str = "./data"
-    db: str = "t1d_analytics.duckdb"
-    prefix_subdirs: bool = False
-    include_sas: bool = False
-    include_spss: bool = False
-    model: str = "gemma4"
-    provider: str = "ollama"
-    num_pairs: int = 5
-    split_ratios: Optional[str] = None
-    test_set: str = ""
-    allow_empty: bool = False
-    min_tables: int = 1
-    min_rows: int = 1
-    json: bool = False
-    sessions_db: Optional[str] = None
-    overwrite: bool = False
-    max_decompressed_gb: float = 200.0
-    tabular_only: bool = False
-    table: str = "sft_data"
-    format: str = "jsonl"
-    output_file: str = ""
-    action: str = "check"
-    stage: str = "sft"
-    output_dir: Optional[str] = None
-    config: Optional[str] = None
-    interval: float = 2.0
-    iterations: int = 0
-    samples_per_table: int = 5
-    export_formats: str = "jsonl,parquet"
-    backend: str = "local-cpu"
-    use_lora: bool = False
-    quantization: Optional[str] = None
-    execute_training: bool = False
-    split_validation: bool = False
-    learning_rate: float = 2e-5
-    batch_size: int = 4
-    num_epochs: int = 3
-    warmup_steps: int = 50
-    weight_decay: float = 0.01
-    max_seq_length: int = 2048
-    checkpoint_interval: int = 500
-    eval_steps: int = 100
-    dry_run: bool = False
-    gcs_bucket: str = "gs://t1d-analytics-artifacts"
-    tpu_zone: str = "us-central2-b"
-    tpu_type: str = "v4-8"
-    tpu_slices: int = 1
-
-
-class CliOptionsModel(BaseModel):
-    """Strongly-typed immutable configuration representing parsed CLI command-line options."""
+class BaseCliOpts(BaseModel):
+    """Immutable base configuration shared across all CLI subcommands."""
 
     model_config = ConfigDict(from_attributes=True, extra="ignore", frozen=True)
 
-    lang: Optional[str] = None
-    command: Optional[str] = None
+    lang: str | None = None
+
+
+class DownloadCliOpts(BaseCliOpts):
+    """Typed CLI options for the `download` subcommand."""
+
+    command: Literal["download"] = "download"
     url: str = "https://public.t1d.org/datasets/diabetes"
-    output: Optional[str] = None
+    output: str = "./data"
     concurrency: int = 4
-    token: Optional[str] = None
-    user: Optional[str] = None
-    password: Optional[str] = None
-    headers: Optional[str] = None
-    auth_plugin: Optional[str] = None
+    token: str | None = None
+    user: str | None = None
+    password: str | None = None
+    headers: str | None = None
+    auth_plugin: str | None = None
+
+
+class ExtractCliOpts(BaseCliOpts):
+    """Typed CLI options for the `extract` subcommand."""
+
+    command: Literal["extract"] = "extract"
+    data_dir: str = "./data"
+    max_decompressed_gb: float = 200.0
+    overwrite: bool = False
+    tabular_only: bool = False
+
+
+class LoadCliOpts(BaseCliOpts):
+    """Typed CLI options for the `load` subcommand."""
+
+    command: Literal["load"] = "load"
     data_dir: str = "./data"
     db: str = "t1d_analytics.duckdb"
     prefix_subdirs: bool = False
     include_sas: bool = False
     include_spss: bool = False
+
+
+class ManifestCliOpts(BaseCliOpts):
+    """Typed CLI options for the `manifest` subcommand."""
+
+    command: Literal["manifest"] = "manifest"
+    db: str = "t1d_analytics.duckdb"
+
+
+class QueryCliOpts(BaseCliOpts):
+    """Typed CLI options for the `query` subcommand."""
+
+    command: Literal["query"] = "query"
+    db: str = "t1d_analytics.duckdb"
     model: str = "gemma4"
     provider: str = "ollama"
+
+
+class GenerateTrainingDataCliOpts(BaseCliOpts):
+    """Typed CLI options for the `generate-training-data` subcommand."""
+
+    command: Literal["generate-training-data"] = "generate-training-data"
+    db: str = "t1d_analytics.duckdb"
     num_pairs: int = 5
-    split_ratios: Optional[str] = None
-    test_set: str = ""
+    model: str = "gemma4"
+    provider: str = "ollama"
+    split_ratios: str | None = None
+
+
+class EvaluateCliOpts(BaseCliOpts):
+    """Typed CLI options for the `evaluate` subcommand."""
+
+    command: Literal["evaluate"] = "evaluate"
+    db: str = "t1d_analytics.duckdb"
+    test_set: str
+    model: str = "gemma4"
+    output: str | None = None
+
+
+class DoctorCliOpts(BaseCliOpts):
+    """Typed CLI options for the `doctor` subcommand."""
+
+    command: Literal["doctor"] = "doctor"
+    db: str = "t1d_analytics.duckdb"
     allow_empty: bool = False
     min_tables: int = 1
     min_rows: int = 1
@@ -108,24 +106,84 @@ class CliOptionsModel(BaseModel):
         default=False,
         validation_alias=AliasChoices("json_output", "json"),
     )
-    sessions_db: Optional[str] = None
+
+
+class SeedCliOpts(BaseCliOpts):
+    """Typed CLI options for the `seed` subcommand."""
+
+    command: Literal["seed"] = "seed"
+    data_dir: str = "./data"
+    db: str = "t1d_analytics.duckdb"
+    sessions_db: str | None = None
     overwrite: bool = False
-    max_decompressed_gb: float = 200.0
-    tabular_only: bool = False
+
+
+class ExportTrainingDataCliOpts(BaseCliOpts):
+    """Typed CLI options for the `export-training-data` subcommand."""
+
+    command: Literal["export-training-data"] = "export-training-data"
+    db: str = "t1d_analytics.duckdb"
     table: str = "sft_data"
     format: str = "jsonl"
-    output_file: str = ""
+    output_file: str
+
+
+class ExportCliOpts(BaseCliOpts):
+    """Typed CLI options for the `export` subcommand."""
+
+    command: Literal["export"] = "export"
+    db: str = "t1d_analytics.duckdb"
+    table: str
+    format: str = "excel"
+    output_file: str
+
+
+class ProfileCliOpts(BaseCliOpts):
+    """Typed CLI options for the `profile` subcommand."""
+
+    command: Literal["profile"] = "profile"
+    db: str = "t1d_analytics.duckdb"
+    table: str
+
+
+class BridgeGemmaSqlCliOpts(BaseCliOpts):
+    """Typed CLI options for the `bridge-gemma-sql` subcommand."""
+
+    command: Literal["bridge-gemma-sql"] = "bridge-gemma-sql"
     action: str = "check"
     stage: str = "sft"
-    output_dir: Optional[str] = None
-    config: Optional[str] = None
+    db: str = "t1d_analytics.duckdb"
+    table: str = "sft_data"
+    output_dir: str | None = None
+    config: str | None = None
+
+
+class WatchCliOpts(BaseCliOpts):
+    """Typed CLI options for the `watch` subcommand."""
+
+    command: Literal["watch"] = "watch"
+    data_dir: str = "data/"
+    db: str = "t1d_analytics.duckdb"
     interval: float = 2.0
     iterations: int = 0
+    prefix_subdirs: bool = False
+    include_sas: bool = False
+    include_spss: bool = False
+
+
+class TrainCliOpts(BaseCliOpts):
+    """Typed CLI options for the `train` subcommand."""
+
+    command: Literal["train"] = "train"
+    db: str = "t1d_analytics.duckdb"
+    output_dir: str = "training_output"
     samples_per_table: int = 5
+    provider: str = "ollama"
+    model: str = "gemma4"
     export_formats: str = "jsonl,parquet"
     backend: str = "local-cpu"
     use_lora: bool = False
-    quantization: Optional[str] = None
+    quantization: str | None = None
     execute_training: bool = False
     split_validation: bool = False
     learning_rate: float = 2e-5
@@ -143,28 +201,49 @@ class CliOptionsModel(BaseModel):
     tpu_slices: int = 1
 
 
-def parse_cli_options(args: argparse.Namespace) -> CliOptionsModel:
+CliSubcommandOptions = Annotated[
+    DownloadCliOpts
+    | ExtractCliOpts
+    | LoadCliOpts
+    | ManifestCliOpts
+    | QueryCliOpts
+    | GenerateTrainingDataCliOpts
+    | EvaluateCliOpts
+    | DoctorCliOpts
+    | SeedCliOpts
+    | ExportTrainingDataCliOpts
+    | ExportCliOpts
+    | ProfileCliOpts
+    | BridgeGemmaSqlCliOpts
+    | WatchCliOpts
+    | TrainCliOpts,
+    Field(discriminator="command"),
+]
+
+_CLI_OPTIONS_ADAPTER: TypeAdapter[CliSubcommandOptions] = TypeAdapter(
+    CliSubcommandOptions
+)
+
+
+def parse_cli_options(args: argparse.Namespace) -> CliSubcommandOptions:
     """
-    Convert an `argparse.Namespace` into a strongly-typed `CliOptionsModel`.
+    Validate an `argparse.Namespace` into its exact per-subcommand discriminated-union model.
 
     Args:
-    ----
-        args: Parsed CLI namespace.
+        args: Parsed CLI `argparse.Namespace`.
 
     Returns:
-    -------
-        CliOptionsModel: Immutable CLI options structure.
+        CliSubcommandOptions: Strongly-typed immutable subcommand options model.
 
     """
-    return CliOptionsModel.model_validate(args)
+    return _CLI_OPTIONS_ADAPTER.validate_python(vars(args))
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
     """
     Build and return the root ArgumentParser for the T1D Analytics CLI.
 
-    Returns
-    -------
+    Returns:
         argparse.ArgumentParser: Configured CLI argument parser with all subcommands.
 
     """

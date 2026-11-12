@@ -8,10 +8,11 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { ChatState } from "../src/state";
 import {
-  ChatUI,
   ModelSelectorController,
-  ProviderSettingsModalController,
-} from "../src/ui";
+  resolveModelProvider,
+} from "../src/controllers/model-selector-controller";
+import { ProviderSettingsModalController } from "../src/controllers/provider-modal-controller";
+import { ChatUI } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 
 describe("ProviderSettingsModalController & ModelSelectorController", () => {
@@ -418,5 +419,6 @@ describe("ProviderSettingsModalController & ModelSelectorController", () => {
       }),
     );
     expect(modal.classList.contains("hidden")).toBe(false);
+    expect(resolveModelProvider("/gpt-4o")).toBe("ollama");
   });
 });

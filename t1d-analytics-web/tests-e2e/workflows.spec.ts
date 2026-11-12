@@ -139,7 +139,7 @@ test.describe("App Workflows E2E", () => {
     await page.waitForFunction(() => {
       const items = document.querySelectorAll(".chat-item");
       return (
-        items.length > 0 && items[0].querySelector(".chat-item-title") !== null
+        items.length > 0 && items[0]?.querySelector(".chat-item-title") !== null
       );
     });
 
@@ -148,7 +148,7 @@ test.describe("App Workflows E2E", () => {
 
     // Prepare for prompt dialog
     page.once("dialog", (dialog) => {
-      dialog.accept("My Custom Chat");
+      void dialog.accept("My Custom Chat");
     });
 
     // Rename

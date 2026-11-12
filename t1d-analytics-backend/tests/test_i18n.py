@@ -7,14 +7,16 @@ from t1d_analytics.i18n import TRANSLATIONS, get_translator
 
 
 def test_get_translator_defaults() -> None:
-    """Test get_translator fallback to LANG environment variable or English."""
+    """Test get_translator explicit locale resolution and independence from os.environ['LANG']."""
     with patch.dict(os.environ, {"LANG": "ja_JP.UTF-8"}):
-        t = get_translator()
-        assert t("Done!") == "完了！"
+        t_default = get_translator()
+        assert t_default("Done!") == "Done!"
 
-    with patch.dict(os.environ, {}, clear=True):
-        t = get_translator()
-        assert t("Done!") == "Done!"
+    t_explicit_posix = get_translator("ja_JP.UTF-8")
+    assert t_explicit_posix("Done!") == "完了！"
+
+    t_blank = get_translator("   ")
+    assert t_blank("Done!") == "Done!"
 
 
 def test_get_translator_all_languages() -> None:
@@ -97,3 +99,40 @@ def test_codebase_translation_keys_parity() -> None:
         lang_dict = TRANSLATIONS[lang]
         missing = [k for k in sorted(all_keys) if k not in lang_dict]
         assert not missing, f"Language '{lang}' missing keys: {missing}"
+
+
+def test_backend_error_codes_frontend_i18n_parity() -> None:
+    """Verify every `backend.*` error_code in `errors.py` is translated in all 4 locales in `t1d-analytics-web/src/i18n.ts`."""
+    import inspect
+    import re
+    from pathlib import Path
+
+    from t1d_analytics import errors as errors_module
+    from t1d_analytics.errors import T1DError
+
+    backend_codes: set[str] = set()
+    for _, cls in inspect.getmembers(errors_module, inspect.isclass):
+        if issubclass(cls, T1DError):
+            code = cls.default_error_code
+            assert code.startswith("backend."), f"Unexpected prefix on {cls}: {code}"
+            backend_codes.add(code.removeprefix("backend."))
+
+    i18n_ts_path = (
+        Path(__file__).resolve().parents[2] / "t1d-analytics-web" / "src" / "i18n.ts"
+    )
+    ts_source = i18n_ts_path.read_text(encoding="utf-8")
+    backend_blocks = re.findall(
+        r"\bbackend:\s*\{(.*?)\n  \},",
+        ts_source,
+        flags=re.DOTALL,
+    )
+    assert len(backend_blocks) == 4, (
+        f"Expected 4 locale backend blocks in i18n.ts, found {len(backend_blocks)}"
+    )
+    locale_names = ("en", "ja", "ar", "he")
+    for locale_name, block in zip(locale_names, backend_blocks, strict=True):
+        present_keys = set(re.findall(r"^\s{4}(\w+):", block, flags=re.MULTILINE))
+        missing_keys = sorted(backend_codes - present_keys)
+        assert not missing_keys, (
+            f"Frontend i18n.ts locale '{locale_name}' missing backend error keys: {missing_keys}"
+        )

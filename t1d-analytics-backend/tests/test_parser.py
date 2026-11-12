@@ -22,6 +22,43 @@ def test_fetch_html_error(requests_mock: Mock) -> None:
         fetch_html("http://test.com")
 
 
+def test_fetch_html_content_type_and_size_caps() -> None:
+    """Test fetch_html rejects non-HTML Content-Type and oversized Content-Length or streamed bodies."""
+    from unittest.mock import MagicMock, patch
+
+    from t1d_analytics.errors import DownloadError
+
+    bad_ct_resp = MagicMock()
+    bad_ct_resp.headers = {"Content-Type": "application/octet-stream"}
+    with patch("requests.get", return_value=bad_ct_resp):
+        with pytest.raises(DownloadError, match="Unexpected non-HTML Content-Type"):
+            fetch_html("http://test.com/bin")
+    bad_ct_resp.close.assert_called_once()
+
+    empty_media_resp = MagicMock()
+    empty_media_resp.headers = {"Content-Type": "; charset=utf-8"}
+    empty_media_resp.encoding = "utf-8"
+    empty_media_resp.iter_content.return_value = [b"", b"<p>ok</p>"]
+    with patch("requests.get", return_value=empty_media_resp):
+        assert fetch_html("http://test.com/semi") == "<p>ok</p>"
+
+    big_cl_resp = MagicMock()
+    big_cl_resp.headers = {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": "1024",
+    }
+    with patch("requests.get", return_value=big_cl_resp):
+        with pytest.raises(DownloadError, match="Content-Length"):
+            fetch_html("http://test.com/big-cl", max_bytes=100)
+
+    big_stream_resp = MagicMock()
+    big_stream_resp.headers = {"Content-Type": "text/html"}
+    big_stream_resp.iter_content.return_value = [b"a" * 60, b"b" * 60]
+    with patch("requests.get", return_value=big_stream_resp):
+        with pytest.raises(DownloadError, match="exceeded maximum size"):
+            fetch_html("http://test.com/big-stream", max_bytes=100)
+
+
 def test_extract_url_img_alt() -> None:
     """Test extracting URL from img alt attribute."""
     soup = BeautifulSoup('<td><img alt="http://url"></td>', "html.parser")

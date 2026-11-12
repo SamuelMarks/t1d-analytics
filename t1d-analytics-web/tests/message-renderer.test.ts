@@ -31,7 +31,7 @@ describe("MessageRenderer & SQL Action Controls", () => {
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
@@ -264,7 +264,11 @@ describe("MessageRenderer & SQL Action Controls", () => {
       },
     ];
     ui.messageRenderer.renderMessages();
-    const getRefreshBtn = () =>
+    /**
+     * Queries the rendered Refresh Query button.
+     * @returns {HTMLButtonElement} Refresh button element.
+     */
+    const getRefreshBtn = (): HTMLButtonElement =>
       queryTestElement<HTMLButtonElement>("button[aria-label='Refresh Query']");
 
     mockFetch.mockResolvedValueOnce({
@@ -441,7 +445,7 @@ describe("MessageRenderer & SQL Action Controls", () => {
     const chat = state.createChat();
     ui.render();
     const table1Chips = queryAllTestElements<HTMLButtonElement>(".table1-chip");
-    expect(table1Chips.length).toBe(7);
+    expect(table1Chips.length).toBe(8);
 
     state.addMessageToActiveChat({
       role: "assistant",
@@ -458,7 +462,7 @@ describe("MessageRenderer & SQL Action Controls", () => {
     expect(chat.messages.length).toBe(1);
   });
 
-  it("renders Gold-Standard SQL Evaluation Card (PASS, DIFF, syntax error, and fallback badges) and user message Edit/Retry button", () => {
+  it("renders Gold-Standard SQL Evaluation Card (PASS, DIFF, syntax error, and fallback badges) and user message Edit/Retry button", async () => {
     state.createChat();
     state.addMessageToActiveChat({
       role: "user",
@@ -547,19 +551,42 @@ describe("MessageRenderer & SQL Action Controls", () => {
 
     // Test fallback SQL synthesis diagnostic banner (both explicit llmError and parenthetical note) and >40 char cell tooltip
     const longText = "A".repeat(45);
+    state.setSchemaTables([
+      {
+        name: "demographics",
+        columns: [
+          { name: "RecID", type: "INTEGER" },
+          { name: "ptid", type: "INTEGER" },
+          { name: "Notes", type: "VARCHAR" },
+        ],
+      },
+    ]);
     ui.messageRenderer.finalizeAssistantResponse(
       {
-        content:
-          "_Note: Local LLM inference was unavailable (Connection refused by local Ollama); synthesized schema-guided fallback SQL for `demographics`._\n\n```sql\nSELECT * FROM demographics LIMIT 10;\n```",
+        content: "```sql\nSELECT * FROM demographics LIMIT 10;\n```",
         sqlQuery: "SELECT * FROM demographics LIMIT 10;",
         sqlResult: [{ RecID: 1, ptid: 101, Notes: longText }],
         is_rule_based_sql: true,
         generation_mode: "rule_based_fallback",
         llm_error: "Connection refused by local Ollama",
         llm_error_code: "backend.llmConnectionError",
+        gold_comparison: {
+          exact_match: false,
+          execution_accuracy: true,
+          column_overlap_pct: 100,
+          pred_row_count: 1,
+          gold_row_count: 1,
+          pred_columns: ["RecID"],
+          gold_columns: ["RecID"],
+          pred_sql: "SELECT * FROM demographics LIMIT 10;",
+          gold_sql: "SELECT * FROM demographics LIMIT 10;",
+          gold_rows_preview: [],
+          syntax_error: false,
+        },
       },
       "gemma:2b",
     );
+    // English substring alone without structured isRuleBasedSql/generationMode does NOT trigger fallback banner
     state.addMessageToActiveChat({
       role: "assistant",
       content:
@@ -567,8 +594,25 @@ describe("MessageRenderer & SQL Action Controls", () => {
     });
     state.addMessageToActiveChat({
       role: "assistant",
+      content: "Fallback via generationMode enum",
+      generationMode: "rule_based_fallback",
+      llmError: "Model not pulled",
+    });
+    state.addMessageToActiveChat({
+      role: "assistant",
       content: "",
       isRuleBasedSql: true,
+    });
+    // Large 220-row SQL result exercises 100-row pagination ("Show next 100 rows" -> "Show next 20 rows")
+    const largeRows = Array.from({ length: 220 }, (_, idx) => ({
+      RecID: idx + 1,
+      ptid: 1000 + idx,
+    }));
+    state.addMessageToActiveChat({
+      role: "assistant",
+      content: "Table Data",
+      sqlQuery: "SELECT RecID, ptid FROM demographics;",
+      sqlResult: largeRows,
     });
     ui.render();
 
@@ -589,12 +633,45 @@ describe("MessageRenderer & SQL Action Controls", () => {
     );
     expect(configBtn).not.toBeNull();
     configBtn?.click();
+    await flushPromises();
+    expect(getTestElement("provider-modal").classList.contains("hidden")).toBe(
+      false,
+    );
+    ui.providerModalController.close();
+
+    const explorerBtn = queryTestElement<HTMLButtonElement>(
+      ".open-table-explorer-btn",
+    );
+    explorerBtn.click();
+    await flushPromises();
+    expect(getTestElement("table-modal").getAttribute("aria-hidden")).toBe(
+      "false",
+    );
+    ui.tableModalController.close();
+
+    const tables = queryAllTestElements<HTMLTableElement>(".sql-table");
+    const paginatedTable = tables[tables.length - 1];
+    expect(paginatedTable?.querySelectorAll("tbody tr").length).toBe(100);
+
+    const loadMoreBtn = queryTestElement<HTMLButtonElement>(
+      ".sql-table-load-more-btn",
+    );
+    expect(loadMoreBtn.textContent).toContain("Show next 100 rows");
+    loadMoreBtn.click();
+    expect(paginatedTable?.querySelectorAll("tbody tr").length).toBe(200);
+    expect(loadMoreBtn.textContent).toContain("Show next 20 rows");
+    loadMoreBtn.click();
+    expect(paginatedTable?.querySelectorAll("tbody tr").length).toBe(220);
+    expect(document.querySelector(".sql-table-load-more-btn")).toBeNull();
 
     const metaBadges = queryAllTestElements<HTMLElement>(
       ".sql-table-meta-badge",
     );
-    expect(metaBadges[metaBadges.length - 1]?.textContent).toContain(
+    expect(metaBadges[metaBadges.length - 2]?.textContent).toContain(
       "1 rows × 3 cols",
+    );
+    expect(metaBadges[metaBadges.length - 1]?.textContent).toContain(
+      "220 rows × 2 cols",
     );
 
     const cells = Array.from(
@@ -602,5 +679,21 @@ describe("MessageRenderer & SQL Action Controls", () => {
     );
     const longCell = cells.find((c) => c.textContent === longText);
     expect(longCell?.title).toBe(longText);
+
+    const { resolveReferencedSchemaTable } =
+      await import("../src/message-renderer");
+    expect(resolveReferencedSchemaTable(undefined, [])).toBeNull();
+    expect(
+      resolveReferencedSchemaTable("SELECT * FROM demographics_archive;", [
+        { name: "", columns: [] },
+        { name: "demographics", columns: [] },
+      ]),
+    ).toBeNull();
+    expect(
+      resolveReferencedSchemaTable(
+        "SELECT * FROM demographics_archive JOIN demographics ON 1=1;",
+        [{ name: "demographics", columns: [] }],
+      ),
+    ).toBe("demographics");
   });
 });

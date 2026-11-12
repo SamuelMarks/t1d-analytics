@@ -1,13 +1,16 @@
 /**
  * @file empty-state-builder.ts
  * @module empty-state-builder
- * Builds the empty-state chat view, starter clinical SQL query chips, and Academic Table 1 chips.
+ * Builds the empty-state chat view, starter clinical SQL query chips, and Academic Table 1 chips,
+ * emitting typed `onSelectTemplate` callbacks without mutating coordinator DOM inputs directly.
  */
 
 import i18next from "i18next";
+import { type TemplateSelectionPayload } from "./event-bus";
 import { DEFAULT_CHAT_MODEL, RAW_SQL_MODEL, type ChatState } from "./state";
 import {
-  TABLE_1_EXAMPLE_QUERIES,
+  getStarterTemplateExamples,
+  getTable1ExampleQueries,
   type Table1ExampleSpec,
 } from "./table1-queries";
 
@@ -32,19 +35,17 @@ export interface SchemaDiagnosticCardOptions {
 }
 
 /**
- * Host contract required by `buildEmptyStateView`.
+ * Narrow dependency options passed to `buildEmptyStateView`.
  */
-export interface EmptyStateHost {
-  /** Global application state store. */
+export interface EmptyStateViewOptions {
+  /** Read-only access to application state (`systemStatus.dbStatusCode`). */
   state: ChatState;
-  /** Textarea element where the user types queries or SQL. */
-  chatInput: HTMLTextAreaElement;
-  /** Dropdown select element for choosing the active LLM or SQL engine. */
+  /** Model selector dropdown inspected (read-only) to resolve available LLM options. */
   modelSelect: HTMLSelectElement;
-  /** Binds interaction events to action buttons inside diagnostic cards. */
-  bindSchemaDiagnosticButtons(container: HTMLElement): void;
-  /** Synchronizes syntax highlighting in the chat input. */
-  syncHighlight(): void;
+  /** Typed callback emitted when a starter query chip or Academic Table 1 chip is clicked. */
+  onSelectTemplate: (selection: TemplateSelectionPayload) => void;
+  /** Callback binding copy/reload buttons inside empty-database diagnostic cards. */
+  onBindDiagnosticButtons: (container: HTMLElement) => void;
 }
 
 /**
@@ -56,10 +57,11 @@ export function createSchemaDiagnosticCard(
   options: SchemaDiagnosticCardOptions,
 ): HTMLDivElement {
   const card = document.createElement("div");
-  card.className = options.isError
-    ? "schema-diagnostic-card error-text"
-    : "schema-diagnostic-card";
-  if (options.isAlert || options.isError) {
+  card.className =
+    options.isError === true
+      ? "schema-diagnostic-card error-text"
+      : "schema-diagnostic-card";
+  if (options.isAlert === true || options.isError === true) {
     card.setAttribute("role", "alert");
   }
 
@@ -92,7 +94,7 @@ export function createSchemaDiagnosticCard(
     card.appendChild(cmdBox);
   }
 
-  if (options.showReload) {
+  if (options.showReload === true) {
     const reloadBtn = document.createElement("button");
     reloadBtn.className = "btn btn-xs btn-primary reload-schema-btn";
     reloadBtn.textContent = i18next.t("status.reloadSchema");
@@ -127,100 +129,34 @@ export interface StarterQueryItem {
  * @returns {StarterQueryItem[]} Starter query items.
  */
 export function buildStarterQueryItems(): StarterQueryItem[] {
-  const demoSql = `SELECT 
-    TxGroup, 
-    COUNT(*) as total_patients, 
-    ROUND(AVG(AgeAsOfRandDt), 1) as avg_age,
-    SUM(NumSevHypo) as total_severe_hypo_events
-FROM tblaptsummary 
-GROUP BY TxGroup;`;
-  const adverseSql = `SELECT 
-    event as adverse_event_type, 
-    COUNT(*) as occurrence_count 
-FROM adverseevents 
-GROUP BY event 
-ORDER BY occurrence_count DESC;`;
-  const pumpSql = `SELECT 
-    Pt_PumpManuf as pump_manufacturer, 
-    COUNT(*) as user_count 
-FROM subjects 
-WHERE Pt_PumpManuf IS NOT NULL 
-GROUP BY Pt_PumpManuf 
-ORDER BY user_count DESC;`;
-  const hba1cSql = `SELECT 
-    t.TxGroup, 
-    t.Gender,
-    ROUND(AVG(h.HbA1c), 2) as average_hba1c,
-    COUNT(h.HbA1c) as total_tests_run
-FROM tblaptsummary t
-JOIN hba1c h ON t.PtID = h.PtID
-WHERE h.HbA1c IS NOT NULL
-GROUP BY t.TxGroup, t.Gender
-ORDER BY t.TxGroup, average_hba1c DESC;`;
   const nlpFirst5Prompt = i18next.t(
     "ui.exampleQueries.nlpFirst5Prompt",
     "Show me the first 5 patients in the demographics table.",
   );
 
-  return [
-    {
-      id: "starter-1",
-      complexity: "Low",
-      label: i18next.t("ui.exampleQueries.patientDemographics"),
-      query: `${i18next.t("ui.exampleQueries.patientDemographicsComment", "-- Patient Demographics & Treatment Breakdown")}
+  return getStarterTemplateExamples().map((spec) => {
+    const isNlpStarter = spec.defaultMode !== "sql";
+    const localizedQuestion =
+      spec.id === "starter-5" ? nlpFirst5Prompt : spec.question;
+    const headerComment =
+      spec.commentI18nKey && spec.defaultComment
+        ? i18next.t(spec.commentI18nKey, spec.defaultComment)
+        : "";
+    const queryText = isNlpStarter
+      ? localizedQuestion
+      : `${headerComment}
 
-${demoSql}`,
-      mode: RAW_SQL_MODEL,
-      question:
-        "Show patient count, average age, and total severe hypoglycemia events grouped by treatment group.",
-      goldSql: demoSql,
-    },
-    {
-      id: "starter-2",
-      complexity: "Low",
-      label: i18next.t("ui.exampleQueries.adverseEvents"),
-      query: `${i18next.t("ui.exampleQueries.adverseEventsComment", "-- Frequency of Adverse Events")}
-
-${adverseSql}`,
-      mode: RAW_SQL_MODEL,
-      question:
-        "Show the frequency of each adverse event type ordered from highest to lowest occurrence count.",
-      goldSql: adverseSql,
-    },
-    {
-      id: "starter-3",
-      complexity: "Low",
-      label: i18next.t("ui.exampleQueries.pumpManufacturers"),
-      query: `${i18next.t("ui.exampleQueries.pumpManufacturersComment", "-- Patient Pump Manufacturers")}
-
-${pumpSql}`,
-      mode: RAW_SQL_MODEL,
-      question:
-        "Count the number of subjects using each insulin pump manufacturer.",
-      goldSql: pumpSql,
-    },
-    {
-      id: "starter-4",
-      complexity: "Low-Medium",
-      label: i18next.t("ui.exampleQueries.hba1cDemographics"),
-      query: `${i18next.t("ui.exampleQueries.hba1cDemographicsComment", "-- Joining Subject Summaries with HbA1c Lab Results")}
-
-${hba1cSql}`,
-      mode: RAW_SQL_MODEL,
-      question:
-        "Join subject summaries with HbA1c lab results and show average HbA1c and total tests by treatment group and gender.",
-      goldSql: hba1cSql,
-    },
-    {
-      id: "starter-5",
-      complexity: "Low",
-      label: i18next.t("ui.exampleQueries.nlpFirst5"),
-      query: nlpFirst5Prompt,
-      mode: DEFAULT_CHAT_MODEL,
-      question: nlpFirst5Prompt,
-      goldSql: "SELECT * FROM demographics LIMIT 5;",
-    },
-  ];
+${spec.goldSql}`;
+    return {
+      id: spec.id,
+      complexity: spec.complexity,
+      label: i18next.t(spec.i18nKey),
+      query: queryText,
+      mode: isNlpStarter ? DEFAULT_CHAT_MODEL : RAW_SQL_MODEL,
+      question: localizedQuestion,
+      goldSql: spec.goldSql,
+    };
+  });
 }
 
 /**
@@ -241,26 +177,28 @@ export function resolvePreferredLlmModel(
     return DEFAULT_CHAT_MODEL;
   }
   const firstLlmOption = Array.from(modelSelect.options).find(
-    (opt) => opt.value && opt.value !== RAW_SQL_MODEL,
+    (opt) => Boolean(opt.value) && opt.value !== RAW_SQL_MODEL,
   );
   return firstLlmOption ? firstLlmOption.value : RAW_SQL_MODEL;
 }
 
 /**
  * Builds the empty-state element with optional database notice, starter chips, and Academic Table 1 chips.
- * @param {EmptyStateHost} ui - Host UI instance.
+ * @param {EmptyStateViewOptions} options - Narrow state and callback dependencies.
  * @returns {HTMLDivElement} Constructed `.empty-state` element.
  */
-export function buildEmptyStateView(ui: EmptyStateHost): HTMLDivElement {
+export function buildEmptyStateView(
+  options: EmptyStateViewOptions,
+): HTMLDivElement {
   const emptyStateDiv = document.createElement("div");
   emptyStateDiv.className = "empty-state";
   emptyStateDiv.setAttribute("role", "status");
   emptyStateDiv.setAttribute("aria-live", "polite");
 
   if (
-    ui.state.systemStatus.dbStatusCode === "empty_db" ||
-    ui.state.systemStatus.dbStatusCode === "missing_initial_data" ||
-    ui.state.systemStatus.dbStatusCode === "missing_file"
+    options.state.systemStatus.dbStatusCode === "empty_db" ||
+    options.state.systemStatus.dbStatusCode === "missing_initial_data" ||
+    options.state.systemStatus.dbStatusCode === "missing_file"
   ) {
     const dbNotice = createSchemaDiagnosticCard({
       icon: "ℹ️",
@@ -268,7 +206,7 @@ export function buildEmptyStateView(ui: EmptyStateHost): HTMLDivElement {
       command: "t1d-analytics load",
     });
     dbNotice.style.marginBottom = "1rem";
-    ui.bindSchemaDiagnosticButtons(dbNotice);
+    options.onBindDiagnosticButtons(dbNotice);
     emptyStateDiv.appendChild(dbNotice);
   }
 
@@ -289,25 +227,22 @@ export function buildEmptyStateView(ui: EmptyStateHost): HTMLDivElement {
     chip.textContent = item.label;
     chip.addEventListener("click", () => {
       if (table1ChipActionMode === "nl") {
-        ui.chatInput.value = item.question;
-        const targetLlm = resolvePreferredLlmModel(ui.modelSelect);
-        ui.modelSelect.value = targetLlm;
-        ui.state.setActiveChatModel(targetLlm);
-        ui.state.setActiveGoldSql(item.goldSql);
+        options.onSelectTemplate({
+          promptText: item.question,
+          targetModel: resolvePreferredLlmModel(options.modelSelect),
+          goldSql: item.goldSql,
+        });
       } else {
-        ui.chatInput.value = item.query;
-        const hasChipModeOption = Array.from(ui.modelSelect.options).some(
+        const hasChipModeOption = Array.from(options.modelSelect.options).some(
           (opt) => opt.value === item.mode,
         );
         const targetChipMode = hasChipModeOption ? item.mode : RAW_SQL_MODEL;
-        ui.modelSelect.value = targetChipMode;
-        ui.state.setActiveChatModel(targetChipMode);
-        ui.state.setActiveGoldSql(
-          targetChipMode === RAW_SQL_MODEL ? null : item.goldSql,
-        );
+        options.onSelectTemplate({
+          promptText: item.query,
+          targetModel: targetChipMode,
+          goldSql: targetChipMode === RAW_SQL_MODEL ? null : item.goldSql,
+        });
       }
-      ui.chatInput.focus();
-      ui.syncHighlight();
     });
     chipsContainer.appendChild(chip);
   });
@@ -372,7 +307,7 @@ export function buildEmptyStateView(ui: EmptyStateHost): HTMLDivElement {
   const table1Container = document.createElement("div");
   table1Container.className = "table1-chips-container chips-container";
 
-  TABLE_1_EXAMPLE_QUERIES.forEach((spec) => {
+  getTable1ExampleQueries().forEach((spec) => {
     const t1Btn = document.createElement("button");
     t1Btn.type = "button";
     t1Btn.className = "table1-chip";
@@ -392,20 +327,19 @@ export function buildEmptyStateView(ui: EmptyStateHost): HTMLDivElement {
     t1Btn.title = spec.question;
     t1Btn.addEventListener("click", () => {
       if (table1ChipActionMode === "nl") {
-        ui.chatInput.value = spec.question;
-        const targetLlm = resolvePreferredLlmModel(ui.modelSelect);
-        ui.modelSelect.value = targetLlm;
-        ui.state.setActiveChatModel(targetLlm);
-        ui.state.setActiveGoldSql(spec.sql);
+        options.onSelectTemplate({
+          promptText: spec.question,
+          targetModel: resolvePreferredLlmModel(options.modelSelect),
+          goldSql: spec.sql,
+        });
       } else {
-        ui.chatInput.value = `-- ${spec.question}
-${spec.sql}`;
-        ui.modelSelect.value = RAW_SQL_MODEL;
-        ui.state.setActiveChatModel(RAW_SQL_MODEL);
-        ui.state.setActiveGoldSql(null);
+        options.onSelectTemplate({
+          promptText: `-- ${spec.question}
+${spec.sql}`,
+          targetModel: RAW_SQL_MODEL,
+          goldSql: null,
+        });
       }
-      ui.chatInput.focus();
-      ui.syncHighlight();
     });
     table1Container.appendChild(t1Btn);
   });

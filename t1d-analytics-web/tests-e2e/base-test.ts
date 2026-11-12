@@ -2,136 +2,188 @@
  * @file base-test.ts
  * @module tests-e2e/base-test
  * Custom Playwright test fixture providing NYC code coverage collection
- * and default network endpoint mocking for backend API calls.
+ * and compile-time type-checked default network mocks for backend API contracts.
  */
 
 import { test as baseTest, expect, type Page } from "@playwright/test";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
-import crypto from "crypto";
+import {
+  type ChatTurnResponse,
+  type ModelsResponsePayload,
+  type ProvidersStatusResponsePayload,
+  type StatusResponsePayload,
+  type TableRowsResponsePayload,
+} from "../src/api-types";
+import {
+  type DatabasesListApiResponse,
+  type SchemaExplorerApiResponse,
+} from "../src/controllers/schema-explorer-controller";
+import { type IstanbulFileCoverage } from "../src/vite-env";
 
 /**
- * Extended Playwright test runner with automatic coverage output and backend endpoint mocks.
+ * Extended Playwright test runner with automatic coverage output and typed backend endpoint mocks.
  */
 export const test = baseTest.extend<{ page: Page }>({
   page: async ({ page }, use) => {
-    // Provide default mocks for backend status and schema endpoints so that
-    // mocked E2E tests run reliably without an active FastAPI backend process.
+    const defaultStatus: StatusResponsePayload = {
+      status: "healthy",
+      database: {
+        status_code: "healthy",
+        exists: true,
+        accessible: true,
+        table_count: 1,
+        has_initial_data: true,
+        message: "Healthy",
+      },
+      ollama: {
+        accessible: true,
+        available_models: ["gemma:2b"],
+        message: "Ollama ready",
+      },
+    };
+
     await page.route("**/api/status*", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         json: {
-          status: "healthy",
+          ...defaultStatus,
           database: {
-            status_code: "healthy",
-            configured_path: "t1d.duckdb",
-            exists: true,
+            ...defaultStatus.database,
             connected: true,
-            table_count: 1,
-            has_initial_data: true,
-          },
-          ollama: {
-            accessible: true,
+            configured_path: "t1d.duckdb",
           },
         },
       });
     });
+
+    await page.route("**/api/templates*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        json: { templates: [] },
+      });
+    });
+
+    const defaultProvidersStatus: ProvidersStatusResponsePayload = {
+      providers: {
+        ollama: {
+          configured: true,
+          source: "local",
+        },
+        openai: {
+          configured: false,
+          source: "none",
+        },
+        anthropic: {
+          configured: false,
+          source: "none",
+        },
+        google: {
+          configured: false,
+          source: "none",
+        },
+      },
+    };
 
     await page.route("**/api/providers/status*", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        json: {
-          providers: [
-            {
-              provider: "ollama",
-              configured: true,
-              reachable: true,
-              status: "healthy",
-            },
-          ],
-        },
+        json: defaultProvidersStatus,
       });
     });
+
+    const defaultSchema: SchemaExplorerApiResponse = {
+      tables: [],
+      database: {
+        status_code: "healthy",
+        configured_path: "t1d.duckdb",
+        exists: true,
+        connected: true,
+        table_count: 0,
+        has_initial_data: true,
+      },
+    };
 
     await page.route("**/api/schema", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        json: {
-          tables: [],
-          database: {
-            status_code: "healthy",
-            configured_path: "t1d.duckdb",
-            exists: true,
-            connected: true,
-            table_count: 0,
-            has_initial_data: true,
-          },
-        },
+        json: defaultSchema,
       });
     });
+
+    const defaultModels: ModelsResponsePayload = {
+      models: [{ name: "gemma:2b" }],
+    };
 
     await page.route("**/api/models", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        json: {
-          models: [{ name: "gemma:2b" }],
-        },
+        json: defaultModels,
       });
     });
+
+    const defaultDatabases: DatabasesListApiResponse = {
+      databases: [{ name: "t1d.duckdb", path: "t1d.duckdb", size_bytes: 1024 }],
+      current_db: "t1d.duckdb",
+    };
 
     await page.route("**/api/databases", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        json: {
-          databases: [
-            { name: "t1d.duckdb", path: "t1d.duckdb", size_bytes: 1024 },
-          ],
-          current_db: "t1d.duckdb",
-        },
+        json: defaultDatabases,
       });
     });
+
+    const defaultChatTurn: ChatTurnResponse = {
+      content: "Query executed.",
+      sqlQuery: "SELECT 1;",
+      sqlResult: [{ count: 1 }],
+    };
 
     await page.route("**/api/chat", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        json: {
-          content: "Query executed.",
-          sqlQuery: "SELECT 1;",
-          sqlResult: [{ count: 1 }],
-        },
+        json: defaultChatTurn,
       });
     });
+
+    const defaultSqlTurn: ChatTurnResponse = {
+      sqlResult: [{ id: 1 }],
+    };
 
     await page.route("**/api/execute-sql", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        json: {
-          sqlResult: [{ id: 1 }],
-        },
+        json: defaultSqlTurn,
       });
     });
 
-    await page.route("**/api/table/*", async (route) => {
+    const defaultTableRows: TableRowsResponsePayload = {
+      rows: [],
+      total_pages: 1,
+    };
+
+    await page.route("**/api/table/**", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        json: {
-          rows: [],
-          total: 0,
-        },
+        json: defaultTableRows,
       });
     });
 
     await use(page);
 
-    const coverage = await page.evaluate(() => window.__coverage__);
+    const coverage: Record<string, IstanbulFileCoverage> | undefined =
+      await page.evaluate(() => window.__coverage__);
     if (coverage) {
       const nycPath = path.join(process.cwd(), ".nyc_output");
       if (!fs.existsSync(nycPath)) {

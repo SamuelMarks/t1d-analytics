@@ -1,11 +1,11 @@
 """Command Line Interface entrypoint for the T1D Analytics Suite."""
 
-import os
 import sys
-from typing import Callable
 
 import duckdb
+from pydantic import ValidationError
 
+from t1d_analytics.api_dependencies import configure_api_logging
 from t1d_analytics.cli_handlers import (
     export_training_stages as export_training_stages,
 )
@@ -64,10 +64,21 @@ from t1d_analytics.cli_handlers import (
     verify_split_prompt_leakage as verify_split_prompt_leakage,
 )
 from t1d_analytics.cli_parser import (
-    CliNamespace as CliNamespace,
-)
-from t1d_analytics.cli_parser import (
-    CliOptionsModel as CliOptionsModel,
+    CliSubcommandOptions,
+    DoctorCliOpts,
+    DownloadCliOpts,
+    EvaluateCliOpts,
+    ExportCliOpts,
+    ExportTrainingDataCliOpts,
+    ExtractCliOpts,
+    GenerateTrainingDataCliOpts,
+    LoadCliOpts,
+    ManifestCliOpts,
+    ProfileCliOpts,
+    QueryCliOpts,
+    SeedCliOpts,
+    TrainCliOpts,
+    WatchCliOpts,
 )
 from t1d_analytics.cli_parser import (
     ManifestStageDict as ManifestStageDict,
@@ -94,13 +105,12 @@ from t1d_analytics.parser import (
 )
 
 
-def handle_download(opts: CliOptionsModel) -> None:
+def handle_download(opts: DownloadCliOpts) -> None:
     """
     Handle the download subcommand using module-level fetch/parse/process callables.
 
     Args:
-    ----
-        opts: Validated CLI options model.
+        opts: Validated `DownloadCliOpts` model.
 
     """
     _handle_download_impl(
@@ -112,39 +122,97 @@ def handle_download(opts: CliOptionsModel) -> None:
     )
 
 
+_DATA_CLI_OPT_TYPES = (
+    DownloadCliOpts,
+    ExtractCliOpts,
+    LoadCliOpts,
+    SeedCliOpts,
+    ManifestCliOpts,
+    QueryCliOpts,
+    ExportCliOpts,
+    ProfileCliOpts,
+    WatchCliOpts,
+)
+
+DataCliSubcommandOptions = (
+    DownloadCliOpts
+    | ExtractCliOpts
+    | LoadCliOpts
+    | SeedCliOpts
+    | ManifestCliOpts
+    | QueryCliOpts
+    | ExportCliOpts
+    | ProfileCliOpts
+    | WatchCliOpts
+)
+
+
+def _dispatch_data_cli_subcommand(opts: DataCliSubcommandOptions) -> None:
+    """
+    Dispatch data-ingestion, query, and export CLI subcommands.
+
+    Args:
+        opts: Per-subcommand typed data CLI options model.
+
+    """
+    if isinstance(opts, DownloadCliOpts):
+        handle_download(opts)
+    elif isinstance(opts, ExtractCliOpts):
+        handle_extract(opts)
+    elif isinstance(opts, LoadCliOpts):
+        handle_load(opts)
+    elif isinstance(opts, SeedCliOpts):
+        handle_seed(opts)
+    elif isinstance(opts, ManifestCliOpts):
+        handle_manifest(opts)
+    elif isinstance(opts, QueryCliOpts):
+        handle_query(opts)
+    elif isinstance(opts, ExportCliOpts):
+        handle_export(opts)
+    elif isinstance(opts, ProfileCliOpts):
+        handle_profile(opts)
+    else:
+        handle_watch(opts)
+
+
+def dispatch_cli_subcommand(opts: CliSubcommandOptions) -> None:
+    """
+    Dispatch a validated `CliSubcommandOptions` discriminated-union model to its typed handler.
+
+    Args:
+        opts: Per-subcommand typed CLI options model.
+
+    """
+    if isinstance(opts, _DATA_CLI_OPT_TYPES):
+        _dispatch_data_cli_subcommand(opts)
+    elif isinstance(opts, GenerateTrainingDataCliOpts):
+        handle_generate_training_data(opts)
+    elif isinstance(opts, ExportTrainingDataCliOpts):
+        handle_export_training_data(opts)
+    elif isinstance(opts, EvaluateCliOpts):
+        handle_evaluate(opts)
+    elif isinstance(opts, DoctorCliOpts):
+        handle_doctor(opts)
+    elif isinstance(opts, TrainCliOpts):
+        handle_train(opts)
+    else:
+        handle_bridge_gemma_sql(opts)
+
+
 def main() -> None:
     """Execute the CLI application."""
-    _ = get_translator()
+    configure_api_logging()
     parser = build_cli_parser()
-    args = parser.parse_args(namespace=CliNamespace())
-    opts = parse_cli_options(args)
+    args = parser.parse_args()
+    try:
+        opts = parse_cli_options(args)
+    except ValidationError:
+        return
 
-    if opts.lang:
-        os.environ["LANG"] = opts.lang
-        _ = get_translator(opts.lang)
-
-    command_handlers: dict[str, Callable[[CliOptionsModel], None]] = {
-        "download": handle_download,
-        "extract": handle_extract,
-        "load": handle_load,
-        "seed": handle_seed,
-        "manifest": handle_manifest,
-        "query": handle_query,
-        "generate-training-data": handle_generate_training_data,
-        "export-training-data": handle_export_training_data,
-        "export": handle_export,
-        "evaluate": handle_evaluate,
-        "doctor": handle_doctor,
-        "profile": handle_profile,
-        "watch": handle_watch,
-        "train": handle_train,
-        "bridge-gemma-sql": handle_bridge_gemma_sql,
-    }
+    _ = get_translator(opts.lang)
 
     try:
-        handler = command_handlers.get(opts.command or "")
-        if handler is not None:
-            handler(opts)
+        dispatch_cli_subcommand(opts)
     except (
         T1DError,
         duckdb.Error,

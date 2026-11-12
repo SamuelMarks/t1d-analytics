@@ -2,7 +2,8 @@
 
 import logging
 import threading
-from typing import Callable, Dict, List
+from collections.abc import Callable
+from typing import Protocol
 
 import duckdb
 
@@ -16,9 +17,28 @@ from t1d_analytics.sql_utils import (
     coerce_numeric_aggregates_in_sql,
     connect_duckdb_read_only_cursor,
     sanitize_sql_value,
+    validate_read_only_sql,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class QueryTimerProtocol(Protocol):
+    """Structural protocol for query execution timeout timers."""
+
+    daemon: bool
+
+    def start(self) -> None:
+        """Start the timeout timer."""
+        ...
+
+    def cancel(self) -> None:
+        """Cancel the timeout timer."""
+        ...
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for timer thread completion."""
+        ...
 
 
 def _noop_interrupt() -> None:
@@ -31,30 +51,36 @@ def execute_duckdb_query(
     max_rows: int = 10000,
     timeout_seconds: float = 30.0,
     connect_fn: Callable[..., duckdb.DuckDBPyConnection] = duckdb.connect,
-) -> List[Dict[str, SqlValue]]:
+    timer_factory: Callable[
+        [float, Callable[[], None]], QueryTimerProtocol
+    ] = threading.Timer,
+) -> list[dict[str, SqlValue]]:
     """
     Execute a read-only SQL query against connection-pooled DuckDB via an isolated cursor with timeout protection and numeric aggregate coercion.
 
     Args:
-    ----
         db_path: Path to the DuckDB database file.
         query: SQL query to execute.
         max_rows: Maximum rows to return to prevent memory exhaustion.
         timeout_seconds: Execution timeout in seconds.
         connect_fn: DuckDB connection factory callable.
+        timer_factory: Injectable timer constructor `(timeout_seconds, callback) -> QueryTimerProtocol`.
 
     Returns:
-    -------
         List[Dict[str, SqlValue]]: List of sanitized row dictionaries.
 
     Raises:
-    ------
+        EmptyQueryError: If the SQL query is empty or comment-only.
+        MultipleStatementsError: If multiple SQL statements are supplied.
+        ReadOnlyViolationError: If the SQL statement is not read-only.
         SqlExecutionError: If query execution fails or times out.
         DatabaseNotFoundError: If database file cannot be opened.
 
     """
-    nl = chr(10)
-    logger.info(f"Executing SQL query against database at {db_path}:{nl}{query}")
+    validated_query = validate_read_only_sql(query)
+    logger.info(
+        "Executing SQL query against database at %s:\n%s", db_path, validated_query
+    )
     interrupt_fn: Callable[[], None] = _noop_interrupt
     lock = threading.Lock()
 
@@ -71,8 +97,8 @@ def execute_duckdb_query(
         ) as cursor:
             with lock:
                 interrupt_fn = cursor.interrupt
-            coerced_query = coerce_numeric_aggregates_in_sql(query)
-            timer = threading.Timer(timeout_seconds, safe_interrupt)
+            coerced_query = coerce_numeric_aggregates_in_sql(validated_query)
+            timer = timer_factory(timeout_seconds, safe_interrupt)
             timer.daemon = True
             timer.start()
             try:
@@ -90,7 +116,10 @@ def execute_duckdb_query(
                     interrupt_fn = _noop_interrupt
 
         output = [
-            {col: sanitize_sql_value(val) for col, val in zip(columns, row)}
+            {
+                col: sanitize_sql_value(val)
+                for col, val in zip(columns, row, strict=False)
+            }
             for row in rows
         ]
         logger.info(f"SQL query executed successfully. Returned {len(output)} rows.")

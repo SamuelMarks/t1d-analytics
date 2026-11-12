@@ -3,7 +3,6 @@
 import concurrent.futures
 import threading
 from pathlib import Path
-from typing import Dict, List
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -23,7 +22,7 @@ def test_concurrent_chat_api_key_isolation(tmp_path: Path) -> None:
     conn.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
     conn.close()
 
-    recorded_keys: Dict[int, str] = {}
+    recorded_keys: dict[int, str] = {}
     lock = threading.Lock()
 
     def mock_create(provider: str, **kwargs: SqlValue) -> MagicMock:
@@ -136,7 +135,7 @@ def test_concurrent_session_deletion_race(tmp_path: Path) -> None:
         )
         return resp.status_code
 
-    targets: List[str] = [f"race-session-{i % 5}" for i in range(25)]
+    targets: list[str] = [f"race-session-{i % 5}" for i in range(25)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         status_codes = list(executor.map(delete_worker, targets))
 

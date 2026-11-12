@@ -1,33 +1,32 @@
 """Domain error hierarchy for T1D Analytics."""
 
-from typing import Dict, Mapping, Optional, Union
+from collections.abc import Mapping
 
+import duckdb
 from typing_extensions import TypedDict
 
-ErrorParamValue = Union[str, int, float, bool, None]
+ErrorParamValue = str | int | float | bool | None
 
 
 class ErrorDetailDict(TypedDict):
     """
     Structured dictionary representation of a domain error for API responses.
 
-    Attributes
-    ----------
+    Attributes:
         error_code: Internationalization translation key for the error.
         params: Structured interpolation parameters for the error message.
 
     """
 
     error_code: str
-    params: Dict[str, ErrorParamValue]
+    params: dict[str, ErrorParamValue]
 
 
 class T1DError(Exception):
     """
     Base exception class for all T1D Analytics domain errors.
 
-    Notes
-    -----
+    Notes:
     Method Resolution Order (MRO) Contract:
     Leaf domain exceptions inherit from `T1DError` first and optionally from standard
     library exception classes (`ValueError`, `RuntimeError`, `FileNotFoundError`,
@@ -36,8 +35,7 @@ class T1DError(Exception):
     `.status_code`, and `.to_dict()`) while preserving standard Python exception
     compatibility where required.
 
-    Attributes
-    ----------
+    Attributes:
         error_code: Internationalization translation key (e.g., 'backend.sqlExecution').
         message: Human-readable fallback error description.
         params: Structured interpolation parameters for localized error rendering.
@@ -53,16 +51,15 @@ class T1DError(Exception):
         self,
         message: str = "",
         *,
-        error_code: Optional[str] = None,
-        params: Optional[Mapping[str, ErrorParamValue]] = None,
-        status_code: Optional[int] = None,
-        headers: Optional[Mapping[str, str]] = None,
+        error_code: str | None = None,
+        params: Mapping[str, ErrorParamValue] | None = None,
+        status_code: int | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         """
         Initialize a T1DError instance.
 
         Args:
-        ----
             message: Human-readable error message.
             error_code: Optional override for the i18n error code.
             params: Optional dictionary of error interpolation parameters.
@@ -71,7 +68,7 @@ class T1DError(Exception):
 
         """
         self.error_code: str = error_code or self.default_error_code
-        self.params: Dict[str, ErrorParamValue] = (
+        self.params: dict[str, ErrorParamValue] = (
             dict(params)
             if params is not None
             else ({"error": message} if message else {})
@@ -81,7 +78,7 @@ class T1DError(Exception):
         self.status_code: int = (
             status_code if status_code is not None else self.default_status_code
         )
-        self.headers: Optional[Dict[str, str]] = (
+        self.headers: dict[str, str] | None = (
             dict(headers) if headers is not None else None
         )
         display_msg = (
@@ -95,8 +92,7 @@ class T1DError(Exception):
         """
         Serialize the error into a structured dictionary suitable for API responses.
 
-        Returns
-        -------
+        Returns:
             ErrorDetailDict: Dictionary containing 'error_code' and 'params'.
 
         """
@@ -120,10 +116,10 @@ class DatabaseNotFoundError(DatabaseError, FileNotFoundError):
     default_status_code = 404
 
 
-class DatabaseLockedError(DatabaseError, RuntimeError):
-    """Raised when a DuckDB database file remains locked after retry attempts."""
+class DatabaseLockedError(DatabaseError, duckdb.IOException):
+    """Raised when a DuckDB database file remains locked after retry exhaustion."""
 
-    default_error_code = "backend.dbLocked"
+    default_error_code = "backend.databaseLocked"
     default_status_code = 503
 
 
@@ -134,28 +130,18 @@ class TableNotFoundError(DatabaseError):
     default_status_code = 404
 
 
-class InvalidIdentifierError(DatabaseError):
-    """Raised when a SQL table or column identifier fails validation."""
-
-    default_error_code = "backend.invalidTableName"
-    default_status_code = 400
-
-
-class InvalidTableNameError(InvalidIdentifierError):
+class InvalidTableNameError(DatabaseError):
     """Raised when a SQL table name fails identifier validation."""
 
     default_error_code = "backend.invalidTable"
     default_status_code = 400
 
 
-class InvalidColumnNameError(InvalidIdentifierError):
-    """Raised when a SQL column name fails identifier validation."""
+class InvalidSortColumnError(DatabaseError):
+    """Raised when a SQL sort column name fails identifier or schema validation."""
 
     default_error_code = "backend.invalidSortColumn"
     default_status_code = 400
-
-
-InvalidSortColumnError = InvalidColumnNameError
 
 
 class InvalidPaginationError(DatabaseError):
@@ -190,13 +176,12 @@ class RateLimitExceededError(T1DError):
         message: str = "",
         *,
         retry_after: int = 1,
-        params: Optional[Mapping[str, ErrorParamValue]] = None,
+        params: Mapping[str, ErrorParamValue] | None = None,
     ) -> None:
         """
         Initialize a RateLimitExceededError with a Retry-After header.
 
         Args:
-        ----
             message: Optional human-readable error message.
             retry_after: Seconds until the client may retry.
             params: Optional dictionary of error interpolation parameters.
@@ -236,7 +221,7 @@ class EmptyQueryError(ReadOnlyViolationError):
 class MultipleStatementsError(ReadOnlyViolationError):
     """Raised when multiple semicolon-delimited SQL statements are submitted in a single query."""
 
-    default_error_code = "backend.multipleStatements"
+    default_error_code = "backend.sqlMultipleStatements"
     default_status_code = 400
 
 
@@ -259,9 +244,6 @@ class ProviderNotConfiguredError(LlmProviderError):
 
     default_error_code = "backend.missingApiKey"
     default_status_code = 400
-
-
-MissingApiKeyError = ProviderNotConfiguredError
 
 
 class LlmRateLimitError(LlmProviderError):
@@ -311,6 +293,13 @@ class PathAccessDeniedError(T1DError, PermissionError):
 
     default_error_code = "backend.accessDenied"
     default_status_code = 403
+
+
+class FrontendBuildNotFoundError(T1DError, FileNotFoundError):
+    """Raised when the compiled frontend SPA `index.html` artifact is missing on disk."""
+
+    default_error_code = "backend.frontendBuildNotFound"
+    default_status_code = 404
 
 
 class UnauthorizedApiError(T1DError, PermissionError):
@@ -376,27 +365,6 @@ class TrainingExecutionError(TrainingError):
     default_status_code = 500
 
 
-class ToolchainNotFoundError(TrainingError):
-    """Raised when an external training or cloud CLI toolchain (gemma-4-sql, xpk, gcloud) is not installed."""
-
-    default_error_code = "backend.toolchainMissing"
-    default_status_code = 503
-
-
-class GcsSyncError(TrainingError):
-    """Raised when syncing training datasets or checkpoints with Google Cloud Storage fails."""
-
-    default_error_code = "backend.gcsSyncFailed"
-    default_status_code = 502
-
-
-class TpuWorkloadError(TrainingError):
-    """Raised when dispatching, polling, or reclaiming a remote TPU workload fails."""
-
-    default_error_code = "backend.tpuWorkloadFailed"
-    default_status_code = 502
-
-
 class SeedVerificationError(DatabaseError):
     """Raised when database seeding verification fails due to missing or empty clinical tables."""
 
@@ -432,7 +400,7 @@ class InvalidTrainingBackendError(TrainingError, ValueError):
     default_status_code = 400
 
 
-class GemmaToolchainError(ToolchainNotFoundError):
+class GemmaToolchainError(TrainingError):
     """Raised when the external gemma-4-sql binary or Python module fails or is missing."""
 
     default_error_code = "backend.gemmaToolchainFailed"
@@ -446,7 +414,7 @@ class InvalidStageError(TrainingError, ValueError):
     default_status_code = 400
 
 
-class TpuOrchestrationError(TpuWorkloadError):
+class TpuOrchestrationError(TrainingError):
     """Raised when Cloud TPU workload dispatch, status polling, or reclamation fails."""
 
     default_error_code = "backend.tpuOrchestrationFailed"
@@ -467,7 +435,7 @@ class TpuPollingTimeoutError(TpuOrchestrationError, TimeoutError):
     default_status_code = 504
 
 
-class GcsStorageError(GcsSyncError):
+class GcsStorageError(TrainingError):
     """Raised when Google Cloud Storage upload, download, or bucket validation fails."""
 
     default_error_code = "backend.gcsStorageFailed"
@@ -495,13 +463,6 @@ class ConfigFileNotFoundError(TrainingError, FileNotFoundError):
     default_status_code = 404
 
 
-class ConfigurationError(T1DError, ValueError):
-    """Raised when runtime configuration, environment settings, or dataset parameters are invalid."""
-
-    default_error_code = "backend.configurationInvalid"
-    default_status_code = 400
-
-
 class DatasetNotFoundError(TrainingError, FileNotFoundError):
     """Raised when a required training or evaluation dataset file does not exist on disk."""
 
@@ -523,6 +484,13 @@ class UnsupportedExportFormatError(ExportError):
     default_status_code = 400
 
 
+class UnsupportedFileFormatError(CliValidationError):
+    """Raised when attempting to ingest an unsupported clinical data file format."""
+
+    default_error_code = "backend.unsupportedFileFormat"
+    default_status_code = 400
+
+
 class SubprocessTimeoutError(TrainingError, TimeoutError):
     """Raised when a local training or ETL CLI subprocess exceeds its execution timeout."""
 
@@ -530,23 +498,14 @@ class SubprocessTimeoutError(TrainingError, TimeoutError):
     default_status_code = 504
 
 
-class SchemaExtractionError(DatabaseError):
-    """Raised when extracting or formatting database schemas for LLM prompts fails."""
-
-    default_error_code = "backend.schemaExtractionFailed"
-    default_status_code = 500
-
-
 def exception_to_error_detail(exc: BaseException) -> ErrorDetailDict:
     """
     Convert any exception into a structured `ErrorDetailDict` with `error_code` and `params`.
 
     Args:
-    ----
         exc: The raised exception instance.
 
     Returns:
-    -------
         ErrorDetailDict: Dictionary containing `error_code` and `params`.
 
     """

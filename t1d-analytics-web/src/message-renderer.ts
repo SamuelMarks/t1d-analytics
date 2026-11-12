@@ -2,29 +2,27 @@
  * @file message-renderer.ts
  * @module message-renderer
  * Renders chat message bubbles, sanitized Markdown (`DOMPurify` + `marked`),
- * SQL syntax-highlighted blocks with copy/play/refresh controls, tabular SQL results,
+ * SQL syntax-highlighted blocks with copy/play/refresh controls, paginated tabular SQL results,
  * and clinical CGM visual analytics cards with incremental DOM memoization.
  */
 
 import DOMPurify from "dompurify";
-import hljs from "highlight.js";
-import sql from "highlight.js/lib/languages/sql";
-import markdown from "highlight.js/lib/languages/markdown";
-import python from "highlight.js/lib/languages/python";
 import i18next from "i18next";
 import { marked } from "marked";
+import { hljs } from "./syntax-highlighter";
 import {
-  type ApiErrorInput,
   fetchWithBackendError,
   parseApiError,
   parseResponseJson,
 } from "./api-client";
+import { type ChatTurnResponse } from "./api-types";
 import { renderCgmCard } from "./chart";
 import {
   type SchemaDiagnosticCardOptions,
   buildEmptyStateView,
   createSchemaDiagnosticCard,
 } from "./empty-state-builder";
+import { type AppEventBus } from "./event-bus";
 import { exportRowsToCsv, exportRowsToJson } from "./exporters";
 import { classifySqlResult, type SqlCellValue } from "./formatters";
 import {
@@ -33,6 +31,7 @@ import {
   type Chat,
   type ChatState,
   type Message,
+  type SchemaTableMetadata,
   type SqlGoldComparisonPayload,
 } from "./state";
 import {
@@ -41,79 +40,85 @@ import {
 } from "./table1-queries";
 
 export {
+  type ChatTurnResponse,
   type SchemaDiagnosticCardOptions,
   type Table1ExampleSpec,
   TABLE_1_EXAMPLE_QUERIES,
   createSchemaDiagnosticCard,
 };
 
-/**
- * Response payload returned by `/api/chat` and `/api/execute-sql`.
- */
-export interface ChatApiResponse {
-  /** Assistant response text or translation key. */
-  content?: string;
-  /** Generated or executed SQL query string. */
-  sqlQuery?: string;
-  /** Tabular SQL query result rows. */
-  sqlResult?: Record<string, SqlCellValue>[];
-  /** Structured or string API error payload. */
-  error?: ApiErrorInput;
-  /** Optional gold-standard SQL evaluation metrics returned by the backend. */
-  gold_comparison?: SqlGoldComparisonPayload | null;
-  /** Whether deterministic rule-based SQL synthesis was used instead of an LLM. */
-  is_rule_based_sql?: boolean;
-  /** SQL generation mode ('llm', 'rule_based_fallback', or 'literal_sql'). */
-  generation_mode?: string;
-  /** Optional human-readable diagnostic reason why LLM inference failed prior to fallback synthesis. */
-  llm_error?: string | null;
-  /** Optional structured error code for the underlying LLM failure. */
-  llm_error_code?: string | null;
-}
-
-const FALLBACK_PARENTHETICAL_ERROR_RE =
-  /Local LLM inference was unavailable\s*\(([^)]+)\)/i;
+/** Maximum number of SQL result rows rendered per page in inline chat tables. */
+export const INLINE_SQL_TABLE_PAGE_SIZE = 100;
 
 /**
- * Extracts an underlying LLM failure reason from either explicit `msg.llmError` metadata
- * or a parenthetical `Note: Local LLM inference was unavailable (<reason>);` in `msg.content`.
+ * Extracts an underlying LLM failure reason strictly from structured `msg.llmError` metadata.
  * @param {Message} msg - Assistant message record.
- * @returns {string | null} Extracted human-readable error reason, or null if none.
+ * @returns {string | null} Trimmed human-readable error reason, or null if none.
  */
 export function extractFallbackErrorDetail(msg: Message): string | null {
-  if (msg.llmError && msg.llmError.trim()) {
+  if (msg.llmError && msg.llmError.trim().length > 0) {
     return msg.llmError.trim();
-  }
-  const match = FALLBACK_PARENTHETICAL_ERROR_RE.exec(msg.content);
-  if (match && match[1].trim()) {
-    return match[1].trim();
   }
   return null;
 }
 
 /**
- * Checks whether an assistant message used rule-based fallback SQL synthesis.
+ * Checks whether an assistant message used rule-based fallback SQL synthesis strictly via
+ * structured boolean/enum fields (`isRuleBasedSql` or `generationMode === "rule_based_fallback"`).
  * @param {Message} msg - Assistant message record.
  * @returns {boolean} True if fallback SQL synthesis was used.
  */
 export function isFallbackSynthesisMessage(msg: Message): boolean {
-  if (
-    Boolean(msg.isRuleBasedSql) ||
-    msg.generationMode === "rule_based_fallback" ||
-    Boolean(msg.llmError)
-  ) {
-    return true;
-  }
-  const text = msg.content;
   return (
-    text.includes("Local LLM inference was unavailable") ||
-    text.includes("Local LLM inference encountered a memory error")
+    msg.isRuleBasedSql === true || msg.generationMode === "rule_based_fallback"
   );
 }
 
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("python", python);
+/**
+ * Checks whether an `ApiErrorInput` value represents a non-empty error condition.
+ * @param {ChatTurnResponse["error"]} err - Candidate API error field.
+ * @returns {boolean} True when an error payload is present.
+ */
+function hasApiError(err: ChatTurnResponse["error"]): boolean {
+  return err !== undefined && err !== null && err !== "" && err !== false;
+}
+
+/**
+ * Resolves a known schema table referenced inside `sqlQuery`, or returns null if none matches.
+ * @param {string | undefined} sqlQuery - Executed SQL query string.
+ * @param {SchemaTableMetadata[]} schemaTables - Active schema table metadata.
+ * @returns {string | null} Matched table name, or null.
+ */
+export function resolveReferencedSchemaTable(
+  sqlQuery: string | undefined,
+  schemaTables: SchemaTableMetadata[],
+): string | null {
+  if (!sqlQuery || schemaTables.length === 0) {
+    return null;
+  }
+  /**
+   * Tests whether a character can form part of an unquoted SQL identifier.
+   * @param {string | undefined} ch - Character to inspect.
+   * @returns {boolean} True if `ch` is `[a-z0-9_]` (case-insensitive).
+   */
+  const isIdentChar = (ch: string | undefined): boolean =>
+    ch !== undefined && /[a-z0-9_]/i.test(ch);
+  const lowerSql = sqlQuery.toLowerCase();
+  for (const tbl of schemaTables) {
+    const needle = tbl.name.toLowerCase();
+    if (!needle) continue;
+    let pos = lowerSql.indexOf(needle);
+    while (pos !== -1) {
+      const prev = lowerSql[pos - 1];
+      const next = lowerSql[pos + needle.length];
+      if (!isIdentChar(prev) && !isIdentChar(next)) {
+        return tbl.name;
+      }
+      pos = lowerSql.indexOf(needle, pos + 1);
+    }
+  }
+  return null;
+}
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -188,17 +193,18 @@ export function formatSqlExecutionOutcome(
   isDirectExecution: boolean,
 ): SqlExecutionOutcome {
   const classified = classifySqlResult(rows);
+  const rowsSpread = rows !== undefined ? { sqlResult: rows } : {};
   if (isDirectExecution) {
     if (classified.kind === "empty") {
       const noRowsMsg = i18next.t("ui.noRows", "No rows returned");
       return { content: noRowsMsg, sqlResult: [], announcement: noRowsMsg };
     }
     if (classified.kind === "scalar") {
-      return { content: classified.formattedValue, sqlResult: undefined };
+      return { content: classified.formattedValue };
     }
     return {
       content: i18next.t("app.tableData", "Table Data"),
-      sqlResult: rows,
+      ...rowsSpread,
     };
   }
 
@@ -206,17 +212,25 @@ export function formatSqlExecutionOutcome(
     const content = baseContent
       ? `${baseContent} **${classified.column}:** ${classified.formattedValue}`
       : classified.formattedValue;
-    return { content, sqlResult: rows };
+    return {
+      content,
+      ...rowsSpread,
+    };
   }
-  return { content: baseContent, sqlResult: rows };
+  return {
+    content: baseContent,
+    ...rowsSpread,
+  };
 }
 
 /**
- * Host contract required by `MessageRenderer`.
+ * Narrow injected dependencies for `MessageRenderer`.
  */
-export interface MessageRendererHost {
+export interface MessageRendererDeps {
   /** Global application state store. */
   state: ChatState;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
   /** Scrollable container element holding chat messages. */
   messagesContainer: HTMLElement;
   /** Wrapper element for the syntax-highlighted textarea input. */
@@ -227,14 +241,12 @@ export interface MessageRendererHost {
   sendBtn: HTMLButtonElement;
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   modelSelect: HTMLSelectElement;
-  /** Updates the provider badge status indicator for the active model. */
-  updateProviderBadgeStatus(): void;
+  /** Callback opening the Cloud Provider & API Key Settings modal. */
+  onOpenProviderSettings: () => void;
+  /** Callback opening a database table in the Table Preview Explorer modal. */
+  onOpenTableExplorer: (tableName: string) => void;
   /** Binds interaction events to action buttons inside diagnostic cards. */
-  bindSchemaDiagnosticButtons(container: HTMLElement): void;
-  /** Synchronizes syntax highlighting in the chat input. */
-  syncHighlight(): void;
-  /** Announces a message to screen readers. */
-  announce(message: string, isAssertive?: boolean): void;
+  onBindDiagnosticButtons: (container: HTMLElement) => void;
 }
 
 /**
@@ -252,20 +264,30 @@ interface CachedMessageEntry {
 }
 
 /**
- * Renders chat message lists, empty-state query chips, SQL action blocks, and result tables.
+ * Renders chat message lists, empty-state query chips, SQL action blocks, and paginated result tables.
  */
 export class MessageRenderer {
-  /** Host UI reference. */
-  private readonly ui: MessageRendererHost;
+  /** Injected dependencies. */
+  private readonly deps: MessageRendererDeps;
   /** WeakMap cache of rendered message DOM nodes keyed by `Message` object identity. */
   private readonly messageCache = new WeakMap<Message, CachedMessageEntry>();
 
   /**
    * Creates a new `MessageRenderer`.
-   * @param {MessageRendererHost} ui - Host UI instance.
+   * @param {MessageRendererDeps} deps - Narrow injected state, DOM, and callback dependencies.
    */
-  constructor(ui: MessageRendererHost) {
-    this.ui = ui;
+  constructor(deps: MessageRendererDeps) {
+    this.deps = deps;
+  }
+
+  /**
+   * Emits a screen-reader announcement via the domain event bus.
+   * @param {string} message - Message string to announce.
+   * @param {boolean} [isAssertive=false] - Whether to use assertive politeness.
+   * @returns {void}
+   */
+  private announce(message: string, isAssertive: boolean = false): void {
+    this.deps.events.emit("announce", { message, isAssertive });
   }
 
   /**
@@ -273,7 +295,14 @@ export class MessageRenderer {
    * @returns {HTMLDivElement} The constructed `.empty-state` element.
    */
   private buildEmptyState(): HTMLDivElement {
-    return buildEmptyStateView(this.ui);
+    return buildEmptyStateView({
+      state: this.deps.state,
+      modelSelect: this.deps.modelSelect,
+      onBindDiagnosticButtons: this.deps.onBindDiagnosticButtons,
+      onSelectTemplate: (selection) => {
+        this.deps.events.emit("templateSelected", selection);
+      },
+    });
   }
 
   /**
@@ -288,6 +317,10 @@ export class MessageRenderer {
     btn.setAttribute("data-i18n-aria-label", "aria.copyQuery");
     btn.title = i18next.t("ui.copyQuery", "Copy Query");
     btn.setAttribute("data-i18n-title", "ui.copyQuery");
+    /**
+     * Constructs the default clipboard SVG icon.
+     * @returns {SVGSVGElement} Clipboard SVG element.
+     */
     const renderCopyIcon = (): SVGSVGElement =>
       createSvgIcon(14, [
         {
@@ -310,25 +343,27 @@ export class MessageRenderer {
       ]);
     btn.replaceChildren(renderCopyIcon());
     let resetTimerId: ReturnType<typeof setTimeout> | null = null;
-    btn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(textToCopy);
-        this.ui.announce(i18next.t("status.commandCopied"));
-        if (resetTimerId !== null) {
-          clearTimeout(resetTimerId);
+    btn.addEventListener("click", () => {
+      void (async (): Promise<void> => {
+        try {
+          await navigator.clipboard.writeText(textToCopy);
+          this.announce(i18next.t("status.commandCopied"));
+          if (resetTimerId !== null) {
+            clearTimeout(resetTimerId);
+          }
+          btn.replaceChildren(
+            createSvgIcon(14, [
+              { tag: "polyline", attrs: { points: "20 6 9 17 4 12" } },
+            ]),
+          );
+          resetTimerId = setTimeout(() => {
+            resetTimerId = null;
+            btn.replaceChildren(renderCopyIcon());
+          }, 2000);
+        } catch (err) {
+          console.error("Failed to copy text: ", err);
         }
-        btn.replaceChildren(
-          createSvgIcon(14, [
-            { tag: "polyline", attrs: { points: "20 6 9 17 4 12" } },
-          ]),
-        );
-        resetTimerId = setTimeout(() => {
-          resetTimerId = null;
-          btn.replaceChildren(renderCopyIcon());
-        }, 2000);
-      } catch (err) {
-        console.error("Failed to copy text: ", err);
-      }
+      })();
     });
     return btn;
   }
@@ -431,14 +466,50 @@ export class MessageRenderer {
   }
 
   /**
+   * Builds a `Message` object from a completed `ChatTurnResponse` payload.
+   * @param {ChatTurnResponse} data - Terminal response payload.
+   * @param {string} model - Active model identifier.
+   * @param {string} content - Formatted assistant text.
+   * @param {boolean} isError - Whether `data.error` was set.
+   * @param {string | undefined} llmError - Trimmed underlying LLM failure reason.
+   * @returns {Message} Constructed assistant `Message` record.
+   */
+  private buildAssistantMessageRecord(
+    data: ChatTurnResponse,
+    model: string,
+    content: string,
+    isError: boolean,
+    llmError: string | undefined,
+  ): Message {
+    const llmErrorCode = data.llm_error_code?.trim() || undefined;
+    return {
+      role: "assistant",
+      content,
+      isError,
+      model,
+      ...(data.sqlResult !== undefined ? { sqlResult: data.sqlResult } : {}),
+      ...(data.sqlQuery !== undefined ? { sqlQuery: data.sqlQuery } : {}),
+      ...(data.gold_comparison ? { goldComparison: data.gold_comparison } : {}),
+      ...(data.is_rule_based_sql !== undefined
+        ? { isRuleBasedSql: data.is_rule_based_sql }
+        : {}),
+      ...(data.generation_mode !== undefined
+        ? { generationMode: data.generation_mode }
+        : {}),
+      ...(llmError ? { llmError } : {}),
+      ...(llmErrorCode ? { llmErrorCode } : {}),
+    };
+  }
+
+  /**
    * Formats and appends an assistant chat response from either SSE streaming or batch `/api/chat`.
-   * @param {ChatApiResponse} data - The terminal SSE or batch response payload.
+   * @param {ChatTurnResponse} data - The terminal SSE or batch response payload.
    * @param {string} model - The active model identifier.
    * @param {string} [fallbackText=""] - Fallback accumulated text when `data.content` is empty.
    * @returns {void}
    */
   public finalizeAssistantResponse(
-    data: ChatApiResponse,
+    data: ChatTurnResponse,
     model: string,
     fallbackText?: string,
   ): void {
@@ -446,53 +517,40 @@ export class MessageRenderer {
       data.content && i18next.exists(data.content)
         ? i18next.t(data.content)
         : data.content || fallbackText || "";
-    if (data.error) {
+    const isError = hasApiError(data.error);
+    if (isError) {
       const parsedError = parseApiError(data.error);
       assistantMsg += `\n${i18next.t("ui.errorDetails", { error: parsedError })}`;
-      this.ui.announce(assistantMsg, true);
+      this.announce(assistantMsg, true);
     } else {
-      const outcome = formatSqlExecutionOutcome(
+      assistantMsg = formatSqlExecutionOutcome(
         data.sqlResult,
         assistantMsg,
         false,
-      );
-      assistantMsg = outcome.content;
+      ).content;
     }
 
-    const resolvedLlmError =
-      data.llm_error && data.llm_error.trim()
-        ? data.llm_error.trim()
-        : undefined;
-    const resolvedLlmErrorCode =
-      data.llm_error_code && data.llm_error_code.trim()
-        ? data.llm_error_code.trim()
-        : undefined;
+    const resolvedLlmError = data.llm_error?.trim() || undefined;
+    const isFallbackMode =
+      data.is_rule_based_sql === true ||
+      data.generation_mode === "rule_based_fallback";
 
-    if (
-      !data.error &&
-      (data.is_rule_based_sql ||
-        data.generation_mode === "rule_based_fallback") &&
-      resolvedLlmError
-    ) {
-      this.ui.announce(
+    if (!isError && isFallbackMode && resolvedLlmError) {
+      this.announce(
         `${i18next.t("ui.fallbackBannerTitle", "⚠️ Fallback SQL Synthesized")} — ${i18next.t("ui.fallbackErrorPrefix", "Underlying LLM Error:")} ${resolvedLlmError}`,
         false,
       );
     }
 
-    this.ui.state.addMessageToActiveChat({
-      role: "assistant",
-      content: assistantMsg,
-      sqlResult: data.sqlResult,
-      sqlQuery: data.sqlQuery,
-      isError: !!data.error,
-      model,
-      goldComparison: data.gold_comparison ?? undefined,
-      isRuleBasedSql: data.is_rule_based_sql,
-      generationMode: data.generation_mode,
-      ...(resolvedLlmError ? { llmError: resolvedLlmError } : {}),
-      ...(resolvedLlmErrorCode ? { llmErrorCode: resolvedLlmErrorCode } : {}),
-    });
+    this.deps.state.addMessageToActiveChat(
+      this.buildAssistantMessageRecord(
+        data,
+        model,
+        assistantMsg,
+        isError,
+        resolvedLlmError,
+      ),
+    );
   }
 
   /**
@@ -513,10 +571,9 @@ export class MessageRenderer {
     btn.title = label;
     btn.textContent = "↻";
     btn.addEventListener("click", () => {
-      this.ui.chatInput.value = msg.content;
-      this.ui.state.setActiveGoldSql(msg.goldSql ?? null);
-      this.ui.syncHighlight();
-      this.ui.chatInput.focus();
+      this.deps.chatInput.value = msg.content;
+      this.deps.state.setActiveGoldSql(msg.goldSql ?? null);
+      this.deps.events.emit("composerSyncRequested", { focus: true });
     });
     return btn;
   }
@@ -577,9 +634,7 @@ export class MessageRenderer {
     });
 
     const modeBadge = document.createElement("span");
-    const isFallback =
-      Boolean(msg.isRuleBasedSql) ||
-      msg.generationMode === "rule_based_fallback";
+    const isFallback = isFallbackSynthesisMessage(msg);
     modeBadge.className = isFallback
       ? "eval-badge eval-badge-warn"
       : "eval-badge eval-badge-info";
@@ -614,6 +669,12 @@ export class MessageRenderer {
     const splitGrid = document.createElement("div");
     splitGrid.className = "gold-sql-split-grid";
 
+    /**
+     * Constructs a syntax-highlighted SQL diff pane inside the Gold comparison card.
+     * @param {string} heading - Pane title text.
+     * @param {string} sqlText - SQL statement string.
+     * @returns {HTMLDivElement} Constructed pane element.
+     */
     const buildPane = (heading: string, sqlText: string): HTMLDivElement => {
       const pane = document.createElement("div");
       pane.className = "gold-sql-pane";
@@ -652,7 +713,7 @@ export class MessageRenderer {
     );
     detailsEl.append(summaryEl, splitGrid);
 
-    if (comp.gold_rows_preview && comp.gold_rows_preview.length > 0) {
+    if (comp.gold_rows_preview.length > 0) {
       const previewHeading = document.createElement("div");
       previewHeading.className = "gold-sql-preview-heading";
       previewHeading.textContent = i18next.t(
@@ -662,6 +723,7 @@ export class MessageRenderer {
       const builtGoldTable = this.buildSqlTableContainer(
         comp.gold_rows_preview,
         9999,
+        comp.gold_sql,
       );
       detailsEl.append(previewHeading, builtGoldTable.container);
     }
@@ -687,24 +749,28 @@ export class MessageRenderer {
     isError: boolean,
   ): void {
     if (messageToUpdate) {
-      this.ui.state.updateMessageInActiveChat(messageToUpdate, {
+      const patch: Partial<Message> = {
         content,
-        sqlResult,
         isError,
-      });
+        ...(sqlResult !== undefined ? { sqlResult } : {}),
+      };
+      if (sqlResult === undefined) {
+        delete messageToUpdate.sqlResult;
+      }
+      this.deps.state.updateMessageInActiveChat(messageToUpdate, patch);
     } else {
-      this.ui.state.addMessageToActiveChat({
+      this.deps.state.addMessageToActiveChat({
         role: "assistant",
         content,
-        sqlResult,
         sqlQuery: queryToPlay,
         isError,
         model: RAW_SQL_MODEL,
+        ...(sqlResult !== undefined ? { sqlResult } : {}),
       });
     }
     this.renderMessages();
-    this.ui.messagesContainer.scrollTop =
-      this.ui.messagesContainer.scrollHeight;
+    this.deps.messagesContainer.scrollTop =
+      this.deps.messagesContainer.scrollHeight;
   }
 
   /**
@@ -722,29 +788,31 @@ export class MessageRenderer {
     triggerBtn.disabled = true;
     try {
       const dbPathOpt =
-        this.ui.state.currentDb && this.ui.state.currentDb !== DEFAULT_DB_NAME
-          ? { db_path: this.ui.state.currentDb }
+        this.deps.state.currentDb &&
+        this.deps.state.currentDb !== DEFAULT_DB_NAME
+          ? { db_path: this.deps.state.currentDb }
           : {};
       const response = await fetchWithBackendError("/api/execute-sql", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: queryToPlay, ...dbPathOpt }),
       });
-      const data = await parseResponseJson<ChatApiResponse>(response);
+      const data = await parseResponseJson<ChatTurnResponse>(response);
 
       let contentStr = "";
       let sqlRes: Record<string, SqlCellValue>[] | undefined = data.sqlResult;
 
-      if (data.error) {
+      const isError = hasApiError(data.error);
+      if (isError) {
         const parsedError = parseApiError(data.error);
         contentStr = i18next.t("ui.errorDetails", { error: parsedError });
-        this.ui.announce(contentStr, true);
+        this.announce(contentStr, true);
       } else {
         const outcome = formatSqlExecutionOutcome(sqlRes, "", true);
         contentStr = outcome.content;
         sqlRes = outcome.sqlResult;
         if (outcome.announcement) {
-          this.ui.announce(outcome.announcement, false);
+          this.announce(outcome.announcement, false);
         }
       }
 
@@ -753,13 +821,13 @@ export class MessageRenderer {
         contentStr,
         sqlRes,
         queryToPlay,
-        !!data.error,
+        isError,
       );
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       const announcedErr = i18next.t("ui.errorComm", { error: errorMsg });
       if (!messageToUpdate) {
-        this.ui.announce(announcedErr, true);
+        this.announce(announcedErr, true);
       }
       this.applyDirectSqlMessageUpdate(
         messageToUpdate,
@@ -774,14 +842,54 @@ export class MessageRenderer {
   }
 
   /**
-   * Renders a tabular SQL result container with CSV/JSON exports and optional CGM analytics card.
+   * Appends a slice of SQL result rows (`[startIdx, endIdx)`) as `<tr>` elements into `tbody`.
+   * @param {HTMLTableSectionElement} tbody - Target `<tbody>` element.
+   * @param {Array<Record<string, SqlCellValue>>} sqlRows - Full SQL result array.
+   * @param {string[]} columns - Ordered column names.
+   * @param {number} startIdx - Inclusive start row index.
+   * @param {number} endIdx - Exclusive end row index.
+   * @returns {void}
+   */
+  private appendSqlRowSlice(
+    tbody: HTMLTableSectionElement,
+    sqlRows: Array<Record<string, SqlCellValue>>,
+    columns: string[],
+    startIdx: number,
+    endIdx: number,
+  ): void {
+    const fragment = document.createDocumentFragment();
+    for (const row of sqlRows.slice(startIdx, endIdx)) {
+      const tr = document.createElement("tr");
+      for (const col of columns) {
+        const td = document.createElement("td");
+        const cellValue = row[col];
+        const cellText =
+          cellValue === null || cellValue === undefined
+            ? "NULL"
+            : String(cellValue);
+        td.textContent = cellText;
+        if (cellText.length > 40) {
+          td.title = cellText;
+        }
+        tr.appendChild(td);
+      }
+      fragment.appendChild(tr);
+    }
+    tbody.appendChild(fragment);
+  }
+
+  /**
+   * Renders a paginated tabular SQL result container (100 rows per page) with CSV/JSON exports,
+   * "Show next 100 rows" / "Open in Table Explorer" controls, and optional CGM analytics card.
    * @param {Array<Record<string, SqlCellValue>>} sqlRows - Non-empty SQL result rows.
    * @param {number} cgmCardIndex - Current index for unique CGM SVG IDs.
+   * @param {string} [sqlQuery] - Optional SQL query string used to resolve a Table Explorer target.
    * @returns {{ container: HTMLDivElement; hadCgmCard: boolean }} Rendered table container and CGM card flag.
    */
   private buildSqlTableContainer(
     sqlRows: Array<Record<string, SqlCellValue>>,
     cgmCardIndex: number,
+    sqlQuery?: string,
   ): { container: HTMLDivElement; hadCgmCard: boolean } {
     const tableContainer = document.createElement("div");
     tableContainer.className = "sql-table-container";
@@ -789,7 +897,7 @@ export class MessageRenderer {
     const toolbar = document.createElement("div");
     toolbar.className = "sql-table-toolbar";
 
-    const columns = Object.keys(sqlRows[0]);
+    const columns = Object.keys(Object(sqlRows[0]));
     const metaBadge = document.createElement("span");
     metaBadge.className = "sql-table-meta-badge";
     metaBadge.textContent = i18next.t("table.rowColSummary", {
@@ -800,6 +908,24 @@ export class MessageRenderer {
 
     const actionsGroup = document.createElement("div");
     actionsGroup.className = "sql-table-toolbar-actions";
+
+    const referencedTable = resolveReferencedSchemaTable(
+      sqlQuery,
+      this.deps.state.schemaTables,
+    );
+    if (referencedTable) {
+      const explorerBtn = document.createElement("button");
+      explorerBtn.type = "button";
+      explorerBtn.className = "btn-secondary open-table-explorer-btn";
+      explorerBtn.textContent = i18next.t(
+        "table.openInExplorer",
+        "Open in Table Explorer",
+      );
+      explorerBtn.addEventListener("click", () => {
+        this.deps.onOpenTableExplorer(referencedTable);
+      });
+      actionsGroup.appendChild(explorerBtn);
+    }
 
     const csvBtn = document.createElement("button");
     csvBtn.className = "btn-secondary export-csv-btn";
@@ -853,23 +979,8 @@ export class MessageRenderer {
     table.appendChild(thead);
 
     const tbody = document.createElement("tbody");
-    sqlRows.forEach((row) => {
-      const tr = document.createElement("tr");
-      columns.forEach((col) => {
-        const td = document.createElement("td");
-        const cellValue = row[col];
-        const cellText =
-          cellValue === null || cellValue === undefined
-            ? "NULL"
-            : String(cellValue);
-        td.textContent = cellText;
-        if (cellText.length > 40) {
-          td.title = cellText;
-        }
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
-    });
+    let renderedRows = Math.min(sqlRows.length, INLINE_SQL_TABLE_PAGE_SIZE);
+    this.appendSqlRowSlice(tbody, sqlRows, columns, 0, renderedRows);
     table.appendChild(tbody);
 
     const cgmCardSuffix = cgmCardIndex === 0 ? "" : `card-${cgmCardIndex}`;
@@ -882,6 +993,55 @@ export class MessageRenderer {
     scrollWrapper.className = "sql-table-scroll-wrapper";
     scrollWrapper.appendChild(table);
     tableContainer.appendChild(scrollWrapper);
+
+    if (sqlRows.length > INLINE_SQL_TABLE_PAGE_SIZE) {
+      const paginationBar = document.createElement("div");
+      paginationBar.className = "sql-table-pagination-bar";
+
+      const rangeInfo = document.createElement("span");
+      rangeInfo.className = "sql-table-pagination-info";
+
+      const loadMoreBtn = document.createElement("button");
+      loadMoreBtn.type = "button";
+      loadMoreBtn.className = "btn-secondary sql-table-load-more-btn";
+
+      /**
+       * Refreshes the pagination range summary and "Show next N rows" button visibility.
+       * @returns {void}
+       */
+      const updatePaginationControls = (): void => {
+        rangeInfo.textContent = i18next.t("table.showingRowsRange", {
+          shown: renderedRows,
+          total: sqlRows.length,
+          defaultValue: `Showing 1–${renderedRows} of ${sqlRows.length} rows`,
+        });
+        const remaining = sqlRows.length - renderedRows;
+        if (remaining <= 0) {
+          loadMoreBtn.remove();
+        } else {
+          const nextBatch = Math.min(remaining, INLINE_SQL_TABLE_PAGE_SIZE);
+          loadMoreBtn.textContent = i18next.t("table.showNextRows", {
+            count: nextBatch,
+            defaultValue: `Show next ${nextBatch} rows`,
+          });
+        }
+      };
+
+      loadMoreBtn.addEventListener("click", () => {
+        const nextEnd = Math.min(
+          renderedRows + INLINE_SQL_TABLE_PAGE_SIZE,
+          sqlRows.length,
+        );
+        this.appendSqlRowSlice(tbody, sqlRows, columns, renderedRows, nextEnd);
+        renderedRows = nextEnd;
+        updatePaginationControls();
+      });
+
+      updatePaginationControls();
+      paginationBar.append(rangeInfo, loadMoreBtn);
+      tableContainer.appendChild(paginationBar);
+    }
+
     return { container: tableContainer, hadCgmCard: Boolean(cgmCard) };
   }
 
@@ -942,7 +1102,7 @@ export class MessageRenderer {
       "Configure LLM / Keys",
     );
     configBtn.addEventListener("click", () => {
-      document.getElementById("provider-settings-btn")?.click();
+      this.deps.onOpenProviderSettings();
     });
     actionsRow.appendChild(configBtn);
 
@@ -951,52 +1111,49 @@ export class MessageRenderer {
   }
 
   /**
-   * Builds a single `.message` DOM element for a chat message.
-   * @param {Message} msg - The message model to render.
-   * @param {Chat} activeChat - The active chat session.
-   * @param {number} cgmCardIndex - Current index for unique CGM SVG IDs.
-   * @returns {{ element: HTMLDivElement; hadCgmCard: boolean }} Constructed message node and CGM card flag.
+   * Builds the optional `.message-header` row containing model badge and user retry button.
+   * @param {Message} msg - Message model.
+   * @returns {HTMLDivElement | null} Header element or null when omitted.
    */
-  private buildMessageElement(
-    msg: Message,
-    activeChat: Chat,
-    cgmCardIndex: number,
-  ): { element: HTMLDivElement; hadCgmCard: boolean } {
-    const msgDiv = document.createElement("div");
-    msgDiv.className = `message ${msg.role}`;
-
-    if (msg.model || msg.role === "user") {
-      const header = document.createElement("div");
-      header.className = "message-header";
-      if (msg.model) {
-        const badge = document.createElement("span");
-        badge.className = "model-badge";
-        badge.textContent =
-          msg.model === RAW_SQL_MODEL
-            ? i18next.t("ui.rawSql")
-            : i18next.t("ui.modelName", { name: msg.model });
-
-        if (msg.role === "user") {
-          badge.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
-          badge.style.color = "var(--user-msg-text)";
-        }
-        header.appendChild(badge);
-      }
+  private buildMessageHeaderElement(msg: Message): HTMLDivElement | null {
+    if (!msg.model && msg.role !== "user") {
+      return null;
+    }
+    const header = document.createElement("div");
+    header.className = "message-header";
+    if (msg.model) {
+      const badge = document.createElement("span");
+      badge.className = "model-badge";
+      badge.textContent =
+        msg.model === RAW_SQL_MODEL
+          ? i18next.t("ui.rawSql")
+          : i18next.t("ui.modelName", { name: msg.model });
 
       if (msg.role === "user") {
-        header.style.justifyContent = "flex-end";
-        header.appendChild(this.createEditRetryBtn(msg));
+        badge.style.backgroundColor = "rgba(255, 255, 255, 0.2)";
+        badge.style.color = "var(--user-msg-text)";
       }
-
-      msgDiv.appendChild(header);
+      header.appendChild(badge);
     }
 
-    const contentDiv = document.createElement("div");
-    const isSqlMessage =
-      msg.role === "user" &&
-      (msg.model === RAW_SQL_MODEL ||
-        (!msg.model && activeChat.model === RAW_SQL_MODEL));
+    if (msg.role === "user") {
+      header.style.justifyContent = "flex-end";
+      header.appendChild(this.createEditRetryBtn(msg));
+    }
+    return header;
+  }
 
+  /**
+   * Builds the primary content container (`.sql-user-query-wrapper` or sanitized Markdown) for `msg`.
+   * @param {Message} msg - Message model.
+   * @param {boolean} isSqlMessage - Whether `msg` is a raw user SQL query.
+   * @returns {HTMLDivElement} Populated content container.
+   */
+  private buildMessageBodyContent(
+    msg: Message,
+    isSqlMessage: boolean,
+  ): HTMLDivElement {
+    const contentDiv = document.createElement("div");
     if (isSqlMessage) {
       contentDiv.className = "sql-user-query-wrapper";
       const headerDiv = document.createElement("div");
@@ -1049,54 +1206,96 @@ export class MessageRenderer {
       });
     }
 
-    if (msg.isError) {
+    if (msg.isError === true) {
       contentDiv.classList.add("error-text");
       contentDiv.setAttribute("role", "alert");
       contentDiv.setAttribute("aria-live", "assertive");
     } else if (!isSqlMessage) {
       contentDiv.classList.add("message-content");
     }
+    return contentDiv;
+  }
+
+  /**
+   * Builds a standalone `.sql-query-container` block when `msg.sqlQuery` is not already rendered in Markdown.
+   * @param {Message} msg - Message model.
+   * @param {string} sqlQuery - SQL query text.
+   * @returns {HTMLDivElement} Constructed SQL query container.
+   */
+  private buildStandaloneSqlBlock(
+    msg: Message,
+    sqlQuery: string,
+  ): HTMLDivElement {
+    const queryContainer = document.createElement("div");
+    queryContainer.className = "sql-query-container";
+    const preBlock = document.createElement("pre");
+    preBlock.tabIndex = 0;
+    preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
+    preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
+    const codeBlock = document.createElement("code");
+    codeBlock.className = "language-sql sql-query";
+    codeBlock.textContent = sqlQuery;
+    hljs.highlightElement(codeBlock);
+    preBlock.appendChild(codeBlock);
+
+    const headerDiv = document.createElement("div");
+    headerDiv.className = "sql-query-header";
+    headerDiv.appendChild(this.createCopyBtn(sqlQuery));
+    headerDiv.appendChild(
+      msg.role === "assistant" && msg.model === RAW_SQL_MODEL
+        ? this.createRefreshBtn(sqlQuery, msg)
+        : this.createPlayBtn(sqlQuery),
+    );
+
+    queryContainer.append(headerDiv, preBlock);
+    return queryContainer;
+  }
+
+  /**
+   * Builds a single `.message` DOM element for a chat message.
+   * @param {Message} msg - The message model to render.
+   * @param {Chat} activeChat - The active chat session.
+   * @param {number} cgmCardIndex - Current index for unique CGM SVG IDs.
+   * @returns {{ element: HTMLDivElement; hadCgmCard: boolean }} Constructed message node and CGM card flag.
+   */
+  private buildMessageElement(
+    msg: Message,
+    activeChat: Chat,
+    cgmCardIndex: number,
+  ): { element: HTMLDivElement; hadCgmCard: boolean } {
+    const msgDiv = document.createElement("div");
+    msgDiv.className = `message ${msg.role}`;
+
+    const headerEl = this.buildMessageHeaderElement(msg);
+    if (headerEl) {
+      msgDiv.appendChild(headerEl);
+    }
+
+    const isSqlMessage =
+      msg.role === "user" &&
+      (msg.model === RAW_SQL_MODEL ||
+        (!msg.model && activeChat.model === RAW_SQL_MODEL));
+    const contentDiv = this.buildMessageBodyContent(msg, isSqlMessage);
 
     const fallbackBanner = this.buildFallbackDiagnosticBanner(msg);
     if (fallbackBanner) {
       msgDiv.appendChild(fallbackBanner);
     }
-
     msgDiv.appendChild(contentDiv);
 
-    const hasMarkdownSqlBlock =
-      contentDiv.querySelector(".sql-query-container") !== null;
-    if (msg.sqlQuery && !hasMarkdownSqlBlock) {
-      const queryContainer = document.createElement("div");
-      queryContainer.className = "sql-query-container";
-      const preBlock = document.createElement("pre");
-      preBlock.tabIndex = 0;
-      preBlock.setAttribute("aria-label", i18next.t("aria.codeBlock"));
-      preBlock.setAttribute("data-i18n-aria-label", "aria.codeBlock");
-      const codeBlock = document.createElement("code");
-      codeBlock.className = "language-sql sql-query";
-      codeBlock.textContent = msg.sqlQuery;
-      hljs.highlightElement(codeBlock);
-      preBlock.appendChild(codeBlock);
-
-      const headerDiv = document.createElement("div");
-      headerDiv.className = "sql-query-header";
-      headerDiv.appendChild(this.createCopyBtn(msg.sqlQuery));
-      if (msg.role === "assistant" && msg.model === RAW_SQL_MODEL) {
-        headerDiv.appendChild(this.createRefreshBtn(msg.sqlQuery, msg));
-      } else {
-        headerDiv.appendChild(this.createPlayBtn(msg.sqlQuery));
-      }
-
-      queryContainer.append(headerDiv, preBlock);
-      msgDiv.appendChild(queryContainer);
+    if (msg.sqlQuery && !contentDiv.querySelector(".sql-query-container")) {
+      msgDiv.appendChild(this.buildStandaloneSqlBlock(msg, msg.sqlQuery));
     }
 
     let hadCgmCard = false;
     const sqlRows = msg.sqlResult;
     if (sqlRows) {
       if (sqlRows.length > 0) {
-        const built = this.buildSqlTableContainer(sqlRows, cgmCardIndex);
+        const built = this.buildSqlTableContainer(
+          sqlRows,
+          cgmCardIndex,
+          msg.sqlQuery,
+        );
         hadCgmCard = built.hadCgmCard;
         msgDiv.appendChild(built.container);
       } else {
@@ -1115,16 +1314,59 @@ export class MessageRenderer {
   }
 
   /**
+   * Computes a deterministic memoization fingerprint for a `Message` and active render context.
+   * @param {Message} msg - Message model.
+   * @param {Chat} activeChat - Active chat session.
+   * @param {number} cgmCardIndex - Current CGM card index.
+   * @returns {string} Memoization fingerprint string.
+   */
+  private computeMessageFingerprint(
+    msg: Message,
+    activeChat: Chat,
+    cgmCardIndex: number,
+  ): string {
+    const effectiveModel =
+      msg.model ?? (msg.role === "user" ? activeChat.model : "");
+    const goldKey = msg.goldComparison
+      ? `${String(msg.goldComparison.execution_accuracy)}|${String(msg.goldComparison.exact_match)}|${msg.goldComparison.column_overlap_pct}`
+      : "";
+    const schemaCount = this.deps.state.schemaTables.length;
+    const rowLen = msg.sqlResult ? msg.sqlResult.length : -1;
+    return `${i18next.language}|${msg.role}|${effectiveModel}|${String(Boolean(msg.isError))}|${msg.content}|${msg.sqlQuery ?? ""}|${rowLen}|${goldKey}|${String(Boolean(msg.isRuleBasedSql))}|${msg.generationMode ?? ""}|${msg.llmError ?? ""}|${msg.llmErrorCode ?? ""}|${schemaCount}|${cgmCardIndex}`;
+  }
+
+  /**
+   * Reconciles `messagesContainer.children` in place to match `desiredNodes` without disturbing unchanged nodes.
+   * @param {HTMLDivElement[]} desiredNodes - Ordered target message DOM elements.
+   * @returns {void}
+   */
+  private reconcileMessageDomNodes(desiredNodes: HTMLDivElement[]): void {
+    const desiredSet = new Set<Element>(desiredNodes);
+    Array.from(this.deps.messagesContainer.children).forEach((child) => {
+      if (!desiredSet.has(child)) {
+        child.remove();
+      }
+    });
+
+    for (const [i, desired] of desiredNodes.entries()) {
+      const current = this.deps.messagesContainer.children[i];
+      if (current !== desired) {
+        this.deps.messagesContainer.insertBefore(desired, current ?? null);
+      }
+    }
+  }
+
+  /**
    * Renders the messages of the active chat into `messagesContainer`, reusing cached
    * DOM nodes for unchanged messages to preserve scroll positions and avoid redundant SVG/Markdown builds.
    * @returns {void}
    */
   public renderMessages(): void {
-    const activeChat = this.ui.state.getActiveChat();
+    const activeChat = this.deps.state.getActiveChat();
     if (!activeChat) return;
 
     if (activeChat.messages.length === 0) {
-      this.ui.messagesContainer.replaceChildren(this.buildEmptyState());
+      this.deps.messagesContainer.replaceChildren(this.buildEmptyState());
       return;
     }
 
@@ -1132,12 +1374,11 @@ export class MessageRenderer {
     const desiredNodes: HTMLDivElement[] = [];
 
     for (const msg of activeChat.messages) {
-      const effectiveModel =
-        msg.model ?? (msg.role === "user" ? activeChat.model : "");
-      const goldKey = msg.goldComparison
-        ? `${msg.goldComparison.execution_accuracy}|${msg.goldComparison.exact_match}|${msg.goldComparison.column_overlap_pct}`
-        : "";
-      const fingerprint = `${i18next.language}|${msg.role}|${effectiveModel}|${Boolean(msg.isError)}|${msg.content}|${msg.sqlQuery ?? ""}|${msg.sqlResult ? msg.sqlResult.length : -1}|${goldKey}|${msg.llmError ?? ""}|${msg.llmErrorCode ?? ""}|${cgmCardIndex}`;
+      const fingerprint = this.computeMessageFingerprint(
+        msg,
+        activeChat,
+        cgmCardIndex,
+      );
       const cached = this.messageCache.get(msg);
 
       if (
@@ -1164,20 +1405,7 @@ export class MessageRenderer {
       }
     }
 
-    const desiredSet = new Set<Element>(desiredNodes);
-    Array.from(this.ui.messagesContainer.children).forEach((child) => {
-      if (!desiredSet.has(child)) {
-        child.remove();
-      }
-    });
-
-    for (let i = 0; i < desiredNodes.length; i++) {
-      const desired = desiredNodes[i];
-      const current = this.ui.messagesContainer.children[i];
-      if (current !== desired) {
-        this.ui.messagesContainer.insertBefore(desired, current ?? null);
-      }
-    }
+    this.reconcileMessageDomNodes(desiredNodes);
   }
 
   /**
@@ -1185,7 +1413,7 @@ export class MessageRenderer {
    * @returns {void}
    */
   public renderActiveChat(): void {
-    const activeChat = this.ui.state.getActiveChat();
+    const activeChat = this.deps.state.getActiveChat();
 
     if (!activeChat) {
       const emptyDiv = document.createElement("div");
@@ -1194,31 +1422,31 @@ export class MessageRenderer {
       emptyDiv.setAttribute("aria-live", "polite");
       emptyDiv.setAttribute("data-i18n", "app.emptyState");
       emptyDiv.textContent = i18next.t("app.emptyState");
-      this.ui.messagesContainer.replaceChildren(emptyDiv);
-      this.ui.chatInput.disabled = true;
-      this.ui.chatInputWrapper.classList.add("disabled");
-      this.ui.sendBtn.disabled = true;
-      this.ui.modelSelect.disabled = true;
+      this.deps.messagesContainer.replaceChildren(emptyDiv);
+      this.deps.chatInput.disabled = true;
+      this.deps.chatInputWrapper.classList.add("disabled");
+      this.deps.sendBtn.disabled = true;
+      this.deps.modelSelect.disabled = true;
       return;
     }
 
-    const online = this.ui.state.systemStatus.backendOnline;
-    this.ui.chatInput.disabled = !online;
-    this.ui.chatInputWrapper.classList.toggle("disabled", !online);
-    this.ui.chatInput.placeholder = online
+    const online = this.deps.state.systemStatus.backendOnline;
+    this.deps.chatInput.disabled = !online;
+    this.deps.chatInputWrapper.classList.toggle("disabled", !online);
+    this.deps.chatInput.placeholder = online
       ? i18next.t("app.typeMessage")
       : i18next.t("status.inputOffline");
-    this.ui.sendBtn.disabled = !online;
+    this.deps.sendBtn.disabled = !online;
 
-    this.ui.modelSelect.disabled = false;
-    const hasActiveModelOption = Array.from(this.ui.modelSelect.options).some(
+    this.deps.modelSelect.disabled = false;
+    const hasActiveModelOption = Array.from(this.deps.modelSelect.options).some(
       (opt) => opt.value === activeChat.model,
     );
-    this.ui.modelSelect.value = hasActiveModelOption
+    this.deps.modelSelect.value = hasActiveModelOption
       ? activeChat.model
       : RAW_SQL_MODEL;
-    this.ui.updateProviderBadgeStatus();
-    this.ui.syncHighlight();
+    this.deps.events.emit("providerBadgeUpdateRequested", undefined);
+    this.deps.events.emit("composerSyncRequested", {});
     this.renderMessages();
   }
 }

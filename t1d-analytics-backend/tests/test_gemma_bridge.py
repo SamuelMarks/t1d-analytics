@@ -3,30 +3,35 @@
 import subprocess
 import types
 from pathlib import Path
-from typing import Dict, Optional, Union
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from t1d_analytics.gemma_bridge import (
+    CliStrategy,
     EtlPayloadDict,
     EvalAccuracyDict,
+    GemmaExecutionStrategy,
     GemmaSqlPipelineEngine,
-    InProcessDuckDbGemmaFallback,
+    LibraryStrategy,
+    NativeDuckDbStrategy,
     SubprocessGemmaToolchain,
-    _classify_sql_error_hint,
-    _extract_schema_map_from_text,
     check_gemma_sql_installed,
-    execute_agentic_nl_to_sql,
     get_gemma_sql_binary,
     parse_gemma_sql_metrics,
-    prune_schema_with_gemma_rag,
     resolve_local_gemma_sql_repo,
     run_gemma_sql_etl,
     run_gemma_sql_train,
-    validate_sql_tokens,
 )
 from t1d_analytics.job_manager import JobMetricValue
+from t1d_analytics.sql_agent import (
+    classify_sql_error_hint,
+    execute_agentic_nl_to_sql,
+    extract_schema_map_from_text,
+    prune_schema_with_gemma_rag,
+    score_sql_completion_logprob,
+    validate_sql_tokens,
+)
 
 
 class _FakeGemmaLibraryModule:
@@ -38,7 +43,7 @@ class _FakeGemmaLibraryModule:
         *,
         duckdb_path: str,
         duckdb_table: str,
-        output_dir: Optional[str] = None,
+        output_dir: str | None = None,
     ) -> EtlPayloadDict:
         """Validate ETL arguments and return structured shard metadata."""
         assert stage in ("pretrain", "sft", "posttrain")
@@ -57,8 +62,8 @@ class _FakeGemmaLibraryModule:
         model: str,
         dataset: str,
         output_dir: str,
-        hyperparameters: Dict[str, Union[int, float, str, bool]],
-    ) -> Dict[str, JobMetricValue]:
+        hyperparameters: dict[str, int | float | str | bool],
+    ) -> dict[str, JobMetricValue]:
         """Validate SFT arguments and return structured training metrics."""
         assert model
         assert Path(dataset).exists()
@@ -73,7 +78,7 @@ class _FakeGemmaLibraryModule:
         dataset: str,
         output_dir: str,
         beta: float,
-    ) -> Dict[str, JobMetricValue]:
+    ) -> dict[str, JobMetricValue]:
         """Validate DPO arguments and return structured alignment metrics."""
         assert model
         assert Path(dataset).exists()
@@ -87,7 +92,7 @@ class _FakeGemmaLibraryModule:
         model: str,
         test_cases: str,
         duckdb_path: str,
-    ) -> Union[EvalAccuracyDict, float]:
+    ) -> EvalAccuracyDict | float:
         """Validate SQL evaluation arguments and return accuracy score."""
         assert model
         assert Path(test_cases).exists()
@@ -292,12 +297,13 @@ def test_gemma_sql_pipeline_engine_library_mode(tmp_path: Path) -> None:
         tc_res = toolchain.run_etl("sft", db_file, "my_table", out_dir)
         assert tc_res.stdout == "ok"
         assert mock_tc_run.call_args[0][0][0] == "/custom/gemma-4-sql"
-    fallback_inst = InProcessDuckDbGemmaFallback()
-    assert hasattr(fallback_inst, "run_etl") and hasattr(fallback_inst, "evaluate_sql")
+    fallback_inst = NativeDuckDbStrategy()
+    assert isinstance(fallback_inst, GemmaExecutionStrategy)
 
     with patch("importlib.import_module", return_value=fake_gemma_pkg):
         engine = GemmaSqlPipelineEngine()
         assert engine.is_library_available is True
+        assert isinstance(engine.strategy, GemmaExecutionStrategy)
 
         res_etl = engine.run_etl("sft", db_file, "my_table", out_dir)
         assert res_etl["execution_mode"] == "library"
@@ -380,10 +386,8 @@ def test_gemma_sql_pipeline_engine_uncallable_functions(tmp_path: Path) -> None:
             engine.evaluate_sql("gemma-7b", tc_file, db_file)
 
     non_callable_pkg = types.ModuleType("gemma_4_sql")
-    non_callable_pkg.run_etl = "not_a_func"  # type: ignore[attr-defined]
-    non_callable_pkg.run_sft = "not_a_func"  # type: ignore[attr-defined]
-    non_callable_pkg.run_dpo = "not_a_func"  # type: ignore[attr-defined]
-    non_callable_pkg.evaluate_sql = "not_a_func"  # type: ignore[attr-defined]
+    for attr_name in ("run_etl", "run_sft", "run_dpo", "evaluate_sql"):
+        setattr(non_callable_pkg, attr_name, "not_a_func")
     with patch(
         "t1d_analytics.gemma_bridge.importlib.import_module",
         return_value=non_callable_pkg,
@@ -573,7 +577,9 @@ def _run_native_fallbacks_assertions(tmp_path: Path, duckdb: types.ModuleType) -
         tmp_path / "dpo_out_full" / "checkpoint-final" / "training_metrics.json"
     ).exists()
 
-    # Numerical convergence check for _optimize_dpo_preference_tensors across optimization steps
+    # Numerical convergence check for optimize_dpo_preference_pairs across optimization steps
+    from t1d_analytics.training_runner import optimize_dpo_preference_pairs
+
     conv_pairs = [
         {
             "prompt": "Find patients with HbA1c above 8.0",
@@ -581,13 +587,12 @@ def _run_native_fallbacks_assertions(tmp_path: Path, duckdb: types.ModuleType) -
             "rejected_sql": "SELECT 0 FROM bad_table WHERE 1=0",
         }
     ]
-    conv_losses, conv_margins = (
-        InProcessDuckDbGemmaFallback._optimize_dpo_preference_tensors(
-            conv_pairs,
-            beta=0.5,
-            num_steps=8,
-        )
+    dpo_conv = optimize_dpo_preference_pairs(
+        conv_pairs,
+        beta=0.5,
+        num_steps=8,
     )
+    conv_losses, conv_margins = dpo_conv.losses, dpo_conv.margins
     assert len(conv_losses) == 8
     assert len(conv_margins) == 8
     assert conv_margins[-1] > conv_margins[0]
@@ -652,20 +657,20 @@ def test_run_gemma_sql_etl_extra_args(tmp_path: Path) -> None:
     conn.close()
     out_dir = tmp_path / "out"
 
-    with patch("t1d_analytics.gemma_bridge.get_gemma_sql_binary", return_value="echo"):
-        res = run_gemma_sql_etl(
-            "sft",
-            db_path,
-            "t",
-            output_dir=out_dir,
-            extra_args=["--verbose", "true"],
-        )
-        assert res.returncode == 0
-        assert "etl sft" in res.stdout
-        assert f"--duckdb-path {Path(db_path).resolve()}" in res.stdout
-        assert "--duckdb-table t" in res.stdout
-        assert f"--output-dir {out_dir.resolve()}" in res.stdout
-        assert "--verbose true" in res.stdout
+    res = run_gemma_sql_etl(
+        "sft",
+        db_path,
+        "t",
+        output_dir=out_dir,
+        extra_args=["--verbose", "true"],
+        binary_resolver=lambda: "echo",
+    )
+    assert res.returncode == 0
+    assert "etl sft" in res.stdout
+    assert f"--duckdb-path {Path(db_path).resolve()}" in res.stdout
+    assert "--duckdb-table t" in res.stdout
+    assert f"--output-dir {out_dir.resolve()}" in res.stdout
+    assert "--verbose true" in res.stdout
 
 
 def test_run_gemma_sql_train_extra_args(tmp_path: Path) -> None:
@@ -678,52 +683,92 @@ def test_run_gemma_sql_train_extra_args(tmp_path: Path) -> None:
     cfg = tmp_path / "config.yaml"
     cfg.write_text("epochs: 1")
 
-    with patch("t1d_analytics.gemma_bridge.get_gemma_sql_binary", return_value="echo"):
-        res = run_gemma_sql_train("sft", str(cfg), extra_args=["--debug"])
-        assert res.returncode == 0
-        assert "sft" in res.stdout
-        assert f"--config {cfg.resolve()}" in res.stdout
-        assert "--debug" in res.stdout
+    res = run_gemma_sql_train(
+        "sft",
+        str(cfg),
+        extra_args=["--debug"],
+        binary_resolver=lambda: "echo",
+    )
+    assert res.returncode == 0
+    assert "sft" in res.stdout
+    assert f"--config {cfg.resolve()}" in res.stdout
+    assert "--debug" in res.stdout
 
-        # With unset cancel_event (polls once before completion, then completes)
-        ev_ok = threading.Event()
-        mock_popen_ok = MagicMock()
-        mock_popen_ok.poll.side_effect = [None, 0]
-        mock_popen_ok.communicate.return_value = ("completed via popen", "")
-        with patch("subprocess.Popen", return_value=mock_popen_ok):
-            res_ev = run_gemma_sql_train("sft", str(cfg), cancel_event=ev_ok)
-            assert res_ev.returncode == 0
-            assert "completed via popen" in res_ev.stdout
-
-        # With pre-set cancel_event -> terminates and raises TrainingExecutionError
-        ev_cancel = threading.Event()
-        ev_cancel.set()
-        mock_popen_cancel = MagicMock()
-        with patch("subprocess.Popen", return_value=mock_popen_cancel):
-            with pytest.raises(TrainingExecutionError, match="training cancelled"):
-                run_gemma_sql_train("sft", str(cfg), cancel_event=ev_cancel)
-        mock_popen_cancel.terminate.assert_called_once()
-
-        # With pre-set cancel_event where wait raises TimeoutExpired -> kills process
-        mock_popen_hang = MagicMock()
-        mock_popen_hang.wait.side_effect = subprocess.TimeoutExpired(
-            cmd="gemma-4-sql", timeout=2.0
+    # With unset cancel_event (polls once via TimeoutExpired, then completes without losing stdout)
+    ev_ok = threading.Event()
+    mock_popen_ok = MagicMock()
+    mock_popen_ok.returncode = 0
+    mock_popen_ok.communicate.side_effect = [
+        subprocess.TimeoutExpired(cmd="gemma-4-sql", timeout=0.01),
+        ("completed via popen", ""),
+    ]
+    with patch("subprocess.Popen", return_value=mock_popen_ok):
+        res_ev = run_gemma_sql_train(
+            "sft",
+            str(cfg),
+            cancel_event=ev_ok,
+            binary_resolver=lambda: "echo",
         )
-        with patch("subprocess.Popen", return_value=mock_popen_hang):
-            with pytest.raises(TrainingExecutionError, match="training cancelled"):
-                run_gemma_sql_train("sft", str(cfg), cancel_event=ev_cancel)
-        mock_popen_hang.kill.assert_called_once()
+        assert res_ev.returncode == 0
+        assert "completed via popen" in res_ev.stdout
 
-        # With unset cancel_event that times out -> kills process and raises SubprocessTimeoutError
-        ev_timeout = threading.Event()
-        mock_popen_timeout = MagicMock()
-        mock_popen_timeout.poll.return_value = None
-        with patch("subprocess.Popen", return_value=mock_popen_timeout):
-            with pytest.raises(SubprocessTimeoutError, match="timed out"):
-                run_gemma_sql_train(
-                    "sft", str(cfg), timeout=0.0, cancel_event=ev_timeout
-                )
-        mock_popen_timeout.kill.assert_called_once()
+    # Real short-lived subprocess exiting inside 10ms communicate window preserves full stdout via public API
+    real_res = run_gemma_sql_train(
+        "sft",
+        str(cfg),
+        extra_args=["race_free_stdout_ok"],
+        timeout=10.0,
+        cancel_event=threading.Event(),
+        binary_resolver=lambda: "echo",
+    )
+    assert real_res.returncode == 0
+    assert "race_free_stdout_ok" in real_res.stdout
+
+    # With pre-set cancel_event -> terminates and raises TrainingExecutionError
+    ev_cancel = threading.Event()
+    ev_cancel.set()
+    mock_popen_cancel = MagicMock()
+    mock_popen_cancel.communicate.return_value = ("", "")
+    with patch("subprocess.Popen", return_value=mock_popen_cancel):
+        with pytest.raises(TrainingExecutionError, match="training cancelled"):
+            run_gemma_sql_train(
+                "sft",
+                str(cfg),
+                cancel_event=ev_cancel,
+                binary_resolver=lambda: "echo",
+            )
+    mock_popen_cancel.terminate.assert_called_once()
+
+    # With pre-set cancel_event where communicate(timeout=2.0) raises TimeoutExpired -> kills process
+    mock_popen_hang = MagicMock()
+    mock_popen_hang.communicate.side_effect = [
+        subprocess.TimeoutExpired(cmd="gemma-4-sql", timeout=2.0),
+        ("", ""),
+    ]
+    with patch("subprocess.Popen", return_value=mock_popen_hang):
+        with pytest.raises(TrainingExecutionError, match="training cancelled"):
+            run_gemma_sql_train(
+                "sft",
+                str(cfg),
+                cancel_event=ev_cancel,
+                binary_resolver=lambda: "echo",
+            )
+    mock_popen_hang.kill.assert_called_once()
+
+    # With unset cancel_event that times out -> kills process and raises SubprocessTimeoutError
+    ev_timeout = threading.Event()
+    mock_popen_timeout = MagicMock()
+    mock_popen_timeout.communicate.return_value = ("", "")
+    with patch("subprocess.Popen", return_value=mock_popen_timeout):
+        with pytest.raises(SubprocessTimeoutError, match="timed out"):
+            run_gemma_sql_train(
+                "sft",
+                str(cfg),
+                timeout=0.0,
+                cancel_event=ev_timeout,
+                binary_resolver=lambda: "echo",
+            )
+    mock_popen_timeout.kill.assert_called_once()
 
 
 def test_resolve_local_gemma_sql_repo(tmp_path: Path) -> None:
@@ -769,7 +814,7 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
     assert prune_schema_with_gemma_rag("query", "   ") == "   "
     assert prune_schema_with_gemma_rag("query", "no tables here") == "no tables here"
 
-    nl = chr(10)
+    nl = "\n"
     schema_text = nl.join(
         [
             "Table: patients",
@@ -784,7 +829,7 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
             "  - glucose (DOUBLE)",
         ]
     )
-    parsed_map = _extract_schema_map_from_text(schema_text)
+    parsed_map = extract_schema_map_from_text(schema_text)
     assert "patients" in parsed_map
     assert "cgm_readings" in parsed_map
 
@@ -799,7 +844,7 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
             "Sample row: (1, 10)",
         ]
     )
-    canonical_map = _extract_schema_map_from_text(canonical_schema)
+    canonical_map = extract_schema_map_from_text(canonical_schema)
     assert canonical_map["lab_results"] == ["patient_id", "hba1c"]
     assert canonical_map["empty_inline"] == []
     assert canonical_map["visits"] == ["visit_id", "patient_id"]
@@ -809,7 +854,7 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
         + nl
         + "CREATE TABLE IF NOT EXISTS visits (visit_id INT, patient_id INT);"
     )
-    ddl_map = _extract_schema_map_from_text(ddl_text)
+    ddl_map = extract_schema_map_from_text(ddl_text)
     assert ddl_map["patients"] == ["subject_id", "age"]
     assert ddl_map["visits"] == ["visit_id", "patient_id"]
 
@@ -833,7 +878,6 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
         assert "-- Table: cgm_readings" in enriched_fb
 
     from t1d_analytics.api_schemas import ColumnInfo, TableSchemaModel
-    from t1d_analytics.gemma_bridge import score_sql_completion_logprob
 
     # 3. When import_module raises -> falls back to built-in ranking (with and without matching words)
     with patch("importlib.import_module", side_effect=ImportError("no rag")):
@@ -870,7 +914,9 @@ def test_extract_schema_map_and_prune_schema_with_gemma_rag() -> None:
                 sample_row="(1, 24.5)",
             )
         ]
-        enriched_models = prune_schema_with_gemma_rag("patients age", structured_models)
+        enriched_models = prune_schema_with_gemma_rag(
+            "patients age", structured_models, repo_resolver=None
+        )
         assert "-- Table: patients | Columns: subject_id, age" in enriched_models
         assert prune_schema_with_gemma_rag("", structured_models) != ""
         assert prune_schema_with_gemma_rag("patients", []) == ""
@@ -924,32 +970,30 @@ def test_validate_sql_tokens() -> None:
 
 
 def test_classify_sql_error_hint_and_execute_agentic_nl_to_sql() -> None:
-    """Test _classify_sql_error_hint and execute_agentic_nl_to_sql self-correction loop."""
-    from t1d_analytics.sql_agent import classify_duckdb_error_hint
-
-    assert "TRY_CAST" in classify_duckdb_error_hint(
+    """Test classify_sql_error_hint and execute_agentic_nl_to_sql self-correction loop."""
+    assert "TRY_CAST" in classify_sql_error_hint(
         "Binder Error: No function matches the given name and argument types 'sum(VARCHAR)'."
     )
-    assert "UNION ALL" in classify_duckdb_error_hint(
+    assert "UNION ALL" in classify_sql_error_hint(
         "Binder Error: Set operations can only apply to expressions with the same number of result columns"
     )
-    assert "ROLLUP" in classify_duckdb_error_hint(
+    assert "ROLLUP" in classify_sql_error_hint(
         "Binder Error: column 'TxGroup' must appear in the GROUP BY clause"
     )
-    assert "column names" in _classify_sql_error_hint(
+    assert "column names" in classify_sql_error_hint(
         "Binder Error: Referenced column 'bad_col' not found"
     )
-    assert "table names" in _classify_sql_error_hint(
+    assert "table names" in classify_sql_error_hint(
         "Catalog Error: Table with name bad_tbl does not exist"
     )
-    assert _classify_sql_error_hint("Syntax error near SELECT") == ""
+    assert classify_sql_error_hint("Syntax error near SELECT") == ""
 
     # 1. Succeeds on second attempt after self-correction
     prompts_seen = []
 
     def fake_gen(prompt: str) -> str:
         """Generate candidate SQL across retry turns."""
-        nl = chr(10)
+        nl = "\n"
         prompts_seen.append(prompt)
         if len(prompts_seen) == 1:
             return f"```sql{nl}SELECT bad_col FROM patients{nl}```"
@@ -985,32 +1029,92 @@ def test_classify_sql_error_hint_and_execute_agentic_nl_to_sql() -> None:
 
 
 def test_gemma_module_protocols_stubs(tmp_path: Path) -> None:
-    """Verify GemmaLibraryAdapter delegation across ETL, SFT, DPO, and SQL evaluation stages."""
-    from t1d_analytics.gemma_bridge import (
-        GemmaLibraryAdapter,
-        _GemmaDpoModuleProtocol,
-        _GemmaEtlModuleProtocol,
-        _GemmaEvalModuleProtocol,
-        _GemmaSftModuleProtocol,
+    """Verify LibraryStrategy, CliStrategy, and GemmaExecutionStrategy delegation across ETL, SFT, DPO, and SQL evaluation."""
+    from t1d_analytics.errors import SubprocessTimeoutError, TrainingExecutionError
+    from t1d_analytics.gemma_library_adapter import (
+        GemmaDpoModuleProtocol,
+        GemmaEtlModuleProtocol,
+        GemmaEvalModuleProtocol,
+        GemmaSftModuleProtocol,
     )
 
     fake_mod = _FakeGemmaLibraryModule()
-    assert isinstance(fake_mod, _GemmaEtlModuleProtocol)
-    assert isinstance(fake_mod, _GemmaSftModuleProtocol)
-    assert isinstance(fake_mod, _GemmaDpoModuleProtocol)
-    assert isinstance(fake_mod, _GemmaEvalModuleProtocol)
+    assert isinstance(fake_mod, GemmaEtlModuleProtocol)
+    assert isinstance(fake_mod, GemmaSftModuleProtocol)
+    assert isinstance(fake_mod, GemmaDpoModuleProtocol)
+    assert isinstance(fake_mod, GemmaEvalModuleProtocol)
     db_file = tmp_path / "db.duckdb"
     db_file.write_text("", encoding="utf-8")
     ds_file = tmp_path / "ds.jsonl"
     ds_file.write_text('{"prompt": "q", "completion": "SELECT 1"}\n', encoding="utf-8")
     out_dir = tmp_path / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
-    adapter = GemmaLibraryAdapter(fake_mod)
-    etl_res = adapter.run_etl("sft", str(db_file), "tbl", str(out_dir))
-    assert etl_res["rows"] == 10
-    sft_res = adapter.run_sft("gemma-2b", str(ds_file), str(out_dir), {"lr": 1e-4})
-    assert sft_res == {"loss": 0.12, "steps": 10}
-    dpo_res = adapter.run_dpo("gemma-2b", str(ds_file), str(out_dir), beta=0.2)
-    assert dpo_res == {"loss": 0.08, "beta": 0.2}
-    eval_res = adapter.evaluate_sql("gemma-2b", str(ds_file), str(db_file))
-    assert eval_res == 0.94
+
+    lib_strategy = LibraryStrategy(fake_mod)
+    assert isinstance(lib_strategy, GemmaExecutionStrategy)
+    etl_res = lib_strategy.run_etl("sft", db_file, "tbl", out_dir)
+    assert etl_res["result"]["rows"] == 10
+    sft_res = lib_strategy.run_sft("gemma-2b", ds_file, out_dir, {"lr": 1e-4})
+    assert sft_res["result"] == {"loss": 0.12, "steps": 10}
+    dpo_res = lib_strategy.run_dpo("gemma-2b", ds_file, out_dir, beta=0.2)
+    assert dpo_res["result"] == {"loss": 0.08, "beta": 0.2}
+    eval_res = lib_strategy.evaluate_sql("gemma-2b", ds_file, db_file)
+    assert eval_res["accuracy"] == 0.94
+
+    cli_strategy = CliStrategy(binary_resolver=lambda: "/opt/bin/gemma-4-sql")
+    assert isinstance(cli_strategy, GemmaExecutionStrategy)
+    cli_engine = GemmaSqlPipelineEngine(strategy=cli_strategy)
+    assert cli_engine.is_library_available is False
+    assert cli_engine.strategy is cli_strategy
+
+    with patch(
+        "subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["/opt/bin/gemma-4-sql"],
+            returncode=0,
+            stdout="Step 12 | Loss: 0.15 | accuracy: 0.88\n",
+            stderr="",
+        ),
+    ):
+        cli_etl = cli_engine.run_etl("sft", db_file, "tbl", out_dir)
+        assert cli_etl["execution_mode"] == "cli"
+        cli_sft = cli_engine.run_sft("gemma-2b", ds_file, out_dir)
+        assert cli_sft["execution_mode"] == "cli"
+        assert cli_sft["result"]["steps"] == 12
+        cli_dpo = cli_engine.run_dpo("gemma-2b", ds_file, out_dir, beta=0.1)
+        assert cli_dpo["execution_mode"] == "cli"
+        cli_eval = cli_engine.evaluate_sql("gemma-2b", ds_file, db_file)
+        assert cli_eval["execution_mode"] == "cli"
+        assert cli_eval["accuracy"] == 0.88
+
+    with patch(
+        "subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["/opt/bin/gemma-4-sql"],
+            returncode=0,
+            stdout="done without metrics\n",
+            stderr="",
+        ),
+    ):
+        assert cli_engine.run_sft("gemma-2b", ds_file, out_dir)["result"]["loss"] == 0.0
+        assert cli_engine.run_dpo("gemma-2b", ds_file, out_dir)["result"]["loss"] == 0.0
+        assert cli_engine.evaluate_sql("gemma-2b", ds_file, db_file)["accuracy"] == 0.0
+
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="gemma-4-sql", timeout=1.0),
+    ):
+        with pytest.raises(SubprocessTimeoutError, match="eval command timed out"):
+            cli_engine.evaluate_sql("gemma-2b", ds_file, db_file, timeout=1.0)
+
+    with patch(
+        "subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            args=["/opt/bin/gemma-4-sql"],
+            returncode=1,
+            stdout="",
+            stderr="eval error",
+        ),
+    ):
+        with pytest.raises(TrainingExecutionError, match="eval command failed"):
+            cli_engine.evaluate_sql("gemma-2b", ds_file, db_file)

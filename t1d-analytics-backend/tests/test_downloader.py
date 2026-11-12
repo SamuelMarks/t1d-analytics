@@ -2,7 +2,6 @@
 
 import typing
 from pathlib import Path
-from typing import Optional
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -447,9 +446,9 @@ def test_download_file_progress_callback_and_terminal(
     tmp_path: Path, requests_mock: Mock, mocker: MagicMock, capsys: CaptureFixture[str]
 ) -> None:
     """Test progress callback and terminal animation execution."""
-    progress_updates: list[tuple[int, Optional[int]]] = []
+    progress_updates: list[tuple[int, int | None]] = []
 
-    def on_progress(downloaded: int, total: Optional[int]) -> None:
+    def on_progress(downloaded: int, total: int | None) -> None:
         """Record download progress tuple."""
         progress_updates.append((downloaded, total))
 
@@ -594,9 +593,9 @@ def test_download_aspnet_postback_file_with_form_data(
         headers={"Content-Disposition": 'attachment; filename="export_study1.csv"'},
     )
 
-    progress_records: list[tuple[int, Optional[int]]] = []
+    progress_records: list[tuple[int, int | None]] = []
 
-    def on_progress(downloaded: int, total: Optional[int]) -> None:
+    def on_progress(downloaded: int, total: int | None) -> None:
         """Track download progress."""
         progress_records.append((downloaded, total))
 
@@ -746,3 +745,97 @@ def test_download_aspnet_postback_file_with_empty_chunk(
     )
     assert p.exists()
     assert p.read_bytes() == b"header,value\n"
+
+
+def test_downloader_weak_lock_pruning_scheme_validation_and_redirect_stripping(
+    tmp_path: Path, requests_mock: Mock
+) -> None:
+    """Verify WeakValueDictionary lock GC, http/https scheme validation, and cross-origin redirect credential stripping."""
+    import gc
+
+    from t1d_analytics.downloader import (
+        _file_locks,
+        _get_file_lock,
+        download_aspnet_postback_file,
+        validate_download_url,
+    )
+    from t1d_analytics.errors import DownloadError
+
+    ephemeral_target = tmp_path / "ephemeral_lock_target.zip"
+    held_lock = _get_file_lock(ephemeral_target)
+    assert str(ephemeral_target.resolve()) in _file_locks
+    assert _get_file_lock(ephemeral_target) is held_lock
+    del held_lock
+    gc.collect()
+    assert str(ephemeral_target.resolve()) not in _file_locks
+
+    for bad_url in (
+        "file:///etc/passwd",
+        "ftp://example.com/data.zip",
+        "javascript:alert(1)",
+        "http:///missing-host",
+        "not-a-url",
+    ):
+        with pytest.raises(DownloadError):
+            validate_download_url(bad_url)
+        with pytest.raises(DownloadError):
+            download_file(bad_url, tmp_path)
+        with pytest.raises(DownloadError):
+            download_aspnet_postback_file(
+                page_url=bad_url,
+                event_target="t",
+                event_argument="a",
+                dest_dir=tmp_path,
+            )
+
+    # Same-origin redirect preserves Authorization, cross-origin redirect strips Authorization/Cookie/auth/cookies
+    requests_mock.get(
+        "https://portal.example.org/start.zip",
+        status_code=302,
+        headers={"Location": "/step2.zip"},
+    )
+    requests_mock.get(
+        "https://portal.example.org/step2.zip",
+        status_code=302,
+        headers={"Location": "https://cdn.other-domain.net/final.zip"},
+    )
+    requests_mock.get(
+        "https://cdn.other-domain.net/final.zip",
+        content=b"safe-payload",
+    )
+
+    download_file(
+        "https://portal.example.org/start.zip",
+        tmp_path,
+        token="secret-bearer-token",
+        auth=("user", "pass"),
+        headers={"Cookie": "sid=secret-cookie", "X-Custom": "keep-me"},
+        cookies={"session": "secret"},
+    )
+    assert (tmp_path / "start.zip").read_bytes() == b"safe-payload"
+
+    same_origin_req = requests_mock.request_history[1]
+    assert same_origin_req.headers.get("Authorization") is not None
+
+    cross_origin_req = requests_mock.request_history[2]
+    assert cross_origin_req.headers.get("Authorization") is None
+    assert cross_origin_req.headers.get("Cookie") is None
+    assert cross_origin_req.headers.get("X-Custom") == "keep-me"
+
+    # Redirect without Location header falls through to raise_for_status / normal handling
+    requests_mock.get(
+        "https://portal.example.org/no-loc.zip",
+        status_code=302,
+        content=b"no-loc",
+    )
+    download_file("https://portal.example.org/no-loc.zip", tmp_path)
+    assert (tmp_path / "no-loc.zip").read_bytes() == b"no-loc"
+
+    # Excess redirect loop raises DownloadError
+    requests_mock.get(
+        "https://portal.example.org/loop.zip",
+        status_code=302,
+        headers={"Location": "https://portal.example.org/loop.zip"},
+    )
+    with pytest.raises(DownloadError, match="Exceeded maximum redirects"):
+        download_file("https://portal.example.org/loop.zip", tmp_path)

@@ -8,8 +8,8 @@ import os
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
 
 import duckdb
 
@@ -22,7 +22,24 @@ from t1d_analytics import (
     seed,
     training_data,
 )
-from t1d_analytics.cli_parser import CliOptionsModel, ManifestStageDict
+from t1d_analytics.cli_parser import (
+    BridgeGemmaSqlCliOpts,
+    DoctorCliOpts,
+    DownloadCliOpts,
+    EvaluateCliOpts,
+    ExportCliOpts,
+    ExportTrainingDataCliOpts,
+    ExtractCliOpts,
+    GenerateTrainingDataCliOpts,
+    LoadCliOpts,
+    ManifestCliOpts,
+    ManifestStageDict,
+    ProfileCliOpts,
+    QueryCliOpts,
+    SeedCliOpts,
+    TrainCliOpts,
+    WatchCliOpts,
+)
 from t1d_analytics.downloader import (
     DownloadSummaryDict,
     parse_headers_file,
@@ -51,15 +68,12 @@ def load_auth_plugin(plugin_spec: str) -> Callable[[], str]:
     Dynamically load an authentication plugin callable from a module specifier.
 
     Args:
-    ----
         plugin_spec: Specifier formatted as 'module:function' or 'pkg.module:func'.
 
     Returns:
-    -------
         Callable[[], str]: The loaded callable function returning a Bearer token or credentials.
 
     Raises:
-    ------
         AuthPluginError: If format is invalid or target function cannot be found or invoked.
 
     """
@@ -95,9 +109,9 @@ def load_auth_plugin(plugin_spec: str) -> Callable[[], str]:
 
 
 def handle_download(
-    opts: CliOptionsModel,
+    opts: DownloadCliOpts,
     fetch_html_fn: Callable[..., str] = fetch_html,
-    parse_datasets_fn: Callable[..., List[DatasetInfo]] = parse_datasets,
+    parse_datasets_fn: Callable[..., list[DatasetInfo]] = parse_datasets,
     process_datasets_fn: Callable[..., DownloadSummaryDict] = process_datasets,
     load_auth_plugin_fn: Callable[[str], Callable[[], str]] = load_auth_plugin,
 ) -> None:
@@ -105,7 +119,6 @@ def handle_download(
     Handle the download subcommand.
 
     Args:
-    ----
         opts: Validated CLI options model.
         fetch_html_fn: Callable to fetch HTML from the dataset index URL.
         parse_datasets_fn: Callable to parse dataset links from HTML.
@@ -113,11 +126,10 @@ def handle_download(
         load_auth_plugin_fn: Callable to load an authentication plugin specifier.
 
     Raises:
-    ------
         DownloadError: If one or more dataset files fail to download.
 
     """
-    _ = get_translator()
+    _ = get_translator(opts.lang)
     print(_("Fetching HTML from {}...", opts.url))
     html = fetch_html_fn(opts.url)
 
@@ -132,16 +144,16 @@ def handle_download(
     out_target = str(opts.output)
     print(_("Starting downloads to {}...", out_target))
 
-    auth: Optional[tuple[str, str]] = None
+    auth: tuple[str, str] | None = None
     if opts.user and opts.password:
         auth = (opts.user, opts.password)
 
-    custom_headers: Optional[dict[str, str]] = None
+    custom_headers: dict[str, str] | None = None
     if opts.headers:
         custom_headers = parse_headers_file(Path(opts.headers))
 
     token = opts.token
-    auth_plugin_cb: Optional[Callable[[], str]] = None
+    auth_plugin_cb: Callable[[], str] | None = None
     if opts.auth_plugin:
         auth_plugin_cb = load_auth_plugin_fn(opts.auth_plugin)
         if not token:
@@ -165,41 +177,32 @@ def handle_download(
     print(_("Done!"))
 
 
-def handle_extract(opts: CliOptionsModel) -> None:
+def handle_extract(opts: ExtractCliOpts) -> None:
     """
     Handle the extract subcommand.
 
     Args:
-    ----
-        opts: Validated CLI options model.
+        opts: Validated `ExtractCliOpts` model.
 
     """
-    if (
-        opts.max_decompressed_gb == 200.0
-        and not opts.overwrite
-        and not opts.tabular_only
-    ):
-        ingestion.extract_zips(opts.data_dir)
-    else:
-        max_bytes = (
-            int(opts.max_decompressed_gb * 1024 * 1024 * 1024)
-            if opts.max_decompressed_gb > 0
-            else 0
-        )
-        ingestion.extract_zips(
-            opts.data_dir,
-            max_decompressed_bytes=max_bytes,
-            overwrite=opts.overwrite,
-            tabular_only=opts.tabular_only,
-        )
+    max_bytes = (
+        int(opts.max_decompressed_gb * 1024 * 1024 * 1024)
+        if opts.max_decompressed_gb > 0
+        else 0
+    )
+    ingestion.extract_zips(
+        opts.data_dir,
+        max_decompressed_bytes=max_bytes,
+        overwrite=opts.overwrite,
+        tabular_only=opts.tabular_only,
+    )
 
 
-def handle_load(opts: CliOptionsModel) -> None:
+def handle_load(opts: LoadCliOpts) -> None:
     """
     Handle the load subcommand.
 
     Args:
-    ----
         opts: Validated CLI options model.
 
     """
@@ -212,12 +215,11 @@ def handle_load(opts: CliOptionsModel) -> None:
     )
 
 
-def handle_seed(opts: CliOptionsModel) -> None:
+def handle_seed(opts: SeedCliOpts) -> None:
     """
     Handle the seed subcommand to generate baseline clinical CSVs and populate DuckDB.
 
     Args:
-    ----
         opts: Validated CLI options model containing data_dir, db, sessions_db, and overwrite.
 
     """
@@ -233,12 +235,11 @@ def handle_seed(opts: CliOptionsModel) -> None:
     )
 
 
-def handle_manifest(opts: CliOptionsModel) -> None:
+def handle_manifest(opts: ManifestCliOpts) -> None:
     """
     Handle the manifest subcommand.
 
     Args:
-    ----
         opts: Validated CLI options model containing db path.
 
     """
@@ -257,19 +258,18 @@ def handle_manifest(opts: CliOptionsModel) -> None:
         )
 
 
-def handle_query(opts: CliOptionsModel) -> None:
+def handle_query(opts: QueryCliOpts) -> None:
     """
     Handle the query subcommand.
 
     Args:
-    ----
         opts: Validated CLI options model containing db, model, and optional provider.
 
     """
     analytics.run_query_repl(opts.db, model=opts.model, provider=opts.provider)
 
 
-def handle_generate_training_data(opts: CliOptionsModel) -> None:
+def handle_generate_training_data(opts: GenerateTrainingDataCliOpts) -> None:
     """
     Handle the generate-training-data subcommand.
 
@@ -278,11 +278,10 @@ def handle_generate_training_data(opts: CliOptionsModel) -> None:
     the provided local LLM model and provider.
 
     Args:
-    ----
         opts: Validated CLI options model containing db, num_pairs, model, provider, and split_ratios.
 
     """
-    _ = get_translator()
+    _ = get_translator(opts.lang)
 
     print(_("Connecting to DuckDB at {}...", opts.db))
     conn = duckdb.connect(opts.db)
@@ -317,16 +316,14 @@ def handle_generate_training_data(opts: CliOptionsModel) -> None:
     print(_("Training data generation complete!"))
 
 
-def handle_evaluate(opts: CliOptionsModel) -> None:
+def handle_evaluate(opts: EvaluateCliOpts) -> None:
     """
     Handle the evaluate subcommand.
 
     Args:
-    ----
         opts: Validated CLI options model containing db, test_set, model, and output.
 
     Raises:
-    ------
         CliValidationError: If the specified `--test-set` file does not exist.
 
     """
@@ -359,16 +356,15 @@ def handle_evaluate(opts: CliOptionsModel) -> None:
         print(f"Report saved to {out_p}")
 
 
-def handle_export_training_data(opts: CliOptionsModel) -> None:
+def handle_export_training_data(opts: ExportTrainingDataCliOpts) -> None:
     """
     Handle exporting training data to JSONL or Parquet format.
 
     Args:
-    ----
         opts: Validated CLI options model containing db, table, format, and output_file.
 
     """
-    _ = get_translator()
+    _ = get_translator(opts.lang)
     print(_("Connecting to DuckDB at {}...", opts.db))
     conn = duckdb.connect(opts.db, read_only=True)
     try:
@@ -384,12 +380,11 @@ def handle_export_training_data(opts: CliOptionsModel) -> None:
     print(_("Export complete!"))
 
 
-def handle_export(opts: CliOptionsModel) -> None:
+def handle_export(opts: ExportCliOpts) -> None:
     """
     Handle exporting database tables to Excel (.xlsx), Parquet, or CSV format.
 
     Args:
-    ----
         opts: Validated CLI options model containing db, table, format, and output_file.
 
     """
@@ -405,16 +400,15 @@ def handle_export(opts: CliOptionsModel) -> None:
     print(_("Export complete!"))
 
 
-def handle_doctor(opts: CliOptionsModel) -> None:
+def handle_doctor(opts: DoctorCliOpts) -> None:
     """
     Handle the doctor subcommand to inspect system health.
 
     Args:
-    ----
         opts: Validated CLI options model containing db path and threshold flags.
 
     """
-    health = diagnostics.get_system_health(db_path=opts.db)
+    health = diagnostics.get_system_health(db_path=opts.db, lang=opts.lang)
     db = health.database
     ollama = health.ollama
 
@@ -468,12 +462,11 @@ def handle_doctor(opts: CliOptionsModel) -> None:
         sys.exit(1)
 
 
-def handle_profile(opts: CliOptionsModel) -> None:
+def handle_profile(opts: ProfileCliOpts) -> None:
     """
     Handle the profile subcommand to analyze data quality and completeness of a table.
 
     Args:
-    ----
         opts: Validated CLI options model containing db path and table name.
 
     """
@@ -493,12 +486,11 @@ def handle_profile(opts: CliOptionsModel) -> None:
     print("=" * 60)
 
 
-def handle_watch(opts: CliOptionsModel) -> None:
+def handle_watch(opts: WatchCliOpts) -> None:
     """
     Handle the watch subcommand to monitor and incrementally ingest files into DuckDB.
 
     Args:
-    ----
         opts: Validated CLI options model containing data_dir, db, interval, iterations, and prefix_subdirs.
 
     """
@@ -575,20 +567,17 @@ def handle_watch(opts: CliOptionsModel) -> None:
         time.sleep(opts.interval)
 
 
-def validate_cli_hyperparameters(opts: CliOptionsModel) -> TrainingHyperparameters:
+def validate_cli_hyperparameters(opts: TrainCliOpts) -> TrainingHyperparameters:
     """
     Validate CLI training hyperparameter bounds and return a `TrainingHyperparameters` instance.
 
     Args:
-    ----
         opts: Validated CLI options model.
 
     Returns:
-    -------
         TrainingHyperparameters: Validated hyperparameter configuration.
 
     Raises:
-    ------
         CliValidationError: If any hyperparameter violates domain constraints.
 
     """
@@ -621,14 +610,13 @@ def export_training_stages(
     conn: duckdb.DuckDBPyConnection,
     generator: training_data.TrainingDataGenerator,
     out_dir: Path,
-    formats: List[str],
+    formats: list[str],
     split_val_flag: bool,
-) -> Dict[str, ManifestStageDict]:
+) -> dict[str, ManifestStageDict]:
     """
     Export generated training tables from DuckDB into JSONL and/or Parquet files.
 
     Args:
-    ----
         conn: Active DuckDB connection.
         generator: Initialized `TrainingDataGenerator`.
         out_dir: Target output directory.
@@ -636,7 +624,6 @@ def export_training_stages(
         split_val_flag: Whether stratified split tables should also be exported.
 
     Returns:
-    -------
         Dict[str, ManifestStageDict]: Stage-to-metadata mapping for the training manifest.
 
     """
@@ -645,7 +632,7 @@ def export_training_stages(
         stages_to_export.extend(["sft_data_train", "sft_data_val", "sft_data_test"])
 
     all_tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
-    manifest_stages: Dict[str, ManifestStageDict] = {}
+    manifest_stages: dict[str, ManifestStageDict] = {}
 
     for stage in stages_to_export:
         if stage in all_tables:
@@ -677,12 +664,11 @@ def export_training_stages(
 verify_split_prompt_leakage = diagnostics.verify_split_prompt_leakage
 
 
-def handle_train(opts: CliOptionsModel) -> None:
+def handle_train(opts: TrainCliOpts) -> None:
     """
     Handle the train subcommand to orchestrate synthetic data generation and export.
 
     Args:
-    ----
         opts: Validated CLI options model containing db, output_dir, samples_per_table, provider, model, export_formats, and optional flags.
 
     """
@@ -730,11 +716,11 @@ def handle_train(opts: CliOptionsModel) -> None:
         hparams = validate_cli_hyperparameters(opts)
 
         backend_val = opts.backend
-        manifest: Dict[
+        manifest: dict[
             str,
-            Union[str, int, bool, List[str], Dict[str, ManifestStageDict]],
+            str | int | bool | list[str] | dict[str, ManifestStageDict],
         ] = {
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
             "model": f"{opts.provider}/{opts.model}",
             "database": str(opts.db),
             "samples_per_table": int(opts.samples_per_table),
@@ -802,16 +788,14 @@ def handle_train(opts: CliOptionsModel) -> None:
     print("Training orchestration completed successfully.")
 
 
-def handle_bridge_gemma_sql(opts: CliOptionsModel) -> None:
+def handle_bridge_gemma_sql(opts: BridgeGemmaSqlCliOpts) -> None:
     """
     Handle the bridge-gemma-sql command to interact with external gemma-4-sql toolchains.
 
     Args:
-    ----
         opts: Validated CLI options model containing action, stage, db, table, output_dir, and config.
 
     Raises:
-    ------
         CliValidationError: If `--config` is omitted for the `'train'` action.
 
     """

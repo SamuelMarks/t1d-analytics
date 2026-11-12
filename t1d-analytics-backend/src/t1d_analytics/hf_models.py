@@ -6,19 +6,12 @@ import platform
 import subprocess
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    Callable,
-    ContextManager,
-    Dict,
-    Iterable,
-    List,
-    Optional,
     Protocol,
-    Sequence,
-    Tuple,
-    Union,
     runtime_checkable,
 )
 
@@ -32,13 +25,13 @@ from t1d_analytics.models import TrainingJobConfig
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHOICE_HF_MODELS: Dict[str, str] = {
+DEFAULT_CHOICE_HF_MODELS: dict[str, str] = {
     "google/gemma-4-E4B": "https://huggingface.co/google/gemma-4-E4B",
     "microsoft/Phi-4-mini-flash-reasoning": "https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning",
     "meta-llama/Llama-3.2-1B": "https://huggingface.co/meta-llama/Llama-3.2-1B",
 }
 
-DEFAULT_CHOICE_OLLAMA_MODELS: Tuple[str, ...] = (
+DEFAULT_CHOICE_OLLAMA_MODELS: tuple[str, ...] = (
     "gemma:2b",
     "llama3.2:1b",
     "phi4-mini",
@@ -78,7 +71,7 @@ class TensorProtocol(Protocol):
         """Return tensor with singleton dimension inserted at dim."""
         ...
 
-    def to(self, device: Union[str, DeviceProtocol]) -> "TensorProtocol":
+    def to(self, device: str | DeviceProtocol) -> "TensorProtocol":
         """Move tensor to target device."""
         ...
 
@@ -94,7 +87,7 @@ class TensorProtocol(Protocol):
         """Compute gradients via backpropagation."""
         ...
 
-    def __truediv__(self, other: Union[int, float]) -> "TensorProtocol":
+    def __truediv__(self, other: int | float) -> "TensorProtocol":
         """Divide tensor by scalar."""
         ...
 
@@ -103,18 +96,18 @@ if TYPE_CHECKING:
     import torch
 
     TensorLike = torch.Tensor
-    DeviceLike = Union[str, torch.device]
-    DtypeLike = Union[str, torch.dtype]
+    DeviceLike = str | torch.device
+    DtypeLike = str | torch.dtype
 else:
     TensorLike = TensorProtocol
-    DeviceLike = Union[str, DeviceProtocol]
-    DtypeLike = Union[str, DtypeProtocol]
+    DeviceLike = str | DeviceProtocol
+    DtypeLike = str | DtypeProtocol
 
 
 class TokenizerProtocol(Protocol):
     """Protocol representing a pretrained tokenizer with encode."""
 
-    def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         """Encode text into integer token identifiers."""
         ...
 
@@ -137,8 +130,8 @@ class AutoModelFactoryProtocol(Protocol):
     def from_pretrained(
         self,
         pretrained_model_name_or_path: str,
-        torch_dtype: Optional[DtypeLike] = None,
-        quantization_config: Optional[QuantizationConfigProtocol] = None,
+        torch_dtype: DtypeLike | None = None,
+        quantization_config: QuantizationConfigProtocol | None = None,
     ) -> "TorchCausalLMProtocol":
         """Load pretrained causal LM by name or path."""
         ...
@@ -157,7 +150,7 @@ class PaddedTokenizerProtocol(Protocol):
     """Runtime-checkable protocol for tokenizers exposing pad_token_id."""
 
     @property
-    def pad_token_id(self) -> Optional[int]:
+    def pad_token_id(self) -> int | None:
         """Return pad token identifier."""
         ...
 
@@ -172,7 +165,7 @@ class ModelOutputWithLogitsProtocol(Protocol):
         ...
 
 
-ModelForwardOutput = Union[TensorLike, ModelOutputWithLogitsProtocol]
+ModelForwardOutput = TensorLike | ModelOutputWithLogitsProtocol
 
 
 class TorchCausalLMProtocol(Protocol):
@@ -198,7 +191,7 @@ class TorchCausalLMProtocol(Protocol):
         """Move model to target compute device."""
         ...
 
-    def state_dict(self) -> Dict[str, TensorLike]:
+    def state_dict(self) -> dict[str, TensorLike]:
         """Return state dictionary."""
         ...
 
@@ -247,7 +240,9 @@ class CosineSchedulerNamespaceProtocol(Protocol):
 class AutocastTorchProtocol(Protocol):
     """Runtime-checkable protocol for `torch` module exposing `.autocast()`."""
 
-    def autocast(self, device_type: str, dtype: TensorLike) -> ContextManager[None]:
+    def autocast(
+        self, device_type: str, dtype: TensorLike
+    ) -> AbstractContextManager[None]:
         """Return an autocast context manager."""
         ...
 
@@ -294,32 +289,28 @@ class AcceleratorDetectorProtocol(Protocol):
         ...
 
 
-def _is_mps_available(backends_obj: MpsBackendsHolderProtocol) -> bool:
+def is_mps_available(backends_obj: MpsBackendsHolderProtocol) -> bool:
     """
     Check whether Apple Silicon MPS acceleration is available on `torch.backends`.
 
     Args:
-    ----
         backends_obj: The `torch.backends` namespace or mock object.
 
     Returns:
-    -------
         bool: True if `backends_obj.mps.is_available()` returns True.
 
     """
     return bool(backends_obj.mps.is_available())
 
 
-def _extract_output_logits(outputs: ModelForwardOutput) -> TensorLike:
+def extract_output_logits(outputs: ModelForwardOutput) -> TensorLike:
     """
     Extract the logits tensor from a model forward output.
 
     Args:
-    ----
         outputs: Model forward output (either a raw Tensor or an output container with `.logits`).
 
     Returns:
-    -------
         TensorLike: Extracted logits tensor.
 
     """
@@ -336,12 +327,10 @@ class BaseTrainingRunner(ABC):
         """
         Validate that required drivers, libraries, and hardware devices are present.
 
-        Returns
-        -------
+        Returns:
             bool: True if execution environment is validated.
 
-        Raises
-        ------
+        Raises:
             RuntimeError: If mandatory execution dependencies are missing.
 
         """
@@ -352,15 +341,12 @@ class BaseTrainingRunner(ABC):
         Validate and prepare input dataset file for training execution.
 
         Args:
-        ----
             config: Structured training job configuration.
 
         Returns:
-        -------
             Path: Verified path to dataset.
 
         Raises:
-        ------
             DatasetNotFoundError: If dataset path does not exist on disk.
 
         """
@@ -369,16 +355,14 @@ class BaseTrainingRunner(ABC):
             raise DatasetNotFoundError(f"Training dataset not found at '{ds_path}'.")
         return ds_path
 
-    def _count_dataset_samples(self, dataset_path: Path) -> int:
+    def count_dataset_samples(self, dataset_path: Path) -> int:
         """
         Count readable samples in dataset file (.parquet, .jsonl, .csv).
 
         Args:
-        ----
             dataset_path: Path to dataset.
 
         Returns:
-        -------
             int: Total sample count, or 0 if unreadable or empty.
 
         """
@@ -410,18 +394,16 @@ class BaseTrainingRunner(ABC):
     def run_training(
         self,
         config: TrainingJobConfig,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, JobMetricValue]:
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, JobMetricValue]:
         """
         Execute training run according to configuration parameters.
 
         Args:
-        ----
             config: Training job configuration.
             cancel_event: Optional threading event for cooperative cancellation.
 
         Returns:
-        -------
             Dict[str, JobMetricValue]: Execution results containing training loss, steps, and duration.
 
         """
@@ -436,7 +418,7 @@ class BaseCausalLMFactory(ABC):
         self,
         model_name: str,
         device: str = "cpu",
-        quantization: Optional[str] = None,
+        quantization: str | None = None,
         use_lora: bool = False,
         lora_r: int = 16,
         lora_alpha: int = 32,
@@ -446,7 +428,6 @@ class BaseCausalLMFactory(ABC):
         Create and return a causal language model instance configured for training.
 
         Args:
-        ----
             model_name: Name or local path of base pretrained model.
             device: Target device string ('cpu', 'cuda:0', 'mps').
             quantization: Quantization mode ('4bit', '8bit', or None).
@@ -456,11 +437,9 @@ class BaseCausalLMFactory(ABC):
             lora_dropout: LoRA dropout probability.
 
         Returns:
-        -------
             TorchCausalLMProtocol: Configured PyTorch nn.Module ready for training.
 
         Raises:
-        ------
             RuntimeError: If dependencies for model creation are missing or fail.
 
         """
@@ -474,7 +453,7 @@ class TinyCausalLMFactory(BaseCausalLMFactory):
         self,
         model_name: str,
         device: str = "cpu",
-        quantization: Optional[str] = None,
+        quantization: str | None = None,
         use_lora: bool = False,
         lora_r: int = 16,
         lora_alpha: int = 32,
@@ -486,7 +465,6 @@ class TinyCausalLMFactory(BaseCausalLMFactory):
         Create a lightweight PyTorch Embedding + Linear causal language model.
 
         Args:
-        ----
             model_name: Identifier for the tiny model.
             device: Target compute device ('cpu', 'cuda:0', 'mps').
             quantization: Optional quantization flag (ignored for tiny model).
@@ -498,7 +476,6 @@ class TinyCausalLMFactory(BaseCausalLMFactory):
             embed_dim: Hidden embedding dimension.
 
         Returns:
-        -------
             TorchCausalLMProtocol: Configured lightweight PyTorch causal model.
 
         """
@@ -545,7 +522,7 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
         self,
         model_name: str,
         device: str = "cpu",
-        quantization: Optional[str] = None,
+        quantization: str | None = None,
         use_lora: bool = False,
         lora_r: int = 16,
         lora_alpha: int = 32,
@@ -555,7 +532,6 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
         Create a Hugging Face AutoModelForCausalLM instance with optional LoRA and quantization.
 
         Args:
-        ----
             model_name: Pretrained model name or path (e.g., 'google/gemma-4-2b').
             device: Target compute device.
             quantization: Quantization mode ('4bit' or '8bit').
@@ -565,11 +541,9 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
             lora_dropout: LoRA dropout probability.
 
         Returns:
-        -------
             TorchCausalLMProtocol: Configured causal LM model.
 
         Raises:
-        ------
             RuntimeError: If transformers or peft are missing or model loading fails.
 
         """
@@ -584,7 +558,7 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
                 "Install via 'pip install transformers torch'."
             ) from e
 
-        bnb_config: Optional[QuantizationConfigProtocol] = None
+        bnb_config: QuantizationConfigProtocol | None = None
         if quantization in ("4bit", "8bit"):
             try:
                 bnb_cls = tf_mod.BitsAndBytesConfig
@@ -661,11 +635,9 @@ def resolve_causal_lm_factory(config: TrainingJobConfig) -> BaseCausalLMFactory:
     Select the appropriate causal LM factory based on TrainingJobConfig flags.
 
     Args:
-    ----
         config: Training job configuration.
 
     Returns:
-    -------
         BaseCausalLMFactory: TinyCausalLMFactory when use_tiny_model is True or
             model_architecture is 'tiny', otherwise HuggingFaceCausalLMFactory.
 
@@ -675,16 +647,14 @@ def resolve_causal_lm_factory(config: TrainingJobConfig) -> BaseCausalLMFactory:
     return HuggingFaceCausalLMFactory()
 
 
-def resolve_device_telemetry(device: str) -> Tuple[str, float]:
+def resolve_device_telemetry(device: str) -> tuple[str, float]:
     """
     Resolve descriptive hardware identifier and total memory for the active execution device.
 
     Args:
-    ----
         device: Target hardware device string ('cuda:0', 'mps', 'cpu', etc.).
 
     Returns:
-    -------
         Tuple[str, float]: (device_name, total_memory_mb).
 
     """

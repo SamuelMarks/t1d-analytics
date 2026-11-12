@@ -203,21 +203,27 @@ describe("i18n.ts", () => {
       { name: "he", map: flattenKeys(heTranslations) },
     ];
 
+    /**
+     * Extracts sorted `{{placeholder}}` variable names from a translation template.
+     * @param {string} str - Translation template string.
+     * @returns {string[]} Sorted placeholder names.
+     */
     const extractPlaceholders = (str: string): string[] =>
       Array.from(str.matchAll(/\{\{(\w+)\}\}/g))
-        .map((m) => m[1])
+        .map((m) => String(m[1]))
         .sort();
 
     for (const [key, enVal] of Object.entries(enFlat)) {
       if (key.includes("chatNumber_")) continue;
       const expectedVars = extractPlaceholders(enVal);
       for (const loc of locales) {
+        const locVal = loc.map[key];
         expect(
-          loc.map[key],
+          locVal,
           `Missing translation key '${key}' in locale '${loc.name}'`,
         ).toBeDefined();
         expect(
-          extractPlaceholders(loc.map[key]),
+          extractPlaceholders(locVal ?? ""),
           `Placeholder mismatch for '${key}' in locale '${loc.name}'`,
         ).toEqual(expectedVars);
       }
@@ -242,22 +248,22 @@ describe("i18n.ts", () => {
       await setLanguage(lang);
 
       document.querySelectorAll("[data-i18n]").forEach((el) => {
-        const key = el.getAttribute("data-i18n")!;
+        const key = String(el.getAttribute("data-i18n"));
         expect(el.textContent).toBe(i18next.t(key));
       });
 
       document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
-        const key = el.getAttribute("data-i18n-placeholder")!;
+        const key = String(el.getAttribute("data-i18n-placeholder"));
         expect(el.getAttribute("placeholder")).toBe(i18next.t(key));
       });
 
       document.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
-        const key = el.getAttribute("data-i18n-aria-label")!;
+        const key = String(el.getAttribute("data-i18n-aria-label"));
         expect(el.getAttribute("aria-label")).toBe(i18next.t(key));
       });
 
       document.querySelectorAll("[data-i18n-title]").forEach((el) => {
-        const key = el.getAttribute("data-i18n-title")!;
+        const key = String(el.getAttribute("data-i18n-title"));
         expect(el.getAttribute("title")).toBe(i18next.t(key));
       });
 

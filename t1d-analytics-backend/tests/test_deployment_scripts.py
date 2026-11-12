@@ -27,11 +27,9 @@ def load_dotenv_dict(
     Parse the repository .env, .env.secrets.tpl, and .env.secrets files into a dictionary.
 
     Args:
-    ----
         paths: Tuple of dotenv file paths to read in order.
 
     Returns:
-    -------
         dict[str, str]: Parsed environment variables.
 
     """
@@ -52,7 +50,6 @@ def make_executable(script_path: Path, content: str) -> None:
     Write an executable shell script to disk.
 
     Args:
-    ----
         script_path: Path where the script should be written.
         content: Shell script body content.
 
@@ -72,13 +69,11 @@ def run_test_sh(
     Execute test.sh with isolated environment overrides.
 
     Args:
-    ----
         args: List of command-line arguments.
         env_overrides: Optional environment variables dictionary.
         cwd: Optional working directory for the process.
 
     Returns:
-    -------
         subprocess.CompletedProcess with text output.
 
     """
@@ -111,7 +106,6 @@ def test_test_sh_mock_cloud_modes(tmp_path: Path) -> None:
     Test test.sh mock cloud modes with and without remote test execution.
 
     Args:
-    ----
         tmp_path: Temporary directory fixture provided by pytest.
 
     """
@@ -146,7 +140,6 @@ def test_test_sh_local_tests(tmp_path: Path) -> None:
     Test test.sh --local flag and automatic fallback when Libscript CLI is missing.
 
     Args:
-    ----
         tmp_path: Temporary directory fixture provided by pytest.
 
     """
@@ -186,7 +179,6 @@ def test_test_sh_cloud_credentials_verification(tmp_path: Path) -> None:
     Test check_cloud_credentials for default provider (.env), gcp, aws, and unknown providers.
 
     Args:
-    ----
         tmp_path: Temporary directory fixture provided by pytest.
 
     """
@@ -207,7 +199,6 @@ def test_test_sh_cloud_credentials_verification(tmp_path: Path) -> None:
         Create a mock tool executable with a fixed exit code.
 
         Args:
-        ----
             name: Tool binary name to write.
             exit_code: Desired exit code for the tool.
 
@@ -345,7 +336,6 @@ def test_test_sh_remote_execution_branches(tmp_path: Path) -> None:
     Test remote execution verification steps, failures, and diagnostic log collection.
 
     Args:
-    ----
         tmp_path: Temporary directory fixture provided by pytest.
 
     """
@@ -534,7 +524,6 @@ def test_test_sh_deprovision_failure_handling(tmp_path: Path) -> None:
     Test that cleanup handles deprovision command failures gracefully.
 
     Args:
-    ----
         tmp_path: Temporary directory fixture provided by pytest.
 
     """
@@ -915,15 +904,24 @@ def test_libscript_config_and_docs_consistency() -> None:
         and "t1d-analytics-backend/.venv/bin/python -c"
         in libscript_cfg["databases"][1]["seed_command"]
         and "_ctcnt" in libscript_cfg["databases"][1]["seed_command"]
+        and '[ "${_ctcnt:-0}" -gt "${_tcnt:-0}" ]'
+        in libscript_cfg["databases"][1]["seed_command"]
+        and 'chmod u+w "$_db"' in libscript_cfg["databases"][1]["seed_command"]
     )
     assert (
         "t1d-analytics-backend/.venv/bin/python -c"
         in libscript_cfg["infrastructure"]["databases"][1]["seed_command"]
         and "_ctcnt" in libscript_cfg["infrastructure"]["databases"][1]["seed_command"]
+        and '[ "${_ctcnt:-0}" -gt "${_tcnt:-0}" ]'
+        in libscript_cfg["infrastructure"]["databases"][1]["seed_command"]
+        and 'chmod u+w "$_db"'
+        in libscript_cfg["infrastructure"]["databases"][1]["seed_command"]
     )
     db_migrate_cmd = libscript_cfg["hooks"]["db_migrate"][1]["command"]
     assert "t1d-analytics-backend/.venv/bin/python -c" in db_migrate_cmd
     assert "_ctcnt" in db_migrate_cmd
+    assert '[ "${_ctcnt:-0}" -gt "${_tcnt:-0}" ]' in db_migrate_cmd
+    assert 'chmod u+w "$_db"' in db_migrate_cmd
     post_install_ollama_cmd = libscript_cfg["hooks"]["post_install"][1]["command"]
     assert "if id ollama >/dev/null 2>&1; then" in post_install_ollama_cmd
     assert "${SERVICE_USER:-$(id -un)}" in post_install_ollama_cmd

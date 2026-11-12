@@ -7,6 +7,8 @@
 
 import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
+import { type ModelCatalogEntryPayload } from "../api-types";
+import { type AppEventBus } from "../event-bus";
 import { requireElementById } from "../modal-utils";
 import { type ChatState } from "../state";
 
@@ -94,26 +96,20 @@ export function resolveModelProvider(
   ) {
     return "ollama";
   }
-  return modelName.split("/")[0];
+  const prefix = modelName.split("/")[0];
+  return prefix || "ollama";
 }
+
 /**
  * Model metadata entry returned by `/api/models`.
  */
-export interface ModelApiItem {
-  /** Model identifier string. */
-  name: string;
+export interface ModelApiItem extends ModelCatalogEntryPayload {
   /** Model size in bytes (for local Ollama models). */
   size?: number;
-  /** Provider identifier ('ollama', 'openai', 'anthropic', 'google', etc.). */
-  provider?: string;
-  /** Whether credentials are configured on the server. */
-  configured?: boolean;
   /** Whether an API key is required. */
   requires_key?: boolean;
   /** Whether the model is available for selection. */
   available?: boolean;
-  /** Whether the provider is reachable. */
-  reachable?: boolean;
   /** Optional error code when unconfigured or offline. */
   error_code?: string;
 }
@@ -127,48 +123,62 @@ export interface ModelsApiResponse {
 }
 
 /**
- * Host contract required by `ModelSelectorController`.
+ * Narrow injected dependencies for `ModelSelectorController`.
  */
-export interface ModelSelectorHost {
-  /** Global application state store. */
+export interface ModelSelectorDeps {
+  /** Shared application state store. */
   state: ChatState;
-  /** Synchronizes syntax highlighting in the chat input. */
-  syncHighlight(): void;
-  /** Updates the provider badge status indicator for the active model. */
-  updateProviderBadgeStatus(): void;
-  /** Populates the multi-select model configuration list in the provider modal. */
-  populateMultiSelectModels(modelsList: ModelApiItem[]): void;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
 }
 
 /**
  * Controller managing `/api/models` discovery, optgroup rendering, and model selection events.
  */
 export class ModelSelectorController {
-  /** Host UI reference. */
-  private readonly ui: ModelSelectorHost;
+  /** Shared application state store. */
+  private readonly state: ChatState;
+  /** Domain event bus. */
+  private readonly events: AppEventBus;
+  /** Persistent AbortController for DOM and bus listeners. */
+  private readonly listenerController = new AbortController();
   /** Dropdown select element for choosing the active LLM or SQL engine. */
   public readonly modelSelect: HTMLSelectElement;
 
   /**
    * Creates a new `ModelSelectorController`.
-   * @param {ModelSelectorHost} ui - Host UI instance.
+   * @param {ModelSelectorDeps} deps - Narrow state and event bus dependencies.
    */
-  constructor(ui: ModelSelectorHost) {
-    this.ui = ui;
+  constructor(deps: ModelSelectorDeps) {
+    this.state = deps.state;
+    this.events = deps.events;
     this.modelSelect = requireElementById<HTMLSelectElement>("model-select");
     this.bindEvents();
   }
 
   /**
-   * Binds the `change` listener on the model selector dropdown.
+   * Binds the `change` listener on the model selector dropdown and bus reload subscription.
    * @returns {void}
    */
   private bindEvents(): void {
-    this.modelSelect.addEventListener("change", () => {
-      this.ui.state.setActiveChatModel(this.modelSelect.value);
-      this.ui.updateProviderBadgeStatus();
-      this.ui.syncHighlight();
-    });
+    const signal = this.listenerController.signal;
+    this.modelSelect.addEventListener(
+      "change",
+      () => {
+        this.state.setActiveChatModel(this.modelSelect.value);
+        this.events.emit("providerBadgeUpdateRequested", undefined);
+        this.events.emit("composerSyncRequested", {});
+      },
+      { signal },
+    );
+
+    this.events.on(
+      "modelsReloadRequested",
+      () => {
+        void this.loadModels();
+      },
+      signal,
+    );
   }
 
   /**
@@ -209,6 +219,41 @@ export class ModelSelectorController {
   }
 
   /**
+   * Builds a single `<option>` element for a model catalog entry.
+   * @param {ModelApiItem} model - Model catalog entry.
+   * @param {string} prov - Resolved provider identifier.
+   * @returns {HTMLOptionElement} Constructed option element.
+   */
+  private buildModelOptionElement(
+    model: ModelApiItem,
+    prov: string,
+  ): HTMLOptionElement {
+    const hasKey = Boolean(this.state.getApiKey(prov));
+    const isConfigured =
+      prov === "ollama"
+        ? model.configured !== false
+        : Boolean(model.configured === true || hasKey);
+    const isReachable = model.reachable !== false;
+    const isAvailable = model.available !== false && isConfigured;
+    const badge = !isReachable ? "🔴" : !isConfigured ? "🟡" : "🟢";
+
+    const option = document.createElement("option");
+    option.value = model.name;
+    option.setAttribute("data-provider", prov);
+    option.setAttribute("data-configured", isConfigured ? "true" : "false");
+    option.setAttribute("data-reachable", isReachable ? "true" : "false");
+    option.setAttribute("data-available", isAvailable ? "true" : "false");
+    option.textContent = `${model.name} ${badge}`;
+    if (prov === "ollama" && (!isAvailable || !isReachable)) {
+      option.disabled = true;
+    }
+    if (!isAvailable && model.error_code) {
+      option.title = `${model.name} (${model.error_code})`;
+    }
+    return option;
+  }
+
+  /**
    * Populates `modelSelect` optgroups from the merged model list.
    * @param {ModelApiItem[]} modelsList - Combined model metadata entries.
    * @returns {void}
@@ -221,47 +266,29 @@ export class ModelSelectorController {
     this.modelSelect.replaceChildren(sqlOption);
 
     const groups: Record<string, HTMLOptGroupElement> = {
-      ollama: document.createElement("optgroup"),
-      openai: document.createElement("optgroup"),
-      anthropic: document.createElement("optgroup"),
-      google: document.createElement("optgroup"),
+      ollama: Object.assign(document.createElement("optgroup"), {
+        label: i18next.t("provider.groupOllama", "Ollama (Local)"),
+      }),
+      openai: Object.assign(document.createElement("optgroup"), {
+        label: i18next.t("provider.groupOpenAI", "OpenAI"),
+      }),
+      anthropic: Object.assign(document.createElement("optgroup"), {
+        label: i18next.t("provider.groupAnthropic", "Anthropic"),
+      }),
+      google: Object.assign(document.createElement("optgroup"), {
+        label: i18next.t("provider.groupGoogle", "Google"),
+      }),
     };
-    groups.ollama.label = i18next.t("provider.groupOllama", "Ollama (Local)");
-    groups.openai.label = i18next.t("provider.groupOpenAI", "OpenAI");
-    groups.anthropic.label = i18next.t("provider.groupAnthropic", "Anthropic");
-    groups.google.label = i18next.t("provider.groupGoogle", "Google");
 
     for (const model of modelsList) {
       const prov = resolveModelProvider(model.name, model.provider);
-      const hasKey = Boolean(this.ui.state.getApiKey(prov));
-      const isConfigured =
-        prov === "ollama"
-          ? model.configured !== false
-          : Boolean(model.configured || hasKey);
-      const isReachable = model.reachable !== false;
-      const isAvailable = model.available !== false && isConfigured;
-
-      const badge = !isReachable ? "🔴" : !isConfigured ? "🟡" : "🟢";
-      const option = document.createElement("option");
-      option.value = model.name;
-      option.setAttribute("data-provider", prov);
-      option.setAttribute("data-configured", isConfigured ? "true" : "false");
-      option.setAttribute("data-reachable", isReachable ? "true" : "false");
-      option.setAttribute("data-available", isAvailable ? "true" : "false");
-      option.textContent = `${model.name} ${badge}`;
-      if (prov === "ollama" && (!isAvailable || !isReachable)) {
-        option.disabled = true;
+      let groupEl = groups[prov];
+      if (!groupEl) {
+        groupEl = document.createElement("optgroup");
+        groupEl.label = `${prov.charAt(0).toUpperCase() + prov.slice(1)} (any-llm)`;
+        groups[prov] = groupEl;
       }
-      if (!isAvailable && model.error_code) {
-        option.title = `${model.name} (${model.error_code})`;
-      }
-
-      if (!groups[prov]) {
-        const dynamicGroup = document.createElement("optgroup");
-        dynamicGroup.label = `${prov.charAt(0).toUpperCase() + prov.slice(1)} (any-llm)`;
-        groups[prov] = dynamicGroup;
-      }
-      groups[prov].appendChild(option);
+      groupEl.appendChild(this.buildModelOptionElement(model, prov));
     }
 
     for (const grp of Object.values(groups)) {
@@ -277,7 +304,7 @@ export class ModelSelectorController {
    * @returns {void}
    */
   private resolveActiveChatModel(modelsList: ModelApiItem[]): void {
-    const activeChat = this.ui.state.getActiveChat();
+    const activeChat = this.state.getActiveChat();
     if (!activeChat) return;
 
     const currentModel = activeChat.model;
@@ -288,14 +315,15 @@ export class ModelSelectorController {
     if (matchedOpt) {
       this.modelSelect.value = matchedOpt.value;
       if (matchedOpt.value !== currentModel) {
-        this.ui.state.setSelectedModel(matchedOpt.value);
+        this.state.setSelectedModel(matchedOpt.value);
       }
       return;
     }
 
-    if (modelsList.length === 0) {
+    const firstModel = modelsList[0];
+    if (!firstModel) {
       this.modelSelect.value = "sql";
-      this.ui.state.setSelectedModel("sql");
+      this.state.setSelectedModel("sql");
       return;
     }
 
@@ -304,7 +332,7 @@ export class ModelSelectorController {
         const prov = resolveModelProvider(m.name, m.provider);
         const readyKey =
           (prov === "ollama" && m.configured !== false) ||
-          Boolean(this.ui.state.getApiKey(prov));
+          Boolean(this.state.getApiKey(prov));
         return m.available !== false && m.reachable !== false && readyKey;
       })
       .sort(
@@ -315,9 +343,9 @@ export class ModelSelectorController {
       ? firstReady.name
       : activeChat.messages.length === 0
         ? "sql"
-        : modelsList[0].name;
+        : firstModel.name;
     this.modelSelect.value = fallbackModel;
-    this.ui.state.setSelectedModel(fallbackModel);
+    this.state.setSelectedModel(fallbackModel);
   }
 
   /**
@@ -326,7 +354,7 @@ export class ModelSelectorController {
    */
   public async loadModels(): Promise<void> {
     try {
-      const customModels = this.ui.state.getConfiguredModels();
+      const customModels = this.state.getConfiguredModels();
       const modelsUrl =
         customModels.length > 0
           ? `/api/models?configured_models=${encodeURIComponent(customModels.join(","))}`
@@ -346,12 +374,20 @@ export class ModelSelectorController {
           m.configured !== false
         );
       });
-      this.ui.state.setSystemStatus({ ollamaOnline: hasReachableOllama });
+      this.state.setSystemStatus({ ollamaOnline: hasReachableOllama });
       this.resolveActiveChatModel(modelsList);
-      this.ui.populateMultiSelectModels(modelsList);
-      this.ui.updateProviderBadgeStatus();
+      this.events.emit("modelsLoaded", { models: modelsList });
+      this.events.emit("providerBadgeUpdateRequested", undefined);
     } catch (error) {
       console.warn("Failed to fetch models from API:", error);
     }
+  }
+
+  /**
+   * Disposes registered DOM and event bus listeners.
+   * @returns {void}
+   */
+  public dispose(): void {
+    this.listenerController.abort();
   }
 }

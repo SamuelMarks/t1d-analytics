@@ -3,13 +3,13 @@
 import importlib
 import json
 import logging
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import duckdb
 
 from t1d_analytics.errors import (
-    DatabaseNotFoundError,
+    DatasetNotFoundError,
     InsufficientDataError,
 )
 from t1d_analytics.hf_models import (
@@ -25,16 +25,14 @@ logger = logging.getLogger(__name__)
 
 def _extract_prompt_target_pair(
     record: Mapping[str, SqlValue],
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """
     Extract `(prompt, completion)` strings from a parsed JSONL/JSON dictionary record.
 
     Args:
-    ----
         record: Parsed JSON dictionary record.
 
     Returns:
-    -------
         Tuple[str, str]: `(prompt_str, completion_str)`.
 
     """
@@ -45,24 +43,21 @@ def _extract_prompt_target_pair(
     return (p, c)
 
 
-def _load_pairs_from_json_or_jsonl(dataset_path: Path) -> List[Tuple[str, str]]:
+def _load_pairs_from_json_or_jsonl(dataset_path: Path) -> list[tuple[str, str]]:
     """
     Read `(prompt, target)` text pairs from a `.jsonl` or `.json` dataset file.
 
     Args:
-    ----
         dataset_path: Path to the `.jsonl` or `.json` file.
 
     Returns:
-    -------
         List[Tuple[str, str]]: Extracted prompt and target pairs.
 
     Raises:
-    ------
         InsufficientDataError: If reading the file fails.
 
     """
-    raw_pairs: List[Tuple[str, str]] = []
+    raw_pairs: list[tuple[str, str]] = []
     try:
         with open(dataset_path, encoding="utf-8") as f:
             for line in f:
@@ -82,24 +77,21 @@ def _load_pairs_from_json_or_jsonl(dataset_path: Path) -> List[Tuple[str, str]]:
     return raw_pairs
 
 
-def _load_pairs_from_duckdb_or_parquet(dataset_path: Path) -> List[Tuple[str, str]]:
+def _load_pairs_from_duckdb_or_parquet(dataset_path: Path) -> list[tuple[str, str]]:
     """
     Read `(prompt, target)` text pairs from a `.parquet` dataset file using DuckDB.
 
     Args:
-    ----
         dataset_path: Path to the `.parquet` file.
 
     Returns:
-    -------
         List[Tuple[str, str]]: Extracted prompt and target pairs.
 
     Raises:
-    ------
         InsufficientDataError: If the Parquet file has no columns or cannot be read.
 
     """
-    raw_pairs: List[Tuple[str, str]] = []
+    raw_pairs: list[tuple[str, str]] = []
     escaped = str(dataset_path.resolve()).replace("'", "''")
     conn = duckdb.connect()
     try:
@@ -133,20 +125,17 @@ def _load_pairs_from_duckdb_or_parquet(dataset_path: Path) -> List[Tuple[str, st
     return raw_pairs
 
 
-def _load_raw_pairs_from_file(dataset_path: Path) -> List[Tuple[str, str]]:
+def _load_raw_pairs_from_file(dataset_path: Path) -> list[tuple[str, str]]:
     """
     Read (prompt, target) text pairs from a .jsonl/.json or .parquet file.
 
     Args:
-    ----
         dataset_path: Path to the dataset file.
 
     Returns:
-    -------
         List[Tuple[str, str]]: Extracted prompt and target completion pairs.
 
     Raises:
-    ------
         InsufficientDataError: If the file cannot be read or contains no valid pairs.
 
     """
@@ -166,23 +155,20 @@ def _load_raw_pairs_from_file(dataset_path: Path) -> List[Tuple[str, str]]:
 
 
 def _resolve_tokenizer(
-    tokenizer: Optional[TokenizerProtocol],
-    tokenizer_name: Optional[str],
+    tokenizer: TokenizerProtocol | None,
+    tokenizer_name: str | None,
 ) -> TokenizerProtocol:
     """
     Resolve an active tokenizer from an explicit instance or Hugging Face model name.
 
     Args:
-    ----
         tokenizer: Optional explicit tokenizer object.
         tokenizer_name: Optional Hugging Face model identifier.
 
     Returns:
-    -------
         TokenizerProtocol: Resolved tokenizer instance.
 
     Raises:
-    ------
         InsufficientDataError: If no tokenizer is provided or loading from Hugging Face fails.
 
     """
@@ -201,30 +187,28 @@ def _resolve_tokenizer(
         ) from e
 
 
-def _tokenize_pair_with_masking(
+def tokenize_pair_with_masking(
     prompt: str,
     target: str,
     active_tok: TokenizerProtocol,
     max_seq_length: int,
-) -> Tuple[TensorLike, TensorLike]:
+) -> tuple[TensorLike, TensorLike]:
     """
     Tokenize a single (prompt, target) pair with -100 prompt-token masking and padding.
 
     Args:
-    ----
         prompt: Natural language question or prompt string.
         target: Target SQL completion string.
         active_tok: Tokenizer instance providing `.encode()`.
         max_seq_length: Maximum sequence length for padding/truncation.
 
     Returns:
-    -------
         Tuple[TensorLike, TensorLike]: `(input_ids, labels)` PyTorch `long` tensors of length `max_seq_length - 1`.
 
     """
     import torch
 
-    nl = chr(10)
+    nl = "\n"
     formatted_prompt = (
         f"<start_of_turn>user{nl}{prompt}<end_of_turn>{nl}<start_of_turn>model{nl}"
     )
@@ -258,49 +242,44 @@ def _tokenize_pair_with_masking(
 class TokenizedPairDataset:
     """Sequence-like dataset wrapping pre-tokenized `(input_ids, labels)` tensor pairs."""
 
-    def __init__(self, pairs: Sequence[Tuple[TensorLike, TensorLike]]) -> None:
+    def __init__(self, pairs: Sequence[tuple[TensorLike, TensorLike]]) -> None:
         """
         Initialize the dataset with tokenized tensor pairs.
 
         Args:
-        ----
             pairs: Sequence of `(input_ids, labels)` tensor tuples.
 
         """
-        self._pairs: List[Tuple[TensorLike, TensorLike]] = list(pairs)
+        self._pairs: list[tuple[TensorLike, TensorLike]] = list(pairs)
 
     def __len__(self) -> int:
         """
         Return the number of tokenized pairs in the dataset.
 
-        Returns
-        -------
+        Returns:
             int: Total sample count.
 
         """
         return len(self._pairs)
 
-    def __getitem__(self, index: int) -> Tuple[TensorLike, TensorLike]:
+    def __getitem__(self, index: int) -> tuple[TensorLike, TensorLike]:
         """
         Return the `(input_ids, labels)` tuple at the given index.
 
         Args:
-        ----
             index: Zero-based sample integer index.
 
         Returns:
-        -------
             Tuple[TensorLike, TensorLike]: Tokenized `(input_ids, labels)` pair.
 
         """
         return self._pairs[index]
 
-    def __iter__(self) -> Iterator[Tuple[TensorLike, TensorLike]]:
+    def __iter__(self) -> Iterator[tuple[TensorLike, TensorLike]]:
         """
         Iterate over all `(input_ids, labels)` pairs in the dataset.
 
-        Returns
-        -------
+        Returns:
             Iterator[Tuple[TensorLike, TensorLike]]: Iterator over tensor pairs.
 
         """
@@ -320,7 +299,6 @@ class StreamingJsonlDataset:
         Initialize the streaming JSONL dataset.
 
         Args:
-        ----
             dataset_path: Path to the `.jsonl` file on disk.
             tokenizer: Pretrained tokenizer instance.
             max_seq_length: Maximum token sequence length.
@@ -330,17 +308,16 @@ class StreamingJsonlDataset:
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
 
-    def __iter__(self) -> Iterator[Tuple[TensorLike, TensorLike]]:
+    def __iter__(self) -> Iterator[tuple[TensorLike, TensorLike]]:
         """
         Stream and tokenize valid `(prompt, target)` pairs from the JSONL file.
 
-        Yields
-        ------
+        Yields:
             Tuple[TensorLike, TensorLike]: Tokenized `(input_ids, labels)` tensor pair.
 
         """
         for prompt, target in _load_raw_pairs_from_file(self.dataset_path):
-            yield _tokenize_pair_with_masking(
+            yield tokenize_pair_with_masking(
                 prompt, target, self.tokenizer, self.max_seq_length
             )
 
@@ -349,16 +326,15 @@ def prepare_torch_dataset(
     dataset_path: Path,
     max_seq_length: int = 128,
     vocab_size: int = 1000,
-    tokenizer: Optional[TokenizerProtocol] = None,
-    tokenizer_name: Optional[str] = None,
-) -> List[Tuple[TensorLike, TensorLike]]:
+    tokenizer: TokenizerProtocol | None = None,
+    tokenizer_name: str | None = None,
+) -> list[tuple[TensorLike, TensorLike]]:
     """
     Load and tokenize a .jsonl or .parquet dataset into PyTorch (input_ids, labels) tensors.
 
     Prompt tokens are masked with -100 in labels so loss is computed exclusively on SQL completions.
 
     Args:
-    ----
         dataset_path: Path to dataset file on disk (.jsonl or .parquet).
         max_seq_length: Fixed sequence length for padding/truncation.
         vocab_size: Vocabulary upper bound.
@@ -366,18 +342,16 @@ def prepare_torch_dataset(
         tokenizer_name: Optional HuggingFace model/tokenizer identifier.
 
     Returns:
-    -------
         List[Tuple[TensorLike, TensorLike]]: List of (input_ids, labels) tensor pairs.
 
     Raises:
-    ------
-        DatabaseNotFoundError: If dataset_path does not exist.
-        TrainingExecutionError: If file format is unsupported or dataset is empty/corrupt.
+        DatasetNotFoundError: If dataset_path does not exist.
+        InsufficientDataError: If file format is unsupported or dataset is empty/corrupt.
 
     """
     _ = vocab_size
     if not dataset_path.exists():
-        raise DatabaseNotFoundError(f"Training dataset not found at '{dataset_path}'.")
+        raise DatasetNotFoundError(f"Training dataset not found at '{dataset_path}'.")
 
     suffix = dataset_path.suffix.lower()
     if suffix not in (".jsonl", ".json", ".parquet"):
@@ -388,10 +362,10 @@ def prepare_torch_dataset(
     raw_pairs = _load_raw_pairs_from_file(dataset_path)
     active_tok = _resolve_tokenizer(tokenizer, tokenizer_name)
 
-    dataset: List[Tuple[TensorLike, TensorLike]] = []
+    dataset: list[tuple[TensorLike, TensorLike]] = []
     for prompt, target in raw_pairs:
         dataset.append(
-            _tokenize_pair_with_masking(prompt, target, active_tok, max_seq_length)
+            tokenize_pair_with_masking(prompt, target, active_tok, max_seq_length)
         )
 
     return dataset

@@ -284,8 +284,8 @@ test("Chat input resizes dynamically with multi-line text and resets on send", a
 
   // Get initial height
   const initialBox = await chatInput.boundingBox();
-  expect(initialBox).not.toBeNull();
-  const initialHeight = initialBox!.height;
+  if (!initialBox) throw new Error("Expected initialBox");
+  const initialHeight = initialBox.height;
 
   // Type multiple lines
   await chatInput.fill("Line 1\nLine 2\nLine 3\nLine 4\nLine 5");
@@ -296,8 +296,8 @@ test("Chat input resizes dynamically with multi-line text and resets on send", a
 
   // Get new height
   const expandedBox = await chatInput.boundingBox();
-  expect(expandedBox).not.toBeNull();
-  const expandedHeight = expandedBox!.height;
+  if (!expandedBox) throw new Error("Expected expandedBox");
+  const expandedHeight = expandedBox.height;
 
   // Assert it grew
   expect(expandedHeight).toBeGreaterThan(initialHeight);
@@ -307,21 +307,22 @@ test("Chat input resizes dynamically with multi-line text and resets on send", a
   await page.waitForTimeout(100);
 
   const clearedBox = await chatInput.boundingBox();
-  expect(clearedBox).not.toBeNull();
-  expect(clearedBox!.height).toBeCloseTo(initialHeight, 1);
+  if (!clearedBox) throw new Error("Expected clearedBox");
+  expect(clearedBox.height).toBeCloseTo(initialHeight, 1);
 
   // Type again, and test that sending resets it
   await chatInput.fill("Line 1\nLine 2");
   await page.waitForTimeout(100);
   const reExpandedBox = await chatInput.boundingBox();
-  expect(reExpandedBox!.height).toBeGreaterThan(initialHeight);
+  if (!reExpandedBox) throw new Error("Expected reExpandedBox");
+  expect(reExpandedBox.height).toBeGreaterThan(initialHeight);
 
   await page.click("#send-btn");
   await page.waitForTimeout(100);
 
   const sentBox = await chatInput.boundingBox();
-  expect(sentBox).not.toBeNull();
-  expect(sentBox!.height).toBeCloseTo(initialHeight, 1);
+  if (!sentBox) throw new Error("Expected sentBox");
+  expect(sentBox.height).toBeCloseTo(initialHeight, 1);
 });
 
 test("Cloud provider settings modal and model selection", async ({ page }) => {

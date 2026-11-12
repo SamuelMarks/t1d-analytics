@@ -212,8 +212,8 @@ build: build_frontend build_backend
 
 build_docs:
 	mkdir -p $(DOCS_DIR)
-	$(VENV_ACTIVATE) interrogate -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics
-	$(VENV_ACTIVATE) python3 -m sphinx -b html t1d-analytics-backend/docs_src $(DOCS_DIR)
+	$(VENV_ACTIVATE) interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts
+	$(VENV_ACTIVATE) python3 -m sphinx -W --keep-going -b html t1d-analytics-backend/docs_src $(DOCS_DIR)
 	cd t1d-analytics-web && npm run docs
 	@echo "Docs built in $(DOCS_DIR)"
 

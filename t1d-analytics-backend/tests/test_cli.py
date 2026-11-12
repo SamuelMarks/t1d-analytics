@@ -126,7 +126,12 @@ def test_extract_subcommand(mock_extract: MagicMock) -> None:
     with patch("sys.argv", ["t1d-analytics", "extract", "--data-dir", "./test_data"]):
         main()
 
-    mock_extract.assert_called_once_with("./test_data")
+    mock_extract.assert_called_once_with(
+        "./test_data",
+        max_decompressed_bytes=200 * 1024 * 1024 * 1024,
+        overwrite=False,
+        tabular_only=False,
+    )
 
     mock_extract.reset_mock()
     with patch(
@@ -508,22 +513,20 @@ def test_generate_training_data_invalid_ratios_fallback(
 
 
 def test_cli_main_invalid_command(mocker: MagicMock) -> None:
-    """Test CLI invalid command and parse_cli_options with standard Namespace."""
+    """Test CLI invalid command and parse_cli_options discriminated-union validation."""
     import argparse
 
-    from t1d_analytics.cli import CliNamespace, main, parse_cli_options
+    from t1d_analytics.cli import main, parse_cli_options
+    from t1d_analytics.cli_parser import QueryCliOpts
 
     raw_ns = argparse.Namespace(command="query", db="custom.db", unknown_extra=123)
     parsed_opts = parse_cli_options(raw_ns)
+    assert isinstance(parsed_opts, QueryCliOpts)
     assert parsed_opts.db == "custom.db"
 
-    # Passing an invalid command. argparse might catch it if it's restricted by subparsers,
-    # but we can mock args to bypass argparse validation and reach the branch.
-    mock_args = CliNamespace()
-    mock_args.command = "invalid_cmd"
+    mock_args = argparse.Namespace(command="invalid_cmd")
     mocker.patch("argparse.ArgumentParser.parse_args", return_value=mock_args)
 
-    # It should fall through the if-elif chain and exit cleanly (or raise no exception)
     main()
 
 
@@ -898,7 +901,7 @@ def test_main_watch(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
         main()
 
 
-@patch("t1d_analytics.training_data.TrainingDataGenerator._generate_pairs")
+@patch("t1d_analytics.training_data.TrainingDataGenerator.generate_pairs")
 def test_main_train(
     mock_generate: MagicMock, tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -960,7 +963,7 @@ def test_main_train(
         main()
 
 
-@patch("t1d_analytics.training_data.TrainingDataGenerator._generate_pairs")
+@patch("t1d_analytics.training_data.TrainingDataGenerator.generate_pairs")
 def test_train_subcommand_advanced_flags(
     mock_generate: MagicMock, tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -1075,7 +1078,7 @@ def test_cli_lang_options(capsys: CaptureFixture[str], tmp_path: Path) -> None:
         assert snippet in out, err_msg
 
 
-@patch("t1d_analytics.training_data.TrainingDataGenerator._generate_pairs")
+@patch("t1d_analytics.training_data.TrainingDataGenerator.generate_pairs")
 def test_train_subcommand_hyperparameters_and_validation(
     mock_generate: MagicMock, tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -1238,7 +1241,7 @@ def test_train_subcommand_hyperparameters_and_validation(
             main()
 
 
-@patch("t1d_analytics.training_data.TrainingDataGenerator._generate_pairs")
+@patch("t1d_analytics.training_data.TrainingDataGenerator.generate_pairs")
 def test_train_subcommand_tpu_execution(
     mock_generate: MagicMock, tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
@@ -1668,8 +1671,9 @@ def test_seed_subcommand_and_doctor_thresholds(
     )
     assert counts["patients"] == 100
 
-    # Test _connect_duckdb_with_retry lock retry and non-lock error propagation
-    from t1d_analytics.seed import _connect_duckdb_with_retry
+    # Test connect_seed_duckdb lock retry and non-lock error propagation
+    from t1d_analytics.errors import DatabaseLockedError
+    from t1d_analytics.seed_verifier import connect_seed_duckdb
 
     call_cnt = 0
     orig_connect = duckdb.connect
@@ -1682,24 +1686,26 @@ def test_seed_subcommand_and_doctor_thresholds(
             raise duckdb.IOException("Could not set lock on file")
         return orig_connect(path, read_only=read_only)
 
-    with patch("t1d_analytics.seed.duckdb.connect", side_effect=_flaky_connect):
-        retry_conn = _connect_duckdb_with_retry(str(db_file), sleep_fn=lambda _: None)
+    with patch(
+        "t1d_analytics.seed_verifier.duckdb.connect", side_effect=_flaky_connect
+    ):
+        retry_conn = connect_seed_duckdb(str(db_file), sleep_fn=lambda _: None)
         retry_conn.close()
     assert call_cnt == 3
 
     with patch(
-        "t1d_analytics.seed.duckdb.connect",
+        "t1d_analytics.seed_verifier.duckdb.connect",
         side_effect=duckdb.IOException("Disk full"),
     ):
         with pytest.raises(duckdb.IOException, match="Disk full"):
-            _connect_duckdb_with_retry(str(db_file), sleep_fn=lambda _: None)
+            connect_seed_duckdb(str(db_file), sleep_fn=lambda _: None)
 
     with patch(
-        "t1d_analytics.seed.duckdb.connect",
+        "t1d_analytics.seed_verifier.duckdb.connect",
         side_effect=duckdb.IOException("Could not set lock"),
     ):
-        with pytest.raises(duckdb.IOException, match="Could not set lock"):
-            _connect_duckdb_with_retry(str(db_file), sleep_fn=lambda _: None)
+        with pytest.raises(DatabaseLockedError, match="Could not set lock"):
+            connect_seed_duckdb(str(db_file), sleep_fn=lambda _: None)
 
     # Test ensure_canonical_clinical_views when tblaptsummary is an existing BASE TABLE
     # (1) Empty base table -> dropped and replaced by view

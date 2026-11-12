@@ -8,11 +8,13 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { ChatState } from "../src/state";
 import {
-  ChatUI,
-  CohortBuilderModalController,
   buildCohortSql,
+  escapeSqlIdentifier,
   normalizeJoinType,
-} from "../src/ui";
+  parseStructuredJoinCondition,
+} from "../src/cohort-sql";
+import { CohortBuilderModalController } from "../src/controllers/cohort-modal-controller";
+import { ChatUI } from "../src/ui";
 import { flushPromises, getTestElement, mountChatUiTestDom } from "./setup";
 
 describe("CohortBuilderModalController & Cohort SQL Generation", () => {
@@ -69,13 +71,14 @@ FROM "patients";`,
       minHbA1c: 8.5,
     });
 
+    expect(escapeSqlIdentifier('age"col')).toBe('"age""col"');
     expect(sql).toContain('FROM "demographics""test"');
-    expect(sql).toContain("age >= 18");
-    expect(sql).toContain("age <= 65");
-    expect(sql).toContain("gender = 'F'");
-    expect(sql).toContain("txgroup ILIKE '%Closed''Loop%'");
-    expect(sql).toContain("tir <= 70");
-    expect(sql).toContain("hba1c >= 8.5");
+    expect(sql).toContain('"age" >= 18');
+    expect(sql).toContain('"age" <= 65');
+    expect(sql).toContain("\"gender\" = 'F'");
+    expect(sql).toContain("\"txgroup\" ILIKE '%Closed''Loop%'");
+    expect(sql).toContain('"tir" <= 70');
+    expect(sql).toContain('"hba1c" >= 8.5');
 
     const nonFiniteSql = buildCohortSql({
       tableName: "patients",
@@ -95,7 +98,9 @@ FROM "patients";`);
     });
     expect(joinSql).toContain('FROM "patients"');
     expect(joinSql).toContain('INNER JOIN "cgms"');
-    expect(joinSql).toContain('ON "patients".patient_id = "cgms".patient_id');
+    expect(joinSql).toContain(
+      'ON "patients"."patient_id" = "cgms"."patient_id"',
+    );
 
     const leftJoinSql = buildCohortSql({
       tableName: "patients",
@@ -105,7 +110,73 @@ FROM "patients";`);
     });
     expect(leftJoinSql).toContain('LEFT JOIN "visits"');
     expect(leftJoinSql).toContain(
-      'ON "patients".patient_id = "visits".subject_id',
+      'ON "patients"."patient_id" = "visits"."subject_id"',
+    );
+
+    // Structured joinSpec and swapped table order in joinCondition
+    const specJoinSql = buildCohortSql({
+      tableName: "patients",
+      joinTableName: "visits",
+      joinSpec: { leftColumn: "pt_key", rightColumn: "visit_pt_key" },
+      tableColumns: ["pt_key"],
+      joinTableColumns: ["visit_pt_key"],
+    });
+    expect(specJoinSql).toContain(
+      'ON "patients"."pt_key" = "visits"."visit_pt_key"',
+    );
+
+    const invalidSpecJoinSql = buildCohortSql({
+      tableName: "patients",
+      joinTableName: "visits",
+      joinSpec: { leftColumn: "", rightColumn: "unknown_col" },
+      tableColumns: ["patient_id"],
+      joinTableColumns: ["patient_id"],
+    });
+    expect(invalidSpecJoinSql).toContain(
+      'ON "patients"."patient_id" = "visits"."patient_id"',
+    );
+
+    expect(
+      parseStructuredJoinCondition(
+        '"visits"."subject_id" = "patients"."patient_id"',
+        "patients",
+        "visits",
+      ),
+    ).toEqual({
+      leftColumn: "patient_id",
+      operator: "=",
+      rightColumn: "subject_id",
+    });
+
+    // Reject SQL injection payloads, extra '=', unknown table qualifiers, empty quotes, and unrecognised schema columns
+    for (const badJoin of [
+      '1=1 OR 1=1; DROP TABLE "patients" --',
+      '"patients".id = "visits".id = 1',
+      '"other_tbl".id = "visits".id',
+      '"" = "visits".id',
+      '"   " = "visits".id',
+      '"patients".nonexistent = "visits".id',
+      "func(a) = b",
+    ]) {
+      expect(
+        parseStructuredJoinCondition(
+          badJoin,
+          "patients",
+          "visits",
+          ["id"],
+          ["id"],
+        ),
+      ).toBeNull();
+    }
+
+    const injectedAttemptSql = buildCohortSql({
+      tableName: "patients",
+      joinTableName: "cgms",
+      joinCondition: "1=1 OR 1=1; DROP TABLE patients --",
+    });
+    expect(injectedAttemptSql).not.toContain("DROP TABLE");
+    expect(injectedAttemptSql).toContain(
+      'ON "patients"."patient_id" = "cgms"."patient_id"',
     );
 
     const jaebSql = buildCohortSql({
@@ -117,23 +188,16 @@ FROM "patients";`);
       txGroup: "Control",
       maxTIR: 65,
       minHbA1c: 7.2,
-      tableColumns: [
-        "PtID",
-        "AgeAsOfRandDt",
-        "Gender",
-        "TxGroup",
-        "time_in_range",
-        "baseline_hba1c",
-      ],
-      joinTableColumns: ["PtID", "HbA1c"],
+      tableColumns: ["PtID", "AgeAsOfRandDt", "Gender", "TxGroup"],
+      joinTableColumns: ["PtID", "time_in_range", "baseline_hba1c"],
     });
-    expect(jaebSql).toContain('"tblaptsummary".AgeAsOfRandDt >= 12');
-    expect(jaebSql).toContain('"tblaptsummary".AgeAsOfRandDt <= 35');
-    expect(jaebSql).toContain("\"tblaptsummary\".Gender = 'M'");
-    expect(jaebSql).toContain("\"tblaptsummary\".TxGroup ILIKE '%Control%'");
-    expect(jaebSql).toContain('"tblaptsummary".time_in_range <= 65');
-    expect(jaebSql).toContain('"tblaptsummary".baseline_hba1c >= 7.2');
-    expect(jaebSql).toContain('ON "tblaptsummary".PtID = "hba1c".PtID');
+    expect(jaebSql).toContain('"tblaptsummary"."AgeAsOfRandDt" >= 12');
+    expect(jaebSql).toContain('"tblaptsummary"."AgeAsOfRandDt" <= 35');
+    expect(jaebSql).toContain('"tblaptsummary"."Gender" = \'M\'');
+    expect(jaebSql).toContain('"tblaptsummary"."TxGroup" ILIKE \'%Control%\'');
+    expect(jaebSql).toContain('"hba1c"."time_in_range" <= 65');
+    expect(jaebSql).toContain('"hba1c"."baseline_hba1c" >= 7.2');
+    expect(jaebSql).toContain('ON "tblaptsummary"."PtID" = "hba1c"."PtID"');
 
     const fallbackJoinSql = buildCohortSql({
       tableName: "custom_alpha",
@@ -142,7 +206,7 @@ FROM "patients";`);
       joinTableColumns: ["other_col"],
     });
     expect(fallbackJoinSql).toContain(
-      'ON "custom_alpha".patient_id = "custom_beta".patient_id',
+      'ON "custom_alpha"."patient_id" = "custom_beta"."patient_id"',
     );
   });
 
@@ -163,7 +227,7 @@ FROM "patients";`);
     minAgeInput.dispatchEvent(new Event("input"));
 
     const preview = getTestElement("cohort-sql-preview");
-    expect(preview.textContent).toContain("age >= 21");
+    expect(preview.textContent).toContain('"age" >= 21');
 
     const joinTableSelect = getTestElement<HTMLSelectElement>(
       "cohort-join-table-select",
@@ -233,7 +297,7 @@ FROM "patients";`);
     );
     insertBtn.click();
     const input = getTestElement<HTMLTextAreaElement>("chat-input");
-    expect(input.value).toContain("age >= 25");
+    expect(input.value).toContain('"age" >= 25');
     expect(modal.classList.contains("hidden")).toBe(true);
 
     state.createChat();
@@ -241,6 +305,7 @@ FROM "patients";`);
     filterBtn.click();
     minAgeInput.value = "30";
     minAgeInput.dispatchEvent(new Event("input"));
+    state.credentialsStore.setBackendApiKey("chat-bearer-xyz");
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: "Ran cohort query", sqlResult: [] }),
@@ -248,48 +313,40 @@ FROM "patients";`);
     const execBtn = getTestElement<HTMLButtonElement>("cohort-execute-btn");
     execBtn.click();
     await flushPromises();
+    state.credentialsStore.removeBackendApiKey();
     const activeChat = state.getActiveChat();
     expect(activeChat?.model).toBe("sql");
     expect(activeChat?.messages.length).toBe(2);
-    expect(activeChat?.messages[0]?.content).toContain("age >= 30");
+    expect(activeChat?.messages[0]?.content).toContain('"age" >= 30');
   });
 
-  it("populates tables from DOM schema headers and resolves relational join columns", () => {
-    const schemaContent = getTestElement("schema-content");
-    const tblA = document.createElement("div");
-    tblA.className = "schema-table";
-    const nameA = document.createElement("span");
-    nameA.className = "schema-table-name";
-    nameA.setAttribute("data-table", "subjects_custom");
-    nameA.textContent = "subjects_custom";
-    const colA = document.createElement("span");
-    colA.className = "col-name";
-    colA.textContent = "subject_id";
-    tblA.append(nameA, colA);
-
-    const tblB = document.createElement("div");
-    tblB.className = "schema-table";
-    const nameB = document.createElement("span");
-    nameB.className = "schema-table-name";
-    nameB.setAttribute("data-table", "labs_custom");
-    nameB.textContent = "labs_custom";
-    const colB = document.createElement("span");
-    colB.className = "col-name";
-    colB.textContent = "subject_id";
-    tblB.append(nameB, colB);
-
-    const tblC = document.createElement("div");
-    tblC.className = "schema-table";
-    const nameC = document.createElement("span");
-    nameC.className = "schema-table-name";
-    nameC.setAttribute("data-table", "patient_notes");
-    nameC.textContent = "patient_notes";
-    const colC = document.createElement("span");
-    colC.className = "col-name";
-    colC.textContent = "note_text";
-    tblC.append(nameC, colC);
-
-    schemaContent.replaceChildren(tblA, tblB, tblC);
+  it("populates tables and column resolution from typed ChatState.schemaTables without DOM scraping", () => {
+    expect(state.getTableColumns("   ")).toBeUndefined();
+    state.setSchemaTables([
+      {
+        name: "subjects_custom",
+        columns: [
+          { name: "subject_id", type: "VARCHAR" },
+          { name: "AgeAsOfRandDt", type: "INTEGER" },
+        ],
+      },
+      {
+        name: "labs_custom",
+        columns: [{ name: "subject_id", type: "VARCHAR" }],
+      },
+      {
+        name: "patient_notes",
+        columns: [{ name: "note_text", type: "VARCHAR" }],
+      },
+      {
+        name: "patients",
+        columns: [{ name: "patient_id", type: "VARCHAR" }],
+      },
+      {
+        name: "hba1c_labs",
+        columns: [{ name: "patient_id", type: "VARCHAR" }],
+      },
+    ]);
 
     ui.cohortModalController.open();
     const tableSelect = ui.cohortModalController.cohortTableSelect;
@@ -302,31 +359,43 @@ FROM "patients";`);
     joinSelect.value = "labs_custom";
     ui.cohortModalController.handleJoinTableChange();
     expect(joinOnInput.value).toBe(
-      '"subjects_custom".subject_id = "labs_custom".subject_id',
+      '"subjects_custom"."subject_id" = "labs_custom"."subject_id"',
+    );
+    ui.cohortModalController.cohortMinAge.value = "15";
+    expect(ui.cohortModalController.getCohortSql()).toContain(
+      '"subjects_custom"."AgeAsOfRandDt" >= 15',
+    );
+
+    // When ontology expects subject_id on patients<->hba1c_labs, but schema only has patient_id, schema wins
+    tableSelect.value = "hba1c_labs";
+    joinSelect.value = "patients";
+    ui.cohortModalController.handleJoinTableChange();
+    expect(joinOnInput.value).toBe(
+      '"hba1c_labs"."patient_id" = "patients"."patient_id"',
     );
 
     tableSelect.value = "subjects_custom";
     joinSelect.value = "patient_notes";
     ui.cohortModalController.handleJoinTableChange();
     expect(joinOnInput.value).toBe(
-      '"subjects_custom".patient_id = "patient_notes".patient_id',
+      '"subjects_custom"."patient_id" = "patient_notes"."patient_id"',
     );
 
-    // Reverse known relation lookup (cgm_readings -> patients) and unrelated tables fallback
-    schemaContent.replaceChildren();
+    // Reverse known relation lookup (cgm_readings -> patients) and unrelated tables fallback when schema is empty
+    state.setSchemaTables([]);
     ui.cohortModalController.open();
     tableSelect.value = "cgm_readings";
     joinSelect.value = "patients";
     ui.cohortModalController.handleJoinTableChange();
     expect(joinOnInput.value).toBe(
-      '"cgm_readings".subject_id = "patients".subject_id',
+      '"cgm_readings"."subject_id" = "patients"."subject_id"',
     );
 
     tableSelect.value = "tblaptsummary";
     joinSelect.value = "cgm_readings";
     ui.cohortModalController.handleJoinTableChange();
     expect(joinOnInput.value).toBe(
-      '"tblaptsummary".patient_id = "cgm_readings".patient_id',
+      '"tblaptsummary"."patient_id" = "cgm_readings"."patient_id"',
     );
 
     // Fallback when tableSelect/joinSelect values are empty strings
@@ -338,7 +407,10 @@ FROM "patients";`);
     ui.cohortModalController.handleJoinTableChange();
 
     // Close before open when previousFocusCohort is null
-    const freshController = new CohortBuilderModalController(ui);
+    const freshController = new CohortBuilderModalController({
+      state,
+      events: ui.events,
+    });
     freshController.close();
     freshController.dispose();
 

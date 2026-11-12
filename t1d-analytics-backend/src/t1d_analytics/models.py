@@ -1,31 +1,20 @@
 """Data models for T1D analytics, downloader, and training orchestration."""
 
-from enum import Enum
-from typing import Dict, Optional, Set, Union
+from __future__ import annotations
+
+from enum import StrEnum
 
 from pydantic.dataclasses import dataclass
 from typing_extensions import TypedDict
 
-from t1d_analytics.api_schemas import (
-    ColumnInfo,
-    JsonLevel2,
-    StatusResponse,
-    TableSchemaModel,
-)
 from t1d_analytics.errors import CliValidationError
-from t1d_analytics.sql_utils import SqlValue
 
 __all__ = [
-    "ColumnInfo",
     "DatasetInfo",
     "GrainDatasetConfig",
     "JaxFlaxModelConfig",
-    "JsonLevel2",
     "MaxTextConfig",
     "MaxTextParamValue",
-    "SqlValue",
-    "StatusResponse",
-    "TableSchemaModel",
     "TfrcZoneAllocationDict",
     "TpuAcceleratorType",
     "TpuSchedulingType",
@@ -34,14 +23,14 @@ __all__ = [
     "TrainingJobConfig",
 ]
 
-MaxTextParamValue = Union[str, int, float, bool]
+MaxTextParamValue = str | int | float | bool
 
 
 class TfrcZoneAllocationDict(TypedDict):
     """Authorized TFRC hardware accelerators and scheduling types for a GCP zone."""
 
-    accelerators: Set["TpuAcceleratorType"]
-    schedulings: Set["TpuSchedulingType"]
+    accelerators: set[TpuAcceleratorType]
+    schedulings: set[TpuSchedulingType]
 
 
 @dataclass
@@ -49,8 +38,7 @@ class DatasetInfo:
     """
     Information about a dataset parsed from the website.
 
-    Attributes
-    ----------
+    Attributes:
         protocol: Clinical protocol name or identifier.
         dataset_url: Remote URL to download tabular dataset.
         document_url: Remote URL for protocol documentation or study design.
@@ -61,14 +49,14 @@ class DatasetInfo:
     """
 
     protocol: str
-    dataset_url: Optional[str]
-    document_url: Optional[str]
-    expected_sha256: Optional[str] = None
-    postback_target: Optional[str] = None
-    postback_argument: Optional[str] = None
+    dataset_url: str | None
+    document_url: str | None
+    expected_sha256: str | None = None
+    postback_target: str | None = None
+    postback_argument: str | None = None
 
 
-class TrainingBackend(str, Enum):
+class TrainingBackend(StrEnum):
     """Supported execution backends for model training."""
 
     LOCAL_CPU = "local-cpu"
@@ -78,7 +66,7 @@ class TrainingBackend(str, Enum):
     HUGGINGFACE = "huggingface"
 
 
-class TpuAcceleratorType(str, Enum):
+class TpuAcceleratorType(StrEnum):
     """Supported Cloud TPU hardware accelerator configurations."""
 
     V4_8 = "v4-8"
@@ -89,7 +77,7 @@ class TpuAcceleratorType(str, Enum):
     V6E_64 = "v6e-64"
 
 
-class TpuSchedulingType(str, Enum):
+class TpuSchedulingType(StrEnum):
     """Scheduling strategy for Cloud TPU allocations."""
 
     SPOT = "spot"
@@ -101,8 +89,7 @@ class JaxFlaxModelConfig:
     """
     Structured JAX/Flax architecture and XLA compilation parameters for MaxText.
 
-    Attributes
-    ----------
+    Attributes:
         model_name: Base architecture identifier (e.g., 'gemma-7b', 'gemma-2b').
         dtype: Numerical precision for weights and activations ('bfloat16', 'float32').
         scan_layers: Whether to apply JAX scan optimization across transformer layers.
@@ -121,12 +108,11 @@ class JaxFlaxModelConfig:
     dcn_data_parallelism: int = 1
     remat_policy: str = "minimal"
 
-    def to_dict(self) -> Dict[str, MaxTextParamValue]:
+    def to_dict(self) -> dict[str, MaxTextParamValue]:
         """
         Convert JAX/Flax configuration to dictionary mapping.
 
-        Returns
-        -------
+        Returns:
             Dict[str, MaxTextParamValue]: Key-value configuration mapping for MaxText.
 
         """
@@ -146,8 +132,7 @@ class GrainDatasetConfig:
     """
     Configuration for Google Grain dataset streaming pipeline to Cloud TPU nodes.
 
-    Attributes
-    ----------
+    Attributes:
         dataset_path: Source filepath or GCS URI to DuckDB parquet records.
         worker_count: Number of independent data loader worker threads per host.
         batch_size: Global batch size across all TPU cores.
@@ -164,12 +149,11 @@ class GrainDatasetConfig:
     shuffle_buffer_size: int = 10000
     seed: int = 42
 
-    def to_dict(self) -> Dict[str, MaxTextParamValue]:
+    def to_dict(self) -> dict[str, MaxTextParamValue]:
         """
         Convert Grain configuration to dictionary mapping.
 
-        Returns
-        -------
+        Returns:
             Dict[str, MaxTextParamValue]: MaxText dataset dictionary structure.
 
         """
@@ -189,8 +173,7 @@ class MaxTextConfig:
     """
     Structured configuration for distributed MaxText training on Google Cloud TPUs.
 
-    Attributes
-    ----------
+    Attributes:
         project_id: Google Cloud project identifier.
         zone: Compute Engine zone where TPU resources reside.
         bucket_url: Google Cloud Storage bucket URL (gs://<bucket>).
@@ -214,23 +197,22 @@ class MaxTextConfig:
     scheduling_type: TpuSchedulingType = TpuSchedulingType.SPOT
     num_slices: int = 1
     model_name: str = "gemma-7b"
-    base_output_directory: Optional[str] = None
-    jax_config: Optional[JaxFlaxModelConfig] = None
-    grain_config: Optional[GrainDatasetConfig] = None
+    base_output_directory: str | None = None
+    jax_config: JaxFlaxModelConfig | None = None
+    grain_config: GrainDatasetConfig | None = None
     max_preemption_retries: int = 3
     execute_tpu_dispatch: bool = False
     auto_sync_gcs: bool = False
 
-    def build_full_maxtext_parameters(self) -> Dict[str, MaxTextParamValue]:
+    def build_full_maxtext_parameters(self) -> dict[str, MaxTextParamValue]:
         """
         Assemble comprehensive MaxText YAML dictionary combining cluster and model parameters.
 
-        Returns
-        -------
+        Returns:
             Dict[str, MaxTextParamValue]: Full MaxText parameter dictionary ready for export.
 
         """
-        params: Dict[str, MaxTextParamValue] = {
+        params: dict[str, MaxTextParamValue] = {
             "project_id": self.project_id,
             "zone": self.zone,
             "base_output_directory": self.base_output_directory
@@ -254,16 +236,14 @@ class MaxTextConfig:
         - Cloud TPU v5e (europe-west4-b & us-central1-a): v5litepod-8, v5litepod-64 (spot)
         - Cloud TPU v6e (europe-west4-a & us-east1-d): v6e-64 (spot)
 
-        Returns
-        -------
+        Returns:
             bool: True if configuration matches authorized region and hardware slice.
 
-        Raises
-        ------
+        Raises:
             CliValidationError: If zone and accelerator type combination violates TFRC grant.
 
         """
-        valid_allocations: Dict[str, TfrcZoneAllocationDict] = {
+        valid_allocations: dict[str, TfrcZoneAllocationDict] = {
             "us-central2-b": {
                 "accelerators": {
                     TpuAcceleratorType.V4_8,
@@ -320,8 +300,7 @@ class TrainingHyperparameters:
     """
     Hyperparameters for fine-tuning or pretraining runs.
 
-    Attributes
-    ----------
+    Attributes:
         learning_rate: Learning rate for gradient descent.
         batch_size: Number of training samples per gradient batch.
         num_epochs: Total number of full passes through the training set.
@@ -352,8 +331,7 @@ class TrainingJobConfig:
     """
     Structured configuration for training orchestration jobs.
 
-    Attributes
-    ----------
+    Attributes:
         model_name: Identifier or path of the base neural model.
         backend: Execution target environment for model training.
         dataset_path: Filepath to the formatted training dataset.
@@ -373,11 +351,11 @@ class TrainingJobConfig:
     backend: TrainingBackend = TrainingBackend.LOCAL_CPU
     dataset_path: str = "./training_data.parquet"
     output_dir: str = "./checkpoints"
-    hyperparameters: Optional[TrainingHyperparameters] = None
+    hyperparameters: TrainingHyperparameters | None = None
     dry_run: bool = False
-    maxtext_config: Optional[MaxTextConfig] = None
+    maxtext_config: MaxTextConfig | None = None
     use_lora: bool = False
-    quantization: Optional[str] = None
-    validation_dataset_path: Optional[str] = None
+    quantization: str | None = None
+    validation_dataset_path: str | None = None
     use_tiny_model: bool = False
     model_architecture: str = "auto"

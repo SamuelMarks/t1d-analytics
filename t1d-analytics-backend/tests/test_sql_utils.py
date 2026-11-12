@@ -94,12 +94,22 @@ def test_is_read_only_sql_query() -> None:
 
 def test_is_sql_query_branches() -> None:
     """Test all branches of is_sql_query including comments, parens, show NL, real connections, and protocol fakes."""
-    from typing import Sequence
+    from collections.abc import Sequence
 
-    from t1d_analytics.sql_utils import SqlSyntaxValidatorProtocol
+    from t1d_analytics.sql_utils import (
+        SqlSyntaxValidatorProtocol,
+        classify_sql_input,
+        is_valid_read_only_sql,
+    )
 
     assert is_sql_query("") is False
     assert is_sql_query("()") is False
+    assert is_sql_query("((SELECT 1)") is False
+    assert is_sql_query("(SELECT 1) UNION ALL (SELECT 2)") is True
+    assert is_valid_read_only_sql("(SELECT 1) UNION ALL (SELECT 2)") is True
+    assert is_valid_read_only_sql("SELECT '--not a comment' AS lbl") is True
+    assert classify_sql_input("SELECT FROM WHERE INVALID") == "malformed_read_only_sql"
+    assert classify_sql_input("Create a Table 1 for patients") == "natural_language"
     assert is_sql_query("What is the average glucose?") is False
     assert is_sql_query("Show me the patients") is False
     assert is_sql_query("SHOW") is False
@@ -148,7 +158,19 @@ def test_is_sql_query_branches() -> None:
             _ = query
             raise RuntimeError("other db error")
 
+    class _ListReturningValidator(SqlSyntaxValidatorProtocol):
+        """Protocol fake returning a concrete statement tuple."""
+
+        def extract_statements(self, query: str) -> Sequence[duckdb.Statement]:
+            """Delegate to in-memory DuckDB connection and return tuple."""
+            with duckdb.connect(":memory:") as tmp_c:
+                return tuple(tmp_c.extract_statements(query))
+
+    from unittest.mock import MagicMock
+
     assert is_sql_query("SELECT 1", conn=_RuntimeErrorValidator()) is True
+    assert is_sql_query("SELECT 1", conn=_ListReturningValidator()) is True
+    assert is_sql_query("SELECT 1", conn=MagicMock()) is True
 
 
 def test_extract_sql_from_response_branches() -> None:
@@ -249,6 +271,11 @@ def test_validate_read_only_sql() -> None:
         validate_read_only_sql("  SELECT * FROM patients WHERE name = 'a;b'; ")
         == "SELECT * FROM patients WHERE name = 'a;b';"
     )
+    assert validate_read_only_sql("PRAGMA version;") == "PRAGMA version;"
+    assert (
+        validate_read_only_sql("PRAGMA table_info('patients')")
+        == "PRAGMA table_info('patients')"
+    )
 
     with pytest.raises(EmptyQueryError):
         validate_read_only_sql("   -- only a comment\n ")
@@ -258,13 +285,27 @@ def test_validate_read_only_sql() -> None:
         "SELECT 1; ATTACH 'evil.db'",
         "SELECT 1; COPY patients TO '/tmp/leak.csv'",
     ):
-        with pytest.raises(MultipleStatementsError):
+        with pytest.raises(MultipleStatementsError) as multi_exc:
             validate_read_only_sql(multi_vec)
+        assert multi_exc.value.error_code == "backend.sqlMultipleStatements"
 
     for forbidden_vec in (
         "DROP TABLE patients",
         "/*! DROP TABLE patients */",
         "-- comment\nDROP TABLE patients",
+        "ATTACH ':memory:' AS extra",
+        "DETACH extra",
+        "COPY patients TO 'out.csv'",
+        "EXPORT DATABASE 'out_dir'",
+        "IMPORT DATABASE 'in_dir'",
+        "LOAD httpfs",
+        "INSTALL httpfs",
+        "SET memory_limit = '1GB'",
+        "RESET memory_limit",
+        "CALL duckdb_tables()",
+        "PRAGMA enable_profiling",
+        "PRAGMA memory_limit='1GB'",
+        "WITH sneaky AS (SELECT 1) COPY sneaky TO 'leak.csv'",
         "SELECT * FROM read_csv_auto('/etc/passwd')",
         "SELECT * FROM read_parquet('secret.parquet')",
         "SELECT * FROM glob('*')",
@@ -303,13 +344,37 @@ def test_execute_duckdb_batch_write_with_retry(tmp_path: Path) -> None:
     conn.close()
     assert rows == [(1, "alpha"), (2, "beta")]
 
-    # Test lock retry and exhaustion
+    # Atomic transaction rollback when second statement in batch fails
+    with pytest.raises(duckdb.Error):
+        execute_duckdb_batch_write_with_retry(
+            db_file,
+            [
+                ("INSERT INTO items VALUES (?, ?)", [3, "rolled_back"]),
+                ("INSERT INTO nonexistent_table VALUES (1)", None),
+            ],
+        )
+    conn_after_rb = duckdb.connect(str(db_file), read_only=True)
+    rows_after_rb = conn_after_rb.execute(
+        "SELECT id, label FROM items ORDER BY id"
+    ).fetchall()
+    conn_after_rb.close()
+    assert rows_after_rb == [(1, "alpha"), (2, "beta")]
+
+    # Test lock retry and DatabaseLockedError exhaustion
+    from t1d_analytics.errors import DatabaseLockedError
+    from t1d_analytics.sql_utils import close_cached_parser_conn, is_sql_query
+
+    assert is_sql_query("SELECT 1") is True
+    close_cached_parser_conn()
+    close_cached_parser_conn()
+    assert is_sql_query("SELECT 1") is True
+
     delays: list[float] = []
     with patch(
         "duckdb.connect",
         side_effect=duckdb.IOException("Could not set lock on file"),
     ):
-        with pytest.raises(duckdb.IOException, match="database is locked"):
+        with pytest.raises(DatabaseLockedError, match="database is locked"):
             execute_duckdb_write_with_retry(
                 db_file,
                 "SELECT 1",
@@ -494,11 +559,11 @@ def test_read_only_duckdb_cursor_and_jaeb_attachment(tmp_path: Path) -> None:
     from t1d_analytics.duckdb_pool import (
         ReadOnlyDuckDbCursorProxy,
         ReadOnlyDuckDBPool,
-        _attach_jaeb_read_only_if_present,
-        _create_read_only_cursor_proxy,
         _noop_interrupt,
         _resolve_jaeb_attach_path,
+        attach_jaeb_read_only_if_present,
         connect_duckdb_read_only_cursor,
+        create_read_only_cursor_proxy,
     )
     from t1d_analytics.sql_executor import execute_duckdb_query
     from t1d_analytics.sql_utils import extract_table_columns_map, extract_table_schemas
@@ -596,19 +661,43 @@ def test_read_only_duckdb_cursor_and_jaeb_attachment(tmp_path: Path) -> None:
             """Raise RuntimeError."""
             raise RuntimeError("attach unsupported")
 
-    _attach_jaeb_read_only_if_present(
-        _FailingAttachConn(),  # type: ignore[arg-type]
+    attach_jaeb_read_only_if_present(
+        _FailingAttachConn(),
         primary_db,
         jaeb_candidates=(jaeb_db,),
     )
 
-    # _create_read_only_cursor_proxy with custom cursor-capable protocol object and fallback object
+    # create_read_only_cursor_proxy with custom cursor-capable protocol object and fallback object
+    from collections.abc import Sequence as AbcSequence
+
+    from t1d_analytics.duckdb_pool import PoolSqlRawInputValue
+
     class _CustomCursorObj:
-        """Custom cursor double without close method."""
+        """Custom cursor double without close method implementing DuckDbCursorObjectProtocol."""
 
-        description = None
+        description: AbcSequence[tuple[str, ...]] | None = None
 
-    class _CustomConnWithCursor:
+        def execute(
+            self,
+            _query: str,
+            _parameters: AbcSequence[PoolSqlRawInputValue] | None = None,
+        ) -> duckdb.DuckDBPyConnection:
+            """Open an in-memory DuckDB relation."""
+            return duckdb.connect(":memory:")
+
+        def fetchone(self) -> tuple[PoolSqlRawInputValue, ...] | None:
+            """Return None."""
+            return None
+
+        def fetchall(self) -> list[tuple[PoolSqlRawInputValue, ...]]:
+            """Return empty row list."""
+            return []
+
+        def fetchmany(self, _size: int = 1) -> list[tuple[PoolSqlRawInputValue, ...]]:
+            """Return empty row list."""
+            return []
+
+    class _CustomConnWithCursor(_CustomCursorObj):
         """Custom connection double implementing .cursor()."""
 
         def __init__(self) -> None:
@@ -621,15 +710,13 @@ def test_read_only_duckdb_cursor_and_jaeb_attachment(tmp_path: Path) -> None:
             return self.cur
 
     custom_conn = _CustomConnWithCursor()
-    proxy_custom = _create_read_only_cursor_proxy(
-        custom_conn  # type: ignore[arg-type]
-    )
+    proxy_custom = create_read_only_cursor_proxy(custom_conn)
     assert id(proxy_custom.raw_cursor) == id(custom_conn.cur)
     assert proxy_custom.description is None
     proxy_custom.interrupt()
     proxy_custom.close()
 
-    class _SelfCursorConn:
+    class _SelfCursorConn(_CustomCursorObj):
         """Connection double whose .cursor() returns self."""
 
         def cursor(self) -> "_SelfCursorConn":
@@ -637,9 +724,77 @@ def test_read_only_duckdb_cursor_and_jaeb_attachment(tmp_path: Path) -> None:
             return self
 
     self_conn = _SelfCursorConn()
-    proxy_self = _create_read_only_cursor_proxy(
-        self_conn  # type: ignore[arg-type]
-    )
+    proxy_self = create_read_only_cursor_proxy(self_conn)
     assert id(proxy_self.raw_cursor) == id(self_conn)
     proxy_self.interrupt()
     proxy_self.close()
+
+
+def test_csv_formula_injection_backend_frontend_parity() -> None:
+    """Verify `sql_utils.sanitize_spreadsheet_cell` and `exporters.ts:sanitizeSpreadsheetCell` produce identical OWASP outputs."""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    from t1d_analytics.sql_utils import sanitize_spreadsheet_cell
+
+    vectors: list[str] = [
+        "",
+        "   ",
+        "normal clinical note",
+        "=SUM(A1:A10)",
+        "+cmd|' /C calc'!A0",
+        "-cmd|' /C calc'!A0",
+        "@SUM(1+1)*cmd|' /C calc'!A0",
+        '   =HYPERLINK("http://evil.example")',
+        "\u00a0@SUM(A1:A2)",
+        "  +IMPORTXML(A1,A2)",
+        "  -2+3",
+        "\t=1+1",
+        "\r=1+1",
+        "\n=1+1",
+        "\x00=1+1",
+        "\x0b+1+1",
+        "\x0c@1+1",
+        "   \t=1+1",
+        "   \x1f-cmd",
+        "-12.5",
+        "+3.25",
+        "  -42.0",
+        "  +0.125e2",
+        "+1e999",
+        "-1e999",
+    ]
+
+    py_outputs = [sanitize_spreadsheet_cell(v) for v in vectors]
+
+    web_dir = Path(__file__).resolve().parents[2] / "t1d-analytics-web"
+    exporters_ts = web_dir / "src" / "exporters.ts"
+    node_script = """
+import fs from "node:fs";
+import vm from "node:vm";
+import ts from "./node_modules/typescript/lib/typescript.js";
+
+const vectors = JSON.parse(process.argv[1]);
+const src = fs.readFileSync("./src/exporters.ts", "utf8");
+const transpiled = ts.transpileModule(src, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const mod = { exports: {} };
+vm.runInNewContext(transpiled, { module: mod, exports: mod.exports, Blob, URL, document: {} });
+const out = vectors.map((v) => mod.exports.sanitizeSpreadsheetCell(v));
+process.stdout.write(JSON.stringify(out));
+"""
+    assert exporters_ts.is_file()
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", node_script, json.dumps(vectors)],
+        cwd=str(web_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    ts_outputs = json.loads(proc.stdout)
+    assert py_outputs == ts_outputs
+    assert py_outputs[3] == "'=SUM(A1:A10)"
+    assert py_outputs[19] == "-12.5"
+    assert py_outputs[23] == "'+1e999"

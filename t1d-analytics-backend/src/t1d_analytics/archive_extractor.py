@@ -4,9 +4,10 @@ import logging
 import os
 import tarfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List, Optional
 
+from t1d_analytics.errors import PathAccessDeniedError
 from t1d_analytics.i18n import get_translator
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ _ARCHIVE_GLOB_PATTERNS = (
 
 
 def resolve_effective_decompressed_quota(
-    max_decompressed_bytes: Optional[int] = None,
+    max_decompressed_bytes: int | None = None,
 ) -> int:
     """
     Resolve the effective maximum decompressed byte quota from explicit arguments or environment variables.
@@ -54,11 +55,9 @@ def resolve_effective_decompressed_quota(
     is None or equals `DEFAULT_MAX_DECOMPRESSED_BYTES`. A value `<= 0` indicates an unlimited quota.
 
     Args:
-    ----
         max_decompressed_bytes: Explicit maximum decompressed bytes (or None to use default/env).
 
     Returns:
-    -------
         int: Effective quota in bytes (`<= 0` means unlimited).
 
     """
@@ -90,7 +89,7 @@ def resolve_effective_decompressed_quota(
     )
 
 
-def _should_skip_archive_member_name(
+def should_skip_archive_member_name(
     member_name: str,
     tabular_only: bool = False,
 ) -> bool:
@@ -98,12 +97,10 @@ def _should_skip_archive_member_name(
     Determine whether an archive member should be skipped as OS metadata or non-tabular documentation.
 
     Args:
-    ----
         member_name: Internal relative path of the archive entry.
         tabular_only: If True, skip entries that are neither tabular data files nor nested archives.
 
     Returns:
-    -------
         bool: True if the member should be skipped without warning.
 
     """
@@ -122,23 +119,48 @@ def _should_skip_archive_member_name(
     return False
 
 
+def validate_safe_member_target(target_path: Path, resolved_extract_dir: Path) -> Path:
+    """
+    Validate that `target_path` resolves inside `resolved_extract_dir` (ZIP/TAR slip prevention).
+
+    Args:
+        target_path: Resolved destination path for an archive member.
+        resolved_extract_dir: Resolved root extraction directory.
+
+    Returns:
+        Path: Validated `target_path`.
+
+    Raises:
+        PathAccessDeniedError: If `target_path` escapes `resolved_extract_dir`.
+
+    """
+    if target_path == resolved_extract_dir or target_path.is_relative_to(
+        resolved_extract_dir
+    ):
+        return target_path
+    raise PathAccessDeniedError(
+        f"Archive member target '{target_path}' escapes extraction root '{resolved_extract_dir}'.",
+        params={"path": str(target_path)},
+    )
+
+
 def _is_safe_member_target(target_path: Path, resolved_extract_dir: Path) -> bool:
     """
     Verify that `target_path` resolves inside `resolved_extract_dir` (ZIP/TAR slip prevention).
 
     Args:
-    ----
         target_path: Resolved destination path for an archive member.
         resolved_extract_dir: Resolved root extraction directory.
 
     Returns:
-    -------
         bool: True if `target_path` is equal to or inside `resolved_extract_dir`.
 
     """
-    return target_path == resolved_extract_dir or target_path.is_relative_to(
-        resolved_extract_dir
-    )
+    try:
+        validate_safe_member_target(target_path, resolved_extract_dir)
+        return True
+    except PathAccessDeniedError:
+        return False
 
 
 def _is_already_extracted(
@@ -150,13 +172,11 @@ def _is_already_extracted(
     Check if `target_path` already exists on disk with `expected_size` when `overwrite` is False.
 
     Args:
-    ----
         target_path: Destination file path.
         expected_size: Expected uncompressed byte size.
         overwrite: Whether existing files should be overwritten.
 
     Returns:
-    -------
         bool: True if extraction can be skipped as idempotent.
 
     """
@@ -166,6 +186,43 @@ def _is_already_extracted(
         and target_path.is_file()
         and target_path.stat().st_size == expected_size
     )
+
+
+def _is_unsafe_tar_member(tar_member: tarfile.TarInfo) -> bool:
+    """
+    Return True if `tar_member` is a symlink, hardlink, character/block device, or FIFO pipe.
+
+    Args:
+        tar_member: Tar archive member metadata entry.
+
+    Returns:
+        bool: True when the entry must not be extracted.
+
+    """
+    return tar_member.issym() or tar_member.islnk() or tar_member.isdev()
+
+
+def extract_tar_member_safely(
+    tar_ref: tarfile.TarFile,
+    tar_member: tarfile.TarInfo,
+    extract_dir: Path,
+) -> None:
+    """
+    Extract a validated `TarInfo` entry, applying PEP 706 `tarfile.data_filter` when supported by Python.
+
+    Args:
+        tar_ref: Open `TarFile` archive handle.
+        tar_member: Validated regular-file `TarInfo` entry.
+        extract_dir: Destination extraction directory.
+
+    """
+    data_filter = getattr(tarfile, "data_filter", None)
+    if callable(data_filter):
+        filtered_member = data_filter(tar_member, str(extract_dir))
+        if filtered_member is not None:
+            tar_ref.extract(filtered_member, extract_dir)
+    else:
+        tar_ref.extract(tar_member, extract_dir)
 
 
 def _extract_tar_archive(
@@ -179,10 +236,9 @@ def _extract_tar_archive(
     tabular_only: bool = False,
 ) -> int:
     """
-    Safely extract a tar archive into `extract_dir` with symlink, path-traversal, idempotency, and size-quota checks.
+    Safely extract a tar archive into `extract_dir` with symlink/device, path-traversal, idempotency, and size-quota checks.
 
     Args:
-    ----
         path: Source tar archive path.
         extract_dir: Target extraction directory.
         resolved_extract_dir: Resolved target extraction directory.
@@ -193,7 +249,6 @@ def _extract_tar_archive(
         tabular_only: Whether to skip non-tabular documentation files.
 
     Returns:
-    -------
         int: Updated cumulative extracted byte count.
 
     """
@@ -202,9 +257,9 @@ def _extract_tar_archive(
     try:
         with tarfile.open(path, "r:*") as tar_ref:
             for tar_member in tar_ref.getmembers():
-                if tar_member.issym() or tar_member.islnk():
+                if _is_unsafe_tar_member(tar_member):
                     warn_sym = _(
-                        "Skipping unsafe entry {} in {} (symlink or hardlink detected).",
+                        "Skipping unsafe entry {} in {} (symlink, hardlink, or device/FIFO detected).",
                         tar_member.name,
                         path.name,
                     )
@@ -221,7 +276,7 @@ def _extract_tar_archive(
                     logger.debug(warn_trav)
                     report_fn(warn_trav)
                     continue
-                if tar_member.isdir() or _should_skip_archive_member_name(
+                if tar_member.isdir() or should_skip_archive_member_name(
                     tar_member.name, tabular_only=tabular_only
                 ):
                     continue
@@ -247,7 +302,7 @@ def _extract_tar_archive(
                     extract_dir.mkdir(parents=True, exist_ok=True)
                     announced = True
                 total_extracted_bytes += expected_size
-                tar_ref.extract(tar_member, extract_dir)
+                extract_tar_member_safely(tar_ref, tar_member, extract_dir)
     except (tarfile.TarError, EOFError, OSError):
         err_tar = _("Failed to extract {} (Bad Archive File).", path.name)
         logger.debug(err_tar)
@@ -271,7 +326,6 @@ def _extract_zip_archive(
     Safely extract a zip archive into `extract_dir` with symlink, path-traversal, idempotency, and size-quota checks.
 
     Args:
-    ----
         path: Source zip archive path.
         extract_dir: Target extraction directory.
         resolved_extract_dir: Resolved target extraction directory.
@@ -284,7 +338,6 @@ def _extract_zip_archive(
         max_member_compression_ratio: Maximum allowed uncompressed/compressed size ratio.
 
     Returns:
-    -------
         int: Updated cumulative extracted byte count.
 
     """
@@ -312,7 +365,7 @@ def _extract_zip_archive(
                     logger.debug(warn_ztrav)
                     report_fn(warn_ztrav)
                     continue
-                if zip_info.is_dir() or _should_skip_archive_member_name(
+                if zip_info.is_dir() or should_skip_archive_member_name(
                     zip_info.filename, tabular_only=tabular_only
                 ):
                     continue
@@ -367,11 +420,9 @@ def _resolve_archive_extract_dir(path: Path) -> Path:
     Determine the target extraction directory for an archive path.
 
     Args:
-    ----
         path: Archive file path (`.zip`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar`).
 
     Returns:
-    -------
         Path: Target directory path with the archive suffix stripped.
 
     """
@@ -386,21 +437,19 @@ def _resolve_archive_extract_dir(path: Path) -> Path:
 def _discover_unprocessed_archives(
     data_dir: Path,
     processed_archives: set[Path],
-) -> List[Path]:
+) -> list[Path]:
     """
     Discover archive files in `data_dir` that have not yet been processed.
 
     Args:
-    ----
         data_dir: Root directory to scan.
         processed_archives: Set of resolved archive paths already processed.
 
     Returns:
-    -------
         List[Path]: Ordered list of unprocessed archive paths.
 
     """
-    candidate_archives: List[Path] = []
+    candidate_archives: list[Path] = []
     for pat in _ARCHIVE_GLOB_PATTERNS:
         candidate_archives.extend(data_dir.rglob(pat))
     deduped = [
@@ -423,7 +472,6 @@ def _extract_single_archive_file(
     Dispatch a single archive file (`.tar*` or `.zip`) to the appropriate extractor.
 
     Args:
-    ----
         path: Archive file path.
         total_extracted_bytes: Running cumulative extracted byte count.
         effective_quota: Maximum decompressed byte quota (`<= 0` for unlimited).
@@ -434,7 +482,6 @@ def _extract_single_archive_file(
         max_member_compression_ratio: Maximum allowed uncompressed/compressed size ratio.
 
     Returns:
-    -------
         int: Updated cumulative extracted byte count.
 
     """
@@ -472,8 +519,8 @@ def extract_zips(
     max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
     overwrite: bool = False,
     tabular_only: bool = False,
-    min_ratio_check_bytes: Optional[int] = None,
-    max_member_compression_ratio: Optional[int] = None,
+    min_ratio_check_bytes: int | None = None,
+    max_member_compression_ratio: int | None = None,
 ) -> None:
     """
     Extract zip and tar archives found in the data directory safely without path traversal or zip bombs.
@@ -481,7 +528,6 @@ def extract_zips(
     Recursively decompresses nested archives up to max_depth with per-entry size-verified idempotency.
 
     Args:
-    ----
         data_dir_str: Directory path containing archive files to extract.
         max_depth: Maximum recursion depth for decompressing nested archives.
         report_fn: Progress reporter callback (defaults to `print`).
@@ -548,17 +594,9 @@ __all__ = [
     "DEFAULT_MAX_DECOMPRESSED_BYTES",
     "MAX_MEMBER_COMPRESSION_RATIO",
     "MIN_RATIO_CHECK_BYTES",
-    "_ARCHIVE_GLOB_PATTERNS",
-    "_TABULAR_AND_ARCHIVE_SUFFIXES",
-    "_discover_unprocessed_archives",
-    "_extract_single_archive_file",
-    "_extract_single_zip",
-    "_extract_tar_archive",
-    "_extract_zip_archive",
-    "_is_already_extracted",
-    "_is_safe_member_target",
-    "_resolve_archive_extract_dir",
-    "_should_skip_archive_member_name",
+    "extract_tar_member_safely",
     "extract_zips",
     "resolve_effective_decompressed_quota",
+    "should_skip_archive_member_name",
+    "validate_safe_member_target",
 ]

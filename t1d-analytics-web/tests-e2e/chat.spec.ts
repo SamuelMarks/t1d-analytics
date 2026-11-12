@@ -18,10 +18,12 @@ test.describe("Chat UI E2E", () => {
     // We will mock the API calls
     await page.route("**/api/chat", async (route) => {
       const request = route.request();
-      const postData = JSON.parse(request.postData() || "{}");
+      const postData: { model?: string; message?: string } = JSON.parse(
+        request.postData() || "{}",
+      );
 
       if (postData.model === "sql") {
-        if (postData.message.includes("empty")) {
+        if (postData.message?.includes("empty") === true) {
           await route.fulfill({
             json: { content: "Query executed.", sqlResult: [] },
           });
@@ -361,8 +363,8 @@ test("Chat input resizes dynamically with multi-line text and resets on send", a
 
   // Get initial height
   const initialBox = await chatInput.boundingBox();
-  expect(initialBox).not.toBeNull();
-  const initialHeight = initialBox!.height;
+  if (!initialBox) throw new Error("Expected initialBox");
+  const initialHeight = initialBox.height;
 
   // Type multiple lines
   await chatInput.fill("Line 1\nLine 2\nLine 3\nLine 4\nLine 5");
@@ -373,8 +375,8 @@ test("Chat input resizes dynamically with multi-line text and resets on send", a
 
   // Get new height
   const expandedBox = await chatInput.boundingBox();
-  expect(expandedBox).not.toBeNull();
-  const expandedHeight = expandedBox!.height;
+  if (!expandedBox) throw new Error("Expected expandedBox");
+  const expandedHeight = expandedBox.height;
 
   // Assert it grew
   expect(expandedHeight).toBeGreaterThan(initialHeight);
@@ -384,21 +386,22 @@ test("Chat input resizes dynamically with multi-line text and resets on send", a
   await page.waitForTimeout(100);
 
   const clearedBox = await chatInput.boundingBox();
-  expect(clearedBox).not.toBeNull();
-  expect(clearedBox!.height).toBeCloseTo(initialHeight, 1);
+  if (!clearedBox) throw new Error("Expected clearedBox");
+  expect(clearedBox.height).toBeCloseTo(initialHeight, 1);
 
   // Type again, and test that sending resets it
   await chatInput.fill("Line 1\nLine 2");
   await page.waitForTimeout(100);
   const reExpandedBox = await chatInput.boundingBox();
-  expect(reExpandedBox!.height).toBeGreaterThan(initialHeight);
+  if (!reExpandedBox) throw new Error("Expected reExpandedBox");
+  expect(reExpandedBox.height).toBeGreaterThan(initialHeight);
 
   await page.click("#send-btn");
   await page.waitForTimeout(100);
 
   const sentBox = await chatInput.boundingBox();
-  expect(sentBox).not.toBeNull();
-  expect(sentBox!.height).toBeCloseTo(initialHeight, 1);
+  if (!sentBox) throw new Error("Expected sentBox");
+  expect(sentBox.height).toBeCloseTo(initialHeight, 1);
 });
 
 test("Cloud provider settings modal and model selection", async ({ page }) => {
@@ -514,11 +517,11 @@ test("Topbar language chooser and chat bubbles remain strictly within viewport a
       const el = page.locator(selector);
       await expect(el).toBeVisible();
       const box = await el.boundingBox();
-      expect(box).not.toBeNull();
-      expect(box!.x).toBeGreaterThanOrEqual(0);
-      expect(box!.x + box!.width).toBeLessThanOrEqual(vp.width + 1);
-      expect(box!.width).toBeGreaterThanOrEqual(28);
-      expect(box!.height).toBeGreaterThanOrEqual(24);
+      if (!box) throw new Error(`Expected boundingBox for ${selector}`);
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(vp.width + 1);
+      expect(box.width).toBeGreaterThanOrEqual(28);
+      expect(box.height).toBeGreaterThanOrEqual(24);
     }
 
     // Send a user message and verify chat bubbles do not shift off-screen after wide SQL response
@@ -532,23 +535,26 @@ test("Topbar language chooser and chat bubbles remain strictly within viewport a
 
     const userBox = await userBubble.boundingBox();
     const assistantBox = await assistantBubble.boundingBox();
-    expect(userBox).not.toBeNull();
-    expect(assistantBox).not.toBeNull();
-    expect(userBox!.x).toBeGreaterThanOrEqual(0);
-    expect(userBox!.x + userBox!.width).toBeLessThanOrEqual(vp.width + 1);
-    expect(assistantBox!.x).toBeGreaterThanOrEqual(0);
-    expect(assistantBox!.x + assistantBox!.width).toBeLessThanOrEqual(
+    if (!userBox || !assistantBox) throw new Error("Expected bubble boxes");
+    expect(userBox.x).toBeGreaterThanOrEqual(0);
+    expect(userBox.x + userBox.width).toBeLessThanOrEqual(vp.width + 1);
+    expect(assistantBox.x).toBeGreaterThanOrEqual(0);
+    expect(assistantBox.x + assistantBox.width).toBeLessThanOrEqual(
       vp.width + 1,
     );
 
     const overflowCheck = await page.evaluate(() => {
       const doc = document.documentElement;
-      const mainPane = document.getElementById("main-pane")!;
-      const msgContainer = document.getElementById("messages-container")!;
+      const mainPane = document.getElementById("main-pane");
+      const msgContainer = document.getElementById("messages-container");
       return {
         docOverflow: doc.scrollWidth > doc.clientWidth,
-        mainOverflow: mainPane.scrollWidth > mainPane.clientWidth,
-        msgOverflow: msgContainer.scrollWidth > msgContainer.clientWidth,
+        mainOverflow: mainPane
+          ? mainPane.scrollWidth > mainPane.clientWidth
+          : false,
+        msgOverflow: msgContainer
+          ? msgContainer.scrollWidth > msgContainer.clientWidth
+          : false,
       };
     });
     expect(overflowCheck.docOverflow).toBe(false);

@@ -21,9 +21,10 @@ if (typeof navigator === "undefined") {
 }
 
 /**
- * In-memory Web Storage API implementation for testing.
+ * Creates an isolated in-memory Web Storage API implementation for testing.
+ * @returns {Storage} Mock Storage instance.
  */
-export const localStorageMock: Storage = (function (): Storage {
+export function createMemoryStorage(): Storage {
   let store: Record<string, string> = {};
   return {
     /**
@@ -40,7 +41,7 @@ export const localStorageMock: Storage = (function (): Storage {
      */
     key: function (index: number): string | null {
       const keys = Object.keys(store);
-      return index >= 0 && index < keys.length ? keys[index] : null;
+      return index >= 0 && index < keys.length ? (keys[index] ?? null) : null;
     },
     /**
      * Retrieves a stored string value by key, preserving empty strings (`""`).
@@ -49,7 +50,7 @@ export const localStorageMock: Storage = (function (): Storage {
      */
     getItem: function (key: string): string | null {
       return Object.prototype.hasOwnProperty.call(store, key)
-        ? store[key]
+        ? (store[key] ?? null)
         : null;
     },
     /**
@@ -77,6 +78,13 @@ export const localStorageMock: Storage = (function (): Storage {
       delete store[key];
     },
   };
-})();
+}
+
+/** Shared in-memory localStorage mock instance. */
+export const localStorageMock: Storage = createMemoryStorage();
+
+/** Shared in-memory sessionStorage mock instance. */
+export const sessionStorageMock: Storage = createMemoryStorage();
 
 vi.stubGlobal("localStorage", localStorageMock);
+vi.stubGlobal("sessionStorage", sessionStorageMock);

@@ -1,7 +1,9 @@
-"""Typed library adapter and structural protocols for in-process `gemma_4_sql` execution."""
+"""Gemma execution strategy protocol and in-process `gemma_4_sql` library strategy."""
 
+from collections.abc import Callable
+from pathlib import Path
 from types import ModuleType
-from typing import Callable, Dict, Optional, Protocol, Union, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from typing_extensions import TypedDict
 
@@ -31,7 +33,7 @@ class SftRunResult(TypedDict):
 
     status: str
     execution_mode: str
-    result: Dict[str, JobMetricValue]
+    result: dict[str, JobMetricValue]
 
 
 class DpoRunResult(TypedDict):
@@ -39,7 +41,7 @@ class DpoRunResult(TypedDict):
 
     status: str
     execution_mode: str
-    result: Dict[str, JobMetricValue]
+    result: dict[str, JobMetricValue]
 
 
 class EvalAccuracyDict(TypedDict):
@@ -55,11 +57,66 @@ class EvalRunResult(TypedDict):
 
     status: str
     execution_mode: str
-    accuracy: Union[EvalAccuracyDict, float]
+    accuracy: EvalAccuracyDict | float
 
 
 @runtime_checkable
-class _GemmaEtlModuleProtocol(Protocol):
+class GemmaExecutionStrategy(Protocol):
+    """Unified execution strategy protocol for Gemma-4-SQL ETL, SFT, DPO, and SQL evaluation."""
+
+    @property
+    def execution_mode(self) -> str:
+        """Return canonical execution mode identifier ('cli', 'library', 'native_in_process')."""
+        ...
+
+    def run_etl(
+        self,
+        stage_lower: str,
+        db_path: Path,
+        duckdb_table: str,
+        output_dir: str | Path | None = None,
+        timeout: float = 300.0,
+    ) -> EtlRunResult:
+        """Execute an ETL pipeline stage."""
+        ...
+
+    def run_sft(
+        self,
+        model_name: str,
+        ds_p: Path,
+        out_p: Path,
+        hyperparameters: dict[str, int | float | str | bool] | None = None,
+        timeout: float = 600.0,
+        dry_run: bool = True,
+    ) -> SftRunResult:
+        """Execute a Supervised Fine-Tuning (SFT) run."""
+        ...
+
+    def run_dpo(
+        self,
+        model_name: str,
+        ds_p: Path,
+        out_p: Path,
+        beta: float = 0.1,
+        timeout: float = 600.0,
+        dry_run: bool = True,
+    ) -> DpoRunResult:
+        """Execute a Direct Preference Optimization (DPO) alignment run."""
+        ...
+
+    def evaluate_sql(
+        self,
+        model_name: str,
+        tc_p: Path,
+        db_p: Path,
+        timeout: float = 300.0,
+    ) -> EvalRunResult:
+        """Evaluate SQL accuracy against DuckDB ground-truth results."""
+        ...
+
+
+@runtime_checkable
+class GemmaEtlModuleProtocol(Protocol):
     """Runtime-checkable protocol for a module exposing run_etl."""
 
     @property
@@ -69,210 +126,244 @@ class _GemmaEtlModuleProtocol(Protocol):
 
 
 @runtime_checkable
-class _GemmaSftModuleProtocol(Protocol):
+class GemmaSftModuleProtocol(Protocol):
     """Runtime-checkable protocol for a module exposing run_sft."""
 
     @property
-    def run_sft(self) -> Callable[..., Dict[str, JobMetricValue]]:
+    def run_sft(self) -> Callable[..., dict[str, JobMetricValue]]:
         """Return run_sft callable."""
         ...
 
 
 @runtime_checkable
-class _GemmaDpoModuleProtocol(Protocol):
+class GemmaDpoModuleProtocol(Protocol):
     """Runtime-checkable protocol for a module exposing run_dpo."""
 
     @property
-    def run_dpo(self) -> Callable[..., Dict[str, JobMetricValue]]:
+    def run_dpo(self) -> Callable[..., dict[str, JobMetricValue]]:
         """Return run_dpo callable."""
         ...
 
 
 @runtime_checkable
-class _GemmaEvalModuleProtocol(Protocol):
+class GemmaEvalModuleProtocol(Protocol):
     """Runtime-checkable protocol for a module exposing evaluate_sql."""
 
     @property
     def evaluate_sql(
         self,
-    ) -> Callable[..., Union[EvalAccuracyDict, float]]:
+    ) -> Callable[..., EvalAccuracyDict | float]:
         """Return evaluate_sql callable."""
         ...
 
 
-class _GemmaLibraryProtocol(
-    _GemmaEtlModuleProtocol,
-    _GemmaSftModuleProtocol,
-    _GemmaDpoModuleProtocol,
-    _GemmaEvalModuleProtocol,
+class GemmaLibraryProtocol(
+    GemmaEtlModuleProtocol,
+    GemmaSftModuleProtocol,
+    GemmaDpoModuleProtocol,
+    GemmaEvalModuleProtocol,
     Protocol,
 ):
     """Combined structural protocol for gemma_4_sql library hooks."""
 
 
-class GemmaLibraryAdapter:
-    """Typed adapter wrapping an imported `gemma_4_sql` Python module."""
+class LibraryStrategy:
+    """In-process Python library execution strategy wrapping an imported `gemma_4_sql` module."""
 
-    def __init__(self, module: Union[ModuleType, _GemmaLibraryProtocol]) -> None:
+    def __init__(self, module: ModuleType | GemmaLibraryProtocol) -> None:
         """
-        Initialize the adapter with a loaded `gemma_4_sql` module.
+        Initialize the library strategy with a loaded `gemma_4_sql` module.
 
         Args:
-        ----
             module: Imported `gemma_4_sql` module or protocol implementation.
 
         """
         self._module = module
 
+    @property
+    def execution_mode(self) -> str:
+        """
+        Return canonical execution mode identifier.
+
+        Returns:
+            str: Always `'library'`.
+
+        """
+        return "library"
+
     def run_etl(
         self,
         stage_lower: str,
-        duckdb_path: str,
+        db_path: Path,
         duckdb_table: str,
-        output_dir: Optional[str],
-    ) -> EtlPayloadDict:
+        output_dir: str | Path | None = None,
+        timeout: float = 300.0,
+    ) -> EtlRunResult:
         """
         Invoke `gemma_4_sql.run_etl` after verifying callable protocol compliance.
 
         Args:
-        ----
             stage_lower: Normalized stage string.
-            duckdb_path: Resolved DuckDB database path.
+            db_path: Validated DuckDB database path.
             duckdb_table: Source DuckDB table name.
-            output_dir: Optional resolved output directory path.
+            output_dir: Optional output directory path.
+            timeout: Execution timeout parameter in seconds.
 
         Returns:
-        -------
-            EtlPayloadDict: Library ETL execution payload.
+            EtlRunResult: Structured library ETL execution result.
 
         Raises:
-        ------
             GemmaToolchainError: If `run_etl` is missing or not callable.
 
         """
-        if not isinstance(self._module, _GemmaEtlModuleProtocol) or not callable(
+        _ = timeout
+        if not isinstance(self._module, GemmaEtlModuleProtocol) or not callable(
             self._module.run_etl
         ):
             raise GemmaToolchainError(
                 "The 'gemma_4_sql' package does not expose a callable 'run_etl' function."
             )
-        return self._module.run_etl(
+        payload = self._module.run_etl(
             stage_lower,
-            duckdb_path=duckdb_path,
+            duckdb_path=str(db_path.resolve()),
             duckdb_table=duckdb_table,
-            output_dir=output_dir,
+            output_dir=str(Path(output_dir).resolve()) if output_dir else None,
         )
+        return {
+            "status": "completed",
+            "execution_mode": self.execution_mode,
+            "result": payload,
+        }
 
     def run_sft(
         self,
         model_name: str,
-        dataset_path: str,
-        output_dir: str,
-        hyperparameters: Dict[str, Union[int, float, str, bool]],
-    ) -> Dict[str, JobMetricValue]:
+        ds_p: Path,
+        out_p: Path,
+        hyperparameters: dict[str, int | float | str | bool] | None = None,
+        timeout: float = 600.0,
+        dry_run: bool = True,
+    ) -> SftRunResult:
         """
         Invoke `gemma_4_sql.run_sft` after verifying callable protocol compliance.
 
         Args:
-        ----
             model_name: Target model name.
-            dataset_path: Resolved dataset path.
-            output_dir: Resolved output directory path.
-            hyperparameters: Training hyperparameters dictionary.
+            ds_p: Validated dataset path.
+            out_p: Validated output directory path.
+            hyperparameters: Optional training hyperparameters dictionary.
+            timeout: Execution timeout parameter in seconds.
+            dry_run: Unused compatibility flag for dry-run parity.
 
         Returns:
-        -------
-            Dict[str, JobMetricValue]: Library SFT execution metrics.
+            SftRunResult: Structured library SFT execution result.
 
         Raises:
-        ------
             GemmaToolchainError: If `run_sft` is missing or not callable.
 
         """
-        if not isinstance(self._module, _GemmaSftModuleProtocol) or not callable(
+        _ = (timeout, dry_run)
+        if not isinstance(self._module, GemmaSftModuleProtocol) or not callable(
             self._module.run_sft
         ):
             raise GemmaToolchainError(
                 "The 'gemma_4_sql' package does not expose a callable 'run_sft' function."
             )
-        return self._module.run_sft(
+        metrics = self._module.run_sft(
             model=model_name,
-            dataset=dataset_path,
-            output_dir=output_dir,
-            hyperparameters=hyperparameters,
+            dataset=str(ds_p.resolve()),
+            output_dir=str(out_p.resolve()),
+            hyperparameters=hyperparameters or {},
         )
+        return {
+            "status": "completed",
+            "execution_mode": self.execution_mode,
+            "result": metrics,
+        }
 
     def run_dpo(
         self,
         model_name: str,
-        dataset_path: str,
-        output_dir: str,
-        beta: float,
-    ) -> Dict[str, JobMetricValue]:
+        ds_p: Path,
+        out_p: Path,
+        beta: float = 0.1,
+        timeout: float = 600.0,
+        dry_run: bool = True,
+    ) -> DpoRunResult:
         """
         Invoke `gemma_4_sql.run_dpo` after verifying callable protocol compliance.
 
         Args:
-        ----
             model_name: Target model name.
-            dataset_path: Resolved preference dataset path.
-            output_dir: Resolved output directory path.
+            ds_p: Validated preference dataset path.
+            out_p: Validated output directory path.
             beta: DPO beta temperature parameter.
+            timeout: Execution timeout parameter in seconds.
+            dry_run: Unused compatibility flag for dry-run parity.
 
         Returns:
-        -------
-            Dict[str, JobMetricValue]: Library DPO execution metrics.
+            DpoRunResult: Structured library DPO execution result.
 
         Raises:
-        ------
             GemmaToolchainError: If `run_dpo` is missing or not callable.
 
         """
-        if not isinstance(self._module, _GemmaDpoModuleProtocol) or not callable(
+        _ = (timeout, dry_run)
+        if not isinstance(self._module, GemmaDpoModuleProtocol) or not callable(
             self._module.run_dpo
         ):
             raise GemmaToolchainError(
                 "The 'gemma_4_sql' package does not expose a callable 'run_dpo' function."
             )
-        return self._module.run_dpo(
+        metrics = self._module.run_dpo(
             model=model_name,
-            dataset=dataset_path,
-            output_dir=output_dir,
+            dataset=str(ds_p.resolve()),
+            output_dir=str(out_p.resolve()),
             beta=beta,
         )
+        return {
+            "status": "completed",
+            "execution_mode": self.execution_mode,
+            "result": metrics,
+        }
 
     def evaluate_sql(
         self,
         model_name: str,
-        test_cases_path: str,
-        duckdb_path: str,
-    ) -> Union[EvalAccuracyDict, float]:
+        tc_p: Path,
+        db_p: Path,
+        timeout: float = 300.0,
+    ) -> EvalRunResult:
         """
         Invoke `gemma_4_sql.evaluate_sql` after verifying callable protocol compliance.
 
         Args:
-        ----
             model_name: Evaluated model name.
-            test_cases_path: Resolved test cases path.
-            duckdb_path: Resolved DuckDB database path.
+            tc_p: Validated test cases path.
+            db_p: Validated DuckDB database path.
+            timeout: Execution timeout parameter in seconds.
 
         Returns:
-        -------
-            Union[EvalAccuracyDict, float]: Library evaluation accuracy result.
+            EvalRunResult: Structured library SQL evaluation result.
 
         Raises:
-        ------
             GemmaToolchainError: If `evaluate_sql` is missing or not callable.
 
         """
-        if not isinstance(self._module, _GemmaEvalModuleProtocol) or not callable(
+        _ = timeout
+        if not isinstance(self._module, GemmaEvalModuleProtocol) or not callable(
             self._module.evaluate_sql
         ):
             raise GemmaToolchainError(
                 "The 'gemma_4_sql' package does not expose a callable 'evaluate_sql' function."
             )
-        return self._module.evaluate_sql(
+        acc = self._module.evaluate_sql(
             model=model_name,
-            test_cases=test_cases_path,
-            duckdb_path=duckdb_path,
+            test_cases=str(tc_p.resolve()),
+            duckdb_path=str(db_p.resolve()),
         )
+        return {
+            "status": "completed",
+            "execution_mode": self.execution_mode,
+            "accuracy": acc,
+        }

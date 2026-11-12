@@ -2,78 +2,81 @@
  * @file table-modal-controller.ts
  * @module controllers/table-modal-controller
  * Composable sub-controller managing the Table Preview Modal state, pagination,
- * column sorting, search filtering, and CSV/JSON/Excel/Parquet export triggers.
+ * column sorting, debounced search filtering, and CSV/JSON/Excel/Parquet exports via `ModalDialogController`.
  */
 
 import i18next from "i18next";
 import { fetchWithBackendError, parseResponseJson } from "../api-client";
-import { exportRowsToCsv, exportRowsToJson } from "../exporters";
+import { type TableRowsResponsePayload } from "../api-types";
+import { type AppEventBus } from "../event-bus";
+import {
+  exportRowsToCsv,
+  exportRowsToJson,
+  triggerBlobDownload,
+} from "../exporters";
 import { formatNumber, type SqlCellValue } from "../formatters";
-import { requireElementById, trapModalFocus } from "../modal-utils";
+import { ModalDialogController, requireElementById } from "../modal-utils";
 import { DEFAULT_DB_NAME, type ChatState } from "../state";
 
-/**
- * Response payload returned by `/api/table/{table_name}`.
- */
-export interface TableDataPayload {
-  /** Total number of pages for the current pagination limit. */
-  total_pages?: number;
-  /** Current page of row records. */
-  rows: Array<Record<string, SqlCellValue>>;
-}
+export { type TableRowsResponsePayload as TableDataPayload };
 
 /**
- * Host contract required by `TablePreviewModalController`.
+ * Narrow injected dependencies for `TablePreviewModalController`.
  */
-export interface TablePreviewHost {
-  /** Global application state store. */
+export interface TablePreviewModalDeps {
+  /** Shared application state store. */
   state: ChatState;
-  /** Announces a message to screen readers. */
-  announce(message: string, isAssertive?: boolean): void;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
 }
 
 /**
- * Composable sub-controller for the Table Preview Modal.
+ * Composable sub-controller for the Table Preview Modal (`#table-modal`).
  */
 export class TablePreviewModalController {
-  /** Host UI reference. */
-  private readonly ui: TablePreviewHost;
-  /** Modal dialog container. */
+  /** Shared application state store. */
+  private readonly state: ChatState;
+  /** Domain event bus. */
+  private readonly events: AppEventBus;
+  /** Composable modal dialog lifecycle controller. */
+  private readonly dialog: ModalDialogController;
+  /** Persistent AbortController for domain event bus subscriptions. */
+  private readonly busAbortController = new AbortController();
+  /** Modal overlay container for previewing database table rows. */
   public readonly modal: HTMLElement;
-  /** Modal title heading element. */
+  /** Heading element inside the table preview modal. */
   public readonly modalTitle: HTMLElement;
-  /** Close modal button element. */
+  /** Button to close the table preview modal. */
   public readonly closeBtn: HTMLButtonElement;
-  /** Table search input element. */
+  /** Search input element for filtering rows in the table preview modal. */
   public readonly searchInput: HTMLInputElement;
-  /** Sort column select element. */
+  /** Column select dropdown for sorting rows in the table preview modal. */
   public readonly sortColSelect: HTMLSelectElement;
-  /** Sort order toggle button element. */
+  /** Button to toggle ascending/descending sort order in the table preview modal. */
   public readonly sortOrderBtn: HTMLButtonElement;
-  /** Previous page button element. */
+  /** Previous page button in the table preview modal pagination controls. */
   public readonly prevBtn: HTMLButtonElement;
-  /** Next page button element. */
+  /** Next page button in the table preview modal pagination controls. */
   public readonly nextBtn: HTMLButtonElement;
-  /** Page indicator span element. */
+  /** Span displaying the current page number in the table preview modal. */
   public readonly pageIndicator: HTMLElement;
-  /** Export page CSV button element. */
+  /** Button to export the current table modal page as CSV. */
   public readonly csvBtn: HTMLButtonElement;
-  /** Export page JSON button element. */
+  /** Button to export the current table modal page as JSON. */
   public readonly jsonBtn: HTMLButtonElement;
-  /** Export full table CSV button element. */
+  /** Button to export the entire table as CSV from the backend. */
   public readonly fullCsvBtn: HTMLButtonElement;
-  /** Export full table Excel button element. */
+  /** Button to export the entire table as Excel (.xlsx) from the backend. */
   public readonly excelBtn: HTMLButtonElement;
-  /** Export full table Parquet button element. */
+  /** Button to export the entire table as Parquet from the backend. */
   public readonly parquetBtn: HTMLButtonElement;
-  /** Loading spinner element inside the table modal. */
+  /** Loading spinner element inside the table preview modal. */
   public readonly loadingEl: HTMLElement;
-  /** Table head element inside the table modal. */
+  /** `<thead>` element inside the table preview modal. */
   public readonly theadEl: HTMLElement;
-  /** Table body element inside the table modal. */
+  /** `<tbody>` element inside the table preview modal. */
   public readonly tbodyEl: HTMLElement;
-  /** Active AbortController for listeners bound during the currently open table preview modal. */
-  private listenerController: AbortController = new AbortController();
+
   /** Name of the database table currently displayed in the table preview modal. */
   public currentTable: string = "";
   /** Current 1-based page number in the table preview modal. */
@@ -88,17 +91,22 @@ export class TablePreviewModalController {
   public currentSortOrder: "asc" | "desc" = "asc";
   /** Active search filter term in the table preview modal. */
   public currentSearchTerm: string = "";
-  /** Element that held focus before the modal opened. */
-  private previousFocus: Element | null = null;
   /** Monotonic sequence counter used to discard stale out-of-order fetchTableData responses. */
   private requestSequence: number = 0;
+  /** Debounce timer handle for search input keystrokes. */
+  private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Active AbortController for cancelling superseded in-flight `/api/table/*` requests. */
+  private fetchAbortController: AbortController | null = null;
+  /** Search input debounce interval in milliseconds. */
+  public static readonly SEARCH_DEBOUNCE_MS = 250;
 
   /**
    * Creates a new `TablePreviewModalController`.
-   * @param {TablePreviewHost} ui - Host UI instance.
+   * @param {TablePreviewModalDeps} deps - Narrow state and event bus dependencies.
    */
-  constructor(ui: TablePreviewHost) {
-    this.ui = ui;
+  constructor(deps: TablePreviewModalDeps) {
+    this.state = deps.state;
+    this.events = deps.events;
     this.modal = requireElementById<HTMLElement>("table-modal");
     this.modalTitle = requireElementById<HTMLElement>("modal-title");
     this.closeBtn = requireElementById<HTMLButtonElement>("close-modal-btn");
@@ -129,14 +137,56 @@ export class TablePreviewModalController {
     this.loadingEl = requireElementById<HTMLElement>("table-loading");
     this.theadEl = requireElementById<HTMLElement>("modal-table-head");
     this.tbodyEl = requireElementById<HTMLElement>("modal-table-body");
+
+    this.dialog = new ModalDialogController({
+      modalEl: this.modal,
+      closeBtn: this.closeBtn,
+      initialFocusEl: this.closeBtn,
+      onClose: () => {
+        this.cancelPendingOperations();
+      },
+    });
+
+    this.events.on(
+      "openTablePreview",
+      ({ tableName }) => {
+        void this.open(tableName);
+      },
+      this.busAbortController.signal,
+    );
   }
 
   /**
-   * Aborts any active modal event listeners.
+   * Emits a screen-reader announcement via the domain event bus.
+   * @param {string} message - Message string to announce.
+   * @param {boolean} [isAssertive=false] - Whether to use assertive politeness.
    * @returns {void}
    */
-  public abortListeners(): void {
-    this.listenerController.abort();
+  private announce(message: string, isAssertive: boolean = false): void {
+    this.events.emit("announce", { message, isAssertive });
+  }
+
+  /**
+   * Cancels any pending search debounce timer and in-flight fetch request.
+   * @returns {void}
+   */
+  private cancelPendingOperations(): void {
+    if (this.searchDebounceTimer !== null) {
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
+    }
+    this.fetchAbortController?.abort();
+    this.fetchAbortController = null;
+  }
+
+  /**
+   * Disposes all modal and bus listeners when tearing down the UI.
+   * @returns {void}
+   */
+  public dispose(): void {
+    this.cancelPendingOperations();
+    this.dialog.dispose();
+    this.busAbortController.abort();
   }
 
   /**
@@ -144,10 +194,7 @@ export class TablePreviewModalController {
    * @returns {Promise<void>}
    */
   public async refreshIfOpen(): Promise<void> {
-    if (
-      this.modal.getAttribute("aria-hidden") !== "true" &&
-      this.currentTable
-    ) {
+    if (this.dialog.isOpen() && this.currentTable) {
       this.modalTitle.textContent = i18next.t("ui.tableName", {
         name: this.currentTable,
       });
@@ -160,32 +207,34 @@ export class TablePreviewModalController {
    * @returns {void}
    */
   public close(): void {
-    this.modal.setAttribute("aria-hidden", "true");
-    this.modal.removeAttribute("aria-modal");
-    this.listenerController.abort();
-    if (
-      this.previousFocus instanceof HTMLElement &&
-      document.body.contains(this.previousFocus)
-    ) {
-      this.previousFocus.focus();
-    } else {
-      document.getElementById("chat-input")?.focus();
-    }
+    this.dialog.close();
   }
 
   /**
-   * Opens a backend full-table export URL.
+   * Downloads a full-table server export via authenticated `fetchWithBackendError` + `Blob` download.
    * @param {"csv" | "excel" | "parquet"} format - Export format endpoint.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  private triggerBackendExport(format: "csv" | "excel" | "parquet"): void {
+  public async triggerServerExport(
+    format: "csv" | "excel" | "parquet",
+  ): Promise<void> {
     const dbParam =
-      this.ui.state.currentDb !== DEFAULT_DB_NAME
-        ? `&db_path=${encodeURIComponent(this.ui.state.currentDb)}`
+      this.state.currentDb !== DEFAULT_DB_NAME
+        ? `&db_path=${encodeURIComponent(this.state.currentDb)}`
         : "";
-    window.open(
-      `/api/export/${format}?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`,
-    );
+    const url = `/api/export/${format}?table_name=${encodeURIComponent(this.currentTable)}${dbParam}`;
+    const ext = format === "excel" ? "xlsx" : format;
+    try {
+      const response = await fetchWithBackendError(url);
+      const blob = await response.blob();
+      triggerBlobDownload(blob, `${this.currentTable}.${ext}`);
+    } catch (error) {
+      const errMsg = i18next.t("ui.failedData", {
+        error,
+        interpolation: { escapeValue: false },
+      });
+      this.announce(errMsg, true);
+    }
   }
 
   /**
@@ -194,7 +243,8 @@ export class TablePreviewModalController {
    * @returns {Promise<void>}
    */
   public async open(tableName: string): Promise<void> {
-    this.previousFocus = document.activeElement;
+    this.dialog.captureOpenerFocus();
+    this.cancelPendingOperations();
     this.currentTable = tableName;
     this.currentPage = 1;
     this.currentSortBy = "";
@@ -213,8 +263,6 @@ export class TablePreviewModalController {
     this.modalTitle.textContent = i18next.t("ui.tableName", {
       name: tableName,
     });
-    this.modal.removeAttribute("aria-hidden");
-    this.modal.setAttribute("aria-modal", "true");
 
     this.csvBtn.onclick = () =>
       exportRowsToCsv(
@@ -226,36 +274,31 @@ export class TablePreviewModalController {
         this.currentModalRows,
         `${this.currentTable}_page${this.currentPage}.json`,
       );
-    this.fullCsvBtn.onclick = () => this.triggerBackendExport("csv");
-    this.excelBtn.onclick = () => this.triggerBackendExport("excel");
-    this.parquetBtn.onclick = () => this.triggerBackendExport("parquet");
+    this.fullCsvBtn.onclick = () => {
+      void this.triggerServerExport("csv");
+    };
+    this.excelBtn.onclick = () => {
+      void this.triggerServerExport("excel");
+    };
+    this.parquetBtn.onclick = () => {
+      void this.triggerServerExport("parquet");
+    };
 
-    this.closeBtn.focus();
-
-    this.listenerController.abort();
-    this.listenerController = new AbortController();
-    const { signal } = this.listenerController;
-
-    this.modal.addEventListener(
-      "keydown",
-      (e: KeyboardEvent) => trapModalFocus(e, this.modal, () => this.close()),
-      { signal },
-    );
-    this.closeBtn.addEventListener("click", () => this.close(), { signal });
-    this.modal.addEventListener(
-      "click",
-      (e: MouseEvent) => {
-        if (e.target === this.modal) this.close();
-      },
-      { signal },
-    );
+    const signal = this.dialog.open(this.closeBtn);
 
     this.searchInput.addEventListener(
       "input",
       () => {
-        this.currentSearchTerm = this.searchInput.value.trim();
-        this.currentPage = 1;
-        void this.fetchTableData();
+        if (this.searchDebounceTimer !== null) {
+          clearTimeout(this.searchDebounceTimer);
+        }
+        this.fetchAbortController?.abort();
+        this.searchDebounceTimer = setTimeout(() => {
+          this.searchDebounceTimer = null;
+          this.currentSearchTerm = this.searchInput.value.trim();
+          this.currentPage = 1;
+          void this.fetchTableData();
+        }, TablePreviewModalController.SEARCH_DEBOUNCE_MS);
       },
       { signal },
     );
@@ -287,7 +330,7 @@ export class TablePreviewModalController {
           "aria-label",
           `${i18next.t("table.toggleSortOrder", "Toggle sort order")} (${sortLabel})`,
         );
-        this.ui.announce(sortLabel);
+        this.announce(sortLabel);
         this.currentPage = 1;
         void this.fetchTableData();
       },
@@ -331,11 +374,11 @@ export class TablePreviewModalController {
 
   /**
    * Renders non-empty rows and sortable column headers into the table modal.
-   * @param {TableDataPayload} data - Loaded table data payload.
+   * @param {TableRowsResponsePayload} data - Loaded table data payload.
    * @returns {void}
    */
-  private renderPopulatedRows(data: TableDataPayload): void {
-    const columns = Object.keys(data.rows[0]);
+  private renderPopulatedRows(data: TableRowsResponsePayload): void {
+    const columns = Object.keys(Object(data.rows[0]));
 
     if (this.sortColSelect.options.length <= 1) {
       columns.forEach((col) => {
@@ -379,6 +422,10 @@ export class TablePreviewModalController {
       sortBtn.className = "table-sort-header-btn";
       sortBtn.textContent = col;
 
+      /**
+       * Toggles or selects column sort direction and reloads page 1.
+       * @returns {void}
+       */
       const onThSort = (): void => {
         if (this.currentSortBy === col) {
           this.currentSortOrder =
@@ -418,12 +465,13 @@ export class TablePreviewModalController {
     });
 
     this.prevBtn.disabled = this.currentPage === 1;
-    const hasMore = data.total_pages
-      ? this.currentPage < data.total_pages
-      : data.rows.length >= this.ROWS_PER_PAGE;
+    const hasMore =
+      data.total_pages !== undefined && data.total_pages > 0
+        ? this.currentPage < data.total_pages
+        : data.rows.length >= this.ROWS_PER_PAGE;
     this.nextBtn.disabled = !hasMore;
     this.setExportButtonsDisabled(false);
-    this.ui.announce(
+    this.announce(
       i18next.t("aria.tableDataLoaded", "Table Data loaded"),
       false,
     );
@@ -435,6 +483,9 @@ export class TablePreviewModalController {
    */
   public async fetchTableData(): Promise<void> {
     const requestId = ++this.requestSequence;
+    this.fetchAbortController?.abort();
+    const reqAbort = new AbortController();
+    this.fetchAbortController = reqAbort;
     this.loadingEl.style.display = "block";
     this.prevBtn.disabled = true;
     this.nextBtn.disabled = true;
@@ -444,6 +495,9 @@ export class TablePreviewModalController {
       const limit = this.ROWS_PER_PAGE;
       const offset = (this.currentPage - 1) * limit;
       let url = `/api/table/${encodeURIComponent(this.currentTable)}?limit=${limit}&offset=${offset}`;
+      if (this.state.currentDb !== DEFAULT_DB_NAME) {
+        url += `&db_path=${encodeURIComponent(this.state.currentDb)}`;
+      }
       if (this.currentSortBy) {
         url += `&sort_by=${encodeURIComponent(this.currentSortBy)}&order=${this.currentSortOrder}`;
       }
@@ -451,8 +505,10 @@ export class TablePreviewModalController {
         url += `&search=${encodeURIComponent(this.currentSearchTerm)}`;
       }
 
-      const response = await fetchWithBackendError(url);
-      const data = await parseResponseJson<TableDataPayload>(response);
+      const response = await fetchWithBackendError(url, {
+        signal: reqAbort.signal,
+      });
+      const data = await parseResponseJson<TableRowsResponsePayload>(response);
 
       if (requestId !== this.requestSequence) {
         return;
@@ -460,7 +516,7 @@ export class TablePreviewModalController {
 
       this.loadingEl.style.display = "none";
       const formattedPage = formatNumber(this.currentPage);
-      if (data.total_pages) {
+      if (data.total_pages !== undefined && data.total_pages > 0) {
         const formattedTotal = formatNumber(data.total_pages);
         this.pageIndicator.textContent = i18next.t("app.pageOfTotal", {
           page: formattedPage,
@@ -487,7 +543,7 @@ export class TablePreviewModalController {
         this.renderPopulatedRows(data);
       } else {
         const msg = i18next.t("ui.noDataAvailable");
-        this.ui.announce(msg, false);
+        this.announce(msg, false);
         const tr = document.createElement("tr");
         const td = document.createElement("td");
         td.textContent = msg;
@@ -506,7 +562,7 @@ export class TablePreviewModalController {
         error,
         interpolation: { escapeValue: false },
       });
-      this.ui.announce(errMsg, true);
+      this.announce(errMsg, true);
       const tr = document.createElement("tr");
       const td = document.createElement("td");
       td.className = "error-text";

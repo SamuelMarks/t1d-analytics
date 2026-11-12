@@ -5,7 +5,7 @@
  * Natural-Language-to-SQL mode, Gold SQL insertion, LLM vs Gold benchmarking, and keyboard shortcuts.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TemplatePickerController } from "../src/controllers/template-picker-controller";
 import { resolvePreferredLlmModel } from "../src/empty-state-builder";
 import { ChatState, RAW_SQL_MODEL } from "../src/state";
@@ -62,6 +62,10 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     ui = new ChatUI(state);
   });
 
+  afterEach(() => {
+    ui.dispose();
+  });
+
   it("opens and closes TemplatePickerModal via button, backdrop click, Escape, and Ctrl+/", () => {
     const openBtn = getTestElement<HTMLButtonElement>("template-picker-btn");
     const modal = getTestElement<HTMLElement>("template-picker-modal");
@@ -79,7 +83,7 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
       ".template-picker-card",
       modal,
     );
-    expect(cards.length).toBe(12); // 5 starters + 7 Table 1
+    expect(cards.length).toBe(13); // 5 starters + 8 Table 1
 
     // Close via close button restores focus
     closeBtn.click();
@@ -126,11 +130,13 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     expect(document.activeElement).toBe(ui.chatInput);
 
     // Test updateAutoExecuteToggleUi when #auto-execute-toggle-btn is absent from DOM
+    ui.dispose();
     const autoBtnEl = document.getElementById("auto-execute-toggle-btn");
     autoBtnEl?.remove();
     const uiWithoutAutoBtn = new ChatUI(state);
     expect(uiWithoutAutoBtn.autoExecuteToggleBtn).toBeNull();
     uiWithoutAutoBtn.updateAutoExecuteToggleUi();
+    uiWithoutAutoBtn.dispose();
     if (autoBtnEl) {
       document.querySelector(".header-actions")?.prepend(autoBtnEl);
     }
@@ -171,7 +177,7 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     expect(ui.templatePickerController.activeCategory).toBe("table1");
     expect(
       queryAllTestElements<HTMLElement>(".template-picker-card", modal).length,
-    ).toBe(7);
+    ).toBe(8);
 
     // Filter by Starter tab
     const starterTab = queryTestElement<HTMLButtonElement>(
@@ -192,7 +198,7 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     allTab.click();
     expect(
       queryAllTestElements<HTMLElement>(".template-picker-card", modal).length,
-    ).toBe(12);
+    ).toBe(13);
 
     // 1. Click "Try NL -> SQL" on a card while modelSelect is "sql"
     ui.modelSelect.value = RAW_SQL_MODEL;
@@ -251,7 +257,13 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     document.getElementById("template-picker-btn")?.remove();
     document.getElementById("close-template-modal-btn")?.remove();
     document.getElementById("template-picker-list")?.remove();
-    const headlessCtrl = new TemplatePickerController(ui);
+    const headlessCtrl = new TemplatePickerController({
+      state,
+      events: ui.events,
+      modelSelect: ui.modelSelect,
+      onSendBenchmark: (question, model, goldSql) =>
+        ui.handleSendMessage(question, model, goldSql),
+    });
     headlessCtrl.openModal();
     headlessCtrl.closeModal();
     headlessCtrl.setCategoryFilter("table1");
@@ -282,6 +294,11 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     expect(state.activeGoldSql).toContain("SELECT");
     expect(ui.chatInput.value).not.toContain("SELECT");
 
+    // Editing the input box after inserting a template question clears activeGoldSql
+    ui.chatInput.value = `${ui.chatInput.value} for children under 14`;
+    ui.chatInput.dispatchEvent(new Event("input"));
+    expect(state.activeGoldSql).toBeNull();
+
     // Switch back to Gold SQL mode and click Table 1 chip
     sqlPill.click();
     expect(sqlPill.getAttribute("aria-pressed")).toBe("true");
@@ -289,5 +306,106 @@ describe("TemplatePickerController & Empty-State Template Mode Toggle", () => {
     expect(ui.modelSelect.value).toBe(RAW_SQL_MODEL);
     expect(state.activeGoldSql).toBeNull();
     expect(ui.chatInput.value).toContain("SELECT");
+  });
+
+  it("hydrates and refreshes starter and Table 1 templates from GET /api/templates across all branches", async () => {
+    const {
+      fetchClinicalTemplateCatalog,
+      getStarterTemplateExamples,
+      getTable1ExampleQueries,
+      hydrateClinicalTemplateCatalog,
+      resetClinicalTemplateCatalog,
+    } = await import("../src/table1-queries");
+
+    expect(hydrateClinicalTemplateCatalog({})).toBe(false);
+    expect(hydrateClinicalTemplateCatalog({ templates: [] })).toBe(false);
+    expect(
+      hydrateClinicalTemplateCatalog({
+        templates: [
+          {
+            id: "",
+            category: "starter",
+            complexity: "Low",
+            question: "",
+            goldSql: "",
+          },
+          {
+            id: "missing-question",
+            category: "starter",
+            complexity: "Low",
+            question: "",
+            goldSql: "SELECT 1;",
+          },
+          {
+            id: "missing-sql",
+            category: "starter",
+            complexity: "Low",
+            question: "Valid question?",
+          },
+        ],
+      }),
+    ).toBe(false);
+
+    // Starter-only hydration (snake_case fields + custom starter without defaultComment)
+    expect(
+      hydrateClinicalTemplateCatalog({
+        templates: [
+          {
+            id: "starter-1",
+            category: "starter",
+            complexity: "Low",
+            i18n_key: "ui.exampleQueries.patientDemographics",
+            question: "Hydrated starter 1?",
+            gold_sql: "SELECT 1;",
+            default_mode: "sql",
+          },
+          {
+            id: "starter-custom",
+            category: "starter",
+            complexity: "Low",
+            question: "Custom starter without i18nKey",
+            goldSql: "SELECT 2;",
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(getStarterTemplateExamples().length).toBe(2);
+
+    // Table1-only hydration while modal is open triggers re-render via refreshCatalog()
+    ui.templatePickerController.openModal();
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        templates: [
+          {
+            id: "table1-custom",
+            category: "table1",
+            complexity: "High",
+            i18nKey: "ui.exampleQueries.table1Overall",
+            question: "Hydrated Table 1?",
+            goldSql: "SELECT 99;",
+            defaultMode: "sql",
+          },
+        ],
+      }),
+    });
+    expect(await ui.templatePickerController.refreshCatalog()).toBe(true);
+    expect(getTable1ExampleQueries()[0]?.id).toBe("table1-custom");
+
+    // Non-OK HTTP status and network exception fallback cleanly
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({ detail: "unavailable" }),
+    });
+    expect(await fetchClinicalTemplateCatalog()).toBe(false);
+    ui.templatePickerController.closeModal();
+    global.fetch = vi.fn().mockRejectedValueOnce(new Error("offline"));
+    expect(await ui.templatePickerController.refreshCatalog()).toBe(false);
+    expect(await fetchClinicalTemplateCatalog()).toBe(false);
+
+    resetClinicalTemplateCatalog();
+    expect(getStarterTemplateExamples().length).toBe(5);
+    expect(getTable1ExampleQueries().length).toBe(8);
   });
 });

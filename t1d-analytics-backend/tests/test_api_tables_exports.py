@@ -2,7 +2,6 @@
 
 import io
 import json
-import typing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,8 +9,9 @@ import duckdb
 import pytest
 from fastapi.testclient import TestClient
 
-from t1d_analytics.api import app, execute_sql
-from t1d_analytics.sql_utils import SqlValue
+from t1d_analytics.api import app
+from t1d_analytics.api_dependencies import execute_sql
+from t1d_analytics.sql_utils import SqlValue, sanitize_sql_value
 
 client = TestClient(app)
 
@@ -170,8 +170,8 @@ def test_get_table_data_zero_columns(tmp_path: Path) -> None:
             self._real = real_conn
 
         def execute(
-            self, query: str, params: typing.Optional[list[SqlValue]] = None
-        ) -> typing.Union[MagicMock, duckdb.DuckDBPyConnection]:
+            self, query: str, params: list[SqlValue] | None = None
+        ) -> MagicMock | duckdb.DuckDBPyConnection:
             """Return empty metadata on PRAGMA table_info/DESCRIBE."""
             if "PRAGMA table_info" in query or "DESCRIBE" in query:
                 mock_res = MagicMock()
@@ -207,8 +207,6 @@ def test_sanitize_sql_value() -> None:
     import datetime
     import decimal
     import uuid
-
-    from t1d_analytics.api import sanitize_sql_value
 
     assert sanitize_sql_value(None) is None
     assert sanitize_sql_value(datetime.date(2023, 1, 15)) == "2023-01-15"
@@ -316,6 +314,13 @@ def test_get_table_profile_endpoint(mock_db: str, mocker: MagicMock) -> None:
     )
     resp_err = client.get(f"/api/table/users/profile?db_path={mock_db}")
     assert resp_err.status_code == 500
+
+    mocker.patch(
+        "t1d_analytics.api_dependencies.profile_table",
+        side_effect=ValueError("Internal float conversion failure"),
+    )
+    resp_val_err = client.get(f"/api/table/users/profile?db_path={mock_db}")
+    assert resp_val_err.status_code == 500
 
 
 def test_export_excel_endpoint(mock_db: str, mocker: MagicMock) -> None:

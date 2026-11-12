@@ -3,8 +3,8 @@
 import os
 import subprocess
 import threading
+from collections.abc import Generator
 from pathlib import Path
-from typing import Dict, Generator, List, Optional, Union
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -49,7 +49,7 @@ def mock_huggingface_tokenizer() -> Generator[None, None, None]:
 
         def encode(
             self, text: str, add_special_tokens: bool = False, **kwargs: SqlValue
-        ) -> List[int]:
+        ) -> list[int]:
             """Encode text characters into integer IDs."""
             _ = add_special_tokens
             return [ord(c) % 50 for c in text] if text else []
@@ -95,7 +95,7 @@ def mock_huggingface_factory() -> Generator[None, None, None]:
             clamped = input_ids.clamp(0, 999)
             return MockOutput(self.head(self.embed(clamped)))
 
-        def save_pretrained(self, path: Union[str, Path]) -> None:
+        def save_pretrained(self, path: str | Path) -> None:
             """Persist state_dict to path."""
             out_dir = Path(path)
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +105,7 @@ def mock_huggingface_factory() -> Generator[None, None, None]:
         self: HuggingFaceCausalLMFactory,
         model_name: str,
         device: str = "cpu",
-        quantization: Optional[str] = None,
+        quantization: str | None = None,
         use_lora: bool = False,
     ) -> RealTinyModule:
         """Return a RealTinyModule instance."""
@@ -551,7 +551,7 @@ def test_gemma_4_sql_runner_lifecycle(tmp_path: Path) -> None:
     mock_completed = subprocess.CompletedProcess(
         args=["gemma-4-sql"],
         returncode=0,
-        stdout="[MOCK] Success" + chr(10),
+        stdout="[MOCK] Success" + "\n",
         stderr="",
     )
     with patch(
@@ -874,11 +874,11 @@ def test_huggingface_runner_validation_path_and_model_no_train(tmp_path: Path) -
     class MinimalCallableModel:
         """Callable model without .train() or .save_pretrained()."""
 
-        def parameters(self) -> List[torch.nn.Parameter]:
+        def parameters(self) -> list[torch.nn.Parameter]:
             """Return single mock parameter."""
             return [torch.nn.Parameter(torch.randn(2, 2))]
 
-        def state_dict(self) -> Dict[str, torch.Tensor]:
+        def state_dict(self) -> dict[str, torch.Tensor]:
             """Return mock state_dict."""
             return {"w": torch.zeros(1)}
 
@@ -1023,8 +1023,8 @@ def test_training_job_manager_lifecycle(tmp_path: Path, mocker: MagicMock) -> No
 
     def slow_run(
         cfg: TrainingJobConfig,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, JobMetricValue]:
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, JobMetricValue]:
         """Signal start and wait for release event."""
         _ = (cfg, cancel_event)
         event_start.set()

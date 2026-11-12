@@ -110,31 +110,31 @@ test.describe("Visual Cohort Builder, Clinical CGM Charts & Multi-Database Switc
     await page.keyboard.press("Shift+Tab");
     await expect(page.locator("#close-cohort-modal-btn")).toBeFocused();
 
-    // Exercise reverse ontology lookup (hba1c_labs -> patients)
+    // Exercise reverse ontology / shared schema column lookup (hba1c_labs -> patients via patient_id)
     await page.selectOption("#cohort-table-select", "hba1c_labs");
     await page.selectOption("#cohort-join-table-select", "patients");
     await expect(page.locator("#cohort-join-on-input")).toHaveValue(
-      '"hba1c_labs".subject_id = "patients".subject_id',
+      '"hba1c_labs"."patient_id" = "patients"."patient_id"',
     );
 
     // Exercise shared column discovery (sensor_events <-> pump_logs via device_id)
     await page.selectOption("#cohort-table-select", "sensor_events");
     await page.selectOption("#cohort-join-table-select", "pump_logs");
     await expect(page.locator("#cohort-join-on-input")).toHaveValue(
-      '"sensor_events".device_id = "pump_logs".device_id',
+      '"sensor_events"."device_id" = "pump_logs"."device_id"',
     );
 
     // Exercise patient substring fallback (sensor_events <-> patient_notes)
     await page.selectOption("#cohort-join-table-select", "patient_notes");
     await expect(page.locator("#cohort-join-on-input")).toHaveValue(
-      '"sensor_events".patient_id = "patient_notes".patient_id',
+      '"sensor_events"."patient_id" = "patient_notes"."patient_id"',
     );
 
     // Exercise unknown table fallback (sensor_events <-> audit_trail) and cleared joinCondition
     await page.selectOption("#cohort-join-table-select", "audit_trail");
     await page.fill("#cohort-join-on-input", "");
     await expect(page.locator("#cohort-sql-preview")).toContainText(
-      'ON "sensor_events".patient_id = "audit_trail".patient_id',
+      'ON "sensor_events"."patient_id" = "audit_trail"."patient_id"',
     );
 
     // Select primary and secondary join table
@@ -150,16 +150,16 @@ test.describe("Visual Cohort Builder, Clinical CGM Charts & Multi-Database Switc
     await page.fill("#cohort-max-tir", "70");
     await page.fill("#cohort-min-hba1c", "8.0");
 
-    // Verify live SQL preview reflects all predicates and JOIN
+    // Verify live SQL preview reflects all predicates and JOIN with quoted identifiers
     const previewText = await page.locator("#cohort-sql-preview").textContent();
     expect(previewText).toContain('FROM "patients"');
     expect(previewText).toContain('LEFT JOIN "hba1c_labs"');
-    expect(previewText).toContain("age >= 18");
-    expect(previewText).toContain("age <= 65");
-    expect(previewText).toContain("gender = 'F'");
-    expect(previewText).toContain("txgroup ILIKE '%AID%'");
-    expect(previewText).toContain("tir <= 70");
-    expect(previewText).toContain("hba1c >= 8");
+    expect(previewText).toContain('"patients"."age" >= 18');
+    expect(previewText).toContain('"patients"."age" <= 65');
+    expect(previewText).toContain('"patients"."gender" = \'F\'');
+    expect(previewText).toContain('"patients"."tx_group" ILIKE \'%AID%\'');
+    expect(previewText).toContain('"patients"."tir" <= 70');
+    expect(previewText).toContain('"hba1c_labs"."hba1c" >= 8');
 
     // Click "Insert into Chat" first and verify it populates #chat-input and closes modal
     await page.click("#cohort-insert-chat-btn");

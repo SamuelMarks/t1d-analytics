@@ -2,24 +2,37 @@
  * @file main.ts
  * @module main
  * Entry point for the Chat UI application.
- * Initializes the state and instantiates the main UI controller.
+ * Initializes localized document strings, `ChatState`, and `ChatUI` with explicit pagehide disposal.
  */
 
+import { translateDocument } from "./i18n";
 import { ChatState } from "./state";
 import { ChatUI } from "./ui";
-import { translateDocument } from "./i18n";
 
-// Initialize translations
-translateDocument();
+/**
+ * Bootstraps the application against the active document, creating an initial chat if none exist
+ * and registering explicit `ui.dispose()` cleanup on `pagehide`.
+ * @returns {ChatUI} Initialized `ChatUI` coordinator instance.
+ */
+export function bootstrapApp(): ChatUI {
+  translateDocument();
 
-/** Global application state instance. */
-const appState = new ChatState();
+  const appState = new ChatState();
+  if (appState.chats.length === 0) {
+    appState.createChat();
+  }
 
-// Create an initial chat if there are no existing chats
-if (appState.chats.length === 0) {
-  appState.createChat();
+  const ui = new ChatUI(appState);
+  window.addEventListener(
+    "pagehide",
+    () => {
+      ui.dispose();
+    },
+    { once: true },
+  );
+  void ui.schemaExplorerController.fetchDatabases();
+  void ui.templatePickerController.refreshCatalog();
+  return ui;
 }
 
-/** Main application UI controller instance. */
-const ui = new ChatUI(appState);
-void ui.schemaExplorerController?.fetchDatabases();
+bootstrapApp();

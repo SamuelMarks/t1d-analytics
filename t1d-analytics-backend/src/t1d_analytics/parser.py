@@ -1,47 +1,89 @@
 """HTML parser for T1D public datasets."""
 
-from typing import List, Optional, Sequence
+from collections.abc import Sequence
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup, Tag
 
+from t1d_analytics.errors import DownloadError
 from t1d_analytics.models import DatasetInfo
 
+DEFAULT_MAX_HTML_BYTES = 10 * 1024 * 1024
+_ALLOWED_HTML_CONTENT_TYPES = (
+    "text/html",
+    "application/xhtml+xml",
+    "text/plain",
+)
 
-def fetch_html(url: str) -> str:
+
+def fetch_html(url: str, max_bytes: int = DEFAULT_MAX_HTML_BYTES) -> str:
     """
-    Fetch HTML content from a given URL.
+    Fetch HTML content from `url` with strict `Content-Type` validation and streaming byte-size caps.
 
     Args:
-    ----
-        url: The URL to fetch.
+        url: The HTTP/HTTPS URL to fetch.
+        max_bytes: Maximum allowed response payload size in bytes (default: 10 MiB).
 
     Returns:
-    -------
-        The HTML content as a string.
+        str: Decoded HTML document text.
+
+    Raises:
+        DownloadError: If `Content-Type` is non-HTML or the response exceeds `max_bytes`.
+        requests.HTTPError: If the HTTP status code indicates an error.
 
     """
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    return response.text
+    response = requests.get(url, timeout=30, stream=True)
+    try:
+        response.raise_for_status()
+        raw_ct = (response.headers.get("Content-Type") or "").strip()
+        if raw_ct:
+            media_type = raw_ct.split(";", 1)[0].strip().lower()
+            if media_type and media_type not in _ALLOWED_HTML_CONTENT_TYPES:
+                raise DownloadError(
+                    f"Unexpected non-HTML Content-Type '{media_type}' from '{url}'.",
+                    params={"url": url, "content_type": media_type},
+                )
+
+        raw_cl = (response.headers.get("Content-Length") or "").strip()
+        if raw_cl.isdigit() and int(raw_cl) > max_bytes:
+            raise DownloadError(
+                f"HTML response Content-Length ({raw_cl} bytes) exceeds limit ({max_bytes} bytes).",
+                params={"url": url, "max_bytes": max_bytes},
+            )
+
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                raise DownloadError(
+                    f"HTML response body from '{url}' exceeded maximum size ({max_bytes} bytes).",
+                    params={"url": url, "max_bytes": max_bytes},
+                )
+            chunks.append(chunk)
+
+        encoding = response.encoding or "utf-8"
+        return b"".join(chunks).decode(encoding, errors="replace")
+    finally:
+        response.close()
 
 
-def extract_url(td: Tag, base_url: Optional[str] = None) -> Optional[str]:
+def extract_url(td: Tag, base_url: str | None = None) -> str | None:
     """
     Extract dataset/document URL from a table cell and optionally resolve relative URLs.
 
     Args:
-    ----
         td: A BeautifulSoup Tag representing a table cell.
         base_url: Optional base URL to resolve relative URLs against.
 
     Returns:
-    -------
         The extracted URL if found, else None.
 
     """
-    url: Optional[str] = None
+    url: str | None = None
     img = td.find("img")
     if isinstance(img, Tag) and img.has_attr("alt"):
         candidate = str(img["alt"]).strip()
@@ -77,11 +119,9 @@ def extract_aspnet_form_data(html: str) -> dict[str, str]:
     required for simulated form postback submissions.
 
     Args:
-    ----
         html: Raw HTML string of the ASP.NET page.
 
     Returns:
-    -------
         dict[str, str]: Dictionary of extracted form field names and their values.
 
     """
@@ -107,18 +147,16 @@ def extract_aspnet_form_data(html: str) -> dict[str, str]:
     return form_data
 
 
-def extract_postback_event(tag: Tag) -> Optional[tuple[str, str]]:
+def extract_postback_event(tag: Tag) -> tuple[str, str] | None:
     """
     Extract __doPostBack(eventTarget, eventArgument) parameters from an element or its children.
 
     Inspects href, onclick, or data-postback attributes on the tag and nested elements.
 
     Args:
-    ----
         tag: BeautifulSoup Tag to inspect.
 
     Returns:
-    -------
         Optional[tuple[str, str]]: Tuple of (event_target, event_argument) if found, else None.
 
     """
@@ -148,19 +186,17 @@ def extract_postback_event(tag: Tag) -> Optional[tuple[str, str]]:
 def _parse_dataset_row(
     cells: Sequence[Tag],
     is_standard_grid: bool,
-    base_url: Optional[str],
-) -> Optional[DatasetInfo]:
+    base_url: str | None,
+) -> DatasetInfo | None:
     """
     Parse a single HTML table row's `<td>` cells into a `DatasetInfo` instance.
 
     Args:
-    ----
         cells: Sequence of `<td>` tags in the row.
         is_standard_grid: Whether the table is the standard 6-column ASP.NET GridView.
         base_url: Optional base URL to resolve relative links.
 
     Returns:
-    -------
         Optional[DatasetInfo]: Parsed dataset record, or None if the row is not a data row.
 
     """
@@ -175,7 +211,7 @@ def _parse_dataset_row(
         return None
 
     ds_cell = cells[4] if is_standard_grid else cells[1]
-    doc_cell: Optional[Tag] = (
+    doc_cell: Tag | None = (
         cells[5] if is_standard_grid else (cells[2] if len(cells) > 2 else None)
     )
     dataset_url = extract_url(ds_cell, base_url=base_url)
@@ -183,8 +219,8 @@ def _parse_dataset_row(
         extract_url(doc_cell, base_url=base_url) if doc_cell is not None else None
     )
 
-    postback_target: Optional[str] = None
-    postback_argument: Optional[str] = None
+    postback_target: str | None = None
+    postback_argument: str | None = None
     if not dataset_url:
         postback = extract_postback_event(ds_cell)
         if postback:
@@ -199,19 +235,17 @@ def _parse_dataset_row(
     )
 
 
-def parse_datasets(html: str, base_url: Optional[str] = None) -> List[DatasetInfo]:
+def parse_datasets(html: str, base_url: str | None = None) -> list[DatasetInfo]:
     """
     Parse HTML to extract dataset information.
 
     Supports ASP.NET GridView tables and generic HTML5 clinical tables.
 
     Args:
-    ----
         html: The HTML string to parse.
         base_url: Optional base URL to resolve relative links.
 
     Returns:
-    -------
         A list of DatasetInfo objects.
 
     """
@@ -228,7 +262,7 @@ def parse_datasets(html: str, base_url: Optional[str] = None) -> List[DatasetInf
     if not isinstance(table, Tag):
         return []
 
-    datasets: List[DatasetInfo] = []
+    datasets: list[DatasetInfo] = []
     for row in table.find_all("tr"):
         row_classes = row.get("class") or []
         if "headerstyle" in row_classes or row.find("td", class_="GroupHeaderStyle"):

@@ -2,9 +2,13 @@
 
 import datetime
 import threading
+import time
 import uuid
+from collections import OrderedDict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import field
-from typing import Callable, Dict, List, Literal, Optional, Protocol, Union
+from typing import Literal, Protocol
 
 from pydantic.dataclasses import dataclass
 from typing_extensions import TypedDict
@@ -21,15 +25,15 @@ from t1d_analytics.errors import T1DError, exception_to_error_detail
 from t1d_analytics.models import TrainingBackend, TrainingJobConfig
 from t1d_analytics.sql_utils import SqlValue
 
-JobMetricValue = Union[SqlValue, List[SqlValue], Dict[str, SqlValue]]
-ChatJobPayloadValue = Union[
-    SqlValue,
-    List[Dict[str, SqlValue]],
-    Dict[
+JobMetricValue = SqlValue | list[SqlValue] | dict[str, SqlValue]
+ChatJobPayloadValue = (
+    SqlValue
+    | list[dict[str, SqlValue]]
+    | dict[
         str,
-        Union[SqlValue, Dict[str, SqlValue], List[str], List[Dict[str, SqlValue]]],
-    ],
-]
+        SqlValue | dict[str, SqlValue] | list[str] | list[dict[str, SqlValue]],
+    ]
+)
 
 
 class ChatJobDict(TypedDict, total=False):
@@ -38,26 +42,26 @@ class ChatJobDict(TypedDict, total=False):
     job_id: str
     status: ChatJobStatus
     created_at: str
-    completed_at: Optional[str]
+    completed_at: str | None
     partial_content: str
     content: str
-    sqlQuery: Optional[str]
-    sqlResult: Optional[List[Dict[str, SqlValue]]]
+    sqlQuery: str | None
+    sqlResult: list[dict[str, SqlValue]] | None
     is_synthetic_data: bool
     is_rule_based_sql: bool
     generation_mode: str
-    llm_error: Optional[str]
-    llm_error_code: Optional[str]
+    llm_error: str | None
+    llm_error_code: str | None
     data_provenance: str
-    gold_comparison: Optional[
-        Dict[
-            str,
-            Union[SqlValue, Dict[str, SqlValue], List[str], List[Dict[str, SqlValue]]],
+    gold_comparison: (
+        dict[
+            str, SqlValue | dict[str, SqlValue] | list[str] | list[dict[str, SqlValue]]
         ]
-    ]
-    error: Optional[Dict[str, Union[SqlValue, Dict[str, SqlValue]]]]
-    question: Optional[str]
-    model: Optional[str]
+        | None
+    )
+    error: dict[str, SqlValue | dict[str, SqlValue]] | None
+    question: str | None
+    model: str | None
 
 
 @dataclass
@@ -65,8 +69,7 @@ class ChatJobState:
     """
     Strongly-typed state record for an asynchronous chat or NL-to-SQL evaluation job.
 
-    Attributes
-    ----------
+    Attributes:
         job_id: Unique job identifier string ('chatjob-<uuid>').
         status: Current lifecycle state ('pending', 'complete', 'failed').
         created_at: ISO-8601 UTC timestamp when the job was submitted.
@@ -81,18 +84,17 @@ class ChatJobState:
     job_id: str
     status: Literal["pending", "complete", "failed"]
     created_at: str
-    completed_at: Optional[str] = None
+    completed_at: str | None = None
     partial_content: str = ""
-    result: Optional[ChatResponse] = None
-    eval_result: Optional[NlToSqlEvalResponse] = None
-    error: Optional[ApiError] = None
+    result: ChatResponse | None = None
+    eval_result: NlToSqlEvalResponse | None = None
+    error: ApiError | None = None
 
     def to_chat_response(self) -> ChatResponse:
         """
         Convert the current job state into a `ChatResponse` model for polling endpoints.
 
-        Returns
-        -------
+        Returns:
             ChatResponse: Pending ticket or completed `ChatResponse` record.
 
         """
@@ -130,12 +132,10 @@ class ChatJobState:
         Convert the current job state into an `NlToSqlEvalResponse` model for evaluation polling endpoints.
 
         Args:
-        ----
             fallback_question: Fallback question string if `eval_result` is not yet populated.
             fallback_model: Fallback model identifier if `eval_result` is not yet populated.
 
         Returns:
-        -------
             NlToSqlEvalResponse: Pending ticket or completed `NlToSqlEvalResponse` record.
 
         """
@@ -170,7 +170,7 @@ class ChatJobState:
             or ApiError(error_code="backend.errorUnexpected", params={}),
         )
 
-    def to_dict(self) -> Dict[str, ChatJobPayloadValue]:
+    def to_dict(self) -> dict[str, ChatJobPayloadValue]:
         """
         Serialize the job state to a dictionary suitable for JSON polling responses.
 
@@ -179,8 +179,7 @@ class ChatJobState:
         merges the full `ChatResponse` (or `NlToSqlEvalResponse`) dictionary with
         `job_id`, `status`, `created_at`, `completed_at`, and `partial_content`.
 
-        Returns
-        -------
+        Returns:
             Dict[str, ChatJobPayloadValue]: Serialized job dictionary.
 
         """
@@ -194,7 +193,7 @@ class ChatJobState:
                 "content": self.partial_content,
             }
         chat_resp = self.to_chat_response()
-        merged = chat_resp.to_dict()
+        merged: dict[str, ChatJobPayloadValue] = chat_resp.model_dump(by_alias=True)
         merged["job_id"] = self.job_id
         merged["status"] = self.status
         merged["created_at"] = self.created_at
@@ -213,10 +212,10 @@ class TrainingJobDict(TypedDict, total=False):
     dataset_path: str
     output_dir: str
     created_at: str
-    started_at: Optional[str]
-    completed_at: Optional[str]
-    metrics: Dict[str, JobMetricValue]
-    error: Optional[str]
+    started_at: str | None
+    completed_at: str | None
+    metrics: dict[str, JobMetricValue]
+    error: str | None
 
 
 class TrainingRunnerProtocol(Protocol):
@@ -225,8 +224,8 @@ class TrainingRunnerProtocol(Protocol):
     def run_training(
         self,
         config: TrainingJobConfig,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> Dict[str, JobMetricValue]:
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, JobMetricValue]:
         """Execute training job for the given configuration."""
         ...
 
@@ -236,8 +235,7 @@ class TrainingJobState:
     """
     Strongly-typed state record for a background training job.
 
-    Attributes
-    ----------
+    Attributes:
         job_id: Unique job identifier string.
         status: Current lifecycle state ('pending', 'running', 'completed', 'failed', 'cancelled').
         backend: Execution backend identifier string.
@@ -259,17 +257,16 @@ class TrainingJobState:
     dataset_path: str
     output_dir: str
     created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    metrics: Dict[str, JobMetricValue] = field(default_factory=dict)
-    error: Optional[str] = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    metrics: dict[str, JobMetricValue] = field(default_factory=dict)
+    error: str | None = None
 
     def to_dict(self) -> TrainingJobDict:
         """
         Convert the job state into a plain dictionary for JSON serialization.
 
-        Returns
-        -------
+        Returns:
             TrainingJobDict: Dictionary representation of the job state.
 
         """
@@ -289,39 +286,72 @@ class TrainingJobState:
 
 
 class TrainingJobManager:
-    """Thread-safe asynchronous background manager for training jobs."""
+    """Thread-safe asynchronous background manager for training jobs with bounded worker pool and TTL/LRU eviction."""
 
     def __init__(
         self,
         runner_resolver: Callable[[TrainingBackend], TrainingRunnerProtocol],
+        max_workers: int = 4,
+        max_retained: int = 100,
+        ttl_seconds: float = 3600.0,
+        clock_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         """
-        Initialize the job manager with thread locks and registry collections.
+        Initialize the job manager with a bounded `ThreadPoolExecutor` and TTL/LRU limits.
 
         Args:
-        ----
             runner_resolver: Factory callable resolving a TrainingBackend to a runner instance.
+            max_workers: Maximum concurrent background worker threads.
+            max_retained: Maximum completed/failed/cancelled jobs retained in memory.
+            ttl_seconds: Time-to-live in seconds for terminal job records.
+            clock_fn: Monotonic clock callable for deterministic TTL testing.
 
         """
         self._lock = threading.Lock()
-        self._jobs: Dict[str, TrainingJobState] = {}
-        self._cancel_flags: Dict[str, threading.Event] = {}
-        self._done_flags: Dict[str, threading.Event] = {}
+        self._jobs: OrderedDict[str, TrainingJobState] = OrderedDict()
+        self._completed_ts: dict[str, float] = {}
+        self._cancel_flags: dict[str, threading.Event] = {}
+        self._done_flags: dict[str, threading.Event] = {}
         self._runner_resolver = runner_resolver
+        self._max_workers = max(1, max_workers)
+        self._max_retained = max(1, max_retained)
+        self._ttl_seconds = max(0.0, ttl_seconds)
+        self._clock_fn = clock_fn
+        self._is_shutdown = False
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="t1d-train-job",
+        )
+
+    def _submit_worker(self, fn: Callable[[], None]) -> None:
+        """
+        Submit `fn` to the bounded `ThreadPoolExecutor`, recreating it if previously shut down.
+
+        Args:
+            fn: Zero-argument background worker callable.
+
+        """
+        with self._lock:
+            if self._is_shutdown:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=self._max_workers,
+                    thread_name_prefix="t1d-train-job",
+                )
+                self._is_shutdown = False
+            self._executor.submit(fn)
 
     def submit_job(self, config: TrainingJobConfig) -> str:
         """
-        Submit a new training job to run in a background daemon thread.
+        Submit a new training job to run on the bounded `ThreadPoolExecutor`.
 
         Args:
-        ----
             config: TrainingJobConfig defining dataset, model, hyperparameters, and backend.
 
         Returns:
-        -------
             str: Unique job ID string.
 
         """
+        self.prune_completed_jobs(max_retained=self._max_retained)
         job_id = f"job-{uuid.uuid4().hex[:12]}"
         cancel_event = threading.Event()
         done_event = threading.Event()
@@ -333,17 +363,17 @@ class TrainingJobManager:
                 model_name=config.model_name,
                 dataset_path=config.dataset_path,
                 output_dir=config.output_dir,
-                created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                created_at=datetime.datetime.now(datetime.UTC).isoformat(),
             )
             self._cancel_flags[job_id] = cancel_event
             self._done_flags[job_id] = done_event
 
         def _worker() -> None:
-            """Execute training runner asynchronously within background thread."""
+            """Execute training runner asynchronously within bounded worker pool."""
             with self._lock:
                 self._jobs[job_id].status = "running"
                 self._jobs[job_id].started_at = datetime.datetime.now(
-                    datetime.timezone.utc
+                    datetime.UTC
                 ).isoformat()
 
             runner = self._runner_resolver(config.backend)
@@ -373,29 +403,26 @@ class TrainingJobManager:
                     self._jobs[job_id].status = "failed"
                     self._jobs[job_id].error = str(e)
             finally:
+                now_mono = self._clock_fn()
                 with self._lock:
                     self._jobs[job_id].completed_at = datetime.datetime.now(
-                        datetime.timezone.utc
+                        datetime.UTC
                     ).isoformat()
+                    self._completed_ts[job_id] = now_mono
                 done_event.set()
 
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
+        self._submit_worker(_worker)
         return job_id
 
-    def wait_for_job(
-        self, job_id: str, timeout: float = 5.0
-    ) -> Optional[TrainingJobDict]:
+    def wait_for_job(self, job_id: str, timeout: float = 5.0) -> TrainingJobDict | None:
         """
         Wait deterministically for a background training job to reach a terminal state.
 
         Args:
-        ----
             job_id: The job ID string to wait on.
             timeout: Maximum seconds to wait before returning the current state.
 
         Returns:
-        -------
             Optional[TrainingJobDict]: Job details dictionary or None if not found.
 
         """
@@ -405,29 +432,28 @@ class TrainingJobManager:
             done_event.wait(timeout=timeout)
         return self.get_job(job_id)
 
-    def get_job(self, job_id: str) -> Optional[TrainingJobDict]:
+    def get_job(self, job_id: str) -> TrainingJobDict | None:
         """
-        Retrieve current status and metrics of a training job.
+        Retrieve current status and metrics of a training job, refreshing its LRU position.
 
         Args:
-        ----
             job_id: The job ID string.
 
         Returns:
-        -------
             Optional[TrainingJobDict]: Job details dictionary or None if not found.
 
         """
         with self._lock:
             job = self._jobs.get(job_id)
+            if job is not None:
+                self._jobs.move_to_end(job_id)
             return job.to_dict() if job else None
 
-    def list_jobs(self) -> List[TrainingJobDict]:
+    def list_jobs(self) -> list[TrainingJobDict]:
         """
         List all tracked training jobs.
 
-        Returns
-        -------
+        Returns:
             List[TrainingJobDict]: List of all job information dictionaries.
 
         """
@@ -439,11 +465,9 @@ class TrainingJobManager:
         Request cancellation of a running or pending training job.
 
         Args:
-        ----
             job_id: The job ID to cancel.
 
         Returns:
-        -------
             bool: True if job was found and cancellation was signaled, False otherwise.
 
         """
@@ -453,44 +477,122 @@ class TrainingJobManager:
             self._cancel_flags[job_id].set()
             if self._jobs[job_id].status in ("pending", "running"):
                 self._jobs[job_id].status = "cancelled"
+                self._completed_ts.setdefault(job_id, self._clock_fn())
             return True
 
-    def prune_completed_jobs(self, max_retained: int = 100) -> int:
+    def prune_completed_jobs(
+        self,
+        max_retained: int | None = None,
+        ttl_seconds: float | None = None,
+    ) -> int:
         """
-        Prune terminal jobs ('completed', 'failed', 'cancelled') when job history exceeds `max_retained`.
+        Evict expired (TTL) and excess least-recently-used (LRU) terminal training jobs.
 
         Args:
-        ----
-            max_retained: Maximum number of terminal jobs to retain in memory.
+            max_retained: Maximum number of terminal jobs to retain (defaults to `self._max_retained`).
+            ttl_seconds: Optional TTL override in seconds (defaults to `self._ttl_seconds`).
 
         Returns:
-        -------
-            int: Number of pruned terminal job records.
+            int: Total number of evicted terminal job records.
 
         """
+        effective_max = (
+            max(0, max_retained) if max_retained is not None else self._max_retained
+        )
+        effective_ttl = ttl_seconds if ttl_seconds is not None else self._ttl_seconds
+        now_mono = self._clock_fn()
+        evicted_ids: list[str] = []
         with self._lock:
             terminal_ids = [
                 jid
                 for jid, state in self._jobs.items()
                 if state.status in ("completed", "failed", "cancelled")
             ]
-            excess = max(0, len(terminal_ids) - max(0, max_retained))
-            for jid in terminal_ids[:excess]:
+            remaining_terminal: list[str] = []
+            for jid in terminal_ids:
+                finished_at = self._completed_ts.get(jid)
+                if (
+                    finished_at is not None
+                    and effective_ttl > 0.0
+                    and (now_mono - finished_at) >= effective_ttl
+                ):
+                    evicted_ids.append(jid)
+                else:
+                    remaining_terminal.append(jid)
+            excess = max(0, len(remaining_terminal) - effective_max)
+            evicted_ids.extend(remaining_terminal[:excess])
+            for jid in evicted_ids:
                 self._jobs.pop(jid, None)
+                self._completed_ts.pop(jid, None)
                 self._cancel_flags.pop(jid, None)
                 self._done_flags.pop(jid, None)
-            return excess
+            return len(evicted_ids)
+
+    def shutdown(self, wait: bool = False) -> None:
+        """
+        Shut down the underlying bounded `ThreadPoolExecutor`.
+
+        Args:
+            wait: Whether to block until active worker threads complete.
+
+        """
+        with self._lock:
+            self._is_shutdown = True
+            executor = self._executor
+        executor.shutdown(wait=wait)
 
 
-class ChatJobManager:
-    """Thread-safe asynchronous background manager for chat and NL-to-SQL evaluation jobs."""
+class ChatTurnJobManager:
+    """Thread-safe asynchronous background manager for chat and NL-to-SQL evaluation jobs with bounded worker pool and TTL/LRU eviction."""
 
-    def __init__(self) -> None:
-        """Initialize the chat job manager with thread locks and registry collections."""
+    def __init__(
+        self,
+        max_workers: int = 8,
+        max_retained: int = 200,
+        ttl_seconds: float = 3600.0,
+        clock_fn: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """
+        Initialize the chat job manager with a bounded `ThreadPoolExecutor` and TTL/LRU limits.
+
+        Args:
+            max_workers: Maximum concurrent background chat/eval worker threads.
+            max_retained: Maximum completed/failed chat jobs retained in memory.
+            ttl_seconds: Time-to-live in seconds for terminal chat job payloads.
+            clock_fn: Monotonic clock callable for deterministic TTL testing.
+
+        """
         self._lock = threading.Lock()
-        self._jobs: Dict[str, ChatJobState] = {}
-        self._done_flags: Dict[str, threading.Event] = {}
-        self._eval_meta: Dict[str, tuple[str, str]] = {}
+        self._jobs: OrderedDict[str, ChatJobState] = OrderedDict()
+        self._completed_ts: dict[str, float] = {}
+        self._done_flags: dict[str, threading.Event] = {}
+        self._eval_meta: dict[str, tuple[str, str]] = {}
+        self._max_workers = max(1, max_workers)
+        self._max_retained = max(1, max_retained)
+        self._ttl_seconds = max(0.0, ttl_seconds)
+        self._clock_fn = clock_fn
+        self._is_shutdown = False
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="t1d-chat-job",
+        )
+
+    def _submit_worker(self, fn: Callable[[], None]) -> None:
+        """
+        Submit `fn` to the bounded `ThreadPoolExecutor`, recreating it if previously shut down.
+
+        Args:
+            fn: Zero-argument background worker callable.
+
+        """
+        with self._lock:
+            if self._is_shutdown:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=self._max_workers,
+                    thread_name_prefix="t1d-chat-job",
+                )
+                self._is_shutdown = False
+            self._executor.submit(fn)
 
     def submit_chat_job(
         self,
@@ -498,22 +600,20 @@ class ChatJobManager:
         worker_fn: Callable[[ChatRequest, Callable[[str], None]], ChatResponse],
     ) -> ChatJobDict:
         """
-        Submit a new chat turn to execute asynchronously in a background daemon thread.
+        Submit a new chat turn to execute asynchronously on the bounded `ThreadPoolExecutor`.
 
         Args:
-        ----
             request: Validated `ChatRequest` payload.
             worker_fn: Callable executing the chat turn and accepting `(request, on_progress)`.
 
         Returns:
-        -------
             ChatJobDict: Immediate pending job ticket (`{"job_id": ..., "status": "pending", ...}`).
 
         """
-        self.prune_completed_chat_jobs(max_retained=200)
+        self.prune_completed_chat_jobs(max_retained=self._max_retained)
         job_id = f"chatjob-{uuid.uuid4().hex[:12]}"
         done_event = threading.Event()
-        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        created_at = datetime.datetime.now(datetime.UTC).isoformat()
         job_state = ChatJobState(
             job_id=job_id,
             status="pending",
@@ -572,14 +672,15 @@ class ChatJobManager:
                         error=api_err,
                     )
             finally:
+                now_mono = self._clock_fn()
                 with self._lock:
                     job_state.completed_at = datetime.datetime.now(
-                        datetime.timezone.utc
+                        datetime.UTC
                     ).isoformat()
+                    self._completed_ts[job_id] = now_mono
                 done_event.set()
 
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
+        self._submit_worker(_worker)
         return {
             "job_id": job_id,
             "status": "pending",
@@ -600,19 +701,17 @@ class ChatJobManager:
         Submit a new NL-to-SQL evaluation turn to execute asynchronously in a background daemon thread.
 
         Args:
-        ----
             request: Validated `NlToSqlEvalRequest` payload.
             worker_fn: Callable executing the evaluation turn and accepting `(request, on_progress)`.
 
         Returns:
-        -------
             ChatJobDict: Immediate pending job ticket (`{"job_id": ..., "status": "pending", ...}`).
 
         """
-        self.prune_completed_chat_jobs(max_retained=200)
+        self.prune_completed_chat_jobs(max_retained=self._max_retained)
         job_id = f"chatjob-{uuid.uuid4().hex[:12]}"
         done_event = threading.Event()
-        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        created_at = datetime.datetime.now(datetime.UTC).isoformat()
         eval_state = ChatJobState(
             job_id=job_id,
             status="pending",
@@ -640,8 +739,8 @@ class ChatJobManager:
                     status="complete",
                     content=eval_resp.content,
                     partial_content=eval_resp.content,
-                    sqlQuery=eval_resp.sqlQuery,
-                    sqlResult=eval_resp.sqlResult,
+                    sqlQuery=eval_resp.sql_query,
+                    sqlResult=eval_resp.sql_result,
                     gold_comparison=eval_resp.gold_comparison,
                     is_rule_based_sql=eval_resp.is_rule_based_sql,
                     generation_mode=eval_resp.generation_mode,
@@ -696,14 +795,15 @@ class ChatJobManager:
                         error=api_err,
                     )
             finally:
+                now_mono = self._clock_fn()
                 with self._lock:
                     eval_state.completed_at = datetime.datetime.now(
-                        datetime.timezone.utc
+                        datetime.UTC
                     ).isoformat()
+                    self._completed_ts[job_id] = now_mono
                 done_event.set()
 
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
+        self._submit_worker(_worker)
         return {
             "job_id": job_id,
             "status": "pending",
@@ -715,50 +815,48 @@ class ChatJobManager:
             "model": request.model,
         }
 
-    def get_chat_job(self, job_id: str) -> Optional[Dict[str, ChatJobPayloadValue]]:
+    def get_chat_job(self, job_id: str) -> dict[str, ChatJobPayloadValue] | None:
         """
-        Retrieve the current status or completed `ChatResponse` dictionary for `job_id`.
+        Retrieve the current status or completed `ChatResponse` dictionary for `job_id`, refreshing its LRU position.
 
         Args:
-        ----
             job_id: Target chat job identifier.
 
         Returns:
-        -------
             Optional[Dict[str, ChatJobPayloadValue]]: Serialized job dictionary or None if not found.
 
         """
         with self._lock:
             state = self._jobs.get(job_id)
+            if state is not None:
+                self._jobs.move_to_end(job_id)
             return state.to_dict() if state is not None else None
 
-    def get_chat_job_response(self, job_id: str) -> Optional[ChatResponse]:
+    def get_chat_job_response(self, job_id: str) -> ChatResponse | None:
         """
-        Retrieve the current status or completed `ChatResponse` model for `job_id`.
+        Retrieve the current status or completed `ChatResponse` model for `job_id`, refreshing its LRU position.
 
         Args:
-        ----
             job_id: Target chat job identifier.
 
         Returns:
-        -------
             Optional[ChatResponse]: `ChatResponse` model (with `status="pending"` or `"complete"`) or None.
 
         """
         with self._lock:
             state = self._jobs.get(job_id)
+            if state is not None:
+                self._jobs.move_to_end(job_id)
             return state.to_chat_response() if state is not None else None
 
-    def get_eval_job_response(self, job_id: str) -> Optional[NlToSqlEvalResponse]:
+    def get_eval_job_response(self, job_id: str) -> NlToSqlEvalResponse | None:
         """
-        Retrieve the current status or completed `NlToSqlEvalResponse` model for `job_id`.
+        Retrieve the current status or completed `NlToSqlEvalResponse` model for `job_id`, refreshing its LRU position.
 
         Args:
-        ----
             job_id: Target evaluation job identifier.
 
         Returns:
-        -------
             Optional[NlToSqlEvalResponse]: `NlToSqlEvalResponse` model or None if not found.
 
         """
@@ -766,22 +864,21 @@ class ChatJobManager:
             state = self._jobs.get(job_id)
             if state is None:
                 return None
+            self._jobs.move_to_end(job_id)
             q, m = self._eval_meta.get(job_id, ("", "gemma:2b"))
             return state.to_eval_response(fallback_question=q, fallback_model=m)
 
     def wait_for_chat_job(
         self, job_id: str, timeout: float = 5.0
-    ) -> Optional[Dict[str, ChatJobPayloadValue]]:
+    ) -> dict[str, ChatJobPayloadValue] | None:
         """
         Wait deterministically for a background chat job to reach a terminal state.
 
         Args:
-        ----
             job_id: Target chat job identifier.
             timeout: Maximum seconds to wait before returning the current state.
 
         Returns:
-        -------
             Optional[Dict[str, ChatJobPayloadValue]]: Job dictionary or None if not found.
 
         """
@@ -791,31 +888,66 @@ class ChatJobManager:
             done_event.wait(timeout=timeout)
         return self.get_chat_job(job_id)
 
-    def prune_completed_chat_jobs(self, max_retained: int = 200) -> int:
+    def prune_completed_chat_jobs(
+        self,
+        max_retained: int | None = None,
+        ttl_seconds: float | None = None,
+    ) -> int:
         """
-        Prune terminal chat jobs ('complete', 'failed') when retained history exceeds `max_retained`.
+        Evict expired (TTL) and excess least-recently-used (LRU) terminal chat jobs.
 
         Args:
-        ----
-            max_retained: Maximum number of terminal chat jobs to retain in memory.
+            max_retained: Maximum number of terminal chat jobs to retain (defaults to `self._max_retained`).
+            ttl_seconds: Optional TTL override in seconds (defaults to `self._ttl_seconds`).
 
         Returns:
-        -------
-            int: Number of pruned terminal chat job records.
+            int: Total number of evicted terminal chat job records.
 
         """
+        effective_max = (
+            max(0, max_retained) if max_retained is not None else self._max_retained
+        )
+        effective_ttl = ttl_seconds if ttl_seconds is not None else self._ttl_seconds
+        now_mono = self._clock_fn()
+        evicted_ids: list[str] = []
         with self._lock:
             terminal_ids = [
                 jid
                 for jid, state in self._jobs.items()
                 if state.status in ("complete", "failed")
             ]
-            excess = max(0, len(terminal_ids) - max(0, max_retained))
-            for jid in terminal_ids[:excess]:
+            remaining_terminal: list[str] = []
+            for jid in terminal_ids:
+                finished_at = self._completed_ts.get(jid)
+                if (
+                    finished_at is not None
+                    and effective_ttl > 0.0
+                    and (now_mono - finished_at) >= effective_ttl
+                ):
+                    evicted_ids.append(jid)
+                else:
+                    remaining_terminal.append(jid)
+            excess = max(0, len(remaining_terminal) - effective_max)
+            evicted_ids.extend(remaining_terminal[:excess])
+            for jid in evicted_ids:
                 self._jobs.pop(jid, None)
+                self._completed_ts.pop(jid, None)
                 self._done_flags.pop(jid, None)
                 self._eval_meta.pop(jid, None)
-            return excess
+            return len(evicted_ids)
+
+    def shutdown(self, wait: bool = False) -> None:
+        """
+        Shut down the underlying bounded `ThreadPoolExecutor`.
+
+        Args:
+            wait: Whether to block until active worker threads complete.
+
+        """
+        with self._lock:
+            self._is_shutdown = True
+            executor = self._executor
+        executor.shutdown(wait=wait)
 
 
-global_chat_job_manager = ChatJobManager()
+global_chat_job_manager = ChatTurnJobManager()

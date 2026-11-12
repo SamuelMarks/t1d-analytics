@@ -8,7 +8,8 @@ import duckdb
 import pytest
 from fastapi.testclient import TestClient
 
-from t1d_analytics.api import app, execute_sql
+from t1d_analytics.api import app
+from t1d_analytics.api_dependencies import execute_sql
 from t1d_analytics.sql_utils import execute_duckdb_write_with_retry
 
 
@@ -17,7 +18,6 @@ def test_concurrent_duckdb_reads(tmp_path: Path) -> None:
     Test multiple threads executing concurrent read queries against DuckDB.
 
     Args:
-    ----
         tmp_path: Pytest temporary directory fixture.
 
     """
@@ -48,7 +48,6 @@ def test_concurrent_api_session_writes(tmp_path: Path) -> None:
     Test multiple concurrent requests saving sessions to verify locking resilience.
 
     Args:
-    ----
         tmp_path: Pytest temporary directory fixture.
 
     """
@@ -86,12 +85,10 @@ def _process_worker_fn(db_path: str, idx: int) -> int:
     Worker function executed in separate process to write DuckDB with retry backoff.
 
     Args:
-    ----
         db_path: Path to the target DuckDB database.
         idx: Value to insert.
 
     Returns:
-    -------
         int: The inserted value.
 
     """
@@ -106,7 +103,6 @@ def test_multiprocess_duckdb_writes(tmp_path: Path) -> None:
     Test multiple distinct processes writing sequentially and retry backoff on lock contention.
 
     Args:
-    ----
         tmp_path: Pytest temporary directory fixture.
 
     """

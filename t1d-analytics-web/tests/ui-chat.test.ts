@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import i18next from "i18next";
 import { ChatState, type Message } from "../src/state";
-import { deduplicateErrorPrefix, parseApiError } from "../src/api-client";
+import { parseApiError } from "../src/api-client";
 import { consumeSseChatStream } from "../src/sse-stream";
 import { ChatUI } from "../src/ui";
 import {
@@ -32,7 +32,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     vi.stubGlobal("fetch", mockFetch);
 
     state = new ChatState();
-    i18next.changeLanguage("en");
+    await i18next.changeLanguage("en");
     document.documentElement.lang = "en";
     ui = new ChatUI(state);
     await flushPromises();
@@ -84,8 +84,10 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(state.getActiveChat()?.model).toBe("gemma:2b");
     state.removeConfiguredModels();
     state.setSystemStatus({ ollamaOnline: true });
-    state.chats = [state.chats[0]!];
-    state.activeChatId = state.chats[0]!.id;
+    const firstChat = state.chats[0];
+    if (!firstChat) throw new Error("Expected firstChat");
+    state.chats = [firstChat];
+    state.activeChatId = firstChat.id;
     ui.render();
 
     const list = document.getElementById("chat-list");
@@ -585,7 +587,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(input.value).toBeTruthy();
 
     const table1Chips = queryAllTestElements<HTMLButtonElement>(".table1-chip");
-    expect(table1Chips.length).toBe(7);
+    expect(table1Chips.length).toBe(8);
     for (const t1Chip of table1Chips) {
       t1Chip.click();
       expect(ui.modelSelect.value).toBe("sql");
@@ -610,6 +612,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     expect(localStorage.getItem("t1d_theme")).toBe("light");
 
     // Re-instantiating ChatUI hydrates light theme and initial /chats/${id} pathname
+    ui.dispose();
     window.history.replaceState(null, "", `/chats/${chat2.id}`);
     const lightUi = new ChatUI(state);
     expect(document.body.classList.contains("light-mode")).toBe(true);
@@ -632,7 +635,7 @@ describe("ChatUI Core Chat & Streaming Interactions", () => {
     const sharedInitUi = new ChatUI(state);
     await flushPromises();
     expect(state.activeChatId).toBe("shared-init-chat");
-    void sharedInitUi;
+    sharedInitUi.dispose();
 
     const freshThemeBtn = getTestElement<HTMLButtonElement>("theme-toggle-btn");
     localStorage.setItem("t1d_theme", "dark");
@@ -1027,7 +1030,12 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     ];
     let idxNo = 0;
     const fakeStream = new ReadableStream<Uint8Array>({
-      pull(controller) {
+      /**
+       * Enqueues synthetic non-object SSE chunks.
+       * @param {ReadableStreamDefaultController<Uint8Array>} controller - Stream controller.
+       * @returns {void}
+       */
+      pull(controller): void {
         if (idxNo < nonObjChunks.length) {
           controller.enqueue(new TextEncoder().encode(nonObjChunks[idxNo++]));
         } else {
@@ -1045,7 +1053,12 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     ];
     let idxCrlf = 0;
     const crlfStream = new ReadableStream<Uint8Array>({
-      pull(controller) {
+      /**
+       * Enqueues CRLF and trailing SSE chunks.
+       * @param {ReadableStreamDefaultController<Uint8Array>} controller - Stream controller.
+       * @returns {void}
+       */
+      pull(controller): void {
         if (idxCrlf < crlfAndTrailingChunks.length) {
           controller.enqueue(
             new TextEncoder().encode(crlfAndTrailingChunks[idxCrlf++]),
@@ -1068,7 +1081,12 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     ];
     let idxErrEv = 0;
     const errEventStream = new ReadableStream<Uint8Array>({
-      pull(controller) {
+      /**
+       * Enqueues a synthetic SSE error event chunk.
+       * @param {ReadableStreamDefaultController<Uint8Array>} controller - Stream controller.
+       * @returns {void}
+       */
+      pull(controller): void {
         if (idxErrEv < errEventChunks.length) {
           controller.enqueue(
             new TextEncoder().encode(errEventChunks[idxErrEv++]),
@@ -1086,15 +1104,16 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     expect(resErrEv.finalData?.error).toBe("backend.invalidDatabasePath");
 
     expect(
-      deduplicateErrorPrefix(
-        "Internal server error: Internal server error: llama-server process has terminated",
-      ),
-    ).toBe("Internal server error: llama-server process has terminated");
-    expect(
-      parseApiError(
-        "Internal server error: Internal server error: signal: segmentation fault",
-      ),
+      parseApiError({
+        error_code: "backend.serverError",
+        params: { error: "signal: segmentation fault" },
+      }),
     ).toBe("Internal server error: signal: segmentation fault");
+    expect(
+      parseApiError({
+        error_code: "backend.invalidDatabasePath",
+      }),
+    ).toBe(i18next.t("backend.invalidDatabasePath"));
 
     streamBtn.click();
     expect(ui.streamingEnabled).toBe(false);
@@ -1233,5 +1252,214 @@ data: {"event":"done","content":"Trailing done","sqlQuery":"SELECT 1","sqlResult
     getTestElement<HTMLButtonElement>("stop-btn").click();
     await abortSendPromise;
     expect(chat.messages[chat.messages.length - 1]?.isError).toBe(true);
+  });
+
+  it("navigates chat input history with ArrowUp and ArrowDown from top/bottom bounds and preserves drafts", async () => {
+    state.createChat();
+    ui.render();
+
+    // 1. ArrowUp when history is empty -> does nothing
+    ui.chatInput.value = "";
+    ui.chatInput.setSelectionRange(0, 0);
+    const emptyUpEv = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(emptyUpEv);
+    expect(emptyUpEv.defaultPrevented).toBe(false);
+    expect(ui.inputHistoryIndex).toBeNull();
+
+    // 2. ArrowDown when not in history navigation mode -> does nothing
+    const idleDownEv = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(idleDownEv);
+    expect(idleDownEv.defaultPrevented).toBe(false);
+
+    // Send 3 messages (including a multi-line message and a duplicate to test deduplication)
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        content: "OK",
+        sqlQuery: "SELECT 1;",
+        sqlResult: [{ a: 1 }],
+      }),
+    });
+    await ui.handleSendMessage("First question", "sql");
+    await ui.handleSendMessage("First question", "sql");
+    await ui.handleSendMessage("Second line 1\nSecond line 2", "sql");
+    await ui.handleSendMessage("Third question", "sql");
+
+    expect(ui.getTypedMessageHistory()).toEqual([
+      "First question",
+      "Second line 1\nSecond line 2",
+      "Third question",
+    ]);
+
+    // 3. Type a draft message, place caret on line 2 of draft -> ArrowUp does NOT trigger history
+    ui.chatInput.value = "Draft line 1\nDraft line 2";
+    ui.chatInput.setSelectionRange(15, 15);
+    const midLineUp = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(midLineUp);
+    expect(midLineUp.defaultPrevented).toBe(false);
+    expect(ui.inputHistoryIndex).toBeNull();
+
+    // 4. Move caret to very top (index 0) and press ArrowUp -> saves draft and shows "Third question"
+    ui.chatInput.setSelectionRange(0, 0);
+    const up1 = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(up1);
+    expect(up1.defaultPrevented).toBe(true);
+    expect(ui.savedInputDraft).toBe("Draft line 1\nDraft line 2");
+    expect(ui.inputHistoryIndex).toBe(2);
+    expect(ui.chatInput.value).toBe("Third question");
+    expect(ui.chatInput.selectionStart).toBe(0);
+
+    // 5. Press ArrowUp again from top -> shows "Second line 1\nSecond line 2"
+    const up2 = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(up2);
+    expect(ui.inputHistoryIndex).toBe(1);
+    expect(ui.chatInput.value).toBe("Second line 1\nSecond line 2");
+    expect(ui.chatInput.selectionStart).toBe(0);
+
+    // 6. While on line 1 of multi-line message, ArrowDown does NOT advance history (native line down)
+    const midLineDown = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(midLineDown);
+    expect(midLineDown.defaultPrevented).toBe(false);
+    expect(ui.inputHistoryIndex).toBe(1);
+
+    // 7. Press ArrowUp again from top -> reaches oldest entry ("First question", index 0)
+    const up3 = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(up3);
+    expect(ui.inputHistoryIndex).toBe(0);
+    expect(ui.chatInput.value).toBe("First question");
+
+    // 8. Press ArrowUp again at index 0 -> stays at index 0
+    const up4 = new KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(up4);
+    expect(ui.inputHistoryIndex).toBe(0);
+    expect(ui.chatInput.value).toBe("First question");
+
+    // 9. Move caret to bottom and press ArrowDown -> advances to index 1
+    ui.chatInput.setSelectionRange(
+      ui.chatInput.value.length,
+      ui.chatInput.value.length,
+    );
+    const down1 = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(down1);
+    expect(down1.defaultPrevented).toBe(true);
+    expect(ui.inputHistoryIndex).toBe(1);
+    expect(ui.chatInput.value).toBe("Second line 1\nSecond line 2");
+    expect(ui.chatInput.selectionStart).toBe(ui.chatInput.value.length);
+
+    // 10. Press ArrowDown again from bottom -> advances to index 2 ("Third question")
+    const down2 = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(down2);
+    expect(ui.inputHistoryIndex).toBe(2);
+    expect(ui.chatInput.value).toBe("Third question");
+
+    // 11. Press ArrowDown from bottom at newest entry when savedInputDraft was non-empty -> restores draft
+    const downRestore = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(downRestore);
+    expect(downRestore.defaultPrevented).toBe(true);
+    expect(ui.chatInput.value).toBe("Draft line 1\nDraft line 2");
+    expect(ui.inputHistoryIndex).toBeNull();
+    expect(ui.savedInputDraft).toBeNull();
+
+    // 12. Start ArrowUp when text box was empty (savedInputDraft === ""), then ArrowDown at newest entry -> does NOT blank out message
+    ui.chatInput.value = "";
+    ui.chatInput.setSelectionRange(0, 0);
+    ui.chatInput.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(ui.chatInput.value).toBe("Third question");
+    expect(ui.savedInputDraft).toBe("");
+    ui.chatInput.setSelectionRange(
+      ui.chatInput.value.length,
+      ui.chatInput.value.length,
+    );
+    const downEmptyDraft = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    ui.chatInput.dispatchEvent(downEmptyDraft);
+    expect(ui.chatInput.value).toBe("Third question");
+    expect(ui.inputHistoryIndex).toBeNull();
+    expect(ui.savedInputDraft).toBeNull();
+
+    // 13. Typing in chatInput while browsing history resets inputHistoryIndex and savedInputDraft
+    ui.chatInput.setSelectionRange(0, 0);
+    ui.chatInput.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(ui.inputHistoryIndex).toBe(2);
+    ui.chatInput.dispatchEvent(new Event("input"));
+    expect(ui.inputHistoryIndex).toBeNull();
+    expect(ui.savedInputDraft).toBeNull();
+
+    // Also test getTypedMessageHistory when activeChat is null or has pre-existing messages not in sessionTypedHistory
+    ui.sessionTypedHistory = ["Extra session msg"];
+    const activeChat = state.getActiveChat();
+    if (activeChat) {
+      activeChat.messages.push({ role: "user", content: "Extra session msg" });
+    }
+    expect(ui.getTypedMessageHistory().slice(-1)).toEqual([
+      "Extra session msg",
+    ]);
+
+    const origParent = ui.chatInputHighlight.parentElement;
+    ui.chatInputHighlight.remove();
+    ui.chatInput.dispatchEvent(new Event("scroll"));
+    origParent?.appendChild(ui.chatInputHighlight);
+
+    state.activeChatId = null;
+    expect(ui.getTypedMessageHistory()).toEqual(["Extra session msg"]);
   });
 });

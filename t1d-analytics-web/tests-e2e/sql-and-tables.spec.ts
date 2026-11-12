@@ -104,7 +104,7 @@ test.describe("SQL Detection, Result Rendering, Exports & Sanitization", () => {
     });
 
     await page.goto("/");
-    await expect(page.locator(".empty-state .table1-chip")).toHaveCount(7);
+    await expect(page.locator(".empty-state .table1-chip")).toHaveCount(8);
     await page.locator(".empty-state .table1-chip").first().click();
     await expect(page.locator("#model-select")).toHaveValue("sql");
 

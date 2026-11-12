@@ -229,10 +229,68 @@ describe("Async Chat Job Polling & SSE Stream Dispatch", () => {
         headers: {},
         streamingEnabled: false,
         useAsyncJobEndpoint: true,
+        pollTimeoutMs: 5000,
         loadingDiv,
         onTokenScroll: () => {},
         signal: jobAbort.signal,
       }),
     ).rejects.toThrow("Aborted submitChatJob");
+
+    // Pending job resolution with explicit pollTimeoutMs and empty partial_content
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ status: "pending", job_id: "chatjob-timeout-opt" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: "completed", content: "Done" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    const timeoutOptRes = await dispatchChatRequest({
+      bodyJson: "{}",
+      headers: {},
+      streamingEnabled: false,
+      useAsyncJobEndpoint: true,
+      pollTimeoutMs: 5000,
+      loadingDiv,
+      onTokenScroll: () => {},
+    });
+    expect(timeoutOptRes.data.content).toBe("Done");
+
+    // Batch /api/chat without signal and with signal covers both branches of buildPostInit
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ content: "Batch without signal" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ content: "Batch with signal" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    const batchNoSignalRes = await dispatchChatRequest({
+      bodyJson: "{}",
+      headers: {},
+      streamingEnabled: false,
+      loadingDiv,
+      onTokenScroll: () => {},
+    });
+    expect(batchNoSignalRes.data.content).toBe("Batch without signal");
+    const batchSignalRes = await dispatchChatRequest({
+      bodyJson: "{}",
+      headers: {},
+      streamingEnabled: false,
+      loadingDiv,
+      onTokenScroll: () => {},
+      signal: new AbortController().signal,
+    });
+    expect(batchSignalRes.data.content).toBe("Batch with signal");
   });
 });

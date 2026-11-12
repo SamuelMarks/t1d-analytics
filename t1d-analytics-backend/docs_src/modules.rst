@@ -71,7 +71,22 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.chat_turn_executor
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.clinical_file_readers
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.clinical_prompts
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.clinical_query_catalog
    :members:
    :undoc-members:
    :show-inheritance:
@@ -161,6 +176,16 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.ingestion_study_resolver
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.jaeb_cohort_sql
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.job_manager
    :members:
    :undoc-members:
@@ -181,6 +206,11 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.nl_to_sql_translator
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.ollama_discovery
    :members:
    :undoc-members:
@@ -197,6 +227,11 @@ t1d_analytics
    :show-inheritance:
 
 .. automodule:: t1d_analytics.seed
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.seed_verifier
    :members:
    :undoc-members:
    :show-inheritance:
@@ -226,12 +261,47 @@ t1d_analytics
    :undoc-members:
    :show-inheritance:
 
+.. automodule:: t1d_analytics.sse_chat_streamer
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.table1_builder
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.table1_formatter
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.table1_specs
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.table1_sql_compiler
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 .. automodule:: t1d_analytics.tpu_orchestrator
    :members:
    :undoc-members:
    :show-inheritance:
 
 .. automodule:: t1d_analytics.training_data
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.training_dataset_exporter
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: t1d_analytics.training_dpo_miner
    :members:
    :undoc-members:
    :show-inheritance:

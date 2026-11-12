@@ -1,11 +1,10 @@
 """Internationalization and localization module for T1D Analytics."""
 
-import os
-from typing import Callable, Dict, Optional, Union
+from collections.abc import Callable
 
-FormatArgValue = Union[str, int, float, bool, None, BaseException]
+FormatArgValue = str | int | float | bool | None | BaseException
 
-TRANSLATIONS: Dict[str, Dict[str, str]] = {
+TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {},
     "ja": {
         "An error occurred: {}": "エラーが発生しました: {}",
@@ -85,6 +84,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "表形式のファイル（CSV、TXT、Parquet、GZ）をスキャン中...",
         "Skipping unsafe entry {} in {} (symlink detected).": "{}内の安全でないエントリ{}をスキップしています（シンボリックリンクが検出されました）。",
         "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "{} 内の安全でないエントリ {} をスキップしました（シンボリックリンクまたはハードリンクを検出）。",
+        "Skipping unsafe entry {} in {} (symlink, hardlink, or device/FIFO detected).": "{} 内の安全でないエントリ {} をスキップしました（シンボリックリンク、ハードリンク、またはデバイス/FIFOを検出）。",
         "Skipping entry {} in {} (decompressed size quota exceeded).": "{} 内のエントリ {} をスキップしました（展開サイズの上限を超過）。",
         "Skipping unsafe entry {} in {} (suspicious compression ratio).": "{} 内の安全でないエントリ {} をスキップしました（不審な圧縮率）。",
     },
@@ -166,6 +166,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "جاري البحث عن ملفات الجداول (CSV, TXT, Parquet, GZ)...",
         "Skipping unsafe entry {} in {} (symlink detected).": "تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي).",
         "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "تم تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي أو صلب).",
+        "Skipping unsafe entry {} in {} (symlink, hardlink, or device/FIFO detected).": "تم تخطي الإدخال غير الآمن {} في {} (تم اكتشاف رابط رمزي أو صلب أو جهاز/FIFO).",
         "Skipping entry {} in {} (decompressed size quota exceeded).": "تم تخطي الإدخال {} في {} (تم تجاوز حصة الحجم بعد فك الضغط).",
         "Skipping unsafe entry {} in {} (suspicious compression ratio).": "تم تخطي الإدخال غير الآمن {} في {} (نسبة ضغط مشبوهة).",
     },
@@ -247,42 +248,38 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "Scanning for tabular files (CSV, TXT, Parquet, GZ)...": "סורק קובצי נתונים טבלאיים (CSV, TXT, Parquet, GZ)...",
         "Skipping unsafe entry {} in {} (symlink detected).": "מדלג על רשומה לא בטוחה {} ב-{} (זוהה קישור סימבולי).",
         "Skipping unsafe entry {} in {} (symlink or hardlink detected).": "דילוג על רשומה לא בטוחה {} ב-{} (זוהה קישור סמלי או קשיח).",
+        "Skipping unsafe entry {} in {} (symlink, hardlink, or device/FIFO detected).": "דילוג על רשומה לא בטוחה {} ב-{} (זוהה קישור סמלי, קשיח או התקן/FIFO).",
         "Skipping entry {} in {} (decompressed size quota exceeded).": "דילוג על רשומה {} ב-{} (חריגה ממכסת גודל הפריסה).",
         "Skipping unsafe entry {} in {} (suspicious compression ratio).": "דילוג על רשומה לא בטוחה {} ב-{} (יחס דחיסה חשוד).",
     },
 }
 
 
-def get_translator(lang: Optional[str] = None) -> Callable[..., str]:
+def get_translator(lang: str | None = None) -> Callable[..., str]:
     """
-    Get a translator function for the given language.
+    Get a translator function for an explicit locale code (defaulting to `'en'`).
 
     Args:
-    ----
-        lang: The language code (e.g., "en", "ja", "ar", "he"). If None, uses the LANG env var.
+        lang: Explicit locale code (e.g., `'en'`, `'ja'`, `'ar'`, `'he'`, `'ja_JP.UTF-8'`). Defaults to `'en'`.
 
     Returns:
-    -------
-        A translation function accepting a text key, format args, and kwargs.
+        Callable[..., str]: Translation function accepting a message key, format args, and kwargs.
 
     """
-    if lang is None:
-        lang = os.environ.get("LANG", "en").split(".")[0].split("_")[0]
-
-    lang_dict = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
+    raw_lang = (lang or "en").strip()
+    resolved_lang = raw_lang.split(".")[0].split("_")[0].split("-")[0].lower() or "en"
+    lang_dict = TRANSLATIONS.get(resolved_lang, TRANSLATIONS["en"])
 
     def translate(text: str, *args: FormatArgValue, **kwargs: FormatArgValue) -> str:
         """
         Translate the given text and format it with positional and keyword arguments.
 
         Args:
-        ----
             text: Message key to translate.
             *args: Positional formatting values.
             **kwargs: Keyword formatting values.
 
         Returns:
-        -------
             Translated and formatted text string.
 
         """

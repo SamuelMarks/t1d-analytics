@@ -445,7 +445,7 @@ def test_extract_zips_already_extracted(
     import tarfile
     import zipfile
 
-    from t1d_analytics.archive_extractor import _should_skip_archive_member_name
+    from t1d_analytics.archive_extractor import should_skip_archive_member_name
     from t1d_analytics.ingestion import (
         DEFAULT_MAX_DECOMPRESSED_BYTES,
         extract_zips,
@@ -473,12 +473,12 @@ def test_extract_zips_already_extracted(
     ):
         assert resolve_effective_decompressed_quota() == DEFAULT_MAX_DECOMPRESSED_BYTES
 
-    assert _should_skip_archive_member_name("")
-    assert _should_skip_archive_member_name("__MACOSX/file.txt")
-    assert _should_skip_archive_member_name("sub/._file.txt")
-    assert _should_skip_archive_member_name("CRFs/Thumbs.db")
-    assert _should_skip_archive_member_name("CRFs/protocol.pdf", tabular_only=True)
-    assert not _should_skip_archive_member_name("Data/cgm.txt", tabular_only=True)
+    assert should_skip_archive_member_name("")
+    assert should_skip_archive_member_name("__MACOSX/file.txt")
+    assert should_skip_archive_member_name("sub/._file.txt")
+    assert should_skip_archive_member_name("CRFs/Thumbs.db")
+    assert should_skip_archive_member_name("CRFs/protocol.pdf", tabular_only=True)
+    assert not should_skip_archive_member_name("Data/cgm.txt", tabular_only=True)
 
     # 1. Partial directory recovery: if extract_dir exists but is empty (from a prior interrupted run),
     # extract_zips recovers and extracts the missing member.
@@ -1021,7 +1021,7 @@ def test_is_sql_query_ddl_and_dml() -> None:
 
 def test_is_sql_query_without_extract_statements() -> None:
     """Test is_sql_query fallback when extract_statements is absent or raises on connection."""
-    from typing import Sequence
+    from collections.abc import Sequence
 
     from t1d_analytics.sql_utils import SqlSyntaxValidatorProtocol, is_sql_query
 
@@ -1201,20 +1201,20 @@ def test_clinical_data_ingestion_and_manifest(
 
 def test_read_clinical_dataframe_edge_cases(tmp_path: Path, mocker: MagicMock) -> None:
     """Test error handling in _read_clinical_dataframe."""
-    from t1d_analytics.ingestion import _read_clinical_dataframe
+    from t1d_analytics.ingestion import read_clinical_dataframe
 
     # Unsupported format
     unsupported = tmp_path / "test.unsupported"
     unsupported.write_text("sample")
     with pytest.raises(ValueError, match="Unsupported clinical file format"):
-        _read_clinical_dataframe(unsupported)
+        read_clinical_dataframe(unsupported)
 
     # Empty/None returned
     mocker.patch("pyreadstat.read_sav", return_value=(None, None))
     sav_file = tmp_path / "empty.sav"
     sav_file.write_text("data")
     with pytest.raises(ValueError, match="Could not read clinical file"):
-        _read_clinical_dataframe(sav_file)
+        read_clinical_dataframe(sav_file)
 
 
 def test_get_ingestion_manifest_edge_cases(tmp_path: Path) -> None:
@@ -1236,14 +1236,14 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
     """Test reading .sas7bdat, decoding bytes in columns, and fallback to pandas readers."""
     import pandas as pd
 
-    from t1d_analytics.ingestion import _read_clinical_dataframe
+    from t1d_analytics.ingestion import read_clinical_dataframe
 
     # 1. sas7bdat success with byte data to decode
     raw_df = pd.DataFrame({b"col_bytes": [b"val_bytes", "str_val"]})
     mocker.patch("pyreadstat.read_sas7bdat", return_value=(raw_df, None))
     sas_file = tmp_path / "test.sas7bdat"
     sas_file.write_text("data")
-    res_df = _read_clinical_dataframe(sas_file)
+    res_df = read_clinical_dataframe(sas_file)
     assert "col_bytes" in res_df.columns
     assert res_df["col_bytes"].iloc[0] == "val_bytes"
 
@@ -1252,7 +1252,7 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
     mock_pandas_sas = mocker.patch(
         "pandas.read_sas", return_value=pd.DataFrame({"a": [1]})
     )
-    fallback_sas_df = _read_clinical_dataframe(sas_file)
+    fallback_sas_df = read_clinical_dataframe(sas_file)
     assert fallback_sas_df["a"].iloc[0] == 1
     mock_pandas_sas.assert_called_once_with(str(sas_file), format="sas7bdat")
 
@@ -1263,7 +1263,7 @@ def test_read_clinical_dataframe_sas7bdat_and_fallbacks(
     mock_pandas_spss = mocker.patch(
         "pandas.read_spss", return_value=pd.DataFrame({"b": [2]})
     )
-    fallback_sav_df = _read_clinical_dataframe(sav_file)
+    fallback_sav_df = read_clinical_dataframe(sav_file)
     assert fallback_sav_df["b"].iloc[0] == 2
     mock_pandas_spss.assert_called_once_with(str(sav_file))
 
@@ -1465,11 +1465,44 @@ def test_extract_tar_symlink_and_hardlink_skipped(
         lnk.linkname = "regular.txt"
         tar.addfile(lnk)
 
+        # FIFO special pipe / device
+        fifo = tarfile.TarInfo(name="evil.fifo")
+        fifo.type = tarfile.FIFOTYPE
+        tar.addfile(fifo)
+
     extract_zips(str(tmp_path))
     out = capsys.readouterr().out
-    assert "symlink or hardlink detected" in out
+    assert "symlink, hardlink, or device/FIFO detected" in out
     extract_dir = tmp_path / "links"
     assert (extract_dir / "regular.txt").exists()
+    assert not (extract_dir / "evil.fifo").exists()
+
+    # Cover PEP 706 tarfile.data_filter callable branches (both returning member and returning None)
+    from t1d_analytics.archive_extractor import extract_tar_member_safely
+
+    filter_out_dir = tmp_path / "filtered_out"
+    filter_out_dir.mkdir()
+    with tarfile.open(tar_path, "r:gz") as tf_read:
+        reg_member = tf_read.getmember("regular.txt")
+        with patch.object(
+            tarfile,
+            "data_filter",
+            side_effect=lambda m, _dest: m,
+            create=True,
+        ):
+            extract_tar_member_safely(tf_read, reg_member, filter_out_dir)
+        assert (filter_out_dir / "regular.txt").exists()
+
+        with patch.object(
+            tarfile,
+            "data_filter",
+            side_effect=lambda _m, _dest: None,
+            create=True,
+        ):
+            extract_tar_member_safely(tf_read, reg_member, filter_out_dir)
+
+        with patch.object(tarfile, "data_filter", None, create=True):
+            extract_tar_member_safely(tf_read, reg_member, filter_out_dir)
     assert not (extract_dir / "symlink.txt").exists()
 
 
@@ -1738,3 +1771,24 @@ def test_load_data_to_duckdb_coerces_varchar_numeric_concepts(tmp_path: Path) ->
     assert res[0] == 2.0
     assert res[1] == 22.5
     assert res_manual == (4.0,)
+
+    # Verify transactional rollback when materialize_temp_view_into_table fails mid-transaction
+    from t1d_analytics.ingestion import materialize_temp_view_into_table
+
+    rb_conn = duckdb.connect(str(tmp_path / "rb.duckdb"))
+    try:
+        rb_conn.execute("CREATE TEMP VIEW temp_view AS SELECT 1 AS id")
+        with pytest.raises(duckdb.CatalogException):
+            materialize_temp_view_into_table(
+                conn=rb_conn,
+                table_name="rolled_back_tbl",
+                current_source="/tmp/src.csv",
+                current_hash="abc",
+                file_size=10,
+                reverse_map={},
+                is_clinical=False,
+            )
+        tables_after_rb = [r[0] for r in rb_conn.execute("SHOW TABLES").fetchall()]
+        assert "rolled_back_tbl" not in tables_after_rb
+    finally:
+        rb_conn.close()

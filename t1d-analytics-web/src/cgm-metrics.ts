@@ -223,8 +223,8 @@ export interface AGPData {
 export function detectCgmColumns(
   rows: Array<Record<string, ClinicalRowValue>>,
 ): DetectedCgmColumns {
-  if (!rows || rows.length === 0) return {};
-  const sample = rows[0];
+  const sample = rows?.[0];
+  if (!sample) return {};
   const keys = Object.keys(sample);
 
   let glucoseCol = keys.find((k) =>
@@ -254,9 +254,9 @@ export function detectCgmColumns(
         })
         .filter((v) => !isNaN(v) && v > 0);
       if (numSamples.length > 0) {
-        const median = numSamples.sort((a, b) => a - b)[
-          Math.floor(numSamples.length / 2)
-        ];
+        const median = Number(
+          numSamples.sort((a, b) => a - b)[Math.floor(numSamples.length / 2)],
+        );
         if (median >= 2 && median <= 500) {
           glucoseCol = genericCol;
         }
@@ -264,7 +264,10 @@ export function detectCgmColumns(
     }
   }
 
-  return { glucoseCol, timeCol };
+  return {
+    ...(glucoseCol !== undefined ? { glucoseCol } : {}),
+    ...(timeCol !== undefined ? { timeCol } : {}),
+  };
 }
 
 /** Alias for `detectCgmColumns`. */
@@ -317,8 +320,8 @@ export function normalizeGlucoseToMgDl(
     return valid.map((v) => v * CLINICAL_CHART_THEME.mmolToMgDlFactor);
   }
   const sorted = [...valid].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const p95 = sorted[Math.floor(sorted.length * 0.95)];
+  const median = Number(sorted[Math.floor(sorted.length / 2)]);
+  const p95 = Number(sorted[Math.floor(sorted.length * 0.95)]);
   const isMmol = median > 0 && median < 25 && p95 < 55;
   return isMmol
     ? valid.map((v) => v * CLINICAL_CHART_THEME.mmolToMgDlFactor)
@@ -473,8 +476,8 @@ export function calculateDayNightTIR(
   const scaledNight = normalizedAll.slice(dayValues.length);
 
   return {
-    day: calculateTIR(scaledDay),
-    night: calculateTIR(scaledNight),
+    day: calculateTIR(scaledDay, "mg/dL"),
+    night: calculateTIR(scaledNight, "mg/dL"),
   };
 }
 
@@ -486,12 +489,14 @@ export function calculateDayNightTIR(
  */
 export function computePercentile(sortedValues: number[], p: number): number {
   if (sortedValues.length === 0) return 0;
-  if (sortedValues.length === 1) return sortedValues[0];
+  if (sortedValues.length === 1) return Number(sortedValues[0]);
   const index = (p / 100) * (sortedValues.length - 1);
   const lower = Math.floor(index);
   const upper = Math.ceil(index);
   const weight = index - lower;
-  const val = sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+  const val =
+    Number(sortedValues[lower]) * (1 - weight) +
+    Number(sortedValues[upper]) * weight;
   return Math.round(val * 10) / 10;
 }
 
@@ -505,10 +510,9 @@ export function _computeAgpPercentiles(
   buckets: number[][],
   intervalMinutes: number,
 ): AGPIntervalMetrics[] {
-  const numBuckets = buckets.length;
   const intervals: AGPIntervalMetrics[] = [];
-  for (let i = 0; i < numBuckets; i++) {
-    const bVals = buckets[i].sort((a, b) => a - b);
+  for (const [i, rawBucket] of buckets.entries()) {
+    const bVals = [...rawBucket].sort((a, b) => a - b);
     const minuteOfDay = i * intervalMinutes;
     const hours = Math.floor(minuteOfDay / 60);
     const mins = minuteOfDay % 60;
@@ -539,51 +543,37 @@ export function _computeAgpPercentiles(
     }
   }
 
-  for (let i = 0; i < numBuckets; i++) {
-    if (intervals[i].count === 0) {
-      let prevIdx = -1;
-      for (let j = i - 1; j >= 0; j--) {
-        if (intervals[j].count > 0) {
-          prevIdx = j;
-          break;
+  const nonEmpty = intervals
+    .map((item, idx) => ({ item, idx }))
+    .filter((entry) => entry.item.count > 0);
+  const firstNonEmpty = nonEmpty[0];
+  if (firstNonEmpty) {
+    for (const [i, curInterval] of intervals.entries()) {
+      if (curInterval.count === 0) {
+        const prevEntry = [...nonEmpty].reverse().find((e) => e.idx < i);
+        const nextEntry = nonEmpty.find((e) => e.idx > i);
+        if (prevEntry && nextEntry) {
+          const factor = (i - prevEntry.idx) / (nextEntry.idx - prevEntry.idx);
+          const prev = prevEntry.item;
+          const next = nextEntry.item;
+          curInterval.p50 =
+            Math.round((prev.p50 + (next.p50 - prev.p50) * factor) * 10) / 10;
+          curInterval.p25 =
+            Math.round((prev.p25 + (next.p25 - prev.p25) * factor) * 10) / 10;
+          curInterval.p75 =
+            Math.round((prev.p75 + (next.p75 - prev.p75) * factor) * 10) / 10;
+          curInterval.p5 =
+            Math.round((prev.p5 + (next.p5 - prev.p5) * factor) * 10) / 10;
+          curInterval.p95 =
+            Math.round((prev.p95 + (next.p95 - prev.p95) * factor) * 10) / 10;
+        } else {
+          const donor = prevEntry ? prevEntry.item : firstNonEmpty.item;
+          curInterval.p50 = donor.p50;
+          curInterval.p25 = donor.p25;
+          curInterval.p75 = donor.p75;
+          curInterval.p5 = donor.p5;
+          curInterval.p95 = donor.p95;
         }
-      }
-      let nextIdx = -1;
-      for (let j = i + 1; j < numBuckets; j++) {
-        if (intervals[j].count > 0) {
-          nextIdx = j;
-          break;
-        }
-      }
-
-      if (prevIdx !== -1 && nextIdx !== -1) {
-        const factor = (i - prevIdx) / (nextIdx - prevIdx);
-        const prev = intervals[prevIdx];
-        const next = intervals[nextIdx];
-        intervals[i].p50 =
-          Math.round((prev.p50 + (next.p50 - prev.p50) * factor) * 10) / 10;
-        intervals[i].p25 =
-          Math.round((prev.p25 + (next.p25 - prev.p25) * factor) * 10) / 10;
-        intervals[i].p75 =
-          Math.round((prev.p75 + (next.p75 - prev.p75) * factor) * 10) / 10;
-        intervals[i].p5 =
-          Math.round((prev.p5 + (next.p5 - prev.p5) * factor) * 10) / 10;
-        intervals[i].p95 =
-          Math.round((prev.p95 + (next.p95 - prev.p95) * factor) * 10) / 10;
-      } else if (prevIdx !== -1) {
-        const prev = intervals[prevIdx];
-        intervals[i].p50 = prev.p50;
-        intervals[i].p25 = prev.p25;
-        intervals[i].p75 = prev.p75;
-        intervals[i].p5 = prev.p5;
-        intervals[i].p95 = prev.p95;
-      } else {
-        const next = intervals[nextIdx];
-        intervals[i].p50 = next.p50;
-        intervals[i].p25 = next.p25;
-        intervals[i].p75 = next.p75;
-        intervals[i].p5 = next.p5;
-        intervals[i].p95 = next.p95;
       }
     }
   }
@@ -605,7 +595,6 @@ export function calculateAGP(
   intervalMinutes: number = 30,
 ): AGPData | null {
   const numBuckets = Math.floor(1440 / intervalMinutes);
-  const buckets: number[][] = Array.from({ length: numBuckets }, () => []);
   const days = new Set<string>();
   const validEntries: Array<{ bucketIdx: number; glucoseVal: number }> = [];
 
@@ -629,9 +618,11 @@ export function calculateAGP(
   const normalizedGlucose = normalizeGlucoseToMgDl(
     validEntries.map((entry) => entry.glucoseVal),
   );
-  for (let i = 0; i < validEntries.length; i++) {
-    buckets[validEntries[i].bucketIdx].push(normalizedGlucose[i]);
-  }
+  const buckets: number[][] = Array.from({ length: numBuckets }, (_, idx) =>
+    validEntries.flatMap((entry, entryIdx) =>
+      entry.bucketIdx === idx ? [Number(normalizedGlucose[entryIdx])] : [],
+    ),
+  );
   const intervals = _computeAgpPercentiles(buckets, intervalMinutes);
 
   return {
@@ -655,10 +646,10 @@ export function detectSensorIntervalMinutes(epochTimesMs: number[]): number {
   const sorted = [...epochTimesMs].sort((a, b) => a - b);
   const deltasMin: number[] = [];
   for (let i = 1; i < sorted.length; i++) {
-    deltasMin.push((sorted[i] - sorted[i - 1]) / 60000);
+    deltasMin.push((Number(sorted[i]) - Number(sorted[i - 1])) / 60000);
   }
   deltasMin.sort((a, b) => a - b);
-  const medianDelta = deltasMin[Math.floor(deltasMin.length / 2)];
+  const medianDelta = Number(deltasMin[Math.floor(deltasMin.length / 2)]);
   if (medianDelta >= 0.5 && medianDelta < 3) {
     return 1;
   }
@@ -719,7 +710,7 @@ export function _computeDailyWearStats(
   }
 
   let calendarDays = monitoringDays;
-  if (!calendarDays || calendarDays < 1) {
+  if (calendarDays === undefined || calendarDays < 1) {
     if (minTime !== Infinity && maxTime !== -Infinity && maxTime >= minTime) {
       const elapsedMs = maxTime - minTime;
       if (elapsedMs < 24 * 3600 * 1000) {

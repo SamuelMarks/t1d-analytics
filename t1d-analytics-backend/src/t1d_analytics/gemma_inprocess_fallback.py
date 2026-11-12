@@ -1,81 +1,67 @@
-"""Native in-process DuckDB and PyTorch fallback engine for Gemma-4-SQL ETL, SFT, DPO, and evaluation."""
+"""Native in-process DuckDB and PyTorch execution strategy for Gemma-4-SQL ETL, SFT, DPO, and evaluation."""
 
 import json
 import logging
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
 
-from t1d_analytics.errors import InvalidIdentifierError
-from t1d_analytics.gemma_cli_toolchain import resolve_local_gemma_sql_repo
+from t1d_analytics.errors import InvalidTableNameError
 from t1d_analytics.gemma_library_adapter import (
     DpoRunResult,
     EtlRunResult,
     EvalRunResult,
     SftRunResult,
 )
-from t1d_analytics.sql_agent import (
-    score_sql_completion_logprob as _score_sql_completion_logprob_impl,
-)
+from t1d_analytics.sql_agent import score_sql_completion_logprob
 from t1d_analytics.sql_utils import escape_sql_identifier, normalize_sql
 
 logger = logging.getLogger(__name__)
 
 
-def score_sql_completion_logprob(prompt: str, sql_text: str) -> float:
-    """
-    Compute a structural and lexical log-probability score for a candidate SQL completion.
+class NativeDuckDbStrategy:
+    """Native in-process DuckDB and PyTorch execution strategy implementing `GemmaExecutionStrategy`."""
 
-    Args:
-    ----
-        prompt: Natural language question or prompt string.
-        sql_text: Candidate SQL completion string.
+    @property
+    def execution_mode(self) -> str:
+        """
+        Return canonical execution mode identifier.
 
-    Returns:
-    -------
-        float: Estimated log-probability score (higher is better, <= 0.0).
+        Returns:
+            str: Always `'native_in_process'`.
 
-    """
-    return _score_sql_completion_logprob_impl(
-        prompt=prompt,
-        sql_text=sql_text,
-        repo_resolver=resolve_local_gemma_sql_repo,
-    )
-
-
-class InProcessDuckDbGemmaFallback:
-    """Native in-process DuckDB fallback engine for ETL, SFT, DPO, and SQL evaluation."""
+        """
+        return "native_in_process"
 
     def run_etl(
         self,
         stage_lower: str,
         db_path: Path,
         duckdb_table: str,
-        output_dir: Optional[Union[str, Path]] = None,
+        output_dir: str | Path | None = None,
+        timeout: float = 300.0,
     ) -> EtlRunResult:
         """
         Execute native in-process DuckDB ETL exporting JSONL and Parquet shards.
 
         Args:
-        ----
             stage_lower: Normalized stage identifier ('pretrain', 'sft', 'posttrain').
             db_path: Validated path to the source DuckDB database.
             duckdb_table: Source table identifier.
             output_dir: Optional output directory path.
+            timeout: Unused execution timeout parameter for strategy parity.
 
         Returns:
-        -------
             EtlRunResult: Structured ETL execution result.
 
         Raises:
-        ------
-            InvalidIdentifierError: If `duckdb_table` is not a valid SQL identifier.
+            InvalidTableNameError: If `duckdb_table` is not a valid SQL identifier.
 
         """
         import duckdb
 
+        _ = timeout
         if not duckdb_table.isidentifier():
-            raise InvalidIdentifierError(
+            raise InvalidTableNameError(
                 f"Invalid DuckDB table identifier: '{duckdb_table}'"
             )
 
@@ -104,7 +90,7 @@ class InProcessDuckDbGemmaFallback:
             jsonl_file = out_p / f"{stage_lower}_data.jsonl"
             with open(jsonl_file, "w", encoding="utf-8") as f:
                 for r in rows:
-                    rec = dict(zip(cols, r))
+                    rec = dict(zip(cols, r, strict=False))
                     prompt_val = str(
                         rec.get("prompt")
                         or rec.get("question")
@@ -122,20 +108,22 @@ class InProcessDuckDbGemmaFallback:
                             },
                             default=str,
                         )
-                        + chr(10)
+                        + "\n"
                     )
 
             parquet_file = out_p / f"{stage_lower}_data.parquet"
             escaped_pq = str(parquet_file.resolve()).replace("'", "''")
-            conn.execute(
-                f"COPY (SELECT * FROM \"{escaped_table}\") TO '{escaped_pq}' (FORMAT PARQUET)"
+            copy_sql = (
+                f'COPY (SELECT * FROM "{escaped_table}") '
+                f"TO '{escaped_pq}' (FORMAT PARQUET)"
             )
+            conn.execute(copy_sql)
         finally:
             conn.close()
 
         return {
             "status": "completed",
-            "execution_mode": "native_in_process",
+            "execution_mode": self.execution_mode,
             "result": {
                 "table": duckdb_table,
                 "rows": row_count,
@@ -148,22 +136,22 @@ class InProcessDuckDbGemmaFallback:
         model_name: str,
         ds_p: Path,
         out_p: Path,
-        hyperparameters: Optional[Dict[str, Union[int, float, str, bool]]] = None,
+        hyperparameters: dict[str, int | float | str | bool] | None = None,
+        timeout: float = 600.0,
         dry_run: bool = True,
     ) -> SftRunResult:
         """
         Execute native in-process SFT training fallback via LocalCpuRunner.
 
         Args:
-        ----
             model_name: Target model name.
             ds_p: Validated dataset path.
             out_p: Validated output directory path.
             hyperparameters: Optional hyperparameter dictionary.
+            timeout: Unused execution timeout parameter for strategy parity.
             dry_run: Whether to run in dry-run validation mode.
 
         Returns:
-        -------
             SftRunResult: Structured SFT execution result.
 
         """
@@ -174,6 +162,7 @@ class InProcessDuckDbGemmaFallback:
         )
         from t1d_analytics.training_runner import get_training_runner
 
+        _ = timeout
         runner = get_training_runner(TrainingBackend.LOCAL_CPU)
         lr_val = 2e-5
         epochs_val = 1
@@ -202,41 +191,9 @@ class InProcessDuckDbGemmaFallback:
         res_runner = runner.run_training(train_cfg)
         return {
             "status": "completed",
-            "execution_mode": "native_in_process",
+            "execution_mode": self.execution_mode,
             "result": res_runner,
         }
-
-    @staticmethod
-    def _optimize_dpo_preference_tensors(
-        pairs: List[Dict[str, str]],
-        beta: float,
-        num_steps: int = 1,
-        checkpoint_dir: Optional[Union[str, Path]] = None,
-    ) -> Tuple[List[float], List[float]]:
-        """
-        Delegate DPO preference tensor optimization to the shared training runner engine.
-
-        Args:
-        ----
-            pairs: Preference dataset triplets with `'prompt'`, `'chosen_sql'`, and `'rejected_sql'`.
-            beta: DPO temperature hyperparameter.
-            num_steps: Number of optimization epochs over the preference pairs.
-            checkpoint_dir: Optional checkpoint directory to persist the DPO-optimized weights and metrics.
-
-        Returns:
-        -------
-            Tuple[List[float], List[float]]: `(dpo_losses, reward_margins)` per preference pair step.
-
-        """
-        from t1d_analytics.training_runner import optimize_dpo_preference_pairs
-
-        dpo_res = optimize_dpo_preference_pairs(
-            pairs=pairs,
-            beta=beta,
-            num_steps=num_steps,
-            checkpoint_dir=checkpoint_dir,
-        )
-        return dpo_res.losses, dpo_res.margins
 
     def run_dpo(
         self,
@@ -244,27 +201,29 @@ class InProcessDuckDbGemmaFallback:
         ds_p: Path,
         out_p: Path,
         beta: float = 0.1,
+        timeout: float = 600.0,
         dry_run: bool = True,
     ) -> DpoRunResult:
         """
         Execute native in-process DPO alignment using the Bradley-Terry preference objective.
 
         Args:
-        ----
             model_name: Target model name.
             ds_p: Validated preference dataset path.
             out_p: Validated output directory path.
             beta: DPO temperature hyperparameter.
+            timeout: Unused execution timeout parameter for strategy parity.
             dry_run: Whether to run in dry-run validation mode.
 
         Returns:
-        -------
             DpoRunResult: Structured DPO execution result.
 
         """
         from t1d_analytics.job_manager import JobMetricValue
+        from t1d_analytics.training_runner import optimize_dpo_preference_pairs
 
-        pairs: List[Dict[str, str]] = []
+        _ = timeout
+        pairs: list[dict[str, str]] = []
         with open(ds_p, encoding="utf-8") as f:
             for raw_line in f:
                 raw_line = raw_line.strip()
@@ -299,11 +258,14 @@ class InProcessDuckDbGemmaFallback:
 
         ckpt_dir = out_p / "checkpoint-final"
         if not dry_run and pairs:
-            dpo_losses, reward_margins = self._optimize_dpo_preference_tensors(
-                pairs,
-                beta,
+            dpo_opt = optimize_dpo_preference_pairs(
+                pairs=pairs,
+                beta=beta,
+                num_steps=1,
                 checkpoint_dir=ckpt_dir,
             )
+            dpo_losses = dpo_opt.losses
+            reward_margins = dpo_opt.margins
         else:
             dpo_losses = []
             reward_margins = []
@@ -327,7 +289,7 @@ class InProcessDuckDbGemmaFallback:
             if reward_margins
             else 0.0
         )
-        res_runner: Dict[str, JobMetricValue] = {
+        res_runner: dict[str, JobMetricValue] = {
             "status": "dry_run_completed" if dry_run else "completed",
             "backend": "local-cpu",
             "model_name": model_name,
@@ -342,31 +304,34 @@ class InProcessDuckDbGemmaFallback:
             res_runner["checkpoint_path"] = str(ckpt_dir.resolve())
         return {
             "status": "completed",
-            "execution_mode": "native_in_process",
+            "execution_mode": self.execution_mode,
             "result": res_runner,
         }
 
     def evaluate_sql(
         self,
+        model_name: str,
         tc_p: Path,
         db_p: Path,
+        timeout: float = 300.0,
     ) -> EvalRunResult:
         """
         Execute native in-process SQL evaluation comparing normalized SQL and DuckDB result sets.
 
         Args:
-        ----
+            model_name: Unused evaluated model name for strategy parity.
             tc_p: Validated test cases JSONL path.
             db_p: Validated DuckDB database path.
+            timeout: Unused execution timeout parameter for strategy parity.
 
         Returns:
-        -------
             EvalRunResult: Structured evaluation result with exact_match and execution_accuracy.
 
         """
         import duckdb
 
-        cases: List[Dict[str, str]] = []
+        _ = (model_name, timeout)
+        cases: list[dict[str, str]] = []
         with open(tc_p, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -382,7 +347,7 @@ class InProcessDuckDbGemmaFallback:
         if not cases:
             return {
                 "status": "completed",
-                "execution_mode": "native_in_process",
+                "execution_mode": self.execution_mode,
                 "accuracy": {
                     "exact_match": 0.0,
                     "execution_accuracy": 0.0,
@@ -429,7 +394,7 @@ class InProcessDuckDbGemmaFallback:
         total = len(cases)
         return {
             "status": "completed",
-            "execution_mode": "native_in_process",
+            "execution_mode": self.execution_mode,
             "accuracy": {
                 "exact_match": round(exact_matches / total, 4),
                 "execution_accuracy": round(exec_matches / total, 4),

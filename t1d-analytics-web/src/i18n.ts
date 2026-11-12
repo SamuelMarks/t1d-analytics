@@ -93,6 +93,8 @@ export const enTranslations: TranslationResourceMap = {
         "[Table 1 · High] Multi-Domain Sensor & Safety Rollup",
       table1TransposedNejm:
         "[Table 1 · Very High] Transposed NEJM/Lancet Table 1",
+      table1Beck2023:
+        "[Table 1 · Very High] Beck et al. (2023) JAEB Meta-Analysis Table 1",
     },
     copyQuery: "Copy Query",
     refreshQuery: "Refresh Query",
@@ -229,6 +231,10 @@ export const enTranslations: TranslationResourceMap = {
   },
   backend: {
     sqlExecution: "SQL execution error: {{error}}",
+    sqlReadOnlyViolation:
+      "Read-only SQL violation: mutating or administrative statements are prohibited.",
+    sqlMultipleStatements:
+      "Multiple SQL statements are not allowed in a single query.",
     missingSdk: "any-llm-sdk[ollama] is not installed.",
     readSchemaFailed: "Failed to read schema: {{error}}",
     llmTranslationError: "LLM translation error: {{error}}",
@@ -247,6 +253,45 @@ export const enTranslations: TranslationResourceMap = {
     invalidDatabasePath: "Invalid or unauthorized database path: {{path}}",
     invalidPagination:
       "Invalid pagination parameters: limit must be positive, offset non-negative.",
+    databaseLocked: "Database is temporarily locked by another process.",
+    invalidSortColumn: "Invalid sort column specified.",
+    invalidSortOrder: "Invalid sort order: must be ASC or DESC.",
+    rateLimitExceeded: "Rate limit exceeded. Please retry shortly.",
+    missingApiKey: "LLM provider API key is not configured.",
+    llmRateLimit: "LLM provider rate limit exceeded.",
+    llmAuthFailed: "LLM provider authentication failed.",
+    llmQuotaExceeded: "LLM provider quota or billing limit exceeded.",
+    llmConnectionFailed: "Failed to connect to LLM provider: {{error}}",
+    accessDenied: "Access denied for the requested path.",
+    frontendBuildNotFound: "Compiled frontend build was not found.",
+    unauthorized: "Unauthorized API request: valid Bearer token required.",
+    sessionNotFound: "Chat session not found.",
+    jobNotFound: "Training job not found.",
+    chatJobNotFound: "Asynchronous chat job not found.",
+    trainingFailed: "Model training operation failed: {{error}}",
+    insufficientData: "Insufficient training data to start job.",
+    hardwareUnavailable: "Required hardware accelerator is unavailable.",
+    trainingExecutionFailed: "Training subprocess execution failed: {{error}}",
+    seedVerificationFailed:
+      "Clinical seed database verification failed: {{error}}",
+    downloadFailed: "Dataset download failed: {{error}}",
+    cliValidationFailed: "Invalid CLI configuration or input: {{error}}",
+    authPluginFailed: "Authentication plugin failed: {{error}}",
+    invalidBackend: "Unsupported training backend specified.",
+    gemmaToolchainFailed: "Local Gemma SQL toolchain is unavailable: {{error}}",
+    invalidStage: "Invalid training pipeline stage specified.",
+    tpuOrchestrationFailed: "Cloud TPU orchestration failed: {{error}}",
+    tpuPreempted: "Cloud TPU workload was preempted.",
+    tpuPollingTimeout: "Timed out waiting for Cloud TPU workload.",
+    gcsStorageFailed: "Google Cloud Storage operation failed: {{error}}",
+    checksumMismatch: "Artifact checksum verification failed.",
+    invalidGcsUri: "Invalid Google Cloud Storage URI (expected gs://).",
+    configNotFound: "Configuration file not found.",
+    datasetNotFound: "Dataset file not found.",
+    queryTimeout: "SQL query exceeded the execution timeout.",
+    unsupportedExportFormat: "Unsupported export file format requested.",
+    unsupportedFileFormat: "Unsupported clinical dataset file format.",
+    subprocessTimeout: "Subprocess exceeded the execution timeout.",
   },
   status: {
     offlineTitle: "Backend Server Unreachable",
@@ -450,6 +495,8 @@ export const jaTranslations: TranslationResourceMap = {
       table1LongitudinalLab: "[Table 1 · 中-高] 縦断的HbA1c・Cペプチド推移",
       table1MultiDomainRollup: "[Table 1 · 高] CGM・有害事象統合ロールアップ",
       table1TransposedNejm: "[Table 1 · 最高] NEJM/Lancet形式 転置Table 1",
+      table1Beck2023:
+        "[Table 1 · 最高] Beck et al. (2023) JAEBメタ解析 Table 1",
     },
     copyQuery: "クエリをコピー",
     refreshQuery: "クエリを更新",
@@ -586,6 +633,10 @@ export const jaTranslations: TranslationResourceMap = {
   },
   backend: {
     sqlExecution: "SQL実行エラー: {{error}}",
+    sqlReadOnlyViolation:
+      "読み取り専用SQL違反: 更新または管理ステートメントは禁止されています。",
+    sqlMultipleStatements:
+      "単一のクエリで複数のSQLステートメントを実行することはできません。",
     missingSdk: "any-llm-sdk[ollama] がインストールされていません。",
     readSchemaFailed: "スキーマの読み込みに失敗しました: {{error}}",
     llmTranslationError: "LLM翻訳エラー: {{error}}",
@@ -604,6 +655,54 @@ export const jaTranslations: TranslationResourceMap = {
     invalidDatabasePath: "無効または未承認のデータベースパス: {{path}}",
     invalidPagination:
       "無効なページネーションパラメータ: limitは正数、offsetは0以上である必要があります。",
+    databaseLocked:
+      "データベースが別のプロセスによって一時的にロックされています。",
+    invalidSortColumn: "無効なソート列が指定されました。",
+    invalidSortOrder:
+      "無効なソート順です: ASC または DESC である必要があります。",
+    rateLimitExceeded:
+      "レート制限を超えました。しばらくしてから再試行してください。",
+    missingApiKey: "LLMプロバイダーのAPIキーが設定されていません。",
+    llmRateLimit: "LLMプロバイダーのレート制限を超えました。",
+    llmAuthFailed: "LLMプロバイダーの認証に失敗しました。",
+    llmQuotaExceeded: "LLMプロバイダーのクォータまたは課金上限に達しました。",
+    llmConnectionFailed: "LLMプロバイダーへの接続に失敗しました: {{error}}",
+    accessDenied: "要求されたパスへのアクセスが拒否されました。",
+    frontendBuildNotFound:
+      "コンパイル済みフロントエンドビルドが見つかりません。",
+    unauthorized: "未承認のAPIリクエスト: 有効なBearerトークンが必要です。",
+    sessionNotFound: "チャットセッションが見つかりません。",
+    jobNotFound: "トレーニングジョブが見つかりません。",
+    chatJobNotFound: "非同期チャットジョブが見つかりません。",
+    trainingFailed: "モデルのトレーニング操作に失敗しました: {{error}}",
+    insufficientData:
+      "ジョブを開始するためのトレーニングデータが不足しています。",
+    hardwareUnavailable: "必要なハードウェアアクセラレータが利用できません。",
+    trainingExecutionFailed:
+      "トレーニングサブプロセスの実行に失敗しました: {{error}}",
+    seedVerificationFailed:
+      "臨床シードデータベースの検証に失敗しました: {{error}}",
+    downloadFailed: "データセットのダウンロードに失敗しました: {{error}}",
+    cliValidationFailed: "無効なCLI設定または入力です: {{error}}",
+    authPluginFailed: "認証プラグインが失敗しました: {{error}}",
+    invalidBackend: "サポートされていないトレーニングバックエンドです。",
+    gemmaToolchainFailed:
+      "ローカルGemma SQLツールチェーンが利用できません: {{error}}",
+    invalidStage: "無効なトレーニングパイプラインステージが指定されました。",
+    tpuOrchestrationFailed:
+      "Cloud TPUオーケストレーションに失敗しました: {{error}}",
+    tpuPreempted: "Cloud TPUワークロードがプリエンプトされました。",
+    tpuPollingTimeout: "Cloud TPUワークロードの待機がタイムアウトしました。",
+    gcsStorageFailed: "Google Cloud Storage操作に失敗しました: {{error}}",
+    checksumMismatch: "アーティファクトのチェックサム検証に失敗しました。",
+    invalidGcsUri: "無効なGoogle Cloud Storage URIです（gs:// が必要です）。",
+    configNotFound: "設定ファイルが見つかりません。",
+    datasetNotFound: "データセットファイルが見つかりません。",
+    queryTimeout: "SQLクエリが実行タイムアウトを超えました。",
+    unsupportedExportFormat:
+      "サポートされていないエクスポートファイル形式です。",
+    unsupportedFileFormat: "サポートされていない臨床データファイル形式です。",
+    subprocessTimeout: "サブプロセスが実行タイムアウトを超えました。",
   },
   status: {
     offlineTitle: "バックエンドサーバーに接続できません",
@@ -812,6 +911,8 @@ export const arTranslations: TranslationResourceMap = {
         "[Table 1 · متوسط-عالٍ] المختبر الطولي و C-Peptide",
       table1MultiDomainRollup: "[Table 1 · عالٍ] دمج مستشعر CGM والسلامة",
       table1TransposedNejm: "[Table 1 · عالٍ جداً] جدول NEJM/Lancet المبدل",
+      table1Beck2023:
+        "[Table 1 · عالٍ جداً] جدول 1 لتحليل بيك وآخرون (2023) JAEB",
     },
     copyQuery: "نسخ الاستعلام",
     refreshQuery: "تحديث الاستعلام",
@@ -948,6 +1049,9 @@ export const arTranslations: TranslationResourceMap = {
   },
   backend: {
     sqlExecution: "خطأ في تنفيذ SQL: {{error}}",
+    sqlReadOnlyViolation:
+      "انتهاك وضع القراءة فقط في SQL: عبارات التعديل أو الإدارة محظورة.",
+    sqlMultipleStatements: "لا يُسمح بعبارات SQL متعددة في استعلام واحد.",
     missingSdk: "حزمة any-llm-sdk[ollama] غير مثبتة.",
     readSchemaFailed: "فشل في قراءة المخطط: {{error}}",
     llmTranslationError: "خطأ في ترجمة LLM: {{error}}",
@@ -966,6 +1070,45 @@ export const arTranslations: TranslationResourceMap = {
     invalidDatabasePath: "مسار قاعدة بيانات غير صالح أو غير مصرح به: {{path}}",
     invalidPagination:
       "معلمات ترقيم الصفحات غير صالحة: يجب أن يكون الحد موجبًا والإزاحة غير سالبة.",
+    databaseLocked: "قاعدة البيانات مقفلة مؤقتًا بواسطة عملية أخرى.",
+    invalidSortColumn: "عمود الفرز المحدد غير صالح.",
+    invalidSortOrder: "ترتيب فرز غير صالح: يجب أن يكون ASC أو DESC.",
+    rateLimitExceeded: "تم تجاوز حد الطلبات. يرجى المحاولة بعد قليل.",
+    missingApiKey: "مفتاح API لمزود LLM غير مُهيأ.",
+    llmRateLimit: "تم تجاوز حد طلبات مزود LLM.",
+    llmAuthFailed: "فشل التحقق من هوية مزود LLM.",
+    llmQuotaExceeded: "تم تجاوز حصة أو حد الفوترة لمزود LLM.",
+    llmConnectionFailed: "فشل الاتصال بمزود LLM: {{error}}",
+    accessDenied: "تم رفض الوصول إلى المسار المطلوب.",
+    frontendBuildNotFound: "لم يتم العثور على بناء الواجهة الأمامية.",
+    unauthorized: "طلب API غير مصرح به: مطلوب رمز Bearer صالح.",
+    sessionNotFound: "لم يتم العثور على جلسة المحادثة.",
+    jobNotFound: "لم يتم العثور على مهمة التدريب.",
+    chatJobNotFound: "لم يتم العثور على مهمة المحادثة غير المتزامنة.",
+    trainingFailed: "فشلت عملية تدريب النموذج: {{error}}",
+    insufficientData: "بيانات التدريب غير كافية لبدء المهمة.",
+    hardwareUnavailable: "مسرع الأجهزة المطلوب غير متاح.",
+    trainingExecutionFailed: "فشل تنفيذ العملية الفرعية للتدريب: {{error}}",
+    seedVerificationFailed:
+      "فشل التحقق من قاعدة البيانات السريرية الأولية: {{error}}",
+    downloadFailed: "فشل تنزيل مجموعة البيانات: {{error}}",
+    cliValidationFailed: "إعدادات أو مدخلات CLI غير صالحة: {{error}}",
+    authPluginFailed: "فشلت إضافة المصادقة: {{error}}",
+    invalidBackend: "واجهة التدريب الخلفية المحددة غير مدعومة.",
+    gemmaToolchainFailed: "أدوات Gemma SQL المحلية غير متاحة: {{error}}",
+    invalidStage: "مرحلة خط أنابيب التدريب غير صالحة.",
+    tpuOrchestrationFailed: "فشل تنسيق Cloud TPU: {{error}}",
+    tpuPreempted: "تمت مقاطعة حمل عمل Cloud TPU.",
+    tpuPollingTimeout: "انتهت مهلة انتظار حمل عمل Cloud TPU.",
+    gcsStorageFailed: "فشلت عملية Google Cloud Storage: {{error}}",
+    checksumMismatch: "فشل التحقق من المجموع الاختباري للملف.",
+    invalidGcsUri: "عنوان Google Cloud Storage غير صالح (متوقع gs://).",
+    configNotFound: "لم يتم العثور على ملف الإعدادات.",
+    datasetNotFound: "لم يتم العثور على ملف مجموعة البيانات.",
+    queryTimeout: "تجاوز استعلام SQL مهلة التنفيذ.",
+    unsupportedExportFormat: "تنسيق ملف التصدير المطلوب غير مدعوم.",
+    unsupportedFileFormat: "تنسيق ملف البيانات السريرية غير مدعوم.",
+    subprocessTimeout: "تجاوزت العملية الفرعية مهلة التنفيذ.",
   },
   status: {
     offlineTitle: "تعذر الاتصال بخادم الواجهة الخلفية",
@@ -1172,6 +1315,8 @@ export const heTranslations: TranslationResourceMap = {
         "[Table 1 · בינוני-גבוה] מעבדה לאורך זמן ו-C-Peptide",
       table1MultiDomainRollup: "[Table 1 · גבוה] איחוד חיישן CGM ובטיחות",
       table1TransposedNejm: "[Table 1 · גבוה מאוד] טבלת NEJM/Lancet משוחלפת",
+      table1Beck2023:
+        "[Table 1 · גבוה מאוד] טבלה 1 מטה-אנליזה JAEB של Beck et al. (2023)",
     },
     copyQuery: "העתק שאילתה",
     refreshQuery: "רענן שאילתה",
@@ -1308,6 +1453,8 @@ export const heTranslations: TranslationResourceMap = {
   },
   backend: {
     sqlExecution: "שגיאת ביצוע SQL: {{error}}",
+    sqlReadOnlyViolation: "הפרת SQL לקריאה בלבד: פקודות שינוי או ניהול אסורות.",
+    sqlMultipleStatements: "לא ניתן להריץ מספר משפטי SQL בשאילתה אחת.",
     missingSdk: "any-llm-sdk[ollama] אינו מותקן.",
     readSchemaFailed: "קריאת סכמה נכשלה: {{error}}",
     llmTranslationError: "שגיאת תרגום LLM: {{error}}",
@@ -1326,6 +1473,44 @@ export const heTranslations: TranslationResourceMap = {
     invalidDatabasePath: "נתיב מסד נתונים לא חוקי או לא מורשה: {{path}}",
     invalidPagination:
       "פרמטרי דפדוף לא חוקיים: המגבלה חייבת להיות חיובית וההיסט אינו שלילי.",
+    databaseLocked: "מסד הנתונים נעול זמנית על ידי תהליך אחר.",
+    invalidSortColumn: "צוין עמודת מיון לא חוקית.",
+    invalidSortOrder: "סדר מיון לא חוקי: חייב להיות ASC או DESC.",
+    rateLimitExceeded: "חריגה ממגבלת הקצב. נסה שוב בעוד רגע.",
+    missingApiKey: "מפתח ה-API של ספק ה-LLM אינו מוגדר.",
+    llmRateLimit: "חריגה ממגבלת הקצב של ספק ה-LLM.",
+    llmAuthFailed: "האימות מול ספק ה-LLM נכשל.",
+    llmQuotaExceeded: "חריגה ממכסת השימוש או החיוב של ספק ה-LLM.",
+    llmConnectionFailed: "החיבור לספק ה-LLM נכשל: {{error}}",
+    accessDenied: "הגישה לנתיב המבוקש נדחתה.",
+    frontendBuildNotFound: "בניית ה-Frontend המהודרת לא נמצאה.",
+    unauthorized: "בקשת API לא מורשית: נדרש אסימון Bearer תקף.",
+    sessionNotFound: "שיחת הצ'אט לא נמצאה.",
+    jobNotFound: "משימת האימון לא נמצאה.",
+    chatJobNotFound: "משימת הצ'אט האסינכרונית לא נמצאה.",
+    trainingFailed: "פעולת אימון המודל נכשלה: {{error}}",
+    insufficientData: "אין מספיק נתוני אימון להתחלת המשימה.",
+    hardwareUnavailable: "מאיץ החומרה הנדרש אינו זמין.",
+    trainingExecutionFailed: "ביצוע תהליך המשנה של האימון נכשל: {{error}}",
+    seedVerificationFailed: "אימות מסד הנתונים הקליני נכשל: {{error}}",
+    downloadFailed: "הורדת ערכת הנתונים נכשלה: {{error}}",
+    cliValidationFailed: "תצורת או קלט CLI לא חוקיים: {{error}}",
+    authPluginFailed: "תוסף האימות נכשל: {{error}}",
+    invalidBackend: "צוין מנוע אימון שאינו נתמך.",
+    gemmaToolchainFailed: "כלי ה-Gemma SQL המקומיים אינם זמינים: {{error}}",
+    invalidStage: "צוין שלב אימון לא חוקי.",
+    tpuOrchestrationFailed: "תזמור ה-Cloud TPU נכשל: {{error}}",
+    tpuPreempted: "משימת ה-Cloud TPU הופקעה.",
+    tpuPollingTimeout: "תם הזמן הקצוב להמתנה למשימת ה-Cloud TPU.",
+    gcsStorageFailed: "פעולת Google Cloud Storage נכשלה: {{error}}",
+    checksumMismatch: "אימות חתימת הקובץ נכשל.",
+    invalidGcsUri: "כתובת Google Cloud Storage לא חוקית (נדרש gs://).",
+    configNotFound: "קובץ התצורה לא נמצא.",
+    datasetNotFound: "קובץ ערכת הנתונים לא נמצא.",
+    queryTimeout: "שאילתת ה-SQL חרגה מזמן הביצוע המותר.",
+    unsupportedExportFormat: "פורמט קובץ הייצוא המבוקש אינו נתמך.",
+    unsupportedFileFormat: "פורמט קובץ הנתונים הקליני אינו נתמך.",
+    subprocessTimeout: "תהליך המשנה חרג מזמן הביצוע המותר.",
   },
   status: {
     offlineTitle: "שרת ה-Backend אינו נגיש",
@@ -1460,7 +1645,7 @@ export const heTranslations: TranslationResourceMap = {
  */
 export function getInitialLang(): string {
   const savedLang = localStorage.getItem("app-lang");
-  const browserLang = navigator.language.split("-")[0];
+  const browserLang = String(navigator.language.split("-")[0]);
   return (
     savedLang ||
     (["en", "ja", "ar", "he"].includes(browserLang) ? browserLang : "en")
@@ -1519,22 +1704,22 @@ setDocumentDir(initialLang);
  */
 export function translateDocument(): void {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
-    const key = el.getAttribute("data-i18n")!;
+    const key = String(el.getAttribute("data-i18n"));
     el.textContent = i18next.t(key);
   });
 
   document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
-    const key = el.getAttribute("data-i18n-placeholder")!;
+    const key = String(el.getAttribute("data-i18n-placeholder"));
     el.setAttribute("placeholder", i18next.t(key));
   });
 
   document.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
-    const key = el.getAttribute("data-i18n-aria-label")!;
+    const key = String(el.getAttribute("data-i18n-aria-label"));
     el.setAttribute("aria-label", i18next.t(key));
   });
 
   document.querySelectorAll("[data-i18n-title]").forEach((el) => {
-    const key = el.getAttribute("data-i18n-title")!;
+    const key = String(el.getAttribute("data-i18n-title"));
     el.setAttribute("title", i18next.t(key));
   });
 }

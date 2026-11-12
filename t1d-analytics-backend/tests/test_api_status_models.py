@@ -40,8 +40,8 @@ def test_list_models_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
         def __init__(
             self,
-            req: typing.Union[str, urllib.request.Request],
-            timeout: typing.Optional[float] = None,
+            req: str | urllib.request.Request,
+            timeout: float | None = None,
         ) -> None:
             """Initialize MockUrlopen."""
             self.req = req
@@ -52,9 +52,9 @@ def test_list_models_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
         def __exit__(
             self,
-            exc_type: typing.Optional[type],
-            exc_val: typing.Optional[BaseException],
-            exc_tb: typing.Optional[types.TracebackType],
+            exc_type: type | None,
+            exc_val: BaseException | None,
+            exc_tb: types.TracebackType | None,
         ) -> None:
             """Exit the context manager."""
 
@@ -81,8 +81,8 @@ def test_list_models_url_error() -> None:
     """Test when Ollama is unreachable via URLError."""
 
     def mock_urlopen(
-        req: typing.Union[str, urllib.request.Request],
-        timeout: typing.Optional[float] = None,
+        req: str | urllib.request.Request,
+        timeout: float | None = None,
     ) -> None:
         """Simulate urlopen throwing URLError."""
         raise urllib.error.URLError("Connection refused")
@@ -107,8 +107,8 @@ def test_list_models_general_error() -> None:
     """Test when an unexpected exception occurs during Ollama fetch."""
 
     def mock_urlopen(
-        req: typing.Union[str, urllib.request.Request],
-        timeout: typing.Optional[float] = None,
+        req: str | urllib.request.Request,
+        timeout: float | None = None,
     ) -> None:
         """Simulate urlopen throwing an unexpected OSError."""
         raise OSError("Unexpected boom")
@@ -263,7 +263,7 @@ def test_list_databases_endpoint(
 
 def test_validate_db_path_null_byte() -> None:
     """Test validate_db_path rejects null byte injection."""
-    from t1d_analytics.api import validate_db_path
+    from t1d_analytics.db_security import validate_db_path
     from t1d_analytics.errors import InvalidDatabasePathError
 
     with pytest.raises(InvalidDatabasePathError) as exc_info:
@@ -276,9 +276,9 @@ def test_validate_db_path_traversal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Test validate_db_path and validate_workspace_artifact_path reject paths outside allowed directories or invalid extensions."""
-    from t1d_analytics.api import validate_db_path
     from t1d_analytics.db_security import (
         get_allowed_db_roots,
+        validate_db_path,
         validate_workspace_artifact_path,
     )
     from t1d_analytics.errors import InvalidDatabasePathError
@@ -319,34 +319,33 @@ def test_validate_db_path_traversal(
     )
 
     assert _split_search_dir_spec("   ") == []
-    assert _split_search_dir_spec(
-        "/mnt/data/t1d:/Volumes/TOSHIBA_EXT/stanford/t1d"
-    ) == [
+    assert _split_search_dir_spec("/mnt/data/t1d:/opt/t1d") == [
         Path("/mnt/data/t1d"),
-        Path("/Volumes/TOSHIBA_EXT/stanford/t1d"),
+        Path("/opt/t1d"),
     ]
-    assert _split_search_dir_spec(
-        "/mnt/data/t1d;/Volumes/TOSHIBA_EXT/stanford/t1d"
-    ) == [
+    assert _split_search_dir_spec("/mnt/data/t1d;/opt/t1d") == [
         Path("/mnt/data/t1d"),
-        Path("/Volumes/TOSHIBA_EXT/stanford/t1d"),
+        Path("/opt/t1d"),
     ]
-    assert _split_search_dir_spec(
-        "/mnt/data/t1d,/Volumes/TOSHIBA_EXT/stanford/t1d"
-    ) == [
+    assert _split_search_dir_spec("/mnt/data/t1d,/opt/t1d") == [
         Path("/mnt/data/t1d"),
-        Path("/Volumes/TOSHIBA_EXT/stanford/t1d"),
+        Path("/opt/t1d"),
     ]
     assert _split_search_dir_spec("C:\\t1d") == [Path("C:\\t1d")]
 
-    # When neither T1D_DB_SEARCH_DIR nor T1D_JAEB_DIR is set, both default roots and /jaeb subdirs are searched
+    # When no search env vars are set, default roots (/mnt/data/t1d and ./data) and /jaeb subdirs are searched
+    monkeypatch.delenv("T1D_EXTRA_DB_ROOTS", raising=False)
     monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
     monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
     default_cfg = get_configured_db_search_dirs()
     assert Path("/mnt/data/t1d") in default_cfg
     assert Path("/mnt/data/t1d/jaeb") in default_cfg
-    assert Path("/Volumes/TOSHIBA_EXT/stanford/t1d") in default_cfg
-    assert Path("/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb") in default_cfg
+    assert Path("./data") in default_cfg
+    assert Path("./data/jaeb") in default_cfg
+    default_roots = get_allowed_db_roots()
+    assert Path("/tmp").resolve() not in default_roots
+    assert Path("/var/tmp").resolve() not in default_roots
+    monkeypatch.setenv("T1D_EXTRA_DB_ROOTS", str(tmp_path.parent))
 
     jaeb_dir = tmp_path / "jaeb_ext"
     jaeb_dir.mkdir()
@@ -354,6 +353,11 @@ def test_validate_db_path_traversal(
     assert get_jaeb_external_root() == jaeb_dir
     assert jaeb_dir.resolve() in get_allowed_db_roots()
     assert get_recommended_jaeb_db_path() == str(jaeb_dir / "jaeb" / "t1d.duckdb")
+
+    explicit_jaeb_file = jaeb_dir / "custom_jaeb.duckdb"
+    monkeypatch.setenv("T1D_JAEB_DB_PATH", str(explicit_jaeb_file))
+    assert get_recommended_jaeb_db_path() == str(explicit_jaeb_file)
+    monkeypatch.delenv("T1D_JAEB_DB_PATH", raising=False)
 
     jaeb_named = tmp_path / "jaeb"
     jaeb_named.mkdir()
@@ -381,11 +385,11 @@ def test_validate_db_path_traversal(
 
     # T1D_DB_SEARCH_DIR with multiple colon-separated paths (remote + local host) and duplicates
     remote_sim = tmp_path / "mnt_data_t1d"
-    local_sim = tmp_path / "toshiba_t1d"
+    local_sim = tmp_path / "local_ext_t1d"
     local_sim.mkdir()
     monkeypatch.setenv(
         "T1D_DB_SEARCH_DIR",
-        f"{remote_sim}:{local_sim}:{local_sim}:/Volumes/TOSHIBA_EXT/stanford/t1d",
+        f"{remote_sim}:{local_sim}:{local_sim}:/opt/nonexistent/t1d",
     )
     monkeypatch.setenv("T1D_DB_PATH", str(local_sim / "test.duckdb"))
     assert get_jaeb_external_root() == local_sim
@@ -431,6 +435,7 @@ def test_validate_db_path_traversal(
     )
 
     # When neither configured nor default roots exist on disk
+    monkeypatch.delenv("T1D_EXTRA_DB_ROOTS", raising=False)
     missing_def = tmp_path / "missing_default_root"
     monkeypatch.setattr(
         db_security,
@@ -454,7 +459,7 @@ def test_validate_db_path_env_var(
 ) -> None:
     """Test validate_db_path respects T1D_DB_PATH and prioritizes T1D_DB_SEARCH_DIR over synthetic data/t1d.duckdb."""
     from t1d_analytics import db_security
-    from t1d_analytics.api import validate_db_path
+    from t1d_analytics.db_security import validate_db_path
     from t1d_analytics.diagnostics import check_database_health
 
     missing_root = tmp_path / "no_default_jaeb"
@@ -468,6 +473,7 @@ def test_validate_db_path_env_var(
         "DEFAULT_T1D_DB_SEARCH_DIRS",
         (missing_root, missing_root / "jaeb"),
     )
+    monkeypatch.delenv("T1D_EXTRA_DB_ROOTS", raising=False)
     monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
     monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
 
@@ -485,20 +491,24 @@ def test_validate_db_path_env_var(
     assert resolved_no_fallback == str(Path("t1d.duckdb").resolve())
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("T1D_EXTRA_DB_ROOTS", str(tmp_path))
     monkeypatch.delenv("T1D_DB_PATH", raising=False)
     data_sub = tmp_path / "data"
     data_sub.mkdir(exist_ok=True)
     (data_sub / "t1d.duckdb").write_text("dummy")
     resolved_data_fb = validate_db_path("t1d.duckdb")
     assert resolved_data_fb == str((data_sub / "t1d.duckdb").resolve())
+    monkeypatch.delenv("T1D_EXTRA_DB_ROOTS", raising=False)
     disc_res = client.get("/api/databases").json()
     assert disc_res["current_db"] == "data/t1d.duckdb"
+    monkeypatch.setenv("T1D_EXTRA_DB_ROOTS", str(tmp_path))
 
     with patch("duckdb.connect", side_effect=RuntimeError("mock")):
         hlth = check_database_health(db_path=None)
         assert hlth.configured_path == "data/t1d.duckdb"
 
     # When both data/t1d.duckdb and an authentic DB in T1D_DB_SEARCH_DIR exist, T1D_DB_SEARCH_DIR wins
+    monkeypatch.delenv("T1D_EXTRA_DB_ROOTS", raising=False)
     search_root = tmp_path / "ext_search"
     jaeb_sub = search_root / "jaeb"
     jaeb_sub.mkdir(parents=True)
@@ -506,6 +516,12 @@ def test_validate_db_path_env_var(
     ext_t1d_db.write_text("dummy_jaeb")
     monkeypatch.setenv("T1D_DB_SEARCH_DIR", str(search_root))
     assert validate_db_path("t1d.duckdb") == str(ext_t1d_db.resolve())
+    assert validate_db_path("jaeb/t1d.duckdb") == str(ext_t1d_db.resolve())
+    assert validate_db_path(str(search_root)) == str(ext_t1d_db.resolve())
+    assert validate_db_path(str(jaeb_sub)) == str(ext_t1d_db.resolve())
+    empty_dir = tmp_path / "empty_dir_no_db"
+    empty_dir.mkdir(exist_ok=True)
+    assert db_security.normalize_db_shorthand_arg(str(empty_dir)) == str(empty_dir)
 
     # If t1d.duckdb is absent in search_root, falls back to first *.duckdb in search_root
     ext_t1d_db.unlink()
@@ -525,12 +541,13 @@ def test_validate_db_path_env_var(
         (tmp_path / "unmatched_bare.duckdb").resolve()
     )
 
-    # When default_db > 50 MB, discover_workspace_databases filters out <10 MB synthetic data/t1d.duckdb
+    # discover_workspace_databases retains valid data/t1d.duckdb even when default_db > 50 MB (deduplicates only by canonical Path.resolve)
     with open(mnt_db, "wb") as f_sparse:
         f_sparse.truncate(55_000_000)
     disc_large = db_security.discover_workspace_databases()
-    assert not any(d.path.endswith("data/t1d.duckdb") for d in disc_large.databases)
+    assert any(d.path.endswith("data/t1d.duckdb") for d in disc_large.databases)
     mnt_db.unlink()
+    db_security.discover_workspace_databases()
     monkeypatch.delenv("T1D_DB_PATH", raising=False)
 
     # If no .duckdb files exist in search_root or data/t1d.duckdb, returns raw t1d.duckdb
@@ -561,9 +578,9 @@ def test_get_providers_status_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
 
         def __exit__(
             self,
-            exc_type: typing.Optional[type] = None,
-            exc_val: typing.Optional[BaseException] = None,
-            exc_tb: typing.Optional[types.TracebackType] = None,
+            exc_type: type | None = None,
+            exc_val: BaseException | None = None,
+            exc_tb: types.TracebackType | None = None,
         ) -> None:
             """Exit context."""
 
@@ -605,7 +622,7 @@ def test_get_providers_status_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_is_provider_configured_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test is_provider_configured handles known and unknown providers and environment keys."""
-    from t1d_analytics.api import is_provider_configured
+    from t1d_analytics.llm_client import is_provider_configured
 
     assert is_provider_configured("ollama") is True
 
@@ -634,9 +651,9 @@ def test_get_providers_status_unprefixed_host_and_non_200(
 
         def __exit__(
             self,
-            exc_type: typing.Optional[type] = None,
-            exc_val: typing.Optional[BaseException] = None,
-            exc_tb: typing.Optional[types.TracebackType] = None,
+            exc_type: type | None = None,
+            exc_val: BaseException | None = None,
+            exc_tb: types.TracebackType | None = None,
         ) -> None:
             """Exit context."""
 
@@ -649,37 +666,33 @@ def test_get_providers_status_unprefixed_host_and_non_200(
 
 
 def test_debug_static_mount(tmp_path: Path) -> None:
-    """Test static mount behavior in debug mode."""
-    import t1d_analytics.api
+    """Test static mount behavior in debug mode via public mount_frontend_static_assets."""
+    from t1d_analytics.api import create_app, mount_frontend_static_assets
 
+    isolated_app = create_app()
     with patch.dict(os.environ, {}, clear=True):
-        t1d_analytics.api._setup_debug()
+        mount_frontend_static_assets(isolated_app)
 
     existing_dist = tmp_path / "dist"
     existing_dist.mkdir()
     with (
         patch.dict(os.environ, {"DEBUG": "1", "T1D_WEB_DIST_DIR": str(existing_dist)}),
-        patch("t1d_analytics.api.app.mount") as mock_mount,
-        patch("t1d_analytics.api.logger.info") as mock_info,
-        patch("t1d_analytics.api.StaticFiles"),
+        patch.object(isolated_app, "mount") as mock_mount,
     ):
-        t1d_analytics.api._setup_debug()
+        mount_frontend_static_assets(isolated_app)
         mock_mount.assert_called_once()
-        mock_info.assert_called_once()
 
     missing_dist = tmp_path / "missing_dist"
-    with (
-        patch.dict(os.environ, {"DEBUG": "1", "T1D_WEB_DIST_DIR": str(missing_dist)}),
-        patch("t1d_analytics.api.logger.warning") as mock_warn,
-    ):
-        t1d_analytics.api._setup_debug()
-        mock_warn.assert_called_once()
+    with patch.dict(os.environ, {"DEBUG": "1"}):
+        mount_frontend_static_assets(isolated_app, frontend_dist=missing_dist)
 
 
 def test_serve_chat_spa_entrypoint_branches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Test GET /chats/{chat_id} SPA fallback route when dist/index.html exists and when missing."""
+    from t1d_analytics.api import create_app
+
     dist_with_index = tmp_path / "dist_ok"
     dist_with_index.mkdir()
     index_html = dist_with_index / "index.html"
@@ -694,10 +707,10 @@ def test_serve_chat_spa_entrypoint_branches(
     empty_dist = tmp_path / "dist_empty"
     empty_dist.mkdir()
     monkeypatch.delenv("T1D_WEB_DIST_DIR", raising=False)
-    monkeypatch.setattr("t1d_analytics.api._FRONTEND_DIST", empty_dist)
-    resp_404 = client.get("/chats/chat-1793964989501-1-476")
+    isolated_client = TestClient(create_app(frontend_dist=empty_dist))
+    resp_404 = isolated_client.get("/chats/chat-1793964989501-1-476")
     assert resp_404.status_code == 404
-    assert resp_404.json()["detail"] == "Frontend index.html not found"
+    assert resp_404.json()["detail"]["error_code"] == "backend.frontendBuildNotFound"
 
 
 def test_lifespan_auto_ingestion_branches(
@@ -737,6 +750,7 @@ def test_lifespan_auto_ingestion_branches(
 
 def test_providers_status_and_models_with_any_llm_configured(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test /api/providers/status and /api/models when additional any-llm providers and custom models are configured."""
     monkeypatch.setenv("GROQ_API_KEY", "gsk-configured")
@@ -764,20 +778,74 @@ def test_providers_status_and_models_with_any_llm_configured(
         _app_services_registry,
         create_default_app_services,
         get_app_services,
+        register_default_app_services,
+        resolve_default_app_services,
         set_default_app_services,
     )
 
-    assert create_app() is app
+    isolated_app = create_app(frontend_dist=tmp_path / "custom_dist")
+    assert isolated_app is not app
+    assert isolated_app.state.services is not app.state.services
+    assert isolated_app.state.session_store is not app.state.session_store
+    assert isolated_app.state.training_job_manager is not app.state.training_job_manager
+    assert isolated_app.state.chat_job_manager is not app.state.chat_job_manager
+    assert isolated_app.state.rate_limiter is not app.state.rate_limiter
+    assert isolated_app.state.frontend_dist == tmp_path / "custom_dist"
+
+    monkeypatch.setenv("T1D_RATE_LIMITER_BACKEND", "duckdb")
+    monkeypatch.setenv("T1D_RATE_LIMIT_DB_PATH", str(tmp_path / "isolated_rl.duckdb"))
+    duck_rl_app = create_app()
+    duck_rl_app.state.rate_limiter.close()
+    monkeypatch.setenv("T1D_RATE_LIMITER_BACKEND", "memory")
+
+    import asyncio
+
+    from fastapi import FastAPI
+
+    from t1d_analytics.api import lifespan
+    from t1d_analytics.api_dependencies import AppServices
+    from t1d_analytics.api_schemas import ChatRequest
+
+    bare_svc = AppServices()
+    bare_schema = bare_svc.build_schema_response(
+        str(tmp_path / "missing_bare.duckdb"), "en"
+    )
+    assert bare_schema.tables == []
+    bare_stream = bare_svc.stream_chat_events(
+        ChatRequest(message="SELECT 1", model="sql")
+    )
+    assert hasattr(bare_stream, "__aiter__")
+
+    async def _run_bare_lifespan() -> None:
+        """Run lifespan on a bare FastAPI instance with no state.rate_limiter."""
+        with (
+            patch("t1d_analytics.api.check_database_health") as mock_hlth,
+            patch("t1d_analytics.api.run_system_diagnostics"),
+            patch("t1d_analytics.api.log_startup_diagnostics"),
+        ):
+            mock_hlth.return_value = MagicMock(
+                exists=True, table_count=1, total_rows=1, has_initial_data=True
+            )
+            async with lifespan(FastAPI()):
+                pass
+
+    asyncio.run(_run_bare_lifespan())
+
     orig_svc = app.state.services
     set_default_app_services(None)
-    assert get_app_services() is orig_svc
+    assert resolve_default_app_services() is not orig_svc
+    register_default_app_services(orig_svc)
+    assert resolve_default_app_services() is orig_svc
     app.state.services = None
-    assert isinstance(get_app_services(), type(orig_svc))
+    dummy_req = MagicMock()
+    dummy_req.app = app
+    assert get_app_services(dummy_req) is orig_svc
     set_default_app_services(orig_svc, target_app=app)
     assert _app_services_registry.get_default() is orig_svc
+    assert get_app_services(dummy_req) is orig_svc
 
     custom_svc = replace(
-        create_default_app_services(app),
+        create_default_app_services(target_app=app),
         cloud_provider_models={"groq": ["groq/custom-llama"]},
     )
     app.dependency_overrides[get_app_services] = lambda: custom_svc

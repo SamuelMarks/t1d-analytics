@@ -426,23 +426,61 @@ def test_check_database_health_integrity_fail(tmp_path: Path) -> None:
 
 
 def test_check_sessions_database_health(tmp_path: Path) -> None:
-    """Test check_sessions_database_health success and failure branches."""
+    """Test check_sessions_database_health read-only inspection, initialization, and failure branches."""
     from t1d_analytics.diagnostics import (
         check_sessions_database_health,
         run_system_diagnostics,
     )
 
     sess_db = str(tmp_path / "sessions.duckdb")
+    # 1. Initializes non-existent sessions.duckdb cleanly
     assert check_sessions_database_health(sess_db) is True
 
+    # 2. Existing sessions.duckdb is inspected in read-only mode without calling open_sessions_db_conn
+    with patch(
+        "t1d_analytics.session_store.open_sessions_db_conn",
+        side_effect=AssertionError("Should not open write connection when existing"),
+    ):
+        assert check_sessions_database_health(sess_db) is True
+
+    # 3. InvalidInputException during read-only open (e.g. active write connection) falls back to open_sessions_db_conn
+    with patch(
+        "t1d_analytics.diagnostics.connect_duckdb_with_retry",
+        side_effect=duckdb.InvalidInputException("Mixed config"),
+    ):
+        assert check_sessions_database_health(sess_db) is True
+
+    # 4. Non-existent sessions.duckdb failure returns False
+    missing_sess_db = str(tmp_path / "missing_sessions.duckdb")
     with patch(
         "t1d_analytics.session_store.open_sessions_db_conn",
         side_effect=RuntimeError("Locked"),
     ):
-        assert check_sessions_database_health(sess_db) is False
-        diag = run_system_diagnostics(sessions_db_path=sess_db)
+        assert check_sessions_database_health(missing_sess_db) is False
+        diag = run_system_diagnostics(sessions_db_path=missing_sess_db)
         assert diag.status == "error"
         assert diag.sessions_database_healthy is False
+
+    from t1d_analytics.diagnostics import (
+        _DIAGNOSTICS_STATS_CACHE,
+        _lookup_cached_diagnostics_stats,
+        _store_cached_diagnostics_stats,
+    )
+
+    assert _lookup_cached_diagnostics_stats(
+        str(tmp_path / "does_not_exist.duckdb")
+    ) == (
+        None,
+        None,
+    )
+    _DIAGNOSTICS_STATS_CACHE.clear()
+    _store_cached_diagnostics_stats(None, ([], 0, True, "unknown"))
+    for idx in range(65):
+        _store_cached_diagnostics_stats(
+            (f"/fake/{idx}.duckdb", idx, idx), (["patients"], 10, True, "seeded_demo")
+        )
+    assert len(_DIAGNOSTICS_STATS_CACHE) == 1
+    _DIAGNOSTICS_STATS_CACHE.clear()
 
 
 def test_check_ollama_health_with_version(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -722,17 +760,173 @@ def test_detect_database_provenance_and_jaeb_views(
     assert c_pv.execute("SELECT COUNT(*) FROM patients").fetchone() == (2,)
     c_pv.close()
     monkeypatch.setenv("T1D_DB_SEARCH_DIR", str(tmp_path / "empty_search"))
-    from t1d_analytics.seed import (
-        _find_authentic_jaeb_source_db,
-        _resolve_non_empty_db_path,
+    from t1d_analytics.seed_verifier import (
+        find_authentic_jaeb_source_db,
+        resolve_non_empty_db_path,
     )
 
-    assert _find_authentic_jaeb_source_db(tmp_path / "none_found.duckdb") is None
+    assert find_authentic_jaeb_source_db(tmp_path / "none_found.duckdb") is None
     monkeypatch.delenv("T1D_DB_SEARCH_DIR", raising=False)
     monkeypatch.delenv("T1D_DB_PATH", raising=False)
-    assert _resolve_non_empty_db_path("", default_path="fallback.duckdb") == (
+    assert resolve_non_empty_db_path("", default_path="fallback.duckdb") == (
         "fallback.duckdb"
     )
     monkeypatch.setenv("T1D_DB_PATH", str(promoted_db))
-    assert _resolve_non_empty_db_path("") == str(promoted_db)
+    assert resolve_non_empty_db_path("") == str(promoted_db)
     ensure_canonical_clinical_views("")
+
+    # Test resolve_subdir_prefix and resolve_target_table_stem for JAEB multi-study folders
+    from t1d_analytics.ingestion_study_resolver import (
+        resolve_subdir_prefix,
+        resolve_target_table_stem,
+    )
+
+    assert (
+        resolve_subdir_prefix(
+            Path("The_International_Diabetes_Closed_Loop_Trial_DCLP3/Data_Files")
+        )
+        == "dclp3"
+    )
+    assert (
+        resolve_subdir_prefix(
+            Path("Some_Very_Long_Custom_Study_Directory_Without_Known_Code/Sub")
+        )
+        == "some_very_long_custom_study_directory_without_known_code_sub"
+    )
+    root_ing = tmp_path / "jaeb_ing"
+    d3_sub = root_ing / "The_International_Diabetes_Closed_Loop_Trial_DCLP3"
+    d3_sub.mkdir(parents=True)
+    f_unprefixed = d3_sub / "PtRoster.txt"
+    f_prefixed = d3_sub / "dclp3_PtRoster.txt"
+    assert (
+        resolve_target_table_stem(f_unprefixed, root_ing, True, {"ptroster": 2})
+        == "dclp3_ptroster"
+    )
+    assert (
+        resolve_target_table_stem(f_prefixed, root_ing, True, {"dclp3_ptroster": 1})
+        == "dclp3_ptroster"
+    )
+
+    # Test build_jaeb_beck2023_cohort_table and ensure_canonical_clinical_views with DCLP3/DCLP5/PEDAP tables
+    beck_db = tmp_path / "beck2023_test.duckdb"
+    c_beck = duckdb.connect(str(beck_db))
+    c_beck.execute(
+        "CREATE TABLE dclp3_ptroster (PtID INT, EnrollDt VARCHAR, RandDt VARCHAR, trtGroup VARCHAR)"
+    )
+    c_beck.execute(
+        "INSERT INTO dclp3_ptroster VALUES (1, '2018-01-10', '2018-01-24', 'CLC')"
+    )
+    c_beck.execute(
+        "CREATE TABLE dclp3_diabscreening (PtID INT, AgeAtEnrollment INT, Gender VARCHAR, Ethnicity VARCHAR, Race VARCHAR, DiagDt VARCHAR, DiagAge INT, InsModPump INT, CGMUseStat VARCHAR)"
+    )
+    c_beck.execute(
+        "INSERT INTO dclp3_diabscreening VALUES (1, 20, 'F', 'Not Hispanic or Latino', 'White', '2010-01-10', 12, 1, 'Current')"
+    )
+    c_beck.execute("CREATE TABLE dclp3_diabsocioecon (PtID INT, AnnualIncome VARCHAR)")
+    c_beck.execute(
+        "INSERT INTO dclp3_diabsocioecon VALUES (1, '$100,000 to less than $200,000')"
+    )
+    c_beck.execute(
+        "CREATE TABLE dclp3_sampleresults (PtID INT, Visit VARCHAR, ResultName VARCHAR, Value VARCHAR)"
+    )
+    c_beck.execute(
+        "INSERT INTO dclp3_sampleresults VALUES (1, 'Randomization', 'GLYHB', '7.2')"
+    )
+    c_beck.execute("CREATE TABLE dclp3_cgm (PtID INT, Period VARCHAR, CGM INT)")
+    c_beck.execute(
+        "INSERT INTO dclp3_cgm SELECT 1, '1. Baseline', 120 FROM range(2100)"
+    )
+
+    c_beck.execute(
+        "CREATE TABLE dclp5_ptroster (PtID INT, EnrollDt VARCHAR, RandDt VARCHAR, trtGroup VARCHAR, AgeAtEnrollment INT)"
+    )
+    c_beck.execute(
+        "INSERT INTO dclp5_ptroster VALUES (2, '2019-01-10', '2019-01-24', 'SC', 10)"
+    )
+    c_beck.execute(
+        "CREATE TABLE dclp5_diabscreening (PtID INT, Gender VARCHAR, Ethnicity VARCHAR, Race VARCHAR, DiagDt VARCHAR, DiagAge INT, InsModPump INT, CGMUseStat VARCHAR)"
+    )
+    c_beck.execute(
+        "INSERT INTO dclp5_diabscreening VALUES (2, 'M', 'Hispanic or Latino', 'White', '2015-01-10', 6, 0, 'Never')"
+    )
+    c_beck.execute("CREATE TABLE dclp5_diabsocioecon (PtID INT, AnnualIncome VARCHAR)")
+    c_beck.execute(
+        "INSERT INTO dclp5_diabsocioecon VALUES (2, '$50,000 to less than $75,000')"
+    )
+    c_beck.execute(
+        "CREATE TABLE dclp5_sampleresults (PtID INT, Visit VARCHAR, ResultName VARCHAR, Value VARCHAR)"
+    )
+    c_beck.execute(
+        "INSERT INTO dclp5_sampleresults VALUES (2, 'Baseline', 'GLYHB', '7.8')"
+    )
+    c_beck.execute(
+        "CREATE TABLE dclp5_dexcomclaritycgm (PtID INT, DataDtTm VARCHAR, DataDtTm_adj VARCHAR, CGM INT)"
+    )
+    c_beck.execute(
+        "INSERT INTO dclp5_dexcomclaritycgm SELECT 2, strftime(TIMESTAMP '2019-01-10 00:00:00' + to_minutes(CAST(i * 5 AS INT)), '%Y-%m-%d %H:%M:%S'), NULL, 140 FROM range(2100) t(i)"
+    )
+    c_beck.execute(
+        "CREATE TABLE dclp5_othercgm (PtID INT, DataDtTm VARCHAR, CGM INT, IsCalibration BOOLEAN)"
+    )
+    c_beck.execute(
+        "CREATE TABLE dclp5_tandemcgmdatagxb_b (PtID INT, DataDtTm VARCHAR, DataDtTm_adjusted VARCHAR, CGMValue INT, HighLowIndicator INT)"
+    )
+
+    c_beck.execute(
+        "CREATE TABLE pedap_ptroster (PtID INT, EnrollDt VARCHAR, RandDt VARCHAR, TrtGroup VARCHAR, AgeAsofEnrollDt INT)"
+    )
+    c_beck.execute(
+        "INSERT INTO pedap_ptroster VALUES (3, '2020-01-10', '2020-01-24 12:00:00', 'CLC', 4)"
+    )
+    c_beck.execute(
+        "CREATE TABLE pedap_diabscreening (PtID INT, Sex VARCHAR, Ethnicity VARCHAR, Race VARCHAR, DiagDt VARCHAR, DiagAge INT, InsModPump INT, CGMUseStat VARCHAR)"
+    )
+    c_beck.execute(
+        "INSERT INTO pedap_diabscreening VALUES (3, 'F', 'Not Hispanic or Latino', 'Asian', '2018-01-10', 2, 1, 'Current')"
+    )
+    c_beck.execute("CREATE TABLE pedap_diabsocioecon (PtID INT, AnnualIncome VARCHAR)")
+    c_beck.execute("INSERT INTO pedap_diabsocioecon VALUES (3, 'Unknown')")
+    c_beck.execute(
+        "CREATE TABLE pedap_stasampleresults (PtID INT, Visit VARCHAR, ResultName VARCHAR, Value VARCHAR, STAResultStatus VARCHAR)"
+    )
+    c_beck.execute(
+        "INSERT INTO pedap_stasampleresults VALUES (3, 'Randomization', 'GLYHB', '7.5', 'Complete')"
+    )
+    c_beck.execute(
+        "CREATE TABLE pedap_dexcomclaritycgm (PtID INT, DeviceDtTm VARCHAR, CGM INT)"
+    )
+    c_beck.execute(
+        "INSERT INTO pedap_dexcomclaritycgm SELECT 3, strftime(TIMESTAMP '2020-01-10 00:00:00' + to_minutes(CAST(i * 5 AS INT)), '%Y-%m-%d %H:%M:%S'), 130 FROM range(2100) t(i)"
+    )
+    c_beck.execute(
+        "CREATE TABLE pedap_othercgm (PtID INT, DeviceDtTm VARCHAR, CGM INT, IsCalibration BOOLEAN)"
+    )
+    c_beck.execute(
+        "CREATE TABLE pedap_tandemcgmdatagxb (PtID INT, DeviceDtTm VARCHAR, CGMValue INT, HighLowIndicator INT)"
+    )
+    c_beck.execute("CREATE TABLE dclp3_adv_event (PtID INT, Event VARCHAR)")
+    c_beck.execute(
+        "INSERT INTO dclp3_adv_event VALUES (1, 'DKA'), (1, 'Severe Hypoglycemia')"
+    )
+    c_beck.execute("CREATE TABLE dclp5_adverseevents (OtherCol INT)")
+    c_beck.close()
+
+    ensure_canonical_clinical_views(str(beck_db))
+    c_bchk = duckdb.connect(str(beck_db), read_only=True)
+    assert c_bchk.execute("SELECT COUNT(*) FROM jaeb_beck2023_cohort").fetchone() == (
+        3,
+    )
+    assert c_bchk.execute("SELECT COUNT(*) FROM patients").fetchone() == (3,)
+    assert c_bchk.execute(
+        "SELECT dka_events, severe_hypo_events FROM patients WHERE PtID = 1"
+    ).fetchone() == (
+        1,
+        1,
+    )
+    c_bchk.close()
+
+    c_beck_no_ae = duckdb.connect(str(beck_db))
+    c_beck_no_ae.execute("DROP TABLE dclp3_adv_event")
+    c_beck_no_ae.execute("DROP TABLE dclp5_adverseevents")
+    c_beck_no_ae.close()
+    ensure_canonical_clinical_views(str(beck_db))

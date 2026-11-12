@@ -1,13 +1,7 @@
 """Analytics module for querying downloaded T1D datasets."""
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import (
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-)
 
 import duckdb
 from typing_extensions import TypedDict
@@ -16,9 +10,9 @@ from t1d_analytics.api_schemas import ColumnInfo, TableSchemaModel
 from t1d_analytics.diagnostics import DatabaseStatusCode, check_database_health
 from t1d_analytics.duckdb_pool import (
     ReadOnlyDuckDbCursorProxy,
-    _create_read_only_cursor_proxy,
     connect_duckdb_read_only_cursor,
     connect_duckdb_read_only_pooled,
+    create_read_only_cursor_proxy,
 )
 from t1d_analytics.errors import (
     DatabaseNotFoundError,
@@ -42,9 +36,10 @@ from t1d_analytics.sql_utils import (
     extract_table_columns_map,
     is_read_only_sql_query,
     is_sql_query,
+    validate_read_only_sql,
 )
 
-_NUMERIC_SQL_TYPE_SUBSTRINGS: Tuple[str, ...] = (
+_NUMERIC_SQL_TYPE_SUBSTRINGS: tuple[str, ...] = (
     "INT",
     "FLOAT",
     "DOUBLE",
@@ -72,7 +67,7 @@ class ColumnProfileRecord(TypedDict, total=False):
     distinct_count: int
     min: SqlValue
     max: SqlValue
-    mean: Optional[float]
+    mean: float | None
 
 
 class TableProfileResult(TypedDict):
@@ -81,35 +76,33 @@ class TableProfileResult(TypedDict):
     table_name: str
     total_rows: int
     column_count: int
-    columns: List[ColumnProfileRecord]
+    columns: list[ColumnProfileRecord]
 
 
 def get_database_schema_models(
-    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
-) -> List[TableSchemaModel]:
+    conn: duckdb.DuckDBPyConnection | ReadOnlyDuckDbCursorProxy,
+) -> list[TableSchemaModel]:
     """
     Extract structured table schema models from the DuckDB database using a read-only cursor.
 
     Args:
-    ----
         conn: The DuckDB connection or read-only cursor proxy.
 
     Returns:
-    -------
         List[TableSchemaModel]: Ordered list of structured table schema models.
 
     """
     cursor_proxy = (
         conn
         if isinstance(conn, ReadOnlyDuckDbCursorProxy)
-        else _create_read_only_cursor_proxy(conn)
+        else create_read_only_cursor_proxy(conn)
     )
     should_close_proxy = not isinstance(conn, ReadOnlyDuckDbCursorProxy)
     try:
         cols_map = extract_table_columns_map(
             cursor_proxy, exclude_internal=True, exclude_training_tables=False
         )
-        models: List[TableSchemaModel] = []
+        models: list[TableSchemaModel] = []
         for table_name, columns in cols_map.items():
             escaped_table = escape_sql_identifier(str(table_name))
             col_infos = [
@@ -141,21 +134,19 @@ def get_database_schema_models(
 
 
 def get_database_schema(
-    conn: Union[duckdb.DuckDBPyConnection, ReadOnlyDuckDbCursorProxy],
+    conn: duckdb.DuckDBPyConnection | ReadOnlyDuckDbCursorProxy,
 ) -> str:
     """
     Extract the database schema as a text description, including sample data.
 
     Args:
-    ----
         conn: The DuckDB connection or read-only cursor proxy.
 
     Returns:
-    -------
         The database schema string.
 
     """
-    nl = chr(10)
+    nl = "\n"
     return f"{nl}{nl}".join(
         m.to_prompt_block() for m in get_database_schema_models(conn)
     )
@@ -165,13 +156,12 @@ def handle_natural_language(
     conn: duckdb.DuckDBPyConnection,
     query: str,
     model: str = "gemma4",
-    provider: Optional[str] = None,
+    provider: str | None = None,
 ) -> None:
     """
     Translate natural language to SQL using an LLM via any-llm and execute it.
 
     Args:
-    ----
         conn: DB connection.
         query: The natural language query.
         model: Model name for translation (or 'provider/model').
@@ -189,7 +179,7 @@ def handle_natural_language(
 
     prov, actual_model = resolve_provider_and_model(model, provider)
 
-    from t1d_analytics.training_data import validate_provider_readiness
+    from t1d_analytics.llm_client import validate_provider_readiness
 
     try:
         validate_provider_readiness(prov)
@@ -204,7 +194,7 @@ def handle_natural_language(
         nl_query=query,
         require_markdown_fence=False,
     )
-    nl = chr(10)
+    nl = "\n"
     try:
         full_response = complete_llm_prompt(
             prompt=prompt,
@@ -229,13 +219,12 @@ def handle_natural_language(
 
 
 def run_query_repl(
-    db_path: str, model: str = "gemma4", provider: Optional[str] = None
+    db_path: str, model: str = "gemma4", provider: str | None = None
 ) -> None:
     """
     Run the interactive query interface.
 
     Args:
-    ----
         db_path: Path to DB.
         model: LLM model name for query translation (or 'provider/model').
         provider: Optional LLM provider name ('ollama', 'openai', 'anthropic', 'google').
@@ -260,7 +249,7 @@ def run_query_repl(
         )
 
     print(_("Connecting to DuckDB at {}...", db_path))
-    nl = chr(10)
+    nl = "\n"
     with connect_duckdb_read_only_pooled(
         db_path=db_path,
         connect_fn=duckdb.connect,
@@ -295,9 +284,8 @@ def run_query_repl(
 
             if model.strip().lower() == "sql" or is_sql_query(user_input, conn=conn):
                 try:
-                    result = conn.sql(coerce_numeric_aggregates_in_sql(user_input))
-                    if result:
-                        result.show()
+                    validated_sql = validate_read_only_sql(user_input)
+                    conn.sql(coerce_numeric_aggregates_in_sql(validated_sql)).show()
                 except (duckdb.Error, RuntimeError, ValueError, TypeError) as e:
                     print(_("SQL Error: {}", e))
             else:
@@ -307,22 +295,20 @@ def run_query_repl(
 
 
 def _build_profile_select_expressions(
-    cols: Sequence[Tuple[SqlRawInputValue, ...]],
-) -> Tuple[List[str], List[_ColumnMetaRecord]]:
+    cols: Sequence[tuple[SqlRawInputValue, ...]],
+) -> tuple[list[str], list[_ColumnMetaRecord]]:
     """
     Build SQL aggregate projection expressions and metadata records for `profile_table`.
 
     Args:
-    ----
         cols: Output rows from `DESCRIBE "<table_name>"`.
 
     Returns:
-    -------
         Tuple[List[str], List[_ColumnMetaRecord]]: `(select_expressions, column_metadata_list)`.
 
     """
-    select_exprs: List[str] = ['COUNT(*) AS "_total_rows"']
-    col_meta: List[_ColumnMetaRecord] = []
+    select_exprs: list[str] = ['COUNT(*) AS "_total_rows"']
+    col_meta: list[_ColumnMetaRecord] = []
 
     for idx, col_info in enumerate(cols):
         col_name = str(col_info[0])
@@ -353,20 +339,18 @@ def _build_profile_select_expressions(
 
 def _profile_numeric_column(
     col_stat: ColumnProfileRecord,
-    agg_res: Optional[Tuple[SqlRawInputValue, ...]],
+    agg_res: tuple[SqlRawInputValue, ...] | None,
     cursor: int,
 ) -> int:
     """
     Populate `min`, `max`, and `mean` fields on `col_stat` from `agg_res` and return updated cursor.
 
     Args:
-    ----
         col_stat: Mutable `ColumnProfileRecord` to enrich.
         agg_res: Fetched aggregate tuple from DuckDB.
         cursor: Current offset in `agg_res`.
 
     Returns:
-    -------
         int: Advanced cursor offset (`cursor + 3`).
 
     """
@@ -398,21 +382,19 @@ def _profile_numeric_column(
 def _profile_categorical_column(
     meta: _ColumnMetaRecord,
     total_rows: int,
-    agg_res: Optional[Tuple[SqlRawInputValue, ...]],
+    agg_res: tuple[SqlRawInputValue, ...] | None,
     cursor: int,
-) -> Tuple[ColumnProfileRecord, int]:
+) -> tuple[ColumnProfileRecord, int]:
     """
     Build the base `ColumnProfileRecord` (nulls, null percentage, distinct count) and advance cursor.
 
     Args:
-    ----
         meta: Column metadata record.
         total_rows: Total row count of the table.
         agg_res: Fetched aggregate tuple from DuckDB.
         cursor: Current offset in `agg_res`.
 
     Returns:
-    -------
         Tuple[ColumnProfileRecord, int]: `(base_column_profile, advanced_cursor)`.
 
     """
@@ -437,16 +419,13 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
     Profile a table to calculate data quality, completeness, and column statistics.
 
     Args:
-    ----
         db_path: Path to DuckDB file.
         table_name: Table name to profile.
 
     Returns:
-    -------
         TableProfileResult: Profiling summary containing total_rows, columns stats, null percentages.
 
     Raises:
-    ------
         InvalidTableNameError: If table name is invalid.
         TableNotFoundError: If table does not exist.
         DatabaseNotFoundError: If database file does not exist.
@@ -490,7 +469,7 @@ def profile_table(db_path: str, table_name: str) -> TableProfileResult:
         agg_res = db_cursor.execute(agg_sql).fetchone()
 
         total_rows = int(agg_res[0]) if (agg_res and agg_res[0] is not None) else 0
-        column_profiles: List[ColumnProfileRecord] = []
+        column_profiles: list[ColumnProfileRecord] = []
         cursor = 1
         for meta in col_meta:
             col_stat, cursor = _profile_categorical_column(

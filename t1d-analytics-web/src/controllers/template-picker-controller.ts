@@ -2,8 +2,7 @@
  * @file template-picker-controller.ts
  * @module controllers/template-picker-controller
  * Composable sub-controller managing the Persistent Prompt & SQL Template Library modal,
- * mid-conversation template switching, Natural-Language-to-SQL prompt insertion,
- * direct Gold-Standard SQL insertion, and one-click LLM vs. Gold SQL benchmarking.
+ * mid-conversation template switching, Natural-Language-to-SQL mode, and Gold SQL comparison via `ModalDialogController`.
  */
 
 import i18next from "i18next";
@@ -11,81 +10,91 @@ import {
   buildStarterQueryItems,
   resolvePreferredLlmModel,
 } from "../empty-state-builder";
-import { trapModalFocus } from "../modal-utils";
+import { type AppEventBus } from "../event-bus";
+import { ModalDialogController } from "../modal-utils";
 import { RAW_SQL_MODEL, type ChatState } from "../state";
-import { TABLE_1_EXAMPLE_QUERIES } from "../table1-queries";
+import {
+  fetchClinicalTemplateCatalog,
+  getTable1ExampleQueries,
+  type Table1ExampleSpec,
+} from "../table1-queries";
 
 /**
- * Host contract required by `TemplatePickerController`.
- */
-export interface TemplatePickerHost {
-  /** Global application state store. */
-  state: ChatState;
-  /** Textarea element where the user types queries or SQL. */
-  chatInput: HTMLTextAreaElement;
-  /** Dropdown select element for choosing the active LLM or SQL engine. */
-  modelSelect: HTMLSelectElement;
-  /** Synchronizes syntax highlighting in the chat input. */
-  syncHighlight(): void;
-  /** Sends a chat message with optional model and gold-standard SQL override. */
-  handleSendMessage(
-    overrideMessage?: string,
-    overrideModel?: string,
-    overrideGoldSql?: string,
-  ): Promise<void>;
-}
-
-/**
- * Unified template specification rendered inside the Template Picker modal.
+ * Unified template specification rendered in the Template Picker modal.
  */
 export interface TemplateLibraryItem {
-  /** Stable identifier for the template item. */
+  /** Stable identifier ('starter-1'..'starter-5' or 'table1-1'..'table1-8'). */
   id: string;
-  /** Category tab ('starter' or 'table1'). */
+  /** Category bucket ('starter' or 'table1'). */
   category: "starter" | "table1";
   /** Localized display title. */
   title: string;
-  /** Complexity tier label. */
-  complexity: string;
-  /** Natural-language clinical question for NL-to-SQL testing. */
+  /** Complexity rating label. */
+  complexity: Table1ExampleSpec["complexity"];
+  /** Plain-English clinical question for NL-to-SQL evaluation. */
   question: string;
   /** Canonical Gold-Standard DuckDB SQL query. */
   goldSql: string;
 }
 
 /**
+ * Narrow injected dependencies for `TemplatePickerController`.
+ */
+export interface TemplatePickerDeps {
+  /** Shared application state store. */
+  state: ChatState;
+  /** Unidirectional domain event bus. */
+  events: AppEventBus;
+  /** Model selector dropdown inspected (read-only) to pick preferred LLM models. */
+  modelSelect: HTMLSelectElement;
+  /** Callback executing an immediate NL-to-SQL vs Gold benchmark turn. */
+  onSendBenchmark: (
+    question: string,
+    model: string,
+    goldSql: string,
+  ) => Promise<void>;
+}
+
+/**
  * Composable sub-controller for the Persistent Prompt & SQL Template Library modal (`#template-picker-modal`).
  */
 export class TemplatePickerController {
-  /** Host UI coordinator. */
-  private readonly ui: TemplatePickerHost;
-  /** Persistent button in the header/composer that opens the template modal (`#template-picker-btn`). */
+  /** Injected dependencies. */
+  private readonly deps: TemplatePickerDeps;
+  /** Optional composable modal dialog controller when `#template-picker-modal` exists in DOM. */
+  private readonly dialog: ModalDialogController | null;
+  /** Persistent AbortController for button and `Cmd+/` / `Ctrl+/` shortcut listeners. */
+  private readonly listenerController = new AbortController();
+  /** Trigger button inside the chat composer toolbar (`#template-picker-btn`). */
   public readonly openBtn: HTMLElement | null;
   /** Modal overlay container (`#template-picker-modal`). */
   public readonly modalEl: HTMLElement | null;
   /** Modal close button (`#close-template-modal-btn`). */
   public readonly closeBtn: HTMLElement | null;
-  /** Container holding the rendered template cards (`#template-picker-list`). */
+  /** Container holding rendered template cards (`#template-picker-list`). */
   public readonly listContainer: HTMLElement | null;
-  /** Currently selected category filter ('all' | 'table1' | 'starter'). */
+  /** Active category filter ('all', 'table1', or 'starter'). */
   public activeCategory: "all" | "table1" | "starter" = "all";
-  /** Element focused immediately before opening the modal. */
-  private previousFocusEl: HTMLElement | null = null;
-  /** Bound keydown listener for focus trapping and Escape handling inside the modal. */
-  private onModalKeyDown: ((e: KeyboardEvent) => void) | null = null;
-  /** Bound global shortcut listener (`Ctrl+/` or `Cmd+/`). */
-  private onGlobalKeyDown: ((e: KeyboardEvent) => void) | null = null;
 
   /**
-   * Initializes the TemplatePickerController and binds trigger/modal listeners when present in the DOM.
-   * @param {TemplatePickerHost} ui - Host UI instance.
+   * Creates a new `TemplatePickerController`.
+   * @param {TemplatePickerDeps} deps - Narrow state, event bus, and benchmark callback dependencies.
    */
-  constructor(ui: TemplatePickerHost) {
-    this.ui = ui;
+  constructor(deps: TemplatePickerDeps) {
+    this.deps = deps;
     this.openBtn = document.getElementById("template-picker-btn");
     this.modalEl = document.getElementById("template-picker-modal");
     this.closeBtn = document.getElementById("close-template-modal-btn");
     this.listContainer = document.getElementById("template-picker-list");
+
+    this.dialog = this.modalEl
+      ? new ModalDialogController({
+          modalEl: this.modalEl,
+          closeBtn: this.closeBtn,
+          initialFocusEl: this.closeBtn,
+        })
+      : null;
+
     this.bindEvents();
   }
 
@@ -106,7 +115,7 @@ export class TemplatePickerController {
       });
     });
 
-    TABLE_1_EXAMPLE_QUERIES.forEach((spec) => {
+    getTable1ExampleQueries().forEach((spec) => {
       items.push({
         id: spec.id,
         category: "table1",
@@ -120,56 +129,64 @@ export class TemplatePickerController {
   }
 
   /**
+   * Synchronizes the clinical template catalog from `GET /api/templates` and re-renders if open.
+   * @returns {Promise<boolean>} True if backend templates were applied.
+   */
+  public async refreshCatalog(): Promise<boolean> {
+    const updated = await fetchClinicalTemplateCatalog();
+    if (updated && this.dialog?.isOpen() === true) {
+      this.renderTemplateList();
+    }
+    return updated;
+  }
+
+  /**
    * Binds click and keyboard listeners for opening, filtering, and closing the template modal.
    * @returns {void}
    */
   private bindEvents(): void {
-    this.openBtn?.addEventListener("click", () => {
-      this.openModal();
-    });
+    const signal = this.listenerController.signal;
 
-    this.closeBtn?.addEventListener("click", () => {
-      this.closeModal();
-    });
-
-    this.modalEl?.addEventListener("click", (e) => {
-      if (e.target === this.modalEl) {
-        this.closeModal();
-      }
-    });
+    this.openBtn?.addEventListener(
+      "click",
+      () => {
+        this.openModal();
+      },
+      { signal },
+    );
 
     if (this.modalEl) {
       const filterBtns = this.modalEl.querySelectorAll<HTMLButtonElement>(
         "[data-template-tab]",
       );
       filterBtns.forEach((btn) => {
-        btn.addEventListener("click", () => {
-          const tab = btn.getAttribute("data-template-tab");
-          const nextTab: "all" | "table1" | "starter" =
-            tab === "starter" || tab === "table1" ? tab : "all";
-          this.setCategoryFilter(nextTab);
-        });
+        btn.addEventListener(
+          "click",
+          () => {
+            const tab = btn.getAttribute("data-template-tab");
+            const nextTab: "all" | "table1" | "starter" =
+              tab === "starter" || tab === "table1" ? tab : "all";
+            this.setCategoryFilter(nextTab);
+          },
+          { signal },
+        );
       });
-
-      this.onModalKeyDown = (e: KeyboardEvent) => {
-        if (this.modalEl && !this.modalEl.classList.contains("hidden")) {
-          trapModalFocus(e, this.modalEl, () => this.closeModal());
-        }
-      };
-      this.modalEl.addEventListener("keydown", this.onModalKeyDown);
     }
 
-    this.onGlobalKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "/") {
-        e.preventDefault();
-        if (this.modalEl && !this.modalEl.classList.contains("hidden")) {
-          this.closeModal();
-        } else {
-          this.openModal();
+    document.addEventListener(
+      "keydown",
+      (e: KeyboardEvent) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "/") {
+          e.preventDefault();
+          if (this.dialog?.isOpen() === true) {
+            this.closeModal();
+          } else {
+            this.openModal();
+          }
         }
-      }
-    };
-    document.addEventListener("keydown", this.onGlobalKeyDown);
+      },
+      { signal },
+    );
   }
 
   /**
@@ -197,16 +214,10 @@ export class TemplatePickerController {
    * @returns {void}
    */
   public openModal(): void {
-    if (!this.modalEl) return;
-    this.previousFocusEl =
-      document.activeElement instanceof HTMLElement &&
-      document.activeElement !== document.body
-        ? document.activeElement
-        : null;
+    if (!this.dialog) return;
+    this.dialog.captureOpenerFocus();
     this.renderTemplateList();
-    this.modalEl.classList.remove("hidden");
-    this.modalEl.setAttribute("aria-hidden", "false");
-    this.closeBtn?.focus();
+    this.dialog.open(this.closeBtn);
   }
 
   /**
@@ -214,49 +225,40 @@ export class TemplatePickerController {
    * @returns {void}
    */
   public closeModal(): void {
-    if (!this.modalEl) return;
-    this.modalEl.classList.add("hidden");
-    this.modalEl.setAttribute("aria-hidden", "true");
-    if (this.previousFocusEl) {
-      this.previousFocusEl.focus();
-      this.previousFocusEl = null;
-    } else {
-      this.ui.chatInput.focus();
-    }
+    if (!this.dialog) return;
+    this.dialog.close();
   }
 
   /**
-   * Applies a template in Natural-Language-to-SQL mode, populating the natural-language question
-   * into `#chat-input`, selecting an LLM model, and attaching `goldSql` for comparison.
+   * Applies a template in Natural-Language-to-SQL mode, emitting `templateSelected`
+   * with the natural-language question, preferred LLM model, and `goldSql`.
    * @param {TemplateLibraryItem} item - Selected template specification.
    * @returns {void}
    */
   public applyTemplateAsNaturalLanguage(item: TemplateLibraryItem): void {
-    const targetLlm = resolvePreferredLlmModel(this.ui.modelSelect);
-    this.ui.modelSelect.value = targetLlm;
-    this.ui.state.setActiveChatModel(targetLlm);
-    this.ui.state.setActiveGoldSql(item.goldSql);
-    this.ui.chatInput.value = item.question;
-    this.ui.syncHighlight();
+    const targetLlm = resolvePreferredLlmModel(this.deps.modelSelect);
     this.closeModal();
-    this.ui.chatInput.focus();
+    this.deps.events.emit("templateSelected", {
+      promptText: item.question,
+      targetModel: targetLlm,
+      goldSql: item.goldSql,
+    });
   }
 
   /**
-   * Applies a template in Literal Gold SQL mode, populating `goldSql` into `#chat-input`
-   * and switching the model selector to `RAW_SQL_MODEL`.
+   * Applies a template in Literal Gold SQL mode, emitting `templateSelected`
+   * with `goldSql` and `RAW_SQL_MODEL`.
    * @param {TemplateLibraryItem} item - Selected template specification.
    * @returns {void}
    */
   public applyTemplateAsGoldSql(item: TemplateLibraryItem): void {
-    this.ui.modelSelect.value = RAW_SQL_MODEL;
-    this.ui.state.setActiveChatModel(RAW_SQL_MODEL);
-    this.ui.state.setActiveGoldSql(null);
-    this.ui.chatInput.value = `-- ${item.question}
-${item.goldSql}`;
-    this.ui.syncHighlight();
     this.closeModal();
-    this.ui.chatInput.focus();
+    this.deps.events.emit("templateSelected", {
+      promptText: `-- ${item.question}
+${item.goldSql}`,
+      targetModel: RAW_SQL_MODEL,
+      goldSql: null,
+    });
   }
 
   /**
@@ -266,11 +268,11 @@ ${item.goldSql}`;
    * @returns {Promise<void>}
    */
   public async runTemplateBenchmark(item: TemplateLibraryItem): Promise<void> {
-    const targetLlm = resolvePreferredLlmModel(this.ui.modelSelect);
-    this.ui.modelSelect.value = targetLlm;
-    this.ui.state.setActiveChatModel(targetLlm);
+    const targetLlm = resolvePreferredLlmModel(this.deps.modelSelect);
+    this.deps.modelSelect.value = targetLlm;
+    this.deps.state.setActiveChatModel(targetLlm);
     this.closeModal();
-    await this.ui.handleSendMessage(item.question, targetLlm, item.goldSql);
+    await this.deps.onSendBenchmark(item.question, targetLlm, item.goldSql);
   }
 
   /**
@@ -372,13 +374,7 @@ ${item.goldSql}`;
    * @returns {void}
    */
   public dispose(): void {
-    if (this.onModalKeyDown && this.modalEl) {
-      this.modalEl.removeEventListener("keydown", this.onModalKeyDown);
-      this.onModalKeyDown = null;
-    }
-    if (this.onGlobalKeyDown) {
-      document.removeEventListener("keydown", this.onGlobalKeyDown);
-      this.onGlobalKeyDown = null;
-    }
+    this.dialog?.dispose();
+    this.listenerController.abort();
   }
 }

@@ -35,11 +35,145 @@ describe("ChatState", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     state = new ChatState();
   });
 
   afterEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it("supports sessionStorage credential scope, backend T1D_API_KEY Bearer headers, and storage error resilience", async () => {
+    const {
+      deleteRemoteSession,
+      fetchRemoteSessionById,
+      fetchRemoteSessions,
+      getStoredBackendApiKey,
+      pushRemoteSession,
+      safeSessionStorageGet,
+      safeSessionStorageRemove,
+      safeSessionStorageSet,
+      withBearerAuth,
+    } = await import("../src/api-client").then(async (apiMod) => {
+      const stateMod = await import("../src/state");
+      return { ...apiMod, ...stateMod };
+    });
+
+    expect(state.credentialsStore.getStorageScope()).toBe("local");
+    expect(getStoredBackendApiKey()).toBeNull();
+    expect(withBearerAuth()).toBeUndefined();
+
+    // Store keys in local scope first, then migrate to session scope
+    state.credentialsStore.setApiKey("openai", "sk-local-1");
+    state.credentialsStore.setBackendApiKey("tok-local-1");
+    expect(localStorage.getItem("t1d_backend_api_key")).toBe("tok-local-1");
+
+    state.credentialsStore.setStorageScope("session");
+    expect(state.credentialsStore.getStorageScope()).toBe("session");
+    expect(localStorage.getItem("t1d_api_key_openai")).toBeNull();
+    expect(localStorage.getItem("t1d_backend_api_key")).toBeNull();
+    expect(sessionStorage.getItem("t1d_api_key_openai")).toBe("sk-local-1");
+    expect(state.credentialsStore.getBackendApiKey()).toBe("tok-local-1");
+
+    // Setting keys while in session scope writes only to sessionStorage
+    state.credentialsStore.setApiKey("anthropic", "sk-sess-2");
+    state.credentialsStore.setBackendApiKey("tok-sess-2");
+    expect(sessionStorage.getItem("t1d_api_key_anthropic")).toBe("sk-sess-2");
+    expect(getStoredBackendApiKey()).toBe("tok-sess-2");
+
+    // withBearerAuth supports Headers instance, tuple arrays, plain objects, and preserves existing Authorization
+    const fromHeaders = withBearerAuth({
+      headers: new Headers({ "X-Custom": "1" }),
+    });
+    expect(fromHeaders?.headers).toEqual({
+      "x-custom": "1",
+      Authorization: "Bearer tok-sess-2",
+    });
+    const fromTuples = withBearerAuth({ headers: [["X-Tuple", "2"]] });
+    expect(fromTuples?.headers).toEqual({
+      "X-Tuple": "2",
+      Authorization: "Bearer tok-sess-2",
+    });
+    const preserveAuth = withBearerAuth({
+      headers: { Authorization: "Bearer explicit" },
+    });
+    expect(preserveAuth?.headers).toEqual({
+      Authorization: "Bearer explicit",
+    });
+
+    // Remote session helpers attach Bearer token when configured
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => createJsonResponse("[]", 200));
+    await fetchRemoteSessions();
+    expect(fetchSpy).toHaveBeenLastCalledWith("/api/sessions", {
+      headers: { Authorization: "Bearer tok-sess-2" },
+    });
+    fetchSpy.mockImplementationOnce(async () =>
+      createJsonResponse(
+        JSON.stringify({
+          session_id: "s1",
+          title: "T",
+          created_at: "",
+          updated_at: "",
+          messages: [],
+        }),
+        200,
+      ),
+    );
+    await fetchRemoteSessionById("s1");
+    await pushRemoteSession("s1", "T", []);
+    await deleteRemoteSession("s1");
+    fetchSpy.mockRestore();
+
+    // Clearing via empty string and switching scopes with no stored keys
+    state.credentialsStore.setBackendApiKey("   ");
+    state.credentialsStore.removeApiKey("openai");
+    state.credentialsStore.removeApiKey("anthropic");
+    expect(state.credentialsStore.getBackendApiKey()).toBeNull();
+    state.credentialsStore.setStorageScope("local");
+    expect(state.credentialsStore.getStorageScope()).toBe("local");
+    state.credentialsStore.setStorageScope("session");
+    state.credentialsStore.setStorageScope("local");
+
+    // safeSessionStorage* graceful error branches and undefined sessionStorage/localStorage
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const origSess = globalThis.sessionStorage;
+    const origLocal = globalThis.localStorage;
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("denied");
+      },
+      removeItem: () => {
+        throw new Error("denied");
+      },
+    });
+    expect(safeSessionStorageGet("k")).toBeNull();
+    safeSessionStorageSet("k", "v");
+    safeSessionStorageRemove("k");
+    expect(getStoredBackendApiKey()).toBeNull();
+
+    vi.stubGlobal("sessionStorage", undefined);
+    vi.stubGlobal("localStorage", undefined);
+    expect(safeSessionStorageGet("k")).toBeNull();
+    safeSessionStorageSet("k", "v");
+    safeSessionStorageRemove("k");
+    expect(getStoredBackendApiKey()).toBeNull();
+    vi.stubGlobal("sessionStorage", origSess);
+    vi.stubGlobal("localStorage", origLocal);
+    warnSpy.mockRestore();
+
+    state.setSchemaTables([
+      {
+        name: "empty_cols_tbl",
+        columns: [],
+      },
+    ]);
+    expect(state.getTableColumns("empty_cols_tbl")).toEqual([]);
   });
 
   it("initializes empty state and preserves empty strings in localStorage", () => {
@@ -94,7 +228,7 @@ describe("ChatState", () => {
     // Delete active chat with no remaining chats
     state.deleteChat(chat2.id);
     expect(state.chats.length).toBe(1); // Temporary chat created!
-    expect(state.chats[0].title).toBe("Temporary chat");
+    expect(state.chats[0]?.title).toBe("Temporary chat");
   });
 
   it("deletes active chat and sets next available chat as active", () => {
@@ -112,7 +246,7 @@ describe("ChatState", () => {
   it("renames a chat", () => {
     const chat = state.createChat();
     state.renameChat(chat.id, "My Custom Title");
-    expect(state.chats[0].title).toBe("My Custom Title");
+    expect(state.chats[0]?.title).toBe("My Custom Title");
 
     // With server sync enabled, triggers POST fetch
     state.serverSyncEnabled = true;
@@ -135,10 +269,10 @@ describe("ChatState", () => {
   it("does not rename chat if title is empty or chat not found", () => {
     const chat = state.createChat();
     state.renameChat(chat.id, "   ");
-    expect(state.chats[0].title).toBe("Chat #1");
+    expect(state.chats[0]?.title).toBe("Chat #1");
 
     state.renameChat("invalid", "New Title");
-    expect(state.chats[0].title).toBe("Chat #1");
+    expect(state.chats[0]?.title).toBe("Chat #1");
   });
 
   it("duplicates a chat", () => {
@@ -337,7 +471,7 @@ describe("ChatState", () => {
       createJsonResponse(JSON.stringify({ status: "ok" })),
     );
     await state.syncWithServer();
-    expect(state.activeChatId).toBe(state.chats[0].id);
+    expect(state.activeChatId).toBe(state.chats[0]?.id);
     expect(chat1.title).toBe("Local Chat Updated");
     expect(chat1.messages.length).toBe(3);
     fetchSpy.mockRestore();
@@ -735,12 +869,11 @@ describe("ChatState", () => {
       ],
     });
     const parsed = parsePersistedChatState(payload);
-    expect(parsed.chats?.[0].messages[0].content).toContain("'sum(VARCHAR)'");
-    expect(parsed.chats?.[0].messages[0].content).toContain("-> DECIMAL");
-    expect(parsed.chats?.[0].messages[0].content).toContain("(arg, /)");
-    expect(parsed.chats?.[2].messages).toHaveLength(2);
-    expect(parsed.chats?.[2].messages[0].role).toBe("user");
-    expect(parsed.chats?.[2].messages[1].content).toBe("Executed SQL query.");
+    expect(parsed.chats?.[0]?.messages[0]?.content).toContain("'sum(VARCHAR)'");
+    expect(parsed.chats?.[0]?.messages[0]?.content).toContain("-> DECIMAL");
+    expect(parsed.chats?.[0]?.messages[0]?.content).toContain("(arg, /)");
+    expect(parsed.chats?.[2]?.messages).toHaveLength(5);
+    expect(parsed.chats?.[2]?.messages[4]?.content).toBe("Executed SQL query.");
 
     // Verify sanitizeMessageRecord does not mutate input object in place
     const originalMsg = {
@@ -876,6 +1009,11 @@ describe("ChatState", () => {
     await state.syncWithServer();
     vi.stubGlobal("window", origWindow);
     window.history.replaceState(null, "", "/");
+
+    state.setActiveChatProvider("openai");
+    expect(state.getActiveChat()?.provider).toBe("openai");
+    state.setActiveChatProvider(undefined);
+    expect(state.getActiveChat()?.provider).toBeUndefined();
 
     fetchSpy.mockRestore();
   });

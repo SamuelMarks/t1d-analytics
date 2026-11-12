@@ -4,14 +4,15 @@ import importlib
 import logging
 import math
 import re
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, Union
 
 import duckdb
 from typing_extensions import TypedDict
 
 from t1d_analytics.api_schemas import ColumnInfo, TableSchemaModel
 from t1d_analytics.errors import T1DError
+from t1d_analytics.gemma_cli_toolchain import resolve_local_gemma_sql_repo
 from t1d_analytics.sql_utils import (
     SqlValue,
     coerce_numeric_aggregates_in_sql,
@@ -31,20 +32,18 @@ class AgenticSqlResult(TypedDict):
     success: bool
     final_sql: str
     attempts: int
-    rows: List[Dict[str, SqlValue]]
-    error: Optional[str]
+    rows: list[dict[str, SqlValue]]
+    error: str | None
 
 
-def parse_schema_text_to_models(schema_text: str) -> List[TableSchemaModel]:
+def parse_schema_text_to_models(schema_text: str) -> list[TableSchemaModel]:
     """
     Parse a formatted schema string or SQL DDL into structured `TableSchemaModel` instances.
 
     Args:
-    ----
         schema_text: Formatted database schema or SQL DDL string.
 
     Returns:
-    -------
         List[TableSchemaModel]: Ordered list of parsed `TableSchemaModel` instances.
 
     """
@@ -59,18 +58,16 @@ def parse_schema_text_to_models(schema_text: str) -> List[TableSchemaModel]:
     ]
 
 
-def _extract_schema_map_from_text(
-    schema_source: Union[str, Sequence[TableSchemaModel]],
-) -> Dict[str, List[str]]:
+def extract_schema_map_from_text(
+    schema_source: str | Sequence[TableSchemaModel],
+) -> dict[str, list[str]]:
     """
     Extract table-to-columns mapping from structured `TableSchemaModel` objects or schema text/DDL.
 
     Args:
-    ----
         schema_source: Sequence of `TableSchemaModel` objects, or a formatted schema/DDL string.
 
     Returns:
-    -------
         Dict[str, List[str]]: Mapping of table names to their column name lists.
 
     """
@@ -99,6 +96,7 @@ _TABLE_1_RAG_KEYWORDS = {
 
 _CORE_CLINICAL_TABLES = {
     "patients",
+    "jaeb_beck2023_cohort",
     "demographics",
     "subjects",
     "tblaptsummary",
@@ -116,11 +114,9 @@ def _is_table_1_broad_query(nl_query: str) -> bool:
     Determine whether `nl_query` requests a broad Academic Table 1 or baseline cohort summary.
 
     Args:
-    ----
         nl_query: Natural language clinical question.
 
     Returns:
-    -------
         bool: True if the query contains Table 1 or baseline summary keywords.
 
     """
@@ -132,25 +128,23 @@ def _is_table_1_broad_query(nl_query: str) -> bool:
 
 
 def _score_tables_by_query_tokens(
-    schema_map: Dict[str, List[str]],
-    prompt_words: Set[str],
+    schema_map: dict[str, list[str]],
+    prompt_words: set[str],
     is_broad_t1: bool,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Score each table in `schema_map` by lexical overlap with `prompt_words` and clinical priority.
 
     Args:
-    ----
         schema_map: Mapping of table names to column names.
         prompt_words: Lowercase words extracted from the user prompt.
         is_broad_t1: Whether the prompt requests a broad Table 1 summary.
 
     Returns:
-    -------
         Dict[str, int]: Mapping of table name to integer relevance score.
 
     """
-    scores: Dict[str, int] = {}
+    scores: dict[str, int] = {}
     for table, cols in schema_map.items():
         score = 5 if table.lower() in prompt_words else 0
         if is_broad_t1 and table.lower() in _CORE_CLINICAL_TABLES:
@@ -161,21 +155,19 @@ def _score_tables_by_query_tokens(
 
 
 def _expand_related_clinical_tables(
-    schema_map: Dict[str, List[str]],
-    scores: Dict[str, int],
+    schema_map: dict[str, list[str]],
+    scores: dict[str, int],
     effective_top_k: int,
-) -> List[str]:
+) -> list[str]:
     """
     Select the top-k highest-scoring tables from `scores` or fall back to the first `effective_top_k` tables.
 
     Args:
-    ----
         schema_map: Mapping of table names to column names.
         scores: Table relevance score mapping.
         effective_top_k: Maximum number of tables to include.
 
     Returns:
-    -------
         List[str]: Ordered list of selected table names.
 
     """
@@ -191,35 +183,32 @@ def _expand_related_clinical_tables(
 
 def _fetch_sample_rows_for_tables(
     ranked_tables: Sequence[str],
-    schema_map: Dict[str, List[str]],
+    schema_map: dict[str, list[str]],
     rendered_schema: str,
 ) -> str:
     """
     Format the `-- Relevant Schema Context:` header block and prepend it to `rendered_schema`.
 
     Args:
-    ----
         ranked_tables: Ordered list of prioritized table names.
         schema_map: Mapping of table names to column names.
         rendered_schema: Full rendered schema text including sample rows.
 
     Returns:
-    -------
         str: Enriched schema string.
 
     """
-    nl = chr(10)
     lines = ["-- Relevant Schema Context:"]
     for t in ranked_tables:
         lines.append(f"-- Table: {t} | Columns: {', '.join(schema_map[t])}")
-    return nl.join(lines) + f"{nl}{nl}" + rendered_schema
+    return "\n".join(lines) + "\n\n" + rendered_schema
 
 
 def prune_schema_with_gemma_rag(
     nl_query: str,
-    full_schema_text: Union[str, Sequence[TableSchemaModel]],
+    full_schema_text: str | Sequence[TableSchemaModel],
     top_k_tables: int = 4,
-    repo_resolver: Optional[Callable[[], Optional[Path]]] = None,
+    repo_resolver: Callable[[], Path | None] | None = resolve_local_gemma_sql_repo,
 ) -> str:
     """
     Augment or prune a database schema description using `gemma_4_sql.sdk.rag.retrieve_relevant_schema`.
@@ -228,27 +217,24 @@ def prune_schema_with_gemma_rag(
     a prioritized `-- Relevant Schema Context:` header while preserving table details.
 
     Args:
-    ----
         nl_query: Natural language clinical question.
         full_schema_text: Full database schema text or sequence of structured `TableSchemaModel` objects.
         top_k_tables: Maximum number of top-ranked tables to highlight.
         repo_resolver: Optional callback to register local `gemma-4-sql` repo on `sys.path`.
 
     Returns:
-    -------
         str: Schema string enriched with prioritized relevant table context.
 
     """
-    nl = chr(10)
     rendered_schema = (
         full_schema_text
         if isinstance(full_schema_text, str)
-        else f"{nl}{nl}".join(tbl.to_prompt_block() for tbl in full_schema_text)
+        else "\n\n".join(tbl.to_prompt_block() for tbl in full_schema_text)
     )
     if not rendered_schema.strip() or not nl_query.strip():
         return rendered_schema
 
-    schema_map = _extract_schema_map_from_text(full_schema_text)
+    schema_map = extract_schema_map_from_text(full_schema_text)
     if not schema_map:
         return rendered_schema
 
@@ -266,7 +252,7 @@ def prune_schema_with_gemma_rag(
             retrieve_fn(nl_query, schema_map, top_k_tables=effective_top_k)
         )
         if rag_header.strip():
-            return f"{rag_header}{nl}{nl}{rendered_schema}"
+            return f"{rag_header}\n\n{rendered_schema}"
     except (
         ImportError,
         SyntaxError,
@@ -287,7 +273,7 @@ def prune_schema_with_gemma_rag(
 def score_sql_completion_logprob(
     prompt: str,
     sql_text: str,
-    repo_resolver: Optional[Callable[[], Optional[Path]]] = None,
+    repo_resolver: Callable[[], Path | None] | None = resolve_local_gemma_sql_repo,
 ) -> float:
     """
     Compute a structural and lexical log-probability score for a candidate SQL completion.
@@ -296,13 +282,11 @@ def score_sql_completion_logprob(
     and lexical alignment with the natural language prompt.
 
     Args:
-    ----
         prompt: Natural language question or prompt string.
         sql_text: Candidate SQL completion string.
         repo_resolver: Optional callback to register local `gemma-4-sql` repo on `sys.path`.
 
     Returns:
-    -------
         float: Estimated log-probability score (higher is better, <= 0.0).
 
     """
@@ -333,20 +317,18 @@ score_sql_completion_heuristic = score_sql_completion_logprob
 
 def validate_sql_tokens(
     sql: str,
-    repo_resolver: Optional[Callable[[], Optional[Path]]] = None,
-) -> List[int]:
+    repo_resolver: Callable[[], Path | None] | None = resolve_local_gemma_sql_repo,
+) -> list[int]:
     """
     Tokenize a SQL query string using `gemma_4_sql.tokenization.SQLTokenizer`.
 
     Falls back to deterministic UTF-8 byte-level token IDs if `gemma_4_sql` is not installed.
 
     Args:
-    ----
         sql: SQL query string to tokenize.
         repo_resolver: Optional callback to register local `gemma-4-sql` repo on `sys.path`.
 
     Returns:
-    -------
         List[int]: List of integer token IDs.
 
     """
@@ -371,16 +353,14 @@ def validate_sql_tokens(
     return list(sql.encode("utf-8", errors="replace"))
 
 
-def _classify_sql_error_hint(error_msg: str) -> str:
+def classify_sql_error_hint(error_msg: str) -> str:
     """
     Classify a DuckDB execution error into an actionable schema repair hint.
 
     Args:
-    ----
         error_msg: Raw DuckDB error string.
 
     Returns:
-    -------
         str: Diagnostic hint suffix string.
 
     """
@@ -428,15 +408,11 @@ def _classify_sql_error_hint(error_msg: str) -> str:
     return ""
 
 
-classify_sql_error = _classify_sql_error_hint
-classify_duckdb_error_hint = _classify_sql_error_hint
-
-
 def execute_agentic_nl_to_sql(
     db_path: str,
     nl_query: str,
     generate_fn: Callable[[str], str],
-    execute_fn: Callable[[str, str], List[Dict[str, SqlValue]]],
+    execute_fn: Callable[[str, str], list[dict[str, SqlValue]]],
     max_retries: int = 2,
 ) -> AgenticSqlResult:
     """
@@ -447,7 +423,6 @@ def execute_agentic_nl_to_sql(
     up to `max_retries` attempts.
 
     Args:
-    ----
         db_path: Path to the DuckDB database file.
         nl_query: Initial natural language prompt.
         generate_fn: Callable accepting a prompt string and returning raw LLM response or SQL.
@@ -455,14 +430,13 @@ def execute_agentic_nl_to_sql(
         max_retries: Maximum number of generation + execution attempts.
 
     Returns:
-    -------
         AgenticSqlResult: Structured dictionary with `success`, `final_sql`, `attempts`, `rows`, and `error`.
 
     """
     current_prompt = nl_query
     attempts = 0
     final_sql = ""
-    last_error: Optional[str] = None
+    last_error: str | None = None
     total_budget = max(1, max_retries)
 
     while attempts < total_budget:
@@ -481,14 +455,13 @@ def execute_agentic_nl_to_sql(
                 "error": None,
             }
         except (T1DError, duckdb.Error, OSError, RuntimeError, ValueError) as exc:
-            nl = chr(10)
             err_str = str(exc)
             last_error = err_str
-            hint = _classify_sql_error_hint(err_str)
+            hint = classify_sql_error_hint(err_str)
             current_prompt = (
-                f"{nl_query}{nl}{nl}"
-                f"Previous SQL attempt:{nl}{candidate_sql}{nl}"
-                f"Failed with database error: {err_str}{hint}{nl}"
+                f"{nl_query}\n\n"
+                f"Previous SQL attempt:\n{candidate_sql}\n"
+                f"Failed with database error: {err_str}{hint}\n"
                 f"Please fix the DuckDB SQL query using only valid tables and columns from the schema."
             )
 

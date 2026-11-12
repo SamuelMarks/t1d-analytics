@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { parseApiError } from "../src/api-client";
+import { sanitizeSpreadsheetCell } from "../src/exporters";
 import {
   classifySqlResult,
   getBuildTimestampUtc,
@@ -101,5 +102,27 @@ describe("formatters.ts", () => {
     expect(getBuildTimestampUtc("  2026-10-29T12:34:56Z UTC  ")).toBe(
       "2026-10-29T12:34:56Z UTC",
     );
+  });
+
+  it("sanitizes spreadsheet cells against OWASP CSV formula and control-char injection", () => {
+    expect(sanitizeSpreadsheetCell("")).toBe("");
+    expect(sanitizeSpreadsheetCell("   ")).toBe("   ");
+    expect(sanitizeSpreadsheetCell("normal text")).toBe("normal text");
+    expect(sanitizeSpreadsheetCell("=SUM(A1:A2)")).toBe("'=SUM(A1:A2)");
+    expect(sanitizeSpreadsheetCell("+cmd|' /C calc'!A0")).toBe(
+      "'+cmd|' /C calc'!A0",
+    );
+    expect(sanitizeSpreadsheetCell("-cmd|' /C calc'!A0")).toBe(
+      "'-cmd|' /C calc'!A0",
+    );
+    expect(sanitizeSpreadsheetCell("@SUM(1+1)")).toBe("'@SUM(1+1)");
+    expect(sanitizeSpreadsheetCell("   =1+1")).toBe("'   =1+1");
+    expect(sanitizeSpreadsheetCell("\u00A0@1+1")).toBe("'\u00A0@1+1");
+    expect(sanitizeSpreadsheetCell("\x00=1+1")).toBe("'\x00=1+1");
+    expect(sanitizeSpreadsheetCell("  \x0b=1+1")).toBe("'  \x0b=1+1");
+    expect(sanitizeSpreadsheetCell("-12.5")).toBe("-12.5");
+    expect(sanitizeSpreadsheetCell("+3.25")).toBe("+3.25");
+    expect(sanitizeSpreadsheetCell("  -42.0")).toBe("  -42.0");
+    expect(sanitizeSpreadsheetCell("+1e999")).toBe("'+1e999");
   });
 });

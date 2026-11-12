@@ -8,38 +8,24 @@ import { defineConfig, type UserConfig } from "vite";
 import istanbul from "vite-plugin-istanbul";
 
 /**
- * Resolve the default process environment dictionary when running in Node, or an empty object in browser contexts.
- *
- * @returns Default environment variable dictionary.
- */
-export function getDefaultViteEnv(): Record<string, string | undefined> {
-  return typeof process !== "undefined" && process.env ? process.env : {};
-}
-
-/**
- * Construct the Vite development, preview, and build configuration.
- *
- * @param env - Environment variable mapping used to resolve API proxy and preview port settings.
- * @returns Resolved Vite user configuration.
+ * Constructs the Vite configuration with optional environment overrides.
+ * @param {Record<string, string | undefined>} [env=process.env] - Environment dictionary.
+ * @returns {UserConfig} Vite configuration object.
  */
 export function createViteConfig(
-  env: Record<string, string | undefined> = getDefaultViteEnv(),
+  env: Record<string, string | undefined> = process.env,
 ): UserConfig {
+  const apiPort = env.T1D_API_PORT || "8000";
   const apiProxyTarget =
-    env.VITE_API_PROXY_TARGET ||
-    `http://127.0.0.1:${env.T1D_API_PORT || "8000"}`;
+    env.VITE_API_PROXY_TARGET || `http://127.0.0.1:${apiPort}`;
+  const webPreviewPort = Number(env.T1D_WEB_PORT || 3000);
   const buildTimestampUtc =
     env.BUILD_TIMESTAMP_UTC ||
-    new Date().toISOString().replace(/\.\d{3}Z$/, " UTC");
-
-  const buildTimestampDefineKey = ["__BUILD_TIMESTAMP", "_UTC__"].join("");
+    `${new Date().toISOString().replace(/\.\d{3}Z$/, "Z")} UTC`;
 
   return defineConfig({
     define: {
-      [buildTimestampDefineKey]: JSON.stringify(buildTimestampUtc),
-    },
-    optimizeDeps: {
-      exclude: ["@playwright/test", "vite", "vite-plugin-istanbul", "vitest"],
+      __BUILD_TIMESTAMP_UTC__: JSON.stringify(buildTimestampUtc),
     },
     build: {
       target: "esnext",
@@ -53,7 +39,7 @@ export function createViteConfig(
       },
     },
     preview: {
-      port: Number(env.T1D_WEB_PORT || 3000),
+      port: webPreviewPort,
       proxy: {
         "/api": {
           target: apiProxyTarget,
@@ -63,17 +49,17 @@ export function createViteConfig(
     },
     plugins: [
       istanbul({
-        include: ["src/**/*"],
-        exclude: ["node_modules", "test/", "tests/", "*.config.ts"],
+        include: "src/*",
+        exclude: ["node_modules", "tests/", "tests-e2e/"],
         extension: [".js", ".ts"],
-        requireEnv: false,
+        requireEnv: true,
       }),
     ],
   });
 }
 
 /**
- * Vite configuration for development, preview server proxying, and Istanbul instrumentation.
+ * Default Vite configuration export.
  */
 const viteConfig: UserConfig = createViteConfig();
 

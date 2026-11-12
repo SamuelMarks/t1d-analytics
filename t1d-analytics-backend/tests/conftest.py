@@ -2,8 +2,8 @@
 
 import sys
 import types
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 from unittest.mock import MagicMock
 
 import duckdb
@@ -41,9 +41,23 @@ def _mock_any_llm(
     monkeypatch.delenv("T1D_JAEB_DIR", raising=False)
     monkeypatch.delenv("T1D_DB_DIR", raising=False)
     monkeypatch.delenv("T1D_SESSIONS_DB", raising=False)
-    default_sess_dir = tmp_path_factory.getbasetemp() / "default_sessions"
+    basetemp = tmp_path_factory.getbasetemp()
+    monkeypatch.setenv("T1D_EXTRA_DB_ROOTS", str(basetemp))
+    default_sess_dir = basetemp / "default_sessions"
     default_sess_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv(
         "T1D_SESSIONS_DB_PATH", str(default_sess_dir / "sessions.duckdb")
     )
+    from t1d_analytics.api import app
+    from t1d_analytics.rate_limiter import (
+        RATE_LIMIT_STORE,
+        BaseRateLimiter,
+        get_rate_limiter,
+    )
+
+    RATE_LIMIT_STORE.clear()
+    get_rate_limiter().reset()
+    app_limiter = getattr(app.state, "rate_limiter", None)
+    if isinstance(app_limiter, BaseRateLimiter):
+        app_limiter.reset()
     yield

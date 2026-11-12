@@ -1,13 +1,17 @@
 """Chat, NL-to-SQL streaming, asynchronous job polling, and read-only SQL execution endpoints."""
 
 import logging
-from typing import AsyncIterator, Callable, Optional, Union
+from collections.abc import AsyncIterator, Callable
 
 import duckdb
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from t1d_analytics.api_dependencies import AppServices, get_app_services
+from t1d_analytics.api_dependencies import (
+    AppServices,
+    get_app_services,
+    resolve_default_app_services,
+)
 from t1d_analytics.api_schemas import (
     ApiError,
     ChatRequest,
@@ -35,24 +39,28 @@ chat_router = APIRouter()
 
 def stream_chat_events(
     request: ChatRequest,
-    req: Optional[Request] = None,
-    services: Optional[AppServices] = None,
+    req: Request | None = None,
+    services: AppServices | None = None,
 ) -> AsyncIterator[str]:
     """
     Generate Server-Sent Events for streaming chat queries and SQL results.
 
     Args:
-    ----
         request: The incoming ChatRequest.
         req: Optional FastAPI Request instance to detect client disconnection.
         services: Optional injected AppServices dependency bundle.
 
     Returns:
-    -------
         AsyncIterator[str]: SSE data lines formatted as JSON strings.
 
     """
-    svc = services or get_app_services()
+    svc = (
+        services
+        if services is not None
+        else (
+            get_app_services(req) if req is not None else resolve_default_app_services()
+        )
+    )
     return generate_sse_chat_events(
         request=request,
         req=req,
@@ -60,19 +68,18 @@ def stream_chat_events(
         execute_fn=svc.execute_sql,
         connect_fn=svc.duckdb_connect,
         schema_fn=svc.get_database_schema,
-        stream_fn=svc.stream_llm_tokens,
+        stream_fn=svc.stream_llm_completion_tokens,
         error_parser=svc.parse_error,
     )
 
 
 def _apply_provider_headers(
-    request: Union[ChatRequest, NlToSqlEvalRequest], req: Request
+    request: ChatRequest | NlToSqlEvalRequest, req: Request
 ) -> None:
     """
     Populate `request.provider` and `request.api_key` from HTTP headers when omitted in body.
 
     Args:
-    ----
         request: Incoming `ChatRequest` or `NlToSqlEvalRequest` payload.
         req: Incoming FastAPI HTTP request.
 
@@ -93,12 +100,10 @@ def _dispatch_async_chat_job(
     Validate `request.db_path` and enqueue an asynchronous chat job in `ChatJobManager`.
 
     Args:
-    ----
         request: Validated `ChatRequest` payload.
         svc: Active `AppServices` bundle.
 
     Returns:
-    -------
         ChatResponse: Immediate pending ticket (`status="pending"`, `job_id="chatjob-..."`).
 
     """
@@ -115,7 +120,7 @@ def _dispatch_async_chat_job(
             request=job_req,
             db_validator=svc.validate_db_path,
             execute_fn=svc.execute_sql,
-            translate_fn=svc.generate_sql_from_nl,
+            translate_fn=svc.translate_nl_to_sql,
             error_parser=svc.parse_error,
         )
         on_progress(resp.content)
@@ -142,22 +147,18 @@ def chat_endpoint(
     Handle incoming chat messages and execute SQL or NLP queries synchronously or asynchronously.
 
     Args:
-    ----
         request: The incoming ChatRequest.
         req: The incoming FastAPI HTTP request.
         async_poll: Optional query parameter to dispatch asynchronously and return a pending ticket.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         ChatResponse: A ChatResponse indicating pending job status, success, or error.
 
     Raises:
-    ------
         HTTPException: If request parameters are invalid.
 
     """
-    svc.enforce_rate_limit(req)
     _apply_provider_headers(request, req)
 
     if not request.message.strip():
@@ -173,7 +174,7 @@ def chat_endpoint(
         request=request,
         db_validator=svc.validate_db_path,
         execute_fn=svc.execute_sql,
-        translate_fn=svc.generate_sql_from_nl,
+        translate_fn=svc.translate_nl_to_sql,
         error_parser=svc.parse_error,
     )
 
@@ -188,21 +189,17 @@ def submit_chat_job_endpoint(
     Enqueue an asynchronous chat or NL-to-SQL request and immediately return a pending job ticket.
 
     Args:
-    ----
         request: The incoming ChatRequest.
         req: The incoming FastAPI HTTP request.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         ChatResponse: Immediate pending job response (`status="pending"`, `job_id="chatjob-..."`).
 
     Raises:
-    ------
         HTTPException: If `request.message` is empty.
 
     """
-    svc.enforce_rate_limit(req)
     _apply_provider_headers(request, req)
 
     if not request.message.strip():
@@ -217,28 +214,22 @@ def submit_chat_job_endpoint(
 @chat_router.get("/api/chat/jobs/{job_id}", response_model=ChatResponse)
 def get_chat_job_endpoint(
     job_id: str,
-    req: Request,
     svc: AppServices = Depends(get_app_services),
 ) -> ChatResponse:
     """
     Poll the status of an asynchronous chat job and return the completed `ChatResponse` once finished.
 
     Args:
-    ----
         job_id: Target chat job identifier (`chatjob-...`).
-        req: The incoming FastAPI HTTP request.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         ChatResponse: Pending status with `partial_content` or completed `ChatResponse` record.
 
     Raises:
-    ------
         ChatJobNotFoundError: Status 404 when `job_id` does not exist.
 
     """
-    svc.enforce_rate_limit(req)
     chat_mgr = svc.get_chat_job_manager()
     job_resp = chat_mgr.get_chat_job_response(job_id)
     if job_resp is None:
@@ -256,17 +247,14 @@ async def chat_stream_endpoint(
     Handle chat requests with Server-Sent Events (SSE) streaming.
 
     Args:
-    ----
         request: The incoming ChatRequest.
         req: The incoming FastAPI HTTP request.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         StreamingResponse: StreamingResponse streaming SSE token and result events.
 
     """
-    svc.enforce_rate_limit(req)
     _apply_provider_headers(request, req)
 
     return StreamingResponse(
@@ -283,24 +271,19 @@ async def chat_stream_endpoint(
 @chat_router.post("/api/execute-sql", response_model=ExecuteSqlResponse)
 def execute_sql_endpoint(
     request: ExecuteSqlRequest,
-    req: Request,
     svc: AppServices = Depends(get_app_services),
 ) -> ExecuteSqlResponse:
     """
     Execute an arbitrary SQL query against the database.
 
     Args:
-    ----
         request: The request containing the query and optional db_path.
-        req: The incoming FastAPI HTTP request.
         svc: Injected AppServices dependency bundle.
 
     Returns:
-    -------
         ExecuteSqlResponse: The execution response containing results or error.
 
     """
-    svc.enforce_rate_limit(req)
     if not request.query.strip():
         return ExecuteSqlResponse(
             error=ApiError(error_code="backend.emptyMessage", params={})
@@ -328,12 +311,10 @@ def _dispatch_async_eval_job(
     Validate `request.db_path` and enqueue an asynchronous NL-to-SQL evaluation job in `ChatJobManager`.
 
     Args:
-    ----
         request: Validated `NlToSqlEvalRequest` payload.
         svc: Active `AppServices` bundle.
 
     Returns:
-    -------
         NlToSqlEvalResponse: Immediate pending ticket (`status="pending"`, `job_id="chatjob-..."`).
 
     """
@@ -350,7 +331,7 @@ def _dispatch_async_eval_job(
             request=job_req,
             db_validator=svc.validate_db_path,
             execute_fn=svc.execute_sql,
-            translate_fn=svc.generate_sql_from_nl,
+            translate_fn=svc.translate_nl_to_sql,
             error_parser=svc.parse_error,
         )
         on_progress(resp.content)
@@ -379,22 +360,18 @@ def eval_nl_to_sql_endpoint(
     Evaluate a natural-language question against a gold-standard SQL query on the read-only DuckDB cursor.
 
     Args:
-    ----
         request: Incoming `NlToSqlEvalRequest` payload.
         req: Incoming FastAPI HTTP request.
         async_poll: Optional query parameter to dispatch asynchronously and return a pending ticket.
         svc: Injected `AppServices` dependency bundle.
 
     Returns:
-    -------
         NlToSqlEvalResponse: Evaluation metrics, generated SQL, and read-only DuckDB result rows.
 
     Raises:
-    ------
         HTTPException: If `request.question` is empty.
 
     """
-    svc.enforce_rate_limit(req)
     _apply_provider_headers(request, req)
 
     if not request.question.strip():
@@ -409,7 +386,7 @@ def eval_nl_to_sql_endpoint(
         request=request,
         db_validator=svc.validate_db_path,
         execute_fn=svc.execute_sql,
-        translate_fn=svc.generate_sql_from_nl,
+        translate_fn=svc.translate_nl_to_sql,
         error_parser=svc.parse_error,
     )
 
@@ -424,21 +401,17 @@ def submit_eval_nl_to_sql_job_endpoint(
     Enqueue an asynchronous NL-to-SQL Gold-Standard evaluation job and immediately return a pending ticket.
 
     Args:
-    ----
         request: Incoming `NlToSqlEvalRequest` payload.
         req: Incoming FastAPI HTTP request.
         svc: Injected `AppServices` dependency bundle.
 
     Returns:
-    -------
         NlToSqlEvalResponse: Immediate pending evaluation ticket (`status="pending"`, `job_id="chatjob-..."`).
 
     Raises:
-    ------
         HTTPException: If `request.question` is empty.
 
     """
-    svc.enforce_rate_limit(req)
     _apply_provider_headers(request, req)
 
     if not request.question.strip():
@@ -454,28 +427,22 @@ def submit_eval_nl_to_sql_job_endpoint(
 )
 def get_eval_nl_to_sql_job_endpoint(
     job_id: str,
-    req: Request,
     svc: AppServices = Depends(get_app_services),
 ) -> NlToSqlEvalResponse:
     """
     Poll the status of an asynchronous NL-to-SQL evaluation job and return the completed `NlToSqlEvalResponse`.
 
     Args:
-    ----
         job_id: Target evaluation job identifier (`chatjob-...`).
-        req: Incoming FastAPI HTTP request.
         svc: Injected `AppServices` dependency bundle.
 
     Returns:
-    -------
         NlToSqlEvalResponse: Pending status or completed `NlToSqlEvalResponse` record.
 
     Raises:
-    ------
         ChatJobNotFoundError: Status 404 when `job_id` does not exist.
 
     """
-    svc.enforce_rate_limit(req)
     chat_mgr = svc.get_chat_job_manager()
     eval_resp = chat_mgr.get_eval_job_response(job_id)
     if eval_resp is None:

@@ -12,31 +12,39 @@ import { type SqlCellValue } from "./formatters";
 export type ExportableCellValue =
   SqlCellValue | Record<string, SqlCellValue> | undefined;
 
-const TAB_CHAR = String.fromCharCode(9);
-const CR_CHAR = String.fromCharCode(13);
-const LF_CHAR = String.fromCharCode(10);
-const CRLF = CR_CHAR + LF_CHAR;
+const CRLF = "\r\n";
+
+const SAFE_SIGNED_DECIMAL_RE = /^[+-](?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
 /**
- * Neutralizes spreadsheet formula injection prefixes (`=`, `+`, `-`, `@`, TAB, CR)
- * while preserving signed numeric literals (`-12.5`, `+3.2`).
+ * Neutralizes spreadsheet formula injection prefixes (`=`, `+`, `-`, `@`, TAB, CR, LF)
+ * while preserving finite signed decimal literals (`-12.5`, `+3.2`).
  * @param {string} strVal - Raw string representation of the cell value.
  * @returns {string} Sanitized string safe for spreadsheet opening.
  */
 export function sanitizeSpreadsheetCell(strVal: string): string {
-  if (!strVal) {
+  if (strVal.length === 0) {
     return strVal;
   }
-  const strippedLeading = strVal.replace(/^ +/, "");
-  const triggerChar = strippedLeading ? strippedLeading[0] : "";
+  const firstCode = strVal.charCodeAt(0);
+  const strippedLeading = strVal.replace(/^[ \u00A0]+/, "");
+  const triggerChar = strippedLeading[0] ?? "";
+  const triggerCode =
+    strippedLeading.length > 0 ? strippedLeading.charCodeAt(0) : 32;
   if (
-    [TAB_CHAR, CR_CHAR, LF_CHAR].includes(strVal[0]) ||
-    ["=", "+", "-", "@", TAB_CHAR, CR_CHAR, LF_CHAR].includes(triggerChar)
+    firstCode < 32 ||
+    triggerCode < 32 ||
+    triggerChar === "=" ||
+    triggerChar === "+" ||
+    triggerChar === "-" ||
+    triggerChar === "@"
   ) {
     let isNumeric = false;
-    if (triggerChar === "+" || triggerChar === "-") {
-      const num = Number(strippedLeading);
-      isNumeric = !isNaN(num) && isFinite(num);
+    if (
+      (triggerChar === "+" || triggerChar === "-") &&
+      SAFE_SIGNED_DECIMAL_RE.test(strippedLeading)
+    ) {
+      isNumeric = Number.isFinite(Number(strippedLeading));
     }
     if (!isNumeric) {
       return `'${strVal}`;
