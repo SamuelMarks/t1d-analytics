@@ -730,6 +730,22 @@ def test_read_only_duckdb_cursor_and_jaeb_attachment(tmp_path: Path) -> None:
     proxy_self.close()
 
 
+def _resolve_parity_modes(has_ts_compiler: bool) -> tuple[str, ...]:
+    """
+    Determine the Node.js TypeScript evaluation modes to verify for OWASP CSV parity.
+
+    Args:
+        has_ts_compiler: Whether `t1d-analytics-web/node_modules/typescript/lib/typescript.js` exists.
+
+    Returns:
+        tuple[str, ...]: Ordered sequence of evaluation mode identifiers (`"auto"`, `"strip"`, `"fallback"`).
+
+    """
+    if has_ts_compiler:
+        return ("auto", "strip", "fallback")
+    return ("strip", "fallback")
+
+
 def test_csv_formula_injection_backend_frontend_parity() -> None:
     """Verify `sql_utils.sanitize_spreadsheet_cell` and `exporters.ts:sanitizeSpreadsheetCell` produce identical OWASP outputs."""
     import json
@@ -777,12 +793,57 @@ import * as nodeModule from "node:module";
 import vm from "node:vm";
 
 const vectors = JSON.parse(process.argv[1]);
-const forceStrip = process.argv[2] === "strip";
+const mode = process.argv[2] ?? "auto";
 const src = fs.readFileSync("./src/exporters.ts", "utf8");
 const tsPath = "./node_modules/typescript/lib/typescript.js";
 
+function stripTypeScriptFallback(code) {
+  const withoutTypeImports = code.replace(
+    /^\\s*import\\s+(?:type\\b[^;]*|\\{\\s*(?:type\\s+\\w+\\s*,?\\s*)+\\})\\s*from\\s*["'][^"']+["'];?\\s*$/gm,
+    "",
+  );
+  const withoutTypeAliases = withoutTypeImports.replace(
+    /^\\s*(?:export\\s+)?type\\s+\\w+\\s*=[\\s\\S]*?;\\s*$/gm,
+    "",
+  );
+  const withoutCtorGenerics = withoutTypeAliases.replace(
+    /\\b(new\\s+[A-Za-z_$][\\w$]*)\\s*<[^>;()]*>\\s*\\(/g,
+    "$1(",
+  );
+  return withoutCtorGenerics.replace(
+    /((?:export\\s+)?function\\s+[A-Za-z_$][\\w$]*\\s*)\\(([\\s\\S]*?)\\)\\s*(?::\\s*[^{]+?)?\\s*\\{/g,
+    (_match, fnPrefix, rawParams) => {
+      const parts = [];
+      let current = "";
+      let angleDepth = 0;
+      for (const ch of rawParams) {
+        if (ch === "<") angleDepth += 1;
+        else if (ch === ">") angleDepth = Math.max(0, angleDepth - 1);
+        if (ch === "," && angleDepth === 0) {
+          parts.push(current);
+          current = "";
+        } else {
+          current += ch;
+        }
+      }
+      if (current.trim().length > 0) parts.push(current);
+      const cleanParams = parts
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0)
+        .map((p) => {
+          const colonIdx = p.indexOf(":");
+          return (colonIdx >= 0 ? p.slice(0, colonIdx) : p)
+            .replace(/\\?$/, "")
+            .trim();
+        })
+        .join(", ");
+      return `${fnPrefix}(${cleanParams}) {`;
+    },
+  );
+}
+
 let sanitizeFn;
-if (!forceStrip && fs.existsSync(tsPath)) {
+if (mode === "auto" && fs.existsSync(tsPath)) {
   const { default: ts } = await import(tsPath);
   const transpiled = ts.transpileModule(src, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -790,10 +851,17 @@ if (!forceStrip && fs.existsSync(tsPath)) {
   const mod = { exports: {} };
   vm.runInNewContext(transpiled, { module: mod, exports: mod.exports, Blob, URL, document: {} });
   sanitizeFn = mod.exports.sanitizeSpreadsheetCell;
-} else {
+} else if (
+  mode !== "fallback" &&
+  typeof nodeModule.stripTypeScriptTypes === "function"
+) {
   const stripped = nodeModule
     .stripTypeScriptTypes(src)
     .replace(/^\\s*import\\s*\\{\\s*\\}\\s*from\\s*["'][^"']+["'];?\\s*$/gm, "");
+  const esm = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(stripped)}`);
+  sanitizeFn = esm.sanitizeSpreadsheetCell;
+} else {
+  const stripped = stripTypeScriptFallback(src);
   const esm = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(stripped)}`);
   sanitizeFn = esm.sanitizeSpreadsheetCell;
 }
@@ -802,7 +870,9 @@ const out = vectors.map((v) => sanitizeFn(v));
 process.stdout.write(JSON.stringify(out));
 """
     assert exporters_ts.is_file()
-    modes = ["auto", "strip"] if ts_compiler_js.is_file() else ["strip"]
+    assert _resolve_parity_modes(True) == ("auto", "strip", "fallback")
+    assert _resolve_parity_modes(False) == ("strip", "fallback")
+    modes: tuple[str, ...] = _resolve_parity_modes(ts_compiler_js.is_file())
     for mode in modes:
         proc = subprocess.run(
             [
@@ -815,11 +885,12 @@ process.stdout.write(JSON.stringify(out));
                 mode,
             ],
             cwd=str(web_dir),
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
         )
-        ts_outputs = json.loads(proc.stdout)
+        assert proc.returncode == 0, f"Node parity check ({mode}) failed: {proc.stderr}"
+        ts_outputs: list[str] = json.loads(proc.stdout)
         assert py_outputs == ts_outputs
     assert py_outputs[3] == "'=SUM(A1:A10)"
     assert py_outputs[19] == "-12.5"

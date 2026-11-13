@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import datetime
 import decimal
 import logging
@@ -762,6 +763,9 @@ def close_read_only_duckdb_pool() -> None:
 
     """
     global_read_only_duckdb_pool.close_all()
+
+
+atexit.register(close_read_only_duckdb_pool)
 
 
 def execute_duckdb_batch_write_with_retry(
