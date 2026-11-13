@@ -25,12 +25,12 @@ export TPU_DATA_DISK_SIZE="500"
 
 ### 1.2 Repository Installation
 
-On the training instance, install the required frameworks. Both `t1d-analytics` (for data generation) and `gemma-4-sql` (for training orchestration) are needed.
+On the training instance (running **Python 3.12+**), install the required frameworks. Both `t1d-analytics[training]` (for data generation, PEFT/LoRA, and bridge orchestration) and `gemma-4-sql` (for XLA/MaxText training orchestration) are needed.
 
 ```bash
-# Inside the TPU VM
-pip install -e /path/to/t1d-analytics/t1d-analytics-backend
-pip install -e /path/to/gemma-4-sql[all]
+# Inside the TPU VM (Python 3.12+)
+pip install -e "/path/to/t1d-analytics/t1d-analytics-backend[training]"
+pip install -e "/path/to/gemma-4-sql[all]"
 ```
 
 ---
@@ -41,11 +41,11 @@ The foundation of the training process is extracting domain-specific T1D data an
 
 ### 2.1 Download and Load T1D Clinical Data
 
-First, retrieve the public T1D datasets and load them into a local DuckDB instance.
+First, retrieve the public T1D datasets and load them into a local DuckDB instance (or run `t1d-analytics seed -d ./data --db t1d_analytics.duckdb` to initialize deterministic baseline cohorts and canonical clinical views).
 
 ```bash
 # 1. Download datasets
-t1d-analytics download
+t1d-analytics download -o ./data
 
 # 2. Extract downloaded zip files
 t1d-analytics extract --data-dir ./data
@@ -56,11 +56,15 @@ t1d-analytics load --data-dir ./data --db t1d_analytics.duckdb
 
 ### 2.2 Procedural Generation of Training Pairs
 
-Leverage a local LLM (e.g., `ollama run gemma4`) to inspect the T1D DuckDB schema and generate high-quality `(Prompt, SQL)` pairs. This step generates the `pretrain_data`, `sft_data`, and `dpo_data` tables within the `t1d_analytics.duckdb` database.
+Leverage a local LLM (e.g., `ollama pull gemma4` or lightweight `gemma:2b`) to inspect the T1D DuckDB schema, synthesize `(Prompt, Chosen SQL, Rejected SQL)` triples validated via DuckDB `EXPLAIN`, and mine DPO preference perturbations. This step populates `pretrain_data`, `sft_data`, and `dpo_data` (plus optional leakage-checked `pretrain_{train,val,test}`, `sft_{train,val,test}`, and `dpo_{train,val,test}` splits) inside `t1d_analytics.duckdb`.
 
 ```bash
-# Generate 1000 pairs per table
-t1d-analytics generate-training-data --db t1d_analytics.duckdb --num-pairs 1000 --model gemma4
+# Generate 1000 pairs per table with 80/10/10 train/val/test splits
+t1d-analytics generate-training-data \
+    --db t1d_analytics.duckdb \
+    --num-pairs 1000 \
+    --model gemma4 \
+    --split-ratios "0.8,0.1,0.1"
 ```
 
 ---
@@ -88,8 +92,10 @@ gemma-4-sql etl posttrain \
     --duckdb-table dpo_data \
     --backend maxtext
 
-# Alternative: Run ETL via the t1d-analytics Gemma-4-SQL bridge
-t1d-analytics bridge-gemma-sql etl --stage sft --db t1d_analytics.duckdb --table sft_data
+# Alternative: Run ETL & training via the strategy-backed t1d-analytics Gemma-4-SQL bridge
+# (delegates across CliStrategy, in-process LibraryStrategy, or NativeDuckDbStrategy)
+t1d-analytics bridge-gemma-sql etl --stage sft --db t1d_analytics.duckdb --table sft_data --output-dir ./shards
+t1d-analytics bridge-gemma-sql train --stage sft --config ./sft_config.yaml
 ```
 
 ---
@@ -155,7 +161,8 @@ gemma-4-sql evaluate \
     --dataset t1d_analytics.duckdb \
     --backend maxtext
 
-# Or generate a holdout benchmark accuracy report directly via t1d-analytics:
+# Or generate a holdout benchmark accuracy report (.md or .csv) directly via t1d-analytics
+# (also exposed over HTTP via POST /api/eval/nl-to-sql and async /api/eval/nl-to-sql/jobs):
 t1d-analytics evaluate \
     --db t1d_analytics.duckdb \
     --test-set test_benchmarks.json \

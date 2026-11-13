@@ -365,6 +365,7 @@ class FakeCommandRunner:
 
         """
         self.commands: list[list[str]] = []
+        self.envs: list[dict[str, str] | None] = []
         self.spawned_servers: list[tuple[list[str], FakeServerProcess]] = []
         self._interrogate_stdout = interrogate_stdout
         self._on_run = on_run
@@ -394,8 +395,9 @@ class FakeCommandRunner:
             CommandResult: Simulated command result.
 
         """
-        _ = (env, cwd, timeout, capture_output, text)
+        _ = (cwd, timeout, capture_output, text)
         self.commands.append(list(cmd))
+        self.envs.append(dict(env) if env is not None else None)
         if self._on_run is not None:
             return self._on_run(cmd)
         joined = " ".join(cmd)
@@ -492,8 +494,18 @@ def test_run_cmd_success_and_failure() -> None:
     assert exc_info.value.code == 42
 
 
-def test_main_full_success_and_custom_suite_config(tmp_path: Path) -> None:
-    """Test main happy path with CommandRunnerProtocol fake, isolated E2E temp dir, and custom URLs."""
+def test_main_full_success_and_custom_suite_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Test main happy path with CommandRunnerProtocol fake, isolated E2E temp dir, and custom URLs.
+
+    Args:
+        tmp_path: Isolated pytest temporary workspace directory.
+        monkeypatch: Pytest monkeypatch fixture for environment isolation.
+
+    """
+    monkeypatch.delenv("T1D_SKIP_README_SHIELD_UPDATE", raising=False)
     (tmp_path / "ci_test.duckdb").write_text("stale", encoding="utf-8")
     backend_dir = tmp_path / "t1d-analytics-backend"
     (backend_dir / "src" / "t1d_analytics").mkdir(parents=True)
@@ -590,11 +602,44 @@ def test_main_full_success_and_custom_suite_config(tmp_path: Path) -> None:
         encoding="utf-8"
     )
 
+    # Verify T1D_SKIP_README_SHIELD_UPDATE=1 skips README updates and is stripped from child envs
+    (tmp_path / "README.md").write_text(
+        NL.join(["[![License](https://img.shields.io/badge/license.svg)](#)", ""]),
+        encoding="utf-8",
+    )
+    env_runner = FakeCommandRunner(interrogate_stdout="actual: 100.0%")
+    monkeypatch.setenv("T1D_SKIP_README_SHIELD_UPDATE", "1")
+    with patch(
+        "shutil.which",
+        side_effect=lambda name, *args, **kwargs: f"/usr/bin/{name}",
+    ):
+        main(
+            workspace_root=tmp_path,
+            runner=env_runner,
+            urlopen_fn=tracking_urlopen,
+            sleep_fn=lambda _: None,
+        )
+    assert "Coverage-" not in (tmp_path / "README.md").read_text(encoding="utf-8")
+    recorded_envs = [e for e in env_runner.envs if e is not None]
+    assert recorded_envs
+    assert all("T1D_SKIP_README_SHIELD_UPDATE" not in e for e in recorded_envs)
+
 
 def test_main_failure_branches(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test main error exits across server readiness, E2E failures, coverage gates, AST audit, and shields."""
+    """
+    Test main error exits across server readiness, E2E failures, coverage gates, AST audit, and shields.
+
+    Args:
+        tmp_path: Isolated pytest temporary workspace directory.
+        capsys: Pytest stdout/stderr capture fixture.
+        monkeypatch: Pytest monkeypatch fixture for environment isolation.
+
+    """
+    monkeypatch.delenv("T1D_SKIP_README_SHIELD_UPDATE", raising=False)
     # 1. Backend fails readiness -> both spawned procs terminated and waited
     r1 = FakeCommandRunner()
     with patch("shutil.which", return_value=None):
@@ -802,7 +847,16 @@ def test_module_dunder_main(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Test execution when scripts.run_tests is invoked as __main__ via runpy in a temporary cwd."""
+    """
+    Test execution when scripts.run_tests is invoked as __main__ via runpy in a temporary cwd.
+
+    Args:
+        tmp_path: Isolated pytest temporary workspace directory.
+        monkeypatch: Pytest monkeypatch fixture for working directory and environment isolation.
+        capsys: Pytest stdout/stderr capture fixture.
+
+    """
+    monkeypatch.delenv("T1D_SKIP_README_SHIELD_UPDATE", raising=False)
     monkeypatch.chdir(tmp_path)
     (tmp_path / "coverage.lcov").write_text(
         NL.join(["SF:file1.py", "DA:1,1", "LF:1", "LH:1", "end_of_record", ""]),

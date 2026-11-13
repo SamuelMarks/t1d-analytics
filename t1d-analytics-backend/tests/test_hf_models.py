@@ -392,3 +392,73 @@ def test_hf_models_protocol_and_abstract_stubs(tmp_path: Path) -> None:
         res = runner.run_training(cfg)
         assert res["status"] == "dry_run_completed"
         assert res["model_name"] == "tiny"
+
+
+def test_hf_factory_real_peft_lora_wrapping() -> None:
+    """Verify `HuggingFaceCausalLMFactory.create_model(..., use_lora=True)` wraps a real `torch.nn.Module` via `peft`."""
+
+    class _MinimalCausalConfig:
+        """Minimal Hugging Face causal LM config namespace required by `peft.get_peft_model`."""
+
+        use_return_dict: bool = True
+        tie_word_embeddings: bool = False
+
+    class _TinyAttentionCausalModule(torch.nn.Module):
+        """Minimal `torch.nn.Module` exposing `q_proj`, `k_proj`, `v_proj`, and `o_proj` linear layers."""
+
+        def __init__(self) -> None:
+            """Initialize linear projection layers and config attribute."""
+            super().__init__()
+            self.config = _MinimalCausalConfig()
+            self.q_proj = torch.nn.Linear(8, 8)
+            self.k_proj = torch.nn.Linear(8, 8)
+            self.v_proj = torch.nn.Linear(8, 8)
+            self.o_proj = torch.nn.Linear(8, 8)
+
+        def prepare_inputs_for_generation(
+            self, input_ids: torch.Tensor
+        ) -> dict[str, torch.Tensor]:
+            """
+            Prepare generation input dictionary for PEFT causal LM wrapper.
+
+            Args:
+                input_ids: Input token tensor.
+
+            Returns:
+                dict[str, torch.Tensor]: Dictionary mapping `input_ids` to tensor.
+
+            """
+            return {"input_ids": input_ids}
+
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+            """
+            Compute linear forward projection.
+
+            Args:
+                input_ids: Float input activation tensor of trailing dimension 8.
+
+            Returns:
+                torch.Tensor: Projected activation tensor.
+
+            """
+            out: torch.Tensor = self.o_proj(self.q_proj(input_ids))
+            return out
+
+    base_mod = _TinyAttentionCausalModule()
+    factory = HuggingFaceCausalLMFactory()
+    with patch(
+        "transformers.AutoModelForCausalLM.from_pretrained", return_value=base_mod
+    ):
+        wrapped = ORIGINAL_CREATE_MODEL(
+            factory,
+            "tiny-real-peft",
+            device="cpu",
+            use_lora=True,
+            lora_r=4,
+            lora_alpha=8,
+            lora_dropout=0.05,
+        )
+    assert any(p.requires_grad for p in wrapped.parameters())
+    state_keys = list(wrapped.state_dict().keys())
+    assert any("lora_A" in key for key in state_keys)
+    assert any("lora_B" in key for key in state_keys)

@@ -32,8 +32,8 @@ This project provides a robust CLI for data retrieval, a highly optimized DuckDB
 - **Local DuckDB Analytics**: Automatically parses raw clinical trial files (with encoding and delimiter detection) into a pooled, read-only validated local DuckDB database with data quality profiling and export to Excel (`.xlsx`), Parquet, CSV, and JSON.
 - **Multi-Provider Natural Language to SQL & Rule-Based Fallback**: Integrated with [Ollama](https://ollama.com/) (`gemma:2b`, `llama3.2:1b`, `phi4-mini`, `gemma4`) and Mozilla's [any-llm](https://github.com/mozilla-ai/any-llm) (`huggingface`, `openai`, `anthropic`, `google`), with automatic schema-guided rule-based SQL fallback and diagnostic reporting when LLM inference is unavailable.
 - **Gemma-4-SQL Training Pipeline**: Provides CLI and API tools to procedurally generate stratified training datasets (`pretrain`, `sft`, and `dpo`), bridge directly to `gemma-4-sql`, and orchestrate local CPU/GPU or Google Cloud TPU (`remote-tpu-maxtext`) training jobs.
-- **FastAPI Backend**: A modular, localized REST and Server-Sent Events (SSE) streaming API serving chat sessions, SQL execution, table profiling, background training jobs, and deep health diagnostics.
-- **Vanilla TypeScript Web UI**: A responsive dark-mode web application built without heavy frameworks (No React/Angular/Vue). Includes composable controllers for chat sessions (`/chats/<id>` shareable deep-linking), a Visual Cohort Builder, a Clinical Prompt & SQL Template Library, a Schema Explorer & Database Switcher, CGM Ambulatory Glucose Profile (AGP) metrics/charts, multi-provider LLM configuration, and 8-locale internationalization (`en`, `es`, `fr`, `de`, `zh`, `ja`, `ar`, `he` with RTL support).
+- **FastAPI Backend**: A modular, localized REST, asynchronous job polling (`/api/chat/jobs`, `/api/eval/nl-to-sql/jobs`), and Server-Sent Events (SSE) streaming API serving chat sessions, SQL execution, clinical query templates (`/api/templates`), table profiling, streaming exports, background training jobs, optional API key / Bearer authentication, route-tiered rate limiting, and deep health diagnostics.
+- **Vanilla TypeScript Web UI**: A responsive dark-mode web application built without heavy frameworks (No React/Angular/Vue). Powered by a strongly typed `AppEventBus`, composable controllers for chat sessions (`/chats/<id>` shareable deep-linking), a Visual Cohort Builder, an Academic Table 1 & Clinical SQL Template Picker, a Schema Explorer & Database Switcher, responsive `viewBox` SVG CGM Ambulatory Glucose Profile (AGP) and bar/line charts, paginated formula-injection-safe result exports, multi-provider LLM configuration, and 8-locale internationalization (`en`, `es`, `fr`, `de`, `zh`, `ja`, `ar`, `he` with RTL support).
 - **Uncompromising Quality**: Enforces strict 100% test coverage (lines, branches, functions, statements) and 100% documentation coverage across both the Python backend and TypeScript frontend.
 
 ## 🏗️ Architecture & Tech Stack
@@ -42,39 +42,49 @@ The repository is structured into distinct, decoupled functional layers:
 
 ```text
 t1d-analytics/
-├── scripts/                      # Full-stack test & LCOV coverage runner (run_tests.py)
-├── t1d-analytics-backend/        # Python Backend Package
+├── libscript.json                # Declarative LibScript multi-cloud, service, and TPU manifest
+├── Makefile / make.sh / make.bat # Cross-platform native and Docker lifecycle automation
+├── test.sh / test.cmd            # Cloud deployment, TLS, and remote health verification harness
+├── scripts/                      # Full-stack test, AST, & LCOV coverage runner (run_tests.py)
+├── t1d-analytics-backend/        # Python Backend Package (Python 3.12+)
 │   ├── pyproject.toml            # Python package metadata and strict tool configuration
 │   ├── docs_src/                 # Sphinx documentation sources
 │   ├── src/t1d_analytics/        # Python Backend Core
-│   │   ├── api.py                # FastAPI application factory, middleware, and lifespan
-│   │   ├── routers/              # Modular API routers (chat, sessions, status, tables, training)
-│   │   ├── cli.py                # Command-line interface entry point
-│   │   ├── cli_parser.py         # Strongly-typed CLI argument parser (15 subcommands)
-│   │   ├── cli_handlers.py       # CLI subcommand handlers
-│   │   ├── downloader.py         # Authenticated dataset scraping and concurrent downloading
-│   │   ├── archive_extractor.py  # Safe zip extraction with decompression limits
-│   │   ├── parser.py             # HTML dataset metadata parser
-│   │   ├── ingestion.py          # DuckDB CSV/TXT/SAS/SPSS loader and directory watcher
-│   │   ├── seed.py               # Baseline T1D clinical cohort seeding and canonical views
-│   │   ├── analytics.py          # DuckDB schema inspection, table profiling, and REPL
-│   │   ├── chat_service.py       # NL-to-SQL translation, SSE streaming, and evaluation
-│   │   ├── sql_fallback_synthesizer.py # Deterministic schema-guided fallback SQL synthesis
-│   │   ├── llm_client.py         # Ollama and any-llm multi-provider client
-│   │   ├── gemma_bridge.py       # Bridge to external gemma-4-sql ETL and training toolchains
-│   │   ├── training_data.py      # Synthetic Pretrain/SFT/DPO pair generation and export
-│   │   ├── training_runner.py    # Local CPU/GPU, HuggingFace, and TPU training execution
-│   │   ├── tpu_orchestrator.py   # Google Cloud TPU VM and XPK workload orchestration
-│   │   ├── job_manager.py        # Background training job lifecycle manager
-│   │   ├── session_store.py      # Persistent DuckDB chat session storage
-│   │   ├── diagnostics.py        # System, database, and LLM readiness diagnostics
-│   │   ├── models.py             # Pydantic domain and training models
-│   │   └── i18n.py               # Backend gettext internationalization (en, ja, ar, he)
+│   │   ├── api.py                        # FastAPI application factory, middleware, and lifespan
+│   │   ├── api_dependencies.py           # AppServices DI container, auth, and CORS dependencies
+│   │   ├── api_exports.py                # Bounded-memory DuckDB COPY & cursor streaming exports
+│   │   ├── api_schemas.py                # Canonical Pydantic API request/response wire schemas
+│   │   ├── routers/                      # Modular routers (chat, session, status, table, training)
+│   │   ├── cli.py / cli_parser.py / cli_handlers.py # 15-subcommand typed CLI & handlers
+│   │   ├── downloader.py / parser.py / archive_extractor.py # Authenticated download & extraction
+│   │   ├── ingestion.py                  # DuckDB tabular loader, manifest, and directory watcher
+│   │   ├── clinical_file_readers.py      # CSV/TXT/SAS (.sas7bdat/.xpt)/SPSS (.sav) readers
+│   │   ├── ingestion_study_resolver.py   # Clinical trial study & ontology mapping
+│   │   ├── seed.py / jaeb_cohort_sql.py / seed_verifier.py # Cohort seeding & canonical views
+│   │   ├── analytics.py                  # DuckDB schema inspection, table profiling, and REPL
+│   │   ├── db_security.py / duckdb_pool.py / rate_limiter.py # Path guards, pooling, rate limits
+│   │   ├── sql_executor.py / sql_utils.py / sql_agent.py # Read-only SQL execution & sanitization
+│   │   ├── chat_service.py               # Chat service facade
+│   │   ├── chat_turn_executor.py         # Sync, async-job, and holdout evaluation turn executor
+│   │   ├── nl_to_sql_translator.py       # NL-to-SQL translation, EXPLAIN validation, and repair
+│   │   ├── sse_chat_streamer.py          # Disconnect-aware SSE token and SQL result streaming
+│   │   ├── sql_fallback_synthesizer.py   # Deterministic schema-guided fallback SQL synthesis
+│   │   ├── clinical_prompts.py / clinical_query_catalog.py # Prompts & 12 gold SQL templates
+│   │   ├── table1_specs.py / table1_sql_compiler.py / table1_formatter.py / table1_builder.py
+│   │   ├── llm_client.py / ollama_discovery.py / llm_stream_protocols.py # Multi-provider LLM I/O
+│   │   ├── gemma_bridge.py / gemma_cli_toolchain.py / gemma_library_adapter.py / gemma_inprocess_fallback.py
+│   │   ├── hf_models.py                  # Typed PyTorch, HuggingFace, BitsAndBytes & PEFT LoRA factories
+│   │   ├── training_data.py / training_dataset_exporter.py / training_dpo_miner.py # SFT/DPO data
+│   │   ├── training_runner.py / tpu_orchestrator.py / gcs_storage.py # CPU/GPU/TPU training & GCS
+│   │   ├── job_manager.py                # Async chat/eval and training job lifecycle managers
+│   │   ├── session_store.py              # Normalized DuckDB chat session & message persistence
+│   │   ├── diagnostics.py / errors.py    # Readiness diagnostics and structured T1DError hierarchy
+│   │   └── models.py / i18n.py           # Pydantic domain models and gettext localization
 │   └── tests/                    # Pytest unit and integration test suite (100% Coverage)
 └── t1d-analytics-web/            # Vanilla TypeScript Web Interface
     ├── package.json              # Frontend package manifest and scripts
-    ├── src/                      # Core UI coordinator, state, CGM metrics, charts, and CSS
-    │   └── controllers/          # Composable modal, sidebar, schema, model, and status controllers
+    ├── src/                      # Typed AppEventBus, state, API client/types, SVG charts, Table 1, CSS
+    │   └── controllers/          # Composable modal, sidebar, schema, template, model, & status controllers
     ├── tests/                    # Vitest DOM and state unit tests (100% Coverage)
     ├── tests-e2e/                # Playwright mocked E2E and accessibility tests
     └── tests-e2e-full/           # Playwright full-stack E2E tests against live FastAPI + DuckDB
@@ -110,9 +120,9 @@ Clone the repository and prepare your virtual environment:
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install all backend dependencies
+# Install all backend dependencies (add [training] for local LoRA / QLoRA fine-tuning)
 pip install -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt
-pip install -e t1d-analytics-backend
+pip install -e "t1d-analytics-backend[training]"
 ```
 
 ### 2. Setup the Web Frontend
@@ -130,11 +140,13 @@ Please refer to the [USAGE.md](USAGE.md) for detailed instructions on launching 
 
 ## 🧰 Makefile Usage
 
-A cross-platform `Makefile` (POSIX/macOS/Linux) and `make.bat` (Windows) are provided to automate environment provisioning, dependency installation, database ingestion, building, serving, testing, and Docker workflows.
+Cross-platform `Makefile` / `make.sh` (POSIX/macOS/Linux) and `make.bat` (Windows) entry points are provided to automate environment provisioning, dependency installation, database ingestion, building, serving, testing, and Docker workflows.
 
 ```bash
 # POSIX / macOS / Linux
 make <target>
+# Or via the POSIX shell wrapper:
+./make.sh <target>
 
 # Windows (Command Prompt / PowerShell)
 .\make.bat <target>
@@ -226,12 +238,14 @@ The project enforces a strict 100% test coverage and 100% documentation coverage
 
 ```bash
 python scripts/run_tests.py
+# In CI (without mutating README badges on disk):
+T1D_SKIP_README_SHIELD_UPDATE=1 python scripts/run_tests.py
 ```
 
 **Backend (Python):**
 
 ```bash
-pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests/ --cov=t1d_analytics --cov-report=term-missing --cov-fail-under=100
+pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests/ --cov-report=json --cov-report=lcov --cov-fail-under=100
 ```
 
 **Frontend Unit Tests (TypeScript / Vitest):**
@@ -262,8 +276,8 @@ export LIBSCRIPT_PATH="$LIBSCRIPT_DIR/libscript.sh"
 $LIBSCRIPT_PATH install-deps libscript.json
 
 # 2. Build frontend, provision DuckDB, apply Nginx SPA/API ingress, and start daemonized services
-$LIBSCRIPT_PATH start
-$LIBSCRIPT_PATH status
+$LIBSCRIPT_PATH start libscript.json
+$LIBSCRIPT_PATH status libscript.json
 
 # 3. Execute declarative ML training or inference (supports --target local|gcp-tpu-vm|gcp-gpu-vm|gke-xpk)
 $LIBSCRIPT_PATH train libscript.json --dry-run

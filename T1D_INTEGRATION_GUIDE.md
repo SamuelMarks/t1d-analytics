@@ -29,7 +29,7 @@ t1d-analytics load -d ./data --db t1d_analytics.duckdb
 
 ### 3. Generate Training Data
 
-Generate synthetic Text-to-SQL training pairs (`pretrain_data`, `sft_data`, and `dpo_data`, plus optional stratified `_train`, `_val`, and `_test` splits) from the DuckDB schema using a local Ollama model or configured `any-llm` provider:
+Generate synthetic Text-to-SQL training pairs (`pretrain_data`, `sft_data`, and `dpo_data`, plus optional stratified `pretrain_{train,val,test}`, `sft_{train,val,test}`, and `dpo_{train,val,test}` splits) from the DuckDB schema using a local Ollama model (`gemma:2b` or `gemma4`) or configured `any-llm` provider:
 
 ```bash
 t1d-analytics generate-training-data \
@@ -51,13 +51,13 @@ t1d-analytics export-training-data \
 
 ### 4. Extract, Transform, Load (ETL) & Training for Gemma-4-SQL
 
-You can ingest the generated training pairs into `gemma-4-sql` either via the built-in `t1d-analytics` bridge subcommands or directly through the `gemma-4-sql` CLI:
+Install optional LoRA/quantization dependencies via `pip install -e "t1d-analytics-backend[training]"` (Python 3.12+). You can ingest the generated training pairs into `gemma-4-sql` via the built-in `t1d-analytics` bridge (`GemmaSqlPipelineEngine`, supporting `CliStrategy`, in-process `LibraryStrategy`, and `NativeDuckDbStrategy`), the unified `t1d-analytics train` orchestrator, or the `gemma-4-sql` CLI directly:
 
 ```bash
 # Option A: Using the t1d-analytics Gemma-4-SQL bridge
 t1d-analytics bridge-gemma-sql check
 t1d-analytics bridge-gemma-sql etl --stage sft --db t1d_analytics.duckdb --table sft_data --output-dir ./shards
-t1d-analytics bridge-gemma-sql train --stage sft --db t1d_analytics.duckdb --table sft_data
+t1d-analytics bridge-gemma-sql train --stage sft --config ./sft_config.yaml
 
 # Option B: End-to-end automated orchestration via t1d-analytics train
 t1d-analytics train \
@@ -66,6 +66,7 @@ t1d-analytics train \
     --samples-per-table 50 \
     --backend gemma-4-sql \
     --use-lora \
+    --split-validation \
     --execute-training
 
 # Option C: Direct gemma-4-sql CLI invocation
@@ -74,7 +75,7 @@ gemma-4-sql etl sft --duckdb-path t1d_analytics.duckdb --duckdb-table sft_data
 
 ### 5. Evaluate Holdout Execution Accuracy
 
-Evaluate the fine-tuned model against a holdout benchmark set of natural-language clinical questions and gold SQL queries:
+Evaluate the fine-tuned model against a holdout benchmark set of natural-language clinical questions and gold SQL queries (outputs Markdown `.md` or `.csv`; also available via FastAPI `POST /api/eval/nl-to-sql`, async `POST` / `GET /api/eval/nl-to-sql/jobs`, and the 12-template clinical catalog at `GET /api/templates`):
 
 ```bash
 t1d-analytics evaluate \

@@ -145,6 +145,70 @@ class TransformersModuleProtocol(Protocol):
     BitsAndBytesConfig: Callable[..., QuantizationConfigProtocol]
 
 
+class PeftTaskTypeNamespaceProtocol(Protocol):
+    """Protocol for the `peft.TaskType` enum namespace."""
+
+    CAUSAL_LM: str
+
+
+class PeftLoraConfigProtocol(Protocol):
+    """Marker protocol for `peft.LoraConfig` adapter configuration instances."""
+
+
+class PeftLoraConfigFactoryProtocol(Protocol):
+    """Callable protocol for constructing `peft.LoraConfig` adapter configurations."""
+
+    def __call__(
+        self,
+        *,
+        task_type: str,
+        r: int,
+        lora_alpha: int,
+        lora_dropout: float,
+        target_modules: list[str],
+    ) -> PeftLoraConfigProtocol:
+        """
+        Construct a LoRA configuration for causal language modeling.
+
+        Args:
+            task_type: PEFT task type identifier (e.g., `TaskType.CAUSAL_LM`).
+            r: LoRA attention rank dimension.
+            lora_alpha: LoRA scaling alpha parameter.
+            lora_dropout: Dropout probability for LoRA layers.
+            target_modules: Module attribute names to wrap with LoRA adapters.
+
+        Returns:
+            PeftLoraConfigProtocol: Configured LoRA adapter specification.
+
+        """
+        ...
+
+
+class PeftModuleProtocol(Protocol):
+    """Typed protocol for the `peft` parameter-efficient fine-tuning module."""
+
+    TaskType: PeftTaskTypeNamespaceProtocol
+    LoraConfig: PeftLoraConfigFactoryProtocol
+
+    def get_peft_model(
+        self,
+        model: "TorchCausalLMProtocol",
+        peft_config: PeftLoraConfigProtocol,
+    ) -> "TorchCausalLMProtocol":
+        """
+        Wrap a causal language model with PEFT adapter layers.
+
+        Args:
+            model: Base causal language model instance.
+            peft_config: Configured PEFT LoRA adapter specification.
+
+        Returns:
+            TorchCausalLMProtocol: Adapter-wrapped causal language model.
+
+        """
+        ...
+
+
 @runtime_checkable
 class PaddedTokenizerProtocol(Protocol):
     """Runtime-checkable protocol for tokenizers exposing pad_token_id."""
@@ -607,16 +671,16 @@ class HuggingFaceCausalLMFactory(BaseCausalLMFactory):
 
         if use_lora:
             try:
-                import peft
+                peft_mod: PeftModuleProtocol = importlib.import_module("peft")
 
-                peft_config = peft.LoraConfig(
-                    task_type=peft.TaskType.CAUSAL_LM,
+                peft_config = peft_mod.LoraConfig(
+                    task_type=peft_mod.TaskType.CAUSAL_LM,
                     r=lora_r,
                     lora_alpha=lora_alpha,
                     lora_dropout=lora_dropout,
                     target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
                 )
-                model = peft.get_peft_model(model, peft_config)
+                model = peft_mod.get_peft_model(model, peft_config)
             except ImportError as e:
                 raise MissingSdkError(
                     "The 'peft' library is required for LoRA fine-tuning. "

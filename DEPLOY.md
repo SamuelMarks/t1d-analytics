@@ -79,13 +79,15 @@ scp -r ./data/jaeb_raw/ t1d_analytics.duckdb $USER@$TPU_IP:~/t1d-analytics/
 
 ### Automated Stack Provisioning (`provision`)
 
-To provision the cloud infrastructure (`Standard_D8s_v7` default), mount the persistent data disk (`$DATA_DISK_MOUNT`, 100 GB managed disk with `--delete-option Detach` / `retain_on_deprovision: true`), install dependencies (`python 3.12`, `nodejs 20.x`, `postgres 18`, `valkey`, `duckdb`, `nginx`, `ollama`, `uv`), initialize the PostgreSQL and DuckDB analytics/session databases via `provision_db`, build the frontend, configure Nginx SPA and API reverse-proxy ingress via `netctl`, and start the `t1d-api` and `t1d-web` services:
+To provision the cloud infrastructure (`Standard_D8s_v7` default), mount the persistent data disk (`$DATA_DISK_MOUNT`, 100 GB managed disk with `--delete-option Detach` / `retain_on_deprovision: true`), install dependencies (`python 3.12`, `nodejs 20.x`, `postgres 18`, `valkey`, `duckdb`, `nginx`, `ollama`, `uv`), initialize the PostgreSQL and DuckDB analytics/session databases via `provision_db`, build the frontend, configure Nginx SPA (`./t1d-analytics-web/dist`) and API reverse-proxy (`http://127.0.0.1:8001` for `/api`, `/docs`, `/openapi.json` on `t1d-analytics.healthplatform.io` with Let's Encrypt TLS) ingress via `netctl`, pull CPU-safe Ollama models (`gemma:2b`, `llama3.2:1b`, `phi4-mini`), and start the `t1d-api` (port `8001`) and `t1d-web` (port `3000`) services:
 
 > **Persistent `/mnt/data` Layout:** The 100 GB persistent managed disk mounted at `/mnt/data` (configured with `--delete-option Detach`, `delete_on_termination: false`, and `retain_on_deprovision: true`) stores all durable state across VM deprovisioning:
+>
 > - `t1d_analytics.duckdb` (`/mnt/data/t1d_analytics.duckdb`) and `t1d_sessions.duckdb` (`/mnt/data/t1d_sessions.duckdb`)
 > - PostgreSQL relational data (`POSTGRES_DATA_DIR=/mnt/data/postgres`, `PGDATA=/mnt/data/postgres`, `0700` `postgres:postgres`)
 > - Valkey/Redis cache data (`VALKEY_DATA_DIR=/mnt/data/valkey`, `REDIS_DATA_DIR=/mnt/data/valkey`, `0750` `valkey:valkey` / `redis:redis`)
-> - Ollama model weights (`/mnt/data/ollama_models`, `02775` `ollama:ollama`)
+> - Ollama model weights (`/mnt/data/ollama_models`, `02775` `ollama:ollama`; defaults to `DEFAULT_OLLAMA_MODEL=gemma:2b`)
+> - Let's Encrypt TLS certificates (`CERT_STORE_DIR=/mnt/data/certs`, with read-only `privkey.pem` persistence preserved across re-deploys)
 
 **Default Cloud Provider (`$CLOUD_PROVIDER` from `.env`):**
 
@@ -123,11 +125,11 @@ You can also orchestrate dependencies, databases, frontend builds, services, rev
 ./_lib/networking/netctl/cli.sh apply libscript.json --format nginx
 
 # Build frontend, provision DuckDB, start services, and apply Nginx ingress
-./libscript.sh start
-./libscript.sh status
-./libscript.sh health
-./libscript.sh logs
-./libscript.sh stop
+./libscript.sh start libscript.json
+./libscript.sh status libscript.json
+./libscript.sh health libscript.json
+./libscript.sh logs libscript.json
+./libscript.sh stop libscript.json
 
 # Execute declarative ML training or inference (supports --target local|gcp-tpu-vm|gcp-gpu-vm|gke-xpk)
 ./libscript.sh train libscript.json --dry-run
@@ -182,12 +184,12 @@ Before performing backups, ensure you have an object storage bucket available:
 
 ## 3. Backing Up Application State
 
-We need to selectively backup the DuckDB analytics database (`$DATA_DISK_MOUNT`), PostgreSQL directories, and Let's Encrypt certificates before tearing down the instance.
+We selectively back up the persistent data volume (`$DATA_DISK_MOUNT`, which houses DuckDB files, `postgres`, `valkey`, `ollama_models`, and `CERT_STORE_DIR=/mnt/data/certs`) along with `/etc/letsencrypt` symlink metadata before tearing down the instance.
 
 Using the explicit path retention feature:
 
 ```sh
-./libscript.sh backup healthplatform-node --target "$CLOUD_PROVIDER" --paths "$DATA_DISK_MOUNT /var/lib/postgresql/data /etc/letsencrypt" --keep-last 5
+./libscript.sh backup healthplatform-node --target "$CLOUD_PROVIDER" --paths "$DATA_DISK_MOUNT ${CERT_STORE_DIR:-/mnt/data/certs} /etc/letsencrypt" --keep-last 5
 ```
 
 ## 4. Deprovisioning (With Data & IP Retention)
@@ -252,26 +254,29 @@ test.cmd --run-remote-tests
 
 ### Reference: CLI Flags
 
-| Flag                                       | Description                                                                                                                                                            |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--unit-mock`, `--mock-cloud`, `--dry-run` | Executes the full verification workflow in mock mode, validating signal handlers and smoke assertions without spending cloud resources.                                |
-| `--live-cloud`                             | Enforces live cloud provisioning; performs mandatory pre-flight CLI checks for `$PRIMARY_CLOUD_CLI_NAME`, `gcloud`, or `aws` and exits immediately if unauthenticated. |
-| `--local`, `-l`                            | Runs the test suite locally on the current workstation using `pytest` and `npm test`.                                                                                  |
-| `--run-remote-tests`, `-t`                 | Runs `pytest` remotely on the provisioned compute node after health checks pass.                                                                                       |
+| Flag                                       | Description                                                                                                                                                                                                                                                |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--unit-mock`, `--mock-cloud`, `--dry-run` | Executes the full verification workflow in mock mode, validating `libscript.json` Let's Encrypt TLS settings, signal handlers, and smoke assertions without spending cloud resources.                                                                      |
+| `--live-cloud`                             | Enforces live cloud provisioning; performs mandatory pre-flight CLI checks (`$PRIMARY_CLOUD_CLI_NAME`, `gcloud`, or `aws`), verifies read-only Let's Encrypt certificates in `$CERT_STORE_DIR`, and polls live HTTPS `/api/chat/jobs` (`ollama:gemma:2b`). |
+| `--local`, `-l`                            | Runs the test suite locally on the current workstation using `pytest` and `npm test`.                                                                                                                                                                      |
+| `--run-remote-tests`, `-t`                 | Runs `pytest` remotely on the provisioned compute node after health checks pass.                                                                                                                                                                           |
 
 ### Reference: Environment Variables
 
-| Variable             | Default (from `.env`)              | Description                                                         |
-| -------------------- | ---------------------------------- | ------------------------------------------------------------------- |
-| `CLOUD_PROVIDER`     | `$DEFAULT_CLOUD_PROVIDER`          | Target cloud provider (`$DEFAULT_CLOUD_PROVIDER`, `gcp`, or `aws`). |
-| `LIBSCRIPT_ROOT_DIR` | `$HOME/repos/libscript`            | Path to the Libscript root repository.                              |
-| `LIBSCRIPT_CLI`      | `$LIBSCRIPT_ROOT_DIR/libscript.sh` | Path to Libscript executable wrapper.                               |
-| `NODE_NAME`          | `test-t1d-analytics-node`          | Name of compute node to allocate.                                   |
-| `RG_NAME`            | `$RG_NAME`                         | Resource group or GCP project ID.                                   |
-| `LOCATION`           | `$LOCATION`                        | Cloud region / datacenter zone.                                     |
-| `REMOTE_DEST`        | `t1d-analytics-test`               | Target remote destination directory.                                |
-| `T1D_MOCK_TPU`       | `0`                                | When `1`, simulates TPU workload creation and status polling.       |
-| `T1D_MOCK_GCS`       | `0`                                | When `1`, simulates GCS upload and checkpoint downloads.            |
+| Variable                           | Default (from `.env`)              | Description                                                           |
+| ---------------------------------- | ---------------------------------- | --------------------------------------------------------------------- |
+| `CLOUD_PROVIDER`                   | `$DEFAULT_CLOUD_PROVIDER`          | Target cloud provider (`$DEFAULT_CLOUD_PROVIDER`, `gcp`, or `aws`).   |
+| `LIBSCRIPT_ROOT_DIR`               | `$HOME/repos/libscript`            | Path to the Libscript root repository.                                |
+| `LIBSCRIPT_CLI`                    | `$LIBSCRIPT_ROOT_DIR/libscript.sh` | Path to Libscript executable wrapper.                                 |
+| `NODE_NAME`                        | `test-t1d-analytics-node`          | Name of compute node to allocate.                                     |
+| `RG_NAME`                          | `$RG_NAME`                         | Resource group or GCP project ID.                                     |
+| `LOCATION`                         | `$LOCATION`                        | Cloud region / datacenter zone.                                       |
+| `REMOTE_DEST`                      | `t1d-analytics-test`               | Target remote destination directory.                                  |
+| `CERT_STORE_DIR`                   | `/mnt/data/certs`                  | Persistent Let's Encrypt certificate store directory on remote nodes. |
+| `LETSENCRYPT_EMAIL`                | `admin@healthplatform.io`          | Contact email registered for ACME / Let's Encrypt certificate issue.  |
+| `LETSENCRYPT_RENEW_BEFORE_SECONDS` | `0`                                | Optional renewal lead-time threshold in seconds.                      |
+| `T1D_MOCK_TPU`                     | `0`                                | When `1`, simulates TPU workload creation and status polling.         |
+| `T1D_MOCK_GCS`                     | `0`                                | When `1`, simulates GCS upload and checkpoint downloads.              |
 
 ### Reference: Exit Codes
 

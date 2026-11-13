@@ -1281,6 +1281,7 @@ def main(
     print("Running web install and build...")
     npm_cmd = shutil.which("npm") or "npm"
     env = os.environ.copy()
+    env.pop("T1D_SKIP_README_SHIELD_UPDATE", None)
     python_bin_dir = str(Path(sys.executable).absolute().parent)
     env["PATH"] = f"{python_bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["PYTHONPATH"] = str((root / "t1d-analytics-backend" / "src").resolve())

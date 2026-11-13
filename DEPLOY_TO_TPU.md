@@ -75,7 +75,7 @@ When using spot instances, always remember to export `TPU_USE_QUEUED_RESOURCE="t
 
 ## 1. Prerequisites
 
-First, clone the `libscript` repository, as all infrastructure provisioning commands must be executed from its root directory.
+Ensure **Python 3.12+** is available locally (with `pip install -e "t1d-analytics-backend[training]"` installed when running local LoRA/QLoRA preparation), then clone the `libscript` repository, as infrastructure provisioning commands are executed from its root directory.
 
 ```bash
 git clone https://github.com/SamuelMarks/libscript.git ~/.libscript
@@ -183,11 +183,13 @@ t1d-analytics train \
   --backend remote-tpu-maxtext \
   --tpu-type "$TPU_ACCELERATOR_TYPE" \
   --tpu-zone "$TPU_ZONE" \
+  --tpu-slices "$NUM_SLICES" \
   --gcs-bucket "$BUCKET_NAME" \
   --use-lora \
   --execute-training
 
-t1d-analytics bridge-gemma-sql train --stage sft --db /mnt/ml_data/t1d_analytics.duckdb --table sft_data
+t1d-analytics bridge-gemma-sql etl --stage sft --db /mnt/ml_data/t1d_analytics.duckdb --table sft_data --output-dir /mnt/ml_data/shards
+t1d-analytics bridge-gemma-sql train --stage sft --config /mnt/ml_data/sft_config.yaml
 ```
 
 ---

@@ -3,27 +3,27 @@ repos:
     hooks:
       - id: auto-format
         name: Auto Format
-        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi && cd t1d-analytics-web && ([ -d node_modules ] || npm ci --no-audit --no-fund --silent) && ./node_modules/.bin/prettier --write ."
+        entry: /bin/sh -c "([ -x .venv/bin/ruff ] || (command -v uv >/dev/null 2>&1 && uv venv --python 3.12 .venv --quiet && uv pip install --python .venv/bin/python -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt -e t1d-analytics-backend --quiet)) && if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi && cd t1d-analytics-web && ([ -d node_modules ] || npm ci --no-audit --no-fund --silent) && ./node_modules/.bin/prettier --write ."
         language: system
         pass_filenames: false
       - id: backend-lint
         name: Backend Lint
-        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
+        entry: /bin/sh -c "([ -x .venv/bin/ruff ] || (command -v uv >/dev/null 2>&1 && uv venv --python 3.12 .venv --quiet && uv pip install --python .venv/bin/python -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt -e t1d-analytics-backend --quiet)) && if [ -x .venv/bin/ruff ]; then .venv/bin/ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
         language: system
         pass_filenames: false
       - id: backend-format
         name: Backend Format
-        entry: /bin/sh -c "if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
+        entry: /bin/sh -c "([ -x .venv/bin/ruff ] || (command -v uv >/dev/null 2>&1 && uv venv --python 3.12 .venv --quiet && uv pip install --python .venv/bin/python -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt -e t1d-analytics-backend --quiet)) && if [ -x .venv/bin/ruff ]; then .venv/bin/ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; else ruff format --check --config t1d-analytics-backend/pyproject.toml t1d-analytics-backend scripts; fi"
         language: system
         pass_filenames: false
       - id: backend-mypy
         name: Backend Mypy
-        entry: /bin/sh -c "if [ -x .venv/bin/mypy ]; then .venv/bin/mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; else mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; fi"
+        entry: /bin/sh -c "([ -x .venv/bin/mypy ] || (command -v uv >/dev/null 2>&1 && uv venv --python 3.12 .venv --quiet && uv pip install --python .venv/bin/python -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt -e t1d-analytics-backend --quiet)) && if [ -x .venv/bin/mypy ]; then .venv/bin/mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; else mypy --config-file t1d-analytics-backend/pyproject.toml --strict t1d-analytics-backend/src t1d-analytics-backend/tests scripts; fi"
         language: system
         pass_filenames: false
       - id: backend-test
         name: Backend Tests
-        entry: /bin/sh -c "if [ -x .venv/bin/pytest ]; then .venv/bin/pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; else pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; fi"
+        entry: /bin/sh -c "([ -x .venv/bin/pytest ] || (command -v uv >/dev/null 2>&1 && uv venv --python 3.12 .venv --quiet && uv pip install --python .venv/bin/python -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt -e t1d-analytics-backend --quiet)) && if [ -x .venv/bin/pytest ]; then .venv/bin/pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; else pytest -c t1d-analytics-backend/pyproject.toml t1d-analytics-backend/tests; fi"
         language: system
         pass_filenames: false
       - id: frontend-lint
@@ -38,17 +38,17 @@ repos:
         pass_filenames: false
       - id: frontend-test
         name: Frontend Tests
-        entry: /bin/sh -c "cd t1d-analytics-web && npm run test:coverage && npm run docs"
+        entry: /bin/sh -c "cd t1d-analytics-web && ([ -d node_modules ] || npm ci --no-audit --no-fund --silent) && npm run test:coverage && npm run docs"
         language: system
         pass_filenames: false
       - id: e2e-test
         name: E2E Tests
-        entry: /bin/sh -c "if [ -x .venv/bin/python ]; then .venv/bin/python scripts/run_tests.py; elif command -v python3 >/dev/null 2>&1; then python3 scripts/run_tests.py; else python scripts/run_tests.py; fi"
+        entry: /bin/sh -c "([ -x .venv/bin/python ] || (command -v uv >/dev/null 2>&1 && uv venv --python 3.12 .venv --quiet && uv pip install --python .venv/bin/python -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt -e t1d-analytics-backend --quiet)) && if [ -x .venv/bin/python ]; then .venv/bin/python scripts/run_tests.py; elif command -v python3 >/dev/null 2>&1; then python3 scripts/run_tests.py; else python scripts/run_tests.py; fi"
         language: system
         pass_filenames: false
       - id: update-coverage-badges
         name: Update Coverage Badges
-        entry: /bin/sh -c "if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; else interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; fi && tmp_sphinx=$(mktemp -d) && (if [ -x .venv/bin/python ]; then .venv/bin/python -m sphinx -W --keep-going -q -b html t1d-analytics-backend/docs_src \"$tmp_sphinx\"; else python3 -m sphinx -W --keep-going -q -b html t1d-analytics-backend/docs_src \"$tmp_sphinx\"; fi); rc=$?; rm -rf \"$tmp_sphinx\"; exit $rc"
+        entry: /bin/sh -c "([ -x .venv/bin/interrogate ] || (command -v uv >/dev/null 2>&1 && uv venv --python 3.12 .venv --quiet && uv pip install --python .venv/bin/python -r t1d-analytics-backend/requirements.txt -r t1d-analytics-backend/requirements-dev.txt -e t1d-analytics-backend --quiet)) && if [ -x .venv/bin/interrogate ]; then .venv/bin/interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; else interrogate -c t1d-analytics-backend/pyproject.toml -vv --fail-under=100 t1d-analytics-backend/src/t1d_analytics t1d-analytics-backend/tests t1d-analytics-backend/docs_src scripts; fi && tmp_sphinx=$(mktemp -d) && (if [ -x .venv/bin/python ]; then .venv/bin/python -m sphinx -W --keep-going -q -b html t1d-analytics-backend/docs_src \"$tmp_sphinx\"; else python3 -m sphinx -W --keep-going -q -b html t1d-analytics-backend/docs_src \"$tmp_sphinx\"; fi); rc=$?; rm -rf \"$tmp_sphinx\"; exit $rc"
         language: system
         pass_filenames: false
       - id: libscript-audit-standards

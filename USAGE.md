@@ -10,8 +10,10 @@ The analytics engine uses a local LLM to translate natural language into SQL. Ma
 
 1. Open a terminal.
 2. Start the Ollama application or service.
-3. Ensure the target model is downloaded:
+3. Ensure a supported model is downloaded (`gemma:2b` is the lightweight CPU-friendly default; `llama3.2:1b`, `phi4-mini`, and `gemma4` are also supported):
    ```bash
+   ollama pull gemma:2b
+   # Optional larger model for GPU workstations:
    ollama pull gemma4
    ```
 
@@ -32,7 +34,7 @@ The `t1d-analytics` CLI supports localization via `-l` / `--lang {en,ja,ar,he}` 
    ```bash
    t1d-analytics extract -d data/ --max-decompressed-gb 200.0 --tabular-only
    ```
-4. **(Optional) Seed Baseline Clinical Cohorts**: To immediately populate deterministic baseline T1D tables (`patients`, `cgm_readings`, `hba1c_labs`, `dka_adverse_events`) and canonical views without downloading external archives:
+4. **(Optional) Seed Baseline Clinical Cohorts**: To populate deterministic baseline T1D tables (`patients`, `cgm_readings`, `hba1c_labs`, `dka_adverse_events`)—or automatically adopt and harmonize an authentic pooled Jaeb DuckDB cohort if present on disk (pass `--overwrite` to force synthetic CSV regeneration)—along with verified canonical clinical views:
    ```bash
    t1d-analytics seed -d data/ --db t1d_analytics.duckdb --sessions-db data/sessions.duckdb
    ```
@@ -106,7 +108,8 @@ If you are preparing to fine-tune `gemma-4-sql` on the T1D schema, you can gener
 ### 1. Generate & Export Training Pairs
 
 ```bash
-# Generate pretrain_data, sft_data, and dpo_data tables (with stratified _train, _val, _test splits)
+# Generate pretrain_data, sft_data, and dpo_data tables
+# (plus stratified pretrain_{train,val,test}, sft_{train,val,test}, and dpo_{train,val,test} splits)
 t1d-analytics generate-training-data \
     --db t1d_analytics.duckdb \
     --num-pairs 1000 \
@@ -137,8 +140,8 @@ t1d-analytics train \
 
 # Or interact directly with the external gemma-4-sql toolchain
 t1d-analytics bridge-gemma-sql check
-t1d-analytics bridge-gemma-sql etl --stage sft --db t1d_analytics.duckdb --table sft_data
-t1d-analytics bridge-gemma-sql train --stage sft --db t1d_analytics.duckdb --table sft_data
+t1d-analytics bridge-gemma-sql etl --stage sft --db t1d_analytics.duckdb --table sft_data --output-dir ./shards
+t1d-analytics bridge-gemma-sql train --stage sft --config ./sft_config.yaml
 ```
 
 ### 3. Evaluate Model Accuracy
@@ -173,7 +176,13 @@ T1D_DB_SEARCH_DIR=/Volumes/TOSHIBA_EXT/stanford/t1d:/mnt/data/t1d \
 uvicorn t1d_analytics.api:app --app-dir t1d-analytics-backend/src --reload --host 0.0.0.0 --port 8000
 ```
 
-You should see output indicating that the server has started on `http://0.0.0.0:8000`. You can visit `http://localhost:8000/docs` in your browser to view the interactive OpenAPI documentation covering `/api/chat`, `/api/chat/stream`, `/api/execute-sql`, `/api/eval/nl-to-sql`, `/api/sessions`, `/api/schema`, `/api/databases`, `/api/table/{name}`, `/api/table/{name}/profile`, `/api/export/{csv,json,excel,parquet}`, `/api/training/jobs`, `/api/models`, `/api/providers/status`, `/api/status`, `/api/ready`, and `/api/health`.
+You should see output indicating that the server has started on `http://0.0.0.0:8000`. Visit `http://localhost:8000/docs` in your browser to view the interactive OpenAPI documentation covering:
+
+- **Chat, Async Jobs & SQL Execution**: `/api/chat` (plus `?async_poll=true`), `/api/chat/jobs`, `/api/chat/jobs/{job_id}`, `/api/chat/stream`, `/api/execute-sql`, `/api/eval/nl-to-sql`, `/api/eval/nl-to-sql/jobs`, and `/api/eval/nl-to-sql/jobs/{job_id}`
+- **Sessions, Schema, Tables & Streaming Exports**: `/api/sessions`, `/api/sessions/{session_id}`, `/api/schema`, `/api/databases`, `/api/table/{name}`, `/api/table/{name}/profile`, and `/api/export/{csv,json,excel,parquet}`
+- **Templates, Models, Training & Diagnostics**: `/api/templates`, `/api/models`, `/api/providers/status`, `/api/training/jobs`, `/api/training/jobs/{job_id}`, `/api/status`, `/api/ready`, and `/api/health`
+
+Optional backend security and runtime environment variables include `T1D_API_KEY` / `T1D_API_BEARER_TOKEN` (enforcing `X-API-Key` or `Authorization: Bearer <token>` on non-public routes), `T1D_RATE_LIMITER_BACKEND` (`memory` or `duckdb`), `T1D_CORS_ORIGINS`, `T1D_SESSIONS_DB_PATH`, and `DEBUG=1` (mounts compiled `t1d-analytics-web/dist` assets and `/chats/{chat_id}` SPA routing directly on port `8000`, as in `make serve`).
 
 ---
 
@@ -198,16 +207,16 @@ This will launch a Vite development server. Check the terminal output for the lo
 - **Schema Explorer & Database Switcher**: Browse available `.duckdb` files in the workspace, search tables and column types, and click any table to open the **Table Preview & Profiling Modal** (featuring server-side sorting, filtering, data-quality completeness metrics, and one-click CSV, JSON, Excel `.xlsx`, and Parquet downloads).
 - **Visual Cohort Builder & Template Library**:
   - Use the **Cohort Builder** modal to construct multi-table `JOIN`, `WHERE`, and aggregation queries visually without writing SQL by hand.
-  - Open the **Prompt & SQL Template Picker** (or Table 1 clinical benchmark cards on the empty state) to run curated T1D clinical trial queries and save custom reusable templates.
+  - Open the **Prompt & SQL Template Picker** (backed by `/api/templates` and compositional Academic Table 1 builders on the empty state) to run curated T1D clinical trial queries and save custom reusable templates.
 - **Model Selector & Multi-Provider Settings** (Top Right):
   - Choose between local Ollama models (`gemma:2b`, `llama3.2:1b`, `phi4-mini`, `gemma4`), cloud `any-llm` providers (`HuggingFace`, `OpenAI`, `Anthropic`, `Google`), or `Literal SQL` mode.
-  - Click the **Provider Settings (⚙️)** button to configure API keys or inspect live provider connectivity. If an LLM is offline or unreachable, the backend automatically synthesizes schema-guided fallback SQL and displays a diagnostic banner with the underlying LLM error reason.
+  - Click the **Provider Settings (⚙️)** button to configure provider API keys, optional backend Bearer authentication, and scoped credential persistence (`sessionStorage` vs `localStorage`), or inspect live provider connectivity. If an LLM is offline or unreachable, the backend automatically synthesizes schema-guided fallback SQL and displays a diagnostic banner with the underlying LLM error reason.
 - **Internationalization (i18n)**: Switch UI language across 8 supported locales (`en`, `es`, `fr`, `de`, `zh`, `ja`, `ar`, `he`), with automatic Right-to-Left (RTL) layout adaptation for Arabic and Hebrew.
 
 ### Viewing Results & CGM Visualizations
 
-- **Horizontal Data Tables**: Query results render in an accessible, horizontally scrollable data table showing row and column counts (`Showing N rows × M columns`), with one-click **CSV** and **JSON** exports.
-- **CGM Analytics & Charts**: Queries returning Continuous Glucose Monitoring (CGM) traces or time-series cohorts automatically compute international consensus glycaemic metrics (Time in Range `TIR 70–180 mg/dL`, `TBR <70 / <54 mg/dL`, `TAR >180 / >250 mg/dL`, `CV%`, `GMI`) and render interactive SVG charts.
+- **Paginated Data Tables & Safe Exports**: Query results render in an accessible, horizontally scrollable, client-paginated data table showing row and column counts (`Showing N rows × M columns`), with one-click **CSV** (protected against OWASP spreadsheet formula injection) and **JSON** exports.
+- **CGM Analytics & Responsive SVG Charts**: Queries returning Continuous Glucose Monitoring (CGM) traces or time-series/categorical cohorts automatically compute international consensus glycaemic metrics (Time in Range `TIR 70–180 mg/dL`, `TBR <70 / <54 mg/dL`, `TAR >180 / >250 mg/dL`, `CV%`, `GMI`) and render responsive `viewBox` SVG visualizations (AGP percentile ribbons, TIR stacked bar, glucose distribution histogram, and categorical/temporal bar and line charts).
 
 ---
 
@@ -216,7 +225,7 @@ This will launch a Vite development server. Check the terminal output for the lo
 If you prefer staying completely in the terminal, you can bypass the web interface and use the built-in Interactive REPL:
 
 ```bash
-t1d-analytics query --db t1d_analytics.duckdb --model gemma4 --provider ollama
+t1d-analytics query --db t1d_analytics.duckdb --model gemma:2b --provider ollama
 ```
 
 This opens a `query>` prompt:

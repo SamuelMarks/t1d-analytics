@@ -770,31 +770,57 @@ def test_csv_formula_injection_backend_frontend_parity() -> None:
 
     web_dir = Path(__file__).resolve().parents[2] / "t1d-analytics-web"
     exporters_ts = web_dir / "src" / "exporters.ts"
+    ts_compiler_js = web_dir / "node_modules" / "typescript" / "lib" / "typescript.js"
     node_script = """
 import fs from "node:fs";
+import * as nodeModule from "node:module";
 import vm from "node:vm";
-import ts from "./node_modules/typescript/lib/typescript.js";
 
 const vectors = JSON.parse(process.argv[1]);
+const forceStrip = process.argv[2] === "strip";
 const src = fs.readFileSync("./src/exporters.ts", "utf8");
-const transpiled = ts.transpileModule(src, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const mod = { exports: {} };
-vm.runInNewContext(transpiled, { module: mod, exports: mod.exports, Blob, URL, document: {} });
-const out = vectors.map((v) => mod.exports.sanitizeSpreadsheetCell(v));
+const tsPath = "./node_modules/typescript/lib/typescript.js";
+
+let sanitizeFn;
+if (!forceStrip && fs.existsSync(tsPath)) {
+  const { default: ts } = await import(tsPath);
+  const transpiled = ts.transpileModule(src, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const mod = { exports: {} };
+  vm.runInNewContext(transpiled, { module: mod, exports: mod.exports, Blob, URL, document: {} });
+  sanitizeFn = mod.exports.sanitizeSpreadsheetCell;
+} else {
+  const stripped = nodeModule
+    .stripTypeScriptTypes(src)
+    .replace(/^\\s*import\\s*\\{\\s*\\}\\s*from\\s*["'][^"']+["'];?\\s*$/gm, "");
+  const esm = await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(stripped)}`);
+  sanitizeFn = esm.sanitizeSpreadsheetCell;
+}
+
+const out = vectors.map((v) => sanitizeFn(v));
 process.stdout.write(JSON.stringify(out));
 """
     assert exporters_ts.is_file()
-    proc = subprocess.run(
-        ["node", "--input-type=module", "-e", node_script, json.dumps(vectors)],
-        cwd=str(web_dir),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    ts_outputs = json.loads(proc.stdout)
-    assert py_outputs == ts_outputs
+    modes = ["auto", "strip"] if ts_compiler_js.is_file() else ["strip"]
+    for mode in modes:
+        proc = subprocess.run(
+            [
+                "node",
+                "--no-warnings",
+                "--input-type=module",
+                "-e",
+                node_script,
+                json.dumps(vectors),
+                mode,
+            ],
+            cwd=str(web_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        ts_outputs = json.loads(proc.stdout)
+        assert py_outputs == ts_outputs
     assert py_outputs[3] == "'=SUM(A1:A10)"
     assert py_outputs[19] == "-12.5"
     assert py_outputs[23] == "'+1e999"
