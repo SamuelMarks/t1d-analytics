@@ -21,10 +21,10 @@ t1d-analytics seed -d ./data --db t1d_analytics.duckdb
 
 ### 2. Load Data into DuckDB
 
-Parse and load the extracted CSV, TXT, SAS (`.sas7bdat`, `.xpt`), or SPSS (`.sav`) files into `t1d_analytics.duckdb`:
+Parse and load extracted CSV, `.csv.gz`, TXT, and Parquet files into `t1d_analytics.duckdb` (pass `--include-sas` and `--include-spss` when ingesting `.sas7bdat`/`.xpt` or `.sav` clinical trial files):
 
 ```bash
-t1d-analytics load -d ./data --db t1d_analytics.duckdb
+t1d-analytics load -d ./data --db t1d_analytics.duckdb --include-sas --include-spss
 ```
 
 ### 3. Generate Training Data
@@ -75,7 +75,7 @@ gemma-4-sql etl sft --duckdb-path t1d_analytics.duckdb --duckdb-table sft_data
 
 ### 5. Evaluate Holdout Execution Accuracy
 
-Evaluate the fine-tuned model against a holdout benchmark set of natural-language clinical questions and gold SQL queries (outputs Markdown `.md` or `.csv`; also available via FastAPI `POST /api/eval/nl-to-sql`, async `POST` / `GET /api/eval/nl-to-sql/jobs`, and the 12-template clinical catalog at `GET /api/templates`):
+Evaluate the fine-tuned model against a holdout benchmark set of natural-language clinical questions and gold SQL queries (outputs Markdown `.md` or `.csv`; also available via FastAPI `POST /api/eval/nl-to-sql`, async `POST` / `GET /api/eval/nl-to-sql/jobs`, and the 13-template clinical catalog at `GET /api/templates`):
 
 ```bash
 t1d-analytics evaluate \

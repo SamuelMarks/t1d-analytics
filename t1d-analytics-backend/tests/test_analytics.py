@@ -302,6 +302,26 @@ def test_run_query_repl_nl(
     assert "Exiting." in capsys.readouterr().out
 
 
+@patch("t1d_analytics.analytics.handle_natural_language")
+@patch("t1d_analytics.analytics.input", side_effect=["not valid sql", "quit"])
+def test_run_query_repl_provider_sql_mode(
+    mock_input: MagicMock,
+    mock_handle_nl: MagicMock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Test REPL with provider='sql' bypasses LLM translation and validates directly against DuckDB."""
+    db_path = str(tmp_path / "test.duckdb")
+    conn = duckdb.connect(db_path)
+    conn.close()
+
+    run_query_repl(db_path, model="gemma4", provider="sql")
+    mock_handle_nl.assert_not_called()
+    out = capsys.readouterr().out
+    assert "SQL Error" in out
+    assert "Exiting." in out
+
+
 @patch("t1d_analytics.analytics.input", side_effect=KeyboardInterrupt)
 def test_run_query_repl_interrupt(
     mock_input: MagicMock, tmp_path: Path, capsys: pytest.CaptureFixture[str]

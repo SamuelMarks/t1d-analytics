@@ -629,7 +629,19 @@ def export_training_stages(
     """
     stages_to_export = ["sft_data", "pretrain_data", "dpo_data"]
     if split_val_flag:
-        stages_to_export.extend(["sft_data_train", "sft_data_val", "sft_data_test"])
+        stages_to_export.extend(
+            [
+                "pretrain_train",
+                "pretrain_val",
+                "pretrain_test",
+                "sft_train",
+                "sft_val",
+                "sft_test",
+                "dpo_train",
+                "dpo_val",
+                "dpo_test",
+            ]
+        )
 
     all_tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
     manifest_stages: dict[str, ManifestStageDict] = {}

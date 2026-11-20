@@ -43,7 +43,7 @@ The `t1d-analytics` CLI supports localization via `-l` / `--lang {en,ja,ar,he}` 
 
 ## 🗄️ Step 3: Populate, Profile, and Export the DuckDB Database
 
-Once data files are extracted into CSV or TXT formats, ingest them into the DuckDB analytics database using `load`. For example, to load data from `/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb` into a `t1d.duckdb` file in the same directory:
+Once data files are extracted into CSV, `.csv.gz`, TXT, or Parquet formats, ingest them into the DuckDB analytics database using `load`. For example, to load data from `/Volumes/TOSHIBA_EXT/stanford/t1d/jaeb` into a `t1d.duckdb` file in the same directory:
 
 ```bash
 t1d-analytics load --data-dir /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb --db /Volumes/TOSHIBA_EXT/stanford/t1d/jaeb/t1d.duckdb
@@ -159,7 +159,7 @@ t1d-analytics evaluate \
 - **Local Development / Prototyping:**
   Use Ollama (`gemma:2b` or `gemma4`) for local pair generation and query evaluation via `t1d-analytics evaluate`.
 - **Distributed TPU Training:**
-  Follow [DEPLOY_TO_TPU.md](DEPLOY_TO_TPU.md) and [REPORT.md](REPORT.md), or run `t1d-analytics train --backend remote-tpu-maxtext --tpu-type v4-8 --tpu-zone us-central2-b --gcs-bucket gs://t1d-analytics-artifacts`.
+  Follow [DEPLOY_TO_TPU.md](DEPLOY_TO_TPU.md) and [REPORT.md](REPORT.md), or run `T1D_AUTO_SYNC_GCS=1 T1D_EXECUTE_TPU_DISPATCH=1 t1d-analytics train --backend remote-tpu-maxtext --tpu-type v4-8 --tpu-zone us-central2-b --gcs-bucket gs://t1d-analytics-artifacts --execute-training` (omit `T1D_EXECUTE_TPU_DISPATCH=1` to generate local MaxText and dispatch manifests only).
 
 ---
 
@@ -211,7 +211,7 @@ This will launch a Vite development server. Check the terminal output for the lo
 - **Model Selector & Multi-Provider Settings** (Top Right):
   - Choose between local Ollama models (`gemma:2b`, `llama3.2:1b`, `phi4-mini`, `gemma4`), cloud `any-llm` providers (`HuggingFace`, `OpenAI`, `Anthropic`, `Google`), or `Literal SQL` mode.
   - Click the **Provider Settings (⚙️)** button to configure provider API keys, optional backend Bearer authentication, and scoped credential persistence (`sessionStorage` vs `localStorage`), or inspect live provider connectivity. If an LLM is offline or unreachable, the backend automatically synthesizes schema-guided fallback SQL and displays a diagnostic banner with the underlying LLM error reason.
-- **Internationalization (i18n)**: Switch UI language across 8 supported locales (`en`, `es`, `fr`, `de`, `zh`, `ja`, `ar`, `he`), with automatic Right-to-Left (RTL) layout adaptation for Arabic and Hebrew.
+- **Internationalization (i18n)**: Switch UI language across 4 supported locales (`en`, `ja`, `ar`, `he`), with automatic Right-to-Left (RTL) layout adaptation for Arabic and Hebrew.
 
 ### Viewing Results & CGM Visualizations
 
@@ -230,6 +230,6 @@ t1d-analytics query --db t1d_analytics.duckdb --model gemma:2b --provider ollama
 
 This opens a `query>` prompt:
 
-- If you type a raw SQL command (starting with `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `SUMMARIZE`, or `PRAGMA`), or set `--provider sql`, it executes directly against DuckDB.
+- If you type a raw read-only SQL command (starting with `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `SUMMARIZE`, `PRAGMA`, `FROM`, `VALUES`, or `TABLE`), or set `--model sql` / `--provider sql`, it executes directly against DuckDB.
 - If you type a natural-language question, it translates it into SQL via the configured LLM provider and executes the resulting query.
 - Type `exit` or `quit` to leave.

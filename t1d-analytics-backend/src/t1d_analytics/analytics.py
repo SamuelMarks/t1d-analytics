@@ -282,7 +282,11 @@ def run_query_repl(
                 print(_("Exiting."))
                 break
 
-            if model.strip().lower() == "sql" or is_sql_query(user_input, conn=conn):
+            is_literal_sql_mode = (
+                model.strip().lower() == "sql"
+                or (provider or "").strip().lower() == "sql"
+            )
+            if is_literal_sql_mode or is_sql_query(user_input, conn=conn):
                 try:
                     validated_sql = validate_read_only_sql(user_input)
                     conn.sql(coerce_numeric_aggregates_in_sql(validated_sql)).show()

@@ -4,11 +4,11 @@ This repository contains the configuration and source code for the Stanford Heal
 
 ## Pre-requisites
 
-Ensure libscript is installed and you are authenticated to your chosen cloud provider (defaults loaded from `.env`).
+Ensure libscript is installed and you are authenticated to your chosen cloud provider (defaults loaded from `.env`):
 
-- **AWS**: aws configure
-- **Default Provider (`$PRIMARY_CLOUD_DISPLAY_NAME`)**: `$PRIMARY_CLOUD_LOGIN_CMD`
-- **GCP**: gcloud auth login
+- **AWS**: `aws configure`
+- **Default Provider (`$PRIMARY_CLOUD_DISPLAY_NAME`, configured in `.env`)**: `$PRIMARY_CLOUD_LOGIN_CMD`
+- **GCP**: `gcloud auth login`
 
 ## T1D Domain Pipeline
 
@@ -275,8 +275,9 @@ test.cmd --run-remote-tests
 | `CERT_STORE_DIR`                   | `/mnt/data/certs`                  | Persistent Let's Encrypt certificate store directory on remote nodes. |
 | `LETSENCRYPT_EMAIL`                | `admin@healthplatform.io`          | Contact email registered for ACME / Let's Encrypt certificate issue.  |
 | `LETSENCRYPT_RENEW_BEFORE_SECONDS` | `0`                                | Optional renewal lead-time threshold in seconds.                      |
-| `T1D_MOCK_TPU`                     | `0`                                | When `1`, simulates TPU workload creation and status polling.         |
-| `T1D_MOCK_GCS`                     | `0`                                | When `1`, simulates GCS upload and checkpoint downloads.              |
+| `GCP_PROJECT_ID`                   | `t1d-analytics-gcp`                | Google Cloud project ID used by `tpu_orchestrator.py` dispatches.     |
+| `T1D_AUTO_SYNC_GCS`                | `0`                                | When `1`, uploads local training datasets to GCS prior to TPU launch. |
+| `T1D_EXECUTE_TPU_DISPATCH`         | `0`                                | When `1`, dispatches live XPK/gcloud TPU workloads (vs manifest-only).|
 
 ### Reference: Exit Codes
 

@@ -1,5 +1,6 @@
 """Tests for the CLI module."""
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1005,6 +1006,21 @@ def test_train_subcommand_advanced_flags(
     assert "Split validation passed: 0 prompt overlap detected." in out
     manifest_file = out_dir / "training_manifest.json"
     assert manifest_file.exists()
+    manifest_payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    for split_stage in (
+        "pretrain_train",
+        "pretrain_val",
+        "pretrain_test",
+        "sft_train",
+        "sft_val",
+        "sft_test",
+        "dpo_train",
+        "dpo_val",
+        "dpo_test",
+    ):
+        assert split_stage in manifest_payload["stages"]
+        assert (out_dir / f"{split_stage}.jsonl").is_file()
+        assert (out_dir / f"{split_stage}.parquet").is_file()
 
     # Test split-validation warning when tables have overlapping prompts
     mock_generate.return_value = [("Overlap", "SELECT 1", "SELECT 2")] * 10

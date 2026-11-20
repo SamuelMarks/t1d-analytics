@@ -28,12 +28,12 @@ This project provides a robust CLI for data retrieval, a highly optimized DuckDB
 
 ## 🚀 Features
 
-- **Automated Data Retrieval & Seeding**: Robust CLI tools to safely download, extract, seed baseline cohorts, and catalog complex clinical trial datasets (including CSV, TXT, SAS `.sas7bdat`/`.xpt`, and SPSS `.sav`).
+- **Automated Data Retrieval & Seeding**: Robust CLI tools to safely download, extract, seed baseline cohorts, and catalog complex clinical trial datasets (including CSV, `.csv.gz`, TXT, Parquet, SAS `.sas7bdat`/`.xpt`, and SPSS `.sav`).
 - **Local DuckDB Analytics**: Automatically parses raw clinical trial files (with encoding and delimiter detection) into a pooled, read-only validated local DuckDB database with data quality profiling and export to Excel (`.xlsx`), Parquet, CSV, and JSON.
 - **Multi-Provider Natural Language to SQL & Rule-Based Fallback**: Integrated with [Ollama](https://ollama.com/) (`gemma:2b`, `llama3.2:1b`, `phi4-mini`, `gemma4`) and Mozilla's [any-llm](https://github.com/mozilla-ai/any-llm) (`huggingface`, `openai`, `anthropic`, `google`), with automatic schema-guided rule-based SQL fallback and diagnostic reporting when LLM inference is unavailable.
 - **Gemma-4-SQL Training Pipeline**: Provides CLI and API tools to procedurally generate stratified training datasets (`pretrain`, `sft`, and `dpo`), bridge directly to `gemma-4-sql`, and orchestrate local CPU/GPU or Google Cloud TPU (`remote-tpu-maxtext`) training jobs.
 - **FastAPI Backend**: A modular, localized REST, asynchronous job polling (`/api/chat/jobs`, `/api/eval/nl-to-sql/jobs`), and Server-Sent Events (SSE) streaming API serving chat sessions, SQL execution, clinical query templates (`/api/templates`), table profiling, streaming exports, background training jobs, optional API key / Bearer authentication, route-tiered rate limiting, and deep health diagnostics.
-- **Vanilla TypeScript Web UI**: A responsive dark-mode web application built without heavy frameworks (No React/Angular/Vue). Powered by a strongly typed `AppEventBus`, composable controllers for chat sessions (`/chats/<id>` shareable deep-linking), a Visual Cohort Builder, an Academic Table 1 & Clinical SQL Template Picker, a Schema Explorer & Database Switcher, responsive `viewBox` SVG CGM Ambulatory Glucose Profile (AGP) and bar/line charts, paginated formula-injection-safe result exports, multi-provider LLM configuration, and 8-locale internationalization (`en`, `es`, `fr`, `de`, `zh`, `ja`, `ar`, `he` with RTL support).
+- **Vanilla TypeScript Web UI**: A responsive dark-mode web application built without heavy frameworks (No React/Angular/Vue). Powered by a strongly typed `AppEventBus`, composable controllers for chat sessions (`/chats/<id>` shareable deep-linking), a Visual Cohort Builder, an Academic Table 1 & Clinical SQL Template Picker, a Schema Explorer & Database Switcher, responsive `viewBox` SVG CGM Ambulatory Glucose Profile (AGP) and bar/line charts, paginated formula-injection-safe result exports, multi-provider LLM configuration, and 4-locale internationalization (`en`, `ja`, `ar`, `he` with RTL support).
 - **Uncompromising Quality**: Enforces strict 100% test coverage (lines, branches, functions, statements) and 100% documentation coverage across both the Python backend and TypeScript frontend.
 
 ## 🏗️ Architecture & Tech Stack
@@ -58,8 +58,8 @@ t1d-analytics/
 │   │   ├── cli.py / cli_parser.py / cli_handlers.py # 15-subcommand typed CLI & handlers
 │   │   ├── downloader.py / parser.py / archive_extractor.py # Authenticated download & extraction
 │   │   ├── ingestion.py                  # DuckDB tabular loader, manifest, and directory watcher
-│   │   ├── clinical_file_readers.py      # CSV/TXT/SAS (.sas7bdat/.xpt)/SPSS (.sav) readers
-│   │   ├── ingestion_study_resolver.py   # Clinical trial study & ontology mapping
+│   │   ├── clinical_file_readers.py      # CSV/CSV.GZ/TXT/Parquet/SAS (.sas7bdat/.xpt)/SPSS (.sav) readers
+│   │   ├── ingestion_study_resolver.py / likely_matches.json # Clinical trial study & ontology mapping
 │   │   ├── seed.py / jaeb_cohort_sql.py / seed_verifier.py # Cohort seeding & canonical views
 │   │   ├── analytics.py                  # DuckDB schema inspection, table profiling, and REPL
 │   │   ├── db_security.py / duckdb_pool.py / rate_limiter.py # Path guards, pooling, rate limits
@@ -69,11 +69,11 @@ t1d-analytics/
 │   │   ├── nl_to_sql_translator.py       # NL-to-SQL translation, EXPLAIN validation, and repair
 │   │   ├── sse_chat_streamer.py          # Disconnect-aware SSE token and SQL result streaming
 │   │   ├── sql_fallback_synthesizer.py   # Deterministic schema-guided fallback SQL synthesis
-│   │   ├── clinical_prompts.py / clinical_query_catalog.py # Prompts & 12 gold SQL templates
+│   │   ├── clinical_prompts.py / clinical_query_catalog.py # Prompts & 13 gold SQL templates
 │   │   ├── table1_specs.py / table1_sql_compiler.py / table1_formatter.py / table1_builder.py
 │   │   ├── llm_client.py / ollama_discovery.py / llm_stream_protocols.py # Multi-provider LLM I/O
 │   │   ├── gemma_bridge.py / gemma_cli_toolchain.py / gemma_library_adapter.py / gemma_inprocess_fallback.py
-│   │   ├── hf_models.py                  # Typed PyTorch, HuggingFace, BitsAndBytes & PEFT LoRA factories
+│   │   ├── hf_models.py / dataset_loader.py # PyTorch, HuggingFace, BitsAndBytes, LoRA & dataset loaders
 │   │   ├── training_data.py / training_dataset_exporter.py / training_dpo_miner.py # SFT/DPO data
 │   │   ├── training_runner.py / tpu_orchestrator.py / gcs_storage.py # CPU/GPU/TPU training & GCS
 │   │   ├── job_manager.py                # Async chat/eval and training job lifecycle managers
@@ -196,7 +196,7 @@ You can override the default paths and binaries either via environment variables
 | `build_frontend`        | Build & Docs | Build the Vite frontend production bundle                                                                                                         |
 | `install_db`            | Database     | Install native DuckDB and Ollama via LibScript                                                                                                    |
 | `init_db`               | Database     | Initialize the native DuckDB database file (`T1D_DB_PATH`)                                                                                        |
-| `seed_db`               | Database     | Load clinical trial datasets from `DATA_DIR` into DuckDB and run `t1d-analytics doctor`                                                           |
+| `seed_db`               | Database     | Seed baseline cohorts, load clinical trial datasets from `DATA_DIR` into DuckDB, and run `t1d-analytics doctor`                                   |
 | `setup_db`              | Native Setup | Initialize the native DuckDB database file, load datasets from `DATA_DIR`, and run `t1d-analytics doctor` (`install_db` + `init_db` + `seed_db`)  |
 | `build`                 | Build & Docs | Build the frontend bundle and install the Python backend package (`build_frontend` + `build_backend`)                                             |
 | `build_docs`            | Build & Docs | Verify 100% docstring coverage (`interrogate`) and build backend (Sphinx) and frontend (TypeDoc) docs into `DOCS_DIR`                             |

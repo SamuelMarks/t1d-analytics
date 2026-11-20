@@ -10,8 +10,9 @@ To handle large-scale LLM training efficiently, we recommend utilizing Google Cl
 
 ```bash
 # Clone libscript and install requirements
-git clone https://github.com/SamuelMarks/libscript.git ~/.libscript
-cd ~/.libscript
+export LIBSCRIPT_ROOT_DIR="$HOME/repos/libscript"
+git clone https://github.com/SamuelMarks/libscript.git "$LIBSCRIPT_ROOT_DIR"
+cd "$LIBSCRIPT_ROOT_DIR"
 ./libscript.sh install cloud-providers/gcp-cli latest
 
 # Provision a TPU VM with persistent storage

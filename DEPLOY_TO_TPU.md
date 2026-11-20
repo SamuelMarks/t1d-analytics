@@ -75,11 +75,12 @@ When using spot instances, always remember to export `TPU_USE_QUEUED_RESOURCE="t
 
 ## 1. Prerequisites
 
-Ensure **Python 3.12+** is available locally (with `pip install -e "t1d-analytics-backend[training]"` installed when running local LoRA/QLoRA preparation), then clone the `libscript` repository, as infrastructure provisioning commands are executed from its root directory.
+Ensure **Python 3.12+** is available locally (with `pip install -e "t1d-analytics-backend[training]"` installed when running local LoRA/QLoRA preparation), then clone the `libscript` repository (`~/repos/libscript` matches the default `LIBSCRIPT_ROOT_DIR` used by `Makefile` and `t1d-analytics`), as infrastructure provisioning commands are executed from its root directory.
 
 ```bash
-git clone https://github.com/SamuelMarks/libscript.git ~/.libscript
-cd ~/.libscript
+export LIBSCRIPT_ROOT_DIR="$HOME/repos/libscript"
+git clone https://github.com/SamuelMarks/libscript.git "$LIBSCRIPT_ROOT_DIR"
+cd "$LIBSCRIPT_ROOT_DIR"
 
 # Install the Google Cloud CLI component and authenticate
 ./libscript.sh install cloud-providers/gcp-cli latest
@@ -178,7 +179,9 @@ You can dispatch native CLI commands using either the unified `libscript` ML orc
 
 ```bash
 # Orchestrate remote TPU MaxText training or invoke the gemma-4-sql bridge directly via t1d-analytics
-t1d-analytics train \
+# (set T1D_AUTO_SYNC_GCS=1 and T1D_EXECUTE_TPU_DISPATCH=1 for live GCS upload & XPK/gcloud dispatch;
+#  omit them or pass --dry-run to emit maxtext_config.yml and dispatch_manifest.json locally)
+T1D_AUTO_SYNC_GCS=1 T1D_EXECUTE_TPU_DISPATCH=1 t1d-analytics train \
   --db t1d_analytics.duckdb \
   --backend remote-tpu-maxtext \
   --tpu-type "$TPU_ACCELERATOR_TYPE" \
