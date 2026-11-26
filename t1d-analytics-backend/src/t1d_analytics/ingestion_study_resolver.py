@@ -213,7 +213,7 @@ def discover_tabular_files(
     )
     raw_files: list[Path] = []
     for pat in patterns:
-        raw_files.extend(data_dir.rglob(pat))
+        raw_files.extend(sorted(data_dir.rglob(pat)))
     data_files = [
         f
         for f in dict.fromkeys(raw_files)

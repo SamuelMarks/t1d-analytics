@@ -1005,3 +1005,72 @@ def test_libscript_manifest_caching_and_build_hooks() -> None:
         assert canonical_dir_loop in fe_build_cmd
         assert "dist/.libscript_src_hash" in fe_build_cmd
         assert ".libscript_build.sha256" in fe_build_cmd
+
+
+def test_duckdb_discovery_deterministic_sorting_independent_of_fs_readdir_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Verify DuckDB discovery sorts per-pattern glob matches independent of OS `readdir` hash order.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+
+    """
+    from t1d_analytics import db_security
+
+    monkeypatch.chdir(tmp_path)
+    search_dir = tmp_path / "ext4_htree_sim"
+    (search_dir / "sub_z").mkdir(parents=True)
+    (search_dir / "sub_a").mkdir(parents=True)
+
+    z_duck = search_dir / "z_cohort.duckdb"
+    a_duck = search_dir / "a_cohort.duckdb"
+    z_db = search_dir / "z_legacy.db"
+    a_db = search_dir / "a_legacy.db"
+    sub_z_duck = search_dir / "sub_z" / "b.duckdb"
+    sub_a_duck = search_dir / "sub_a" / "a.duckdb"
+
+    for p in (z_duck, a_duck, z_db, a_db, sub_z_duck, sub_a_duck):
+        duckdb.connect(str(p)).close()
+
+    orig_glob = Path.glob
+
+    def _reverse_glob(self_path: Path, pattern: str) -> typing.Iterator[Path]:
+        """
+        Yield glob matches in reverse lexicographical order to simulate arbitrary ext4 HTree hash seeds.
+
+        Args:
+            self_path: Directory `Path` instance being scanned.
+            pattern: Glob pattern string.
+
+        Returns:
+            typing.Iterator[Path]: Reverse-sorted iterator of matched paths.
+
+        """
+        return iter(sorted(orig_glob(self_path, pattern), reverse=True))
+
+    monkeypatch.setenv("T1D_DB_PATH", "/mnt/data/nonexistent_remote_db.duckdb")
+    monkeypatch.setenv("T1D_DB_SEARCH_DIR", str(search_dir))
+    monkeypatch.setattr(db_security, "DEFAULT_DB_SEARCH_DIRS", (search_dir,))
+    monkeypatch.setattr(db_security, "REMOTE_DISCOVERY_DB_CANDIDATES", ())
+
+    with patch.object(Path, "glob", _reverse_glob):
+        discovered = db_security._iter_duckdb_files_in_dir(
+            search_dir, include_subdirs=True
+        )
+        assert discovered == [
+            a_duck,
+            z_duck,
+            a_db,
+            z_db,
+            sub_a_duck,
+            sub_z_duck,
+        ]
+        assert db_security.resolve_default_db_path() == str(a_duck)
+        assert db_security.resolve_default_db_path("jaeb") == str(a_duck)
+
+        ws_resp = db_security.discover_workspace_databases()
+        names = [item.name for item in ws_resp.databases]
+        assert names.index("a_cohort.duckdb") < names.index("z_cohort.duckdb")

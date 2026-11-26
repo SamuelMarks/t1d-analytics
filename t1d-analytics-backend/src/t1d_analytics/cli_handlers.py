@@ -511,7 +511,7 @@ def handle_watch(opts: WatchCliOpts) -> None:
         current_files: list[Path] = []
         if data_path.exists():
             for ext in exts:
-                current_files.extend(data_path.rglob(ext))
+                current_files.extend(sorted(data_path.rglob(ext)))
 
         current_paths_set = {str(f.resolve()) for f in current_files}
         deleted_files = [

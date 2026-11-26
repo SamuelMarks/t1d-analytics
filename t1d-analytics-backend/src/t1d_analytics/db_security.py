@@ -279,14 +279,16 @@ def _iter_duckdb_files_in_dir(
     List valid DuckDB database files in `search_dir` (and optionally one subdirectory level deep).
 
     Excludes session store databases (`sessions.duckdb`, `t1d_sessions.duckdb`) and macOS
-    AppleDouble resource fork files (`._*`).
+    AppleDouble resource fork files (`._*`). Results within each glob pattern are sorted
+    lexicographically so database discovery is deterministic across operating systems and
+    filesystem directory-hash orders.
 
     Args:
         search_dir: Directory to scan for `.duckdb` files.
         include_subdirs: Whether to also scan immediate child directories (`*/*.duckdb`).
 
     Returns:
-        List[Path]: Discovered `.duckdb` file paths.
+        List[Path]: Deterministically ordered `.duckdb` and `.db` file paths.
 
     """
     if not search_dir.exists():
@@ -300,9 +302,11 @@ def _iter_duckdb_files_in_dir(
     matches: list[Path] = []
     for pattern in patterns:
         matches.extend(
-            p
-            for p in search_dir.glob(pattern)
-            if p.name not in excluded_names and not p.name.startswith("._")
+            sorted(
+                p
+                for p in search_dir.glob(pattern)
+                if p.name not in excluded_names and not p.name.startswith("._")
+            )
         )
     return matches
 

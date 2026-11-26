@@ -451,7 +451,7 @@ def _discover_unprocessed_archives(
     """
     candidate_archives: list[Path] = []
     for pat in _ARCHIVE_GLOB_PATTERNS:
-        candidate_archives.extend(data_dir.rglob(pat))
+        candidate_archives.extend(sorted(data_dir.rglob(pat)))
     deduped = [
         p for p in dict.fromkeys(candidate_archives) if not p.name.startswith("._")
     ]

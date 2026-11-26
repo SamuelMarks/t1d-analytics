@@ -2924,8 +2924,8 @@ def test_all_12_gold_templates_sql_and_gemma2b_nl_to_sql(tmp_path: Path) -> None
             "T1D_DB_SEARCH_DIR": str(tmp_path),
         },
     ):
-        assert resolve_default_db_path() == str(Path(seeded_db))
-        assert resolve_default_db_path("jaeb") == str(Path(seeded_db))
+        assert resolve_default_db_path() == str(Path(jaeb_db))
+        assert resolve_default_db_path("jaeb") == str(Path(jaeb_db))
 
     # 1. Test every single Gold Template in literal SQL mode and gemma:2b NL->SQL mode
     for idx, tmpl in enumerate(all_templates):
